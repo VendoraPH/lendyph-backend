@@ -308,6 +308,10 @@ class TimezoneShift
             'activated_at', 'created_at', 'disabled_at', 'ecomm_consent_at', 'hard_locked_at', 'invited_at', 'last_login_at',
             'locked_until', 'lockouts_cleared_at', 'password_changed_at', 'terms_accepted_at', 'updated_at',
         ],
+        // Added 2026-11-16 with Linda, well after the cutover, for the same
+        // reason. `linda_questions.period_from` and `period_to` are DATEs.
+        'linda_questions' => ['asked_at', 'created_at', 'updated_at'],
+        'linda_settings' => ['created_at', 'updated_at'],
         // A column added to a table the shift covers. Listed here, not in
         // COLUMNS, because it was added after the one-shot shift ran, and
         // because the shift reads COLUMNS on a fresh database before this

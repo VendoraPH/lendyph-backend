@@ -217,6 +217,13 @@ class RoleAndPermissionSeeder extends Seeder
             // lists them. Mirrors 2026_11_12_400200_add_penalty_permissions,
             // which grants them on the already-migrated deployments.
             'penalties:view', 'penalties:create', 'penalties:update', 'penalties:delete',
+
+            // Linda, the staff assistant: asking it, and Settings → Linda (which
+            // also needs branches:view_all). admin and super_admin only, through
+            // Permission::all() below; no other role lists them. Mirrors
+            // 2026_11_16_100000_add_linda_permissions, which grants them on the
+            // already-migrated deployments.
+            'linda:use', 'linda:settings',
         ];
 
         $guard = 'web';

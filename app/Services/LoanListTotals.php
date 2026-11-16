@@ -4,6 +4,8 @@ namespace App\Services;
 
 use App\Models\AmortizationSchedule;
 use App\Models\Loan;
+use Brick\Math\BigDecimal;
+use Brick\Math\RoundingMode;
 use Carbon\Carbon;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Query\Builder as QueryBuilder;
@@ -31,6 +33,12 @@ use Illuminate\Support\Facades\DB;
  */
 class LoanListTotals
 {
+    /**
+     * Borrower::full_name in SQL: first, middle, last and suffix, empty parts
+     * dropped (ReportService's member name expression).
+     */
+    private const MEMBER_NAME_SQL = "CONCAT_WS(' ', NULLIF(borrowers.first_name, ''), NULLIF(borrowers.middle_name, ''), NULLIF(borrowers.last_name, ''), NULLIF(borrowers.suffix, ''))";
+
     /**
      * @param  Builder<Loan>  $loans  the filtered loans; its select, eager loads and order are ignored
      * @return array{total_outstanding: float, outstanding_principal: float, overdue_amount: float, overdue_count: int}
@@ -127,6 +135,88 @@ class LoanListTotals
                 'overdue_amount' => round((float) $row->overdue_amount, 2),
             ]])
             ->all();
+    }
+
+    /**
+     * The members with a LATE period on the filtered loans (unpaid and past
+     * the due date plus the loan's grace), as of $asOf: the Past Due Loans
+     * page's members (GET /reports/due-past-due with `past_due_only=1`,
+     * grouped by member), worked out in one grouped query.
+     *
+     * - `past_due_amount`: the member's loans' `overdue_amount` added up, so
+     *   the total over every member is self::for()'s `overdue_amount`.
+     * - `days_overdue`: the most days any late period is past its grace, the
+     *   report rows' `days_overdue` rule (ReportController::daysLate()).
+     * - `loan_count`: the member's loans with a late period.
+     *
+     * Members are sorted by amount, highest first, then by name. Amounts are
+     * 2-decimal strings, added as exact decimals.
+     *
+     * @param  Builder<Loan>  $loans  the filtered loans, with columns named `loans.` (the query joins `borrowers`); its select, eager loads and order are ignored
+     * @return array{member_count: int, loan_count: int, past_due_amount: string, members: list<array{borrower_id: int, name: string, code: string, past_due_amount: string, days_overdue: int, loan_count: int}>}
+     */
+    public function overdueByMember(Builder $loans, ?Carbon $asOf = null): array
+    {
+        $asOf ??= Carbon::today();
+
+        $perLoan = $this->perLoan($this->baseOf($loans)->select('loans.id'), $asOf);
+
+        $unpaid = implode(', ', array_fill(0, count(AmortizationSchedule::UNPAID_STATUSES), '?'));
+        $lateDays = DB::table('amortization_schedules')
+            ->join('loans', 'loans.id', '=', 'amortization_schedules.loan_id')
+            ->whereIn('amortization_schedules.loan_id', $this->baseOf($loans)->select('loans.id'))
+            ->whereRaw("`amortization_schedules`.`status` IN ({$unpaid})", AmortizationSchedule::UNPAID_STATUSES)
+            ->whereRaw(AmortizationSchedule::pastGraceSql(), [$asOf->toDateString()])
+            ->groupBy('amortization_schedules.loan_id')
+            ->selectRaw(
+                'amortization_schedules.loan_id,
+                MAX(DATEDIFF(DATE_SUB(?, INTERVAL COALESCE(`loans`.`grace_period_days`, 0) DAY), `amortization_schedules`.`due_date`)) as days_overdue',
+                [$asOf->toDateString()],
+            );
+
+        $name = self::MEMBER_NAME_SQL;
+
+        $rows = $this->baseOf($loans)
+            ->joinSub($lateDays, 'late', 'late.loan_id', '=', 'loans.id')
+            ->leftJoinSub($perLoan, 'per_loan', 'per_loan.loan_id', '=', 'loans.id')
+            ->join('borrowers', 'borrowers.id', '=', 'loans.borrower_id')
+            ->groupBy('loans.borrower_id', 'borrowers.first_name', 'borrowers.middle_name', 'borrowers.last_name', 'borrowers.suffix', 'borrowers.borrower_code')
+            ->selectRaw(
+                "loans.borrower_id,
+                {$name} as member_name,
+                borrowers.borrower_code,
+                COALESCE(SUM(per_loan.overdue), 0) as past_due_amount,
+                MAX(late.days_overdue) as days_overdue,
+                COUNT(loans.id) as loan_count",
+            )
+            ->orderByDesc('past_due_amount')
+            ->orderBy('member_name')
+            ->orderBy('loans.borrower_id')
+            ->get();
+
+        $total = BigDecimal::zero();
+        $members = [];
+
+        foreach ($rows as $row) {
+            $amount = BigDecimal::of((string) $row->past_due_amount)->toScale(2, RoundingMode::HalfUp);
+            $total = $total->plus($amount);
+
+            $members[] = [
+                'borrower_id' => (int) $row->borrower_id,
+                'name' => (string) $row->member_name,
+                'code' => (string) $row->borrower_code,
+                'past_due_amount' => (string) $amount,
+                'days_overdue' => (int) $row->days_overdue,
+                'loan_count' => (int) $row->loan_count,
+            ];
+        }
+
+        return [
+            'member_count' => count($members),
+            'loan_count' => array_sum(array_column($members, 'loan_count')),
+            'past_due_amount' => (string) $total->toScale(2),
+            'members' => $members,
+        ];
     }
 
     /**

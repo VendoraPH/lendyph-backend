@@ -77,6 +77,7 @@ Schedule::command('notifications:prune')->dailyAt('04:00')->timezone('Asia/Manil
 // without editing this file. RouteSnapshotTest pins every schedule.
 require __DIR__.'/console/reminders.php';
 require __DIR__.'/console/credit-scoring.php';
+require __DIR__.'/console/linda.php';
 
 /*
  * Savings & Deposits schedules (routes/console/savings/*.php), in file-name

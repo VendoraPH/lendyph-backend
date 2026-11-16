@@ -8,6 +8,7 @@ use App\Models\User;
 use App\Services\BorrowerSubmissionTokenService;
 use App\Services\CsvImport\CsvImportUploadService;
 use App\Services\CsvImport\ImportErrorDigest;
+use App\Services\Linda\LindaHttpError;
 use App\Services\TokenIdleWindow;
 use App\Services\TokenTimeout;
 use Illuminate\Cache\RateLimiting\Limit;
@@ -542,6 +543,33 @@ class AppServiceProvider extends ServiceProvider
          */
         RateLimiter::for('calculator', function (Request $request) {
             return Limit::perMinute(30)->by('calculator:'.($request->user()?->id ?: $request->ip()));
+        });
+
+        /**
+         * POST /linda/chat, per user (Linda v1 plan, "Limits and cost"):
+         * `linda.limits.per_minute` (10) a minute answers 429 `rate_limited`,
+         * and `per_day` (100) in a fixed 24-hour window that starts at the
+         * user's first question (Limit::perDay, not a calendar day) answers
+         * 429 `daily_limit`. The api group's limiter still applies. Nothing is
+         * counted while Linda is switched off (EnsureLindaEnabled answers 501
+         * then), so turning it on starts everyone at zero. The route sits behind auth:sanctum, so the
+         * caller is always a staff user here.
+         */
+        RateLimiter::for('linda', function (Request $request) {
+            $user = $request->user();
+
+            if (! config('linda.enabled') || $user === null) {
+                return Limit::none();
+            }
+
+            return [
+                Limit::perMinute((int) config('linda.limits.per_minute'))
+                    ->by('linda:minute:'.$user->getKey())
+                    ->response(fn (Request $request, array $headers) => LindaHttpError::rateLimited($headers)->toResponse()),
+                Limit::perDay((int) config('linda.limits.per_day'))
+                    ->by('linda:day:'.$user->getKey())
+                    ->response(fn (Request $request, array $headers) => LindaHttpError::dailyLimit($headers)->toResponse()),
+            ];
         });
 
         /**

@@ -61,5 +61,12 @@
         "timezone": "Asia/Manila",
         "without_overlapping": false,
         "expires_at": 1440
+    },
+    {
+        "command": "linda:prune",
+        "expression": "20 4 * * *",
+        "timezone": "Asia/Manila",
+        "without_overlapping": false,
+        "expires_at": 1440
     }
 ]

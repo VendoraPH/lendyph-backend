@@ -49,6 +49,7 @@ use App\Models\Fee;
 use App\Models\GCashNonMember;
 use App\Models\GCashTier;
 use App\Models\GCashTransaction;
+use App\Models\LindaSetting;
 use App\Models\Loan;
 use App\Models\LoanAdjustment;
 use App\Models\LoanApprovalStep;
@@ -228,6 +229,9 @@ class AuditLogModules
         // Penalty configurations (Phase 4, Settings → Penalties). Its brackets
         // and products are written on the configuration's own rows.
         PenaltyConfig::class => 'penalties',
+        // Settings → Linda's model change. System, so the Audit Trail's module
+        // filter needs no new entry; the row's description names the change.
+        LindaSetting::class => self::UNMAPPED,
         // Deliberately system: an import run is housekeeping, not a record
         // any module's screen shows.
         CsvImportRun::class => self::UNMAPPED,

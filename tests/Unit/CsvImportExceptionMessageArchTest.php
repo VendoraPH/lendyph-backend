@@ -112,6 +112,18 @@ $csvImportSources = static function (): array {
     $files = [...$files, ...(glob($root.'/app/Services/Diagnostics/*.php') ?: [])];
 
     /*
+     * Linda, globbed two levels deep (the services, Model/ and Answers/) with
+     * its controllers: no question, answer, prompt or exception text may reach
+     * a log on that path either (Linda v1 plan, "Privacy and the log").
+     */
+    $files = [
+        ...$files,
+        ...(glob($root.'/app/Services/Linda/*.php') ?: []),
+        ...(glob($root.'/app/Services/Linda/*/*.php') ?: []),
+        ...(glob($root.'/app/Http/Controllers/Api/Linda/*.php') ?: []),
+    ];
+
+    /*
      * The console side, named rather than globbed: app/Console/Commands holds a
      * dozen commands that have nothing to do with importing, and sweeping the
      * directory would quietly claim ownership of all of them.
@@ -126,7 +138,7 @@ $csvImportSources = static function (): array {
      * call site that un-converts itself the first time somebody debugs a prune
      * failure at 3am. Its catch binds `$e`, so all three scans below apply.
      */
-    foreach (['ProcessCsvImports.php', 'RedactCsvImportRows.php', 'PruneAbandonedRegistrations.php'] as $command) {
+    foreach (['ProcessCsvImports.php', 'RedactCsvImportRows.php', 'PruneAbandonedRegistrations.php', 'PruneLindaQuestions.php', 'EvaluateLinda.php'] as $command) {
         $path = $root.'/app/Console/Commands/'.$command;
 
         if (is_file($path)) {
@@ -790,4 +802,20 @@ it('claims every bulk borrower endpoint there is', function () use ($boundedSour
 
     // And the ranges really did resolve to that file, rather than to nothing.
     expect($boundedSources())->toHaveCount(1);
+});
+
+it('scans Linda\'s services, controllers and prune command', function () use ($csvImportSources, $relative) {
+    $scanned = array_map($relative, $csvImportSources());
+
+    expect($scanned)->toContain(
+        'app/Services/Linda/LindaSettings.php',
+        'app/Services/Linda/LindaIntent.php',
+        'app/Http/Controllers/Api/Linda/LindaController.php',
+        'app/Http/Controllers/Api/Linda/LindaSettingsController.php',
+        'app/Console/Commands/PruneLindaQuestions.php',
+        'app/Console/Commands/EvaluateLinda.php',
+        'app/Services/Linda/LindaMatcher.php',
+        'app/Services/Linda/LindaAssistant.php',
+        'app/Services/Linda/Model/AnthropicModel.php',
+    );
 });

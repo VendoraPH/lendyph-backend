@@ -410,7 +410,7 @@ class ReportController extends Controller
     #[OA\Get(
         path: '/api/reports/loan-balance-summary',
         summary: 'Loan Balance Summary',
-        description: 'Aggregate portfolio, outstanding, and overdue amounts by branch. `total_outstanding` is everything owed (principal, interest, penalty, premium) and `outstanding_principal` the unpaid principal, on the collectible loans (released, ongoing, defaulted) by the rule of GET /loans `meta.totals`, so they agree with the loan pages to the centavo, and with no date range `outstanding_principal` equals the Dashboard\'s `total_portfolio`. `by_branch[]` and `by_branch_totals` carry both too. `outstanding_balance` is a deprecated alias with its old meaning, principal plus premium.',
+        description: 'Aggregate portfolio, outstanding, and overdue amounts by branch. `total_outstanding` is everything owed (principal, interest, penalty, premium) and `outstanding_principal` the unpaid principal, on the collectible loans (released, ongoing, defaulted) by the rule of GET /loans `meta.totals`, so they agree with the loan pages to the centavo, and with no date range `outstanding_principal` equals the Dashboard\'s `total_portfolio`. `by_branch[]` and `by_branch_totals` carry both too. Each `by_branch[]` row also carries `active_loan_count` (released and ongoing loans). `outstanding_balance` is a deprecated alias with its old meaning, principal plus premium.',
         tags: ['Reports'],
         security: [['sanctum' => []]],
         parameters: [
@@ -441,7 +441,7 @@ class ReportController extends Controller
             new OA\Parameter(name: 'date_to', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')),
             new OA\Parameter(name: 'date', in: 'query', required: false, description: 'Legacy single-day parameter; superseded by date_from/date_to.', schema: new OA\Schema(type: 'string', format: 'date')),
         ],
-        responses: [new OA\Response(response: 200, description: 'Daily collection summary, counted by period: `total_collected` is the principal and interest paid on the periods due in the range, capped per period (penalty never counts), so `collection_rate` never exceeds 100. Also `collected_in_full`, `partially_collected`, `counts` {collected, partial, pending}, and the cash side: `penalty_collected` and `total_received` (posted receipts in the range, less the insurance premium they collected first; equals Cash Flow\'s `inflows.repayments.total` less `inflows.repayments.insurance`).')],
+        responses: [new OA\Response(response: 200, description: 'Daily collection summary, counted by period: `total_collected` is the principal and interest paid on the periods due in the range, capped per period (penalty never counts), so `collection_rate` never exceeds 100. Also `collected_in_full`, `partially_collected`, `counts` {collected, partial, pending}, and the cash side: `penalty_collected` and `total_received` (posted receipts in the range, less the insurance premium they collected first; equals Cash Flow\'s `inflows.repayments.total` less `inflows.repayments.insurance`). `payment_count` is the number of those receipts.')],
     )]
     public function dailyCollection(): JsonResponse
     {

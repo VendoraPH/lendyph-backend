@@ -8,6 +8,7 @@ use App\Models\CoMaker;
 use App\Models\CsvImportRun;
 use App\Models\GCashNonMember;
 use App\Models\GCashTransaction;
+use App\Models\LindaSetting;
 use App\Models\Loan;
 use App\Models\Role;
 use App\Models\User;
@@ -45,6 +46,7 @@ function explicitAuditWriters(): array
         CsvImportRun::class,             // CsvImportMappingController, CsvImportProcessor
         GCashNonMember::class,           // GCashNonMemberController
         GCashTransaction::class,         // GCashService, GCashCashInPaidAtBackfill
+        LindaSetting::class,             // LindaSettings (the model change)
         Loan::class,                     // LoanService, CollateralAttacher, migrations
         Role::class,                     // RolePermissionAudit
         User::class,                     // AuthController, UserController
@@ -105,6 +107,7 @@ it('files the planned Phase 2 models under their modules', function (string $cla
     'SavingsTransaction' => ['App\\Models\\SavingsTransaction', 'savings'],
     'TimeDeposit' => ['App\\Models\\TimeDeposit', 'savings'],
     'SavingsInterestRun' => ['App\\Models\\SavingsInterestRun', 'savings'],
+    'LindaSetting' => ['App\\Models\\LindaSetting', 'system'],
 ]);
 
 it('compares full class names, so a same-named class elsewhere is not mapped', function () {

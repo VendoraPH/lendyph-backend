@@ -1337,6 +1337,24 @@ class ReportService
     }
 
     /**
+     * The members whose collectible loans have a period past its grace, as of
+     * today: LoanListTotals::overdueByMember() over the loans
+     * PortfolioOutstanding::totals() reads for the same branches, so the
+     * total equals its `overdue_amount` and the members are the Past Due
+     * Loans page's.
+     *
+     * @return array{member_count: int, loan_count: int, past_due_amount: string, members: list<array{borrower_id: int, name: string, code: string, past_due_amount: string, days_overdue: int, loan_count: int}>}
+     */
+    public function overdueMembers(array $filters): array
+    {
+        return app(LoanListTotals::class)->overdueByMember(
+            Loan::query()
+                ->whereIn('loans.status', Loan::COLLECTIBLE_STATUSES)
+                ->tap(self::inBranches(self::branchScope($filters), 'loans.branch_id')),
+        );
+    }
+
+    /**
      * Per-branch portfolio and outstanding balance in ONE grouped query.
      *
      * This used to run two extra queries per branch and — worse — ignored both
@@ -1359,6 +1377,7 @@ class ReportService
                 SUM('.AmortizationSchedule::remainingTotalSql().') as remaining_total');
 
         $collectible = implode(', ', array_fill(0, count(Loan::COLLECTIBLE_STATUSES), '?'));
+        $active = implode(', ', array_fill(0, count(Loan::ACTIVE_STATUSES), '?'));
 
         $branchIds = self::branchScope($filters);
 
@@ -1376,8 +1395,9 @@ class ReportService
                 COALESCE(SUM(schedule_totals.remaining_principal), 0)
                     + COALESCE(SUM(loans.insurance_remaining_balance), 0) as outstanding_balance,
                 COALESCE(SUM(CASE WHEN loans.status IN ('.$collectible.') THEN schedule_totals.remaining_principal END), 0) as outstanding_principal,
-                COALESCE(SUM(CASE WHEN loans.status IN ('.$collectible.') THEN COALESCE(schedule_totals.remaining_total, 0) + GREATEST(loans.insurance_remaining_balance, 0) END), 0) as total_outstanding
-            ', [...Loan::COLLECTIBLE_STATUSES, ...Loan::COLLECTIBLE_STATUSES])
+                COALESCE(SUM(CASE WHEN loans.status IN ('.$collectible.') THEN COALESCE(schedule_totals.remaining_total, 0) + GREATEST(loans.insurance_remaining_balance, 0) END), 0) as total_outstanding,
+                COUNT(CASE WHEN loans.status IN ('.$active.') THEN 1 END) as active_loan_count
+            ', [...Loan::COLLECTIBLE_STATUSES, ...Loan::COLLECTIBLE_STATUSES, ...Loan::ACTIVE_STATUSES])
             ->get()
             ->keyBy(fn ($row) => (int) $row->branch_id);
 
@@ -1394,6 +1414,9 @@ class ReportService
                     'outstanding_principal' => round((float) ($row->outstanding_principal ?? 0), 2),
                     // Deprecated alias: principal plus premium.
                     'outstanding_balance' => round((float) ($row->outstanding_balance ?? 0), 2),
+                    // Released plus ongoing, the headline `active_loans`
+                    // counted per branch.
+                    'active_loan_count' => (int) ($row->active_loan_count ?? 0),
                 ];
             })->all();
     }
@@ -1478,7 +1501,7 @@ class ReportService
             ->toBase()
             // The insurance premium a payment collected first is not loan
             // collection: it is left out of the money taken in.
-            ->selectRaw('COALESCE(SUM(amount_paid - insurance_applied), 0) as total_received, COALESCE(SUM(penalty_applied), 0) as penalty_collected')
+            ->selectRaw('COALESCE(SUM(amount_paid - insurance_applied), 0) as total_received, COALESCE(SUM(penalty_applied), 0) as penalty_collected, COUNT(CASE WHEN amount_paid - insurance_applied > 0 THEN 1 END) as payment_count')
             ->first();
 
         return [
@@ -1492,6 +1515,10 @@ class ReportService
             ],
             'penalty_collected' => round((float) $receipts->penalty_collected, 2),
             'total_received' => round((float) $receipts->total_received, 2),
+            // How many receipts `total_received` is made of: the same posted
+            // payments, dated in the range, on the same loans, that added to
+            // it (a receipt that only paid the insurance premium adds nothing).
+            'payment_count' => (int) $receipts->payment_count,
         ];
     }
 
