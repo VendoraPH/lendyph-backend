@@ -74,4 +74,47 @@ class LindaLookupReReviewTest extends LindaTestCase
         $this->assertSame('LN-42', LindaLookup::parse("Status of LN\u{2E3A}42")?->code);
         $this->assertSame(LindaLookupRequest::LOAN, LindaLookup::parse("Status of LN\u{FE58}42")?->kind);
     }
+
+    /**
+     * Low 1: "kay" reads as "because" only before a clear verb prefix.
+     *
+     * @return array<string, array{string, ?string}>
+     */
+    public static function kayQuestions(): array
+    {
+        return [
+            'kay maria' => ['pila utang kay maria', 'maria'],
+            'kay michael' => ['kay michael', 'michael'],
+            'kay nicole' => ['kay nicole', 'nicole'],
+            'kay gikinahanglan' => ['kay gikinahanglan nako', null],
+            'kay nagkadaghan' => ['ubos ang koleksyon kay nagkadaghan ang atraso', null],
+        ];
+    }
+
+    #[DataProvider('kayQuestions')]
+    public function test_kay_is_because_only_before_a_clear_verb(string $question, ?string $name): void
+    {
+        $this->assertSame($name, LindaLookup::parse($question)?->name, $question);
+        $this->assertSame($name !== null, LindaLookup::parse($question) !== null, $question);
+    }
+
+    /**
+     * Low 5: isNameLike() fails closed, so the full-name check keeps the
+     * question local.
+     */
+    public function test_is_name_like_fails_closed_on_a_regex_error(): void
+    {
+        $jit = ini_get('pcre.jit');
+        $limit = ini_get('pcre.backtrack_limit');
+        ini_set('pcre.jit', '0');
+        ini_set('pcre.backtrack_limit', '1');
+
+        try {
+            $this->expectException(\UnexpectedValueException::class);
+            LindaLookup::isNameLike('juan');
+        } finally {
+            ini_set('pcre.jit', (string) $jit);
+            ini_set('pcre.backtrack_limit', (string) $limit);
+        }
+    }
 }

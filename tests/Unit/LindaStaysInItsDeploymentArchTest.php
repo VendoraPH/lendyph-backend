@@ -88,7 +88,7 @@ $forbidden = [
     'the environment' => '/(?<![\w>:$\\\\])env\s*\(|\bEnv::|Illuminate\\\\Support\\\\Env\b|\bgetenv\s*\(|\bputenv\s*\(|\$_ENV\b|\$_SERVER\b|\bfilter_input(?:_array)?\s*\(\s*INPUT_(?:ENV|SERVER)\b/i',
     'mail' => '/\bMail::|Illuminate\\\\Support\\\\Facades\\\\Mail\b|(?<![\w>:$\\\\])mail\s*\(/i',
     'a named log channel' => '/\bLog::(?:channel|build|stack)\s*\(|\blogger\s*\(\s*\)\s*->\s*channel\s*\(/i',
-    'a runtime config write' => '/(?<![\w>:$\\\\])config\s*\(\s*\[|\bConfig::set\s*\(/i',
+    'a runtime config write' => '/(?<![\w>:$\\\\])config\s*\(\s*\[|\bConfig::set\s*\(|\bconfig\s*\(\s*\)\s*->\s*set\s*\(|\b(?:app|resolve)\s*\(\s*[\'"]config[\'"]\s*\)\s*->\s*set\s*\(/i',
     'a process' => '/(?<![\w>:$\\\\])(?<!function\s)(?:exec|shell_exec|proc_open|popen|passthru|system|pcntl_exec)\s*\(|\bProcess::|Illuminate\\\\Support\\\\Facades\\\\Process\b|Symfony\\\\Component\\\\Process\\\\/i',
 ];
 

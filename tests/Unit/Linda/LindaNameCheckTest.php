@@ -34,8 +34,9 @@ class LindaNameCheckTest extends LindaTestCase
             'last, first' => ['Is Dela Cruz, Juan late?', LindaNameCheck::MEMBER, 'Juan Dela Cruz'],
             'lower case' => ['is juan dela cruz late', LindaNameCheck::MEMBER, 'juan dela cruz'],
             'extra spaces' => ['is  Juan   Dela   Cruz late', LindaNameCheck::MEMBER, 'Juan Dela Cruz'],
-            'a middle name' => ['Is Juan Santos Dela Cruz late?', LindaNameCheck::MEMBER, 'Juan Dela Cruz'],
-            'a middle initial' => ['Is Juan S. Dela Cruz late?', LindaNameCheck::MEMBER, 'Juan Dela Cruz'],
+            'a middle name, kept as typed' => ['Is Juan Santos Dela Cruz late?', LindaNameCheck::MEMBER, 'Juan Santos Dela Cruz'],
+            'the middle name\'s initial, kept as typed' => ['Is Juan S. Dela Cruz late?', LindaNameCheck::MEMBER, 'Juan S. Dela Cruz'],
+            'another initial, left out' => ['Is Juan Q. Dela Cruz late?', LindaNameCheck::MEMBER, 'Juan Dela Cruz'],
             'a two-word first name' => ['Is Maria Clara Santos up to date?', LindaNameCheck::MEMBER, 'Maria Clara Santos'],
             'a two-word first name, reversed' => ['Santos, Maria Clara status', LindaNameCheck::MEMBER, 'Maria Clara Santos'],
             'staff' => ['Is Pedro Reyes around today?', LindaNameCheck::STAFF, 'Pedro Reyes'],
@@ -99,13 +100,14 @@ class LindaNameCheckTest extends LindaTestCase
         $this->assertContains('juan dela cruz', $spans);
         $this->assertContains('cruz', $spans);
         $this->assertNotContains('juan dela cruz overdue', $spans);
-        $this->assertNotContains('is', $spans);
+        $this->assertNotContains('overdue', $spans);
     }
 
-    public function test_a_question_of_stop_words_only_asks_for_nothing(): void
+    public function test_a_question_of_stop_words_only_names_no_one(): void
     {
         $this->assertNull(LindaNameCheck::find('how much is it?', $this->people(...)));
-        $this->assertSame([], $this->asked);
+        $this->assertNull(LindaNameCheck::find('collections overdue performance', $this->people(...)));
+        $this->assertSame([], $this->asked[1] ?? []);
     }
 
     /**

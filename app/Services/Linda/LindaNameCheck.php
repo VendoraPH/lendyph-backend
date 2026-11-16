@@ -21,8 +21,14 @@ use UnexpectedValueException;
  *   "Dela Cruz, Juan"), any case, extra spaces ignored. Between them, up to
  *   three words, each an initial ("A." or "A"), a word of the stored middle
  *   name, or a name-like word. First and last names of several words work
- *   ("Maria Clara Santos"). A walk-in's stored full name is found as typed,
- *   or with its last part first ("Soriano, Carmen").
+ *   ("Maria Clara Santos"), a first name may be a common word ("May",
+ *   "Will"), and a dotted surname matches with or without its dot ("Sta.
+ *   Maria"). A walk-in's free-text full name is compared without dots,
+ *   commas, initials or accents, as stored or with its last part first
+ *   ("Soriano, Carmen").
+ * - When several people of one kind fit, the one covering the most typed
+ *   words wins ("Juan Pedro Dela Cruz" over "Juan Dela Cruz"); a tie is
+ *   answered as several matches, never a guess.
  * - Accents are folded on both sides ("Pena" finds "Peña" and the other way
  *   round); invisible format characters (zero-width spaces, soft hyphens)
  *   are ignored, and every dash reads as "-".
@@ -32,8 +38,8 @@ use UnexpectedValueException;
  *   applies its own permission and branch scope.
  *
  * Cost: one indexed read per table (borrowers, users and co_makers by last
- * name and first name, gcash_non_members by full name), from the question's
- * spans, and the names are compared here. A read that reaches its cap may
+ * name and first name, gcash_non_members by a full-name prefix), from the
+ * question's spans, and the names are compared here. A read that reaches its cap may
  * have left the person out, so it keeps the question local too (a hit with
  * no name). Nothing is stored or logged.
  *
@@ -56,11 +62,8 @@ final readonly class LindaNameCheck
     /** The longest first or last name looked for, in words. */
     private const SPAN_MAX = 3;
 
-    /** The longest walk-in full name looked for, in words. */
-    private const FULL_NAME_MAX = 6;
-
-    /** The longest walk-in full name also looked for with its last part first. */
-    private const ROTATED_MAX = 4;
+    /** The most question words a walk-in's full name is read by, as a prefix. */
+    private const PREFIX_WORDS_MAX = 20;
 
     /** The most words allowed between a first and a last name (a middle name). */
     private const BETWEEN_MAX = 3;
@@ -95,7 +98,8 @@ final readonly class LindaNameCheck
      * after every named hit.
      *
      * $people gives the candidates for the given lower-case, accent-folded
-     * spans: (last names, first names, walk-in full names). By default, the
+     * spans: (last names, first names, name words a walk-in's full name may
+     * start with). By default, the
      * database. A row is a person (`kind`, `first_name`, `middle_name`,
      * `last_name`, or a walk-in's `full_name`) or `['kind' => …, 'capped' =>
      * true]` for a read that reached its cap.
@@ -119,7 +123,7 @@ final readonly class LindaNameCheck
         $question = self::normalise($question);
         $tokens = self::tokens($question);
         $words = array_column($tokens, 'word');
-        $lastNames = self::spans($words, true);
+        $lastNames = self::withDots(self::lastNameSpans($words), 4);
 
         if ($lastNames === []) {
             return null;
@@ -128,7 +132,7 @@ final readonly class LindaNameCheck
         $hits = [];
         $capped = [];
 
-        foreach ($people($lastNames, self::withInitialDots(self::spans($words, false)), self::fullNameSpans($words)) as $person) {
+        foreach ($people($lastNames, self::withDots(self::allSpans($words), 2), self::prefixWords($words)) as $person) {
             $kind = in_array($person['kind'] ?? null, self::ORDER, true) ? $person['kind'] : self::MEMBER;
 
             if (($person['capped'] ?? false) === true) {
@@ -137,16 +141,20 @@ final readonly class LindaNameCheck
                 continue;
             }
 
-            if (! isset($hits[$kind])) {
-                $name = $kind === self::WALK_IN
-                    ? self::walkInNamed($question, $tokens, (string) ($person['full_name'] ?? ''))
-                    : self::personNamed($question, $tokens, $person);
+            $found = $kind === self::WALK_IN
+                ? self::walkInNamed($question, $tokens, (string) ($person['full_name'] ?? ''))
+                : self::personNamed($question, $tokens, $person);
 
-                if ($name !== null) {
-                    $hits[$kind] = $name;
-                }
+            // The person covering the most typed words wins ("Juan Pedro Dela
+            // Cruz" over "Juan Dela Cruz"); on a tie, the longer name, which
+            // the answer then lists with every member it fits.
+            if ($found !== null && (! isset($hits[$kind]) || $found[1] > $hits[$kind][1]
+                || ($found[1] === $hits[$kind][1] && mb_strlen($found[0]) > mb_strlen($hits[$kind][0])))) {
+                $hits[$kind] = $found;
             }
         }
+
+        $hits = array_map(fn (array $hit): string => $hit[0], $hits);
 
         $performance = array_intersect($words, self::PERFORMANCE_WORDS) !== [];
 
@@ -176,12 +184,15 @@ final readonly class LindaNameCheck
 
     /**
      * A member, staff user or co-maker the question names, as typed (first
-     * name first), or null.
+     * name first, with the middle words typed between when every one of them
+     * is the stored middle name or its initial), and how many typed words
+     * the person covers; or null.
      *
      * @param  list<array{word: string, start: int, end: int}>  $tokens
      * @param  array<string, mixed>  $person
+     * @return ?array{string, int}
      */
-    private static function personNamed(#[\SensitiveParameter] string $question, array $tokens, array $person): ?string
+    private static function personNamed(#[\SensitiveParameter] string $question, array $tokens, array $person): ?array
     {
         $first = self::words((string) ($person['first_name'] ?? ''));
         $last = self::words((string) ($person['last_name'] ?? ''));
@@ -193,36 +204,48 @@ final readonly class LindaNameCheck
 
         $at = self::named(array_column($tokens, 'word'), $first, $last, $middle);
 
-        return $at === null ? null : self::typed($question, $tokens, $at[0], count($first)).' '.self::typed($question, $tokens, $at[1], count($last));
+        if ($at === null) {
+            return null;
+        }
+
+        [$firstAt, $lastAt, $gap, $matched] = $at;
+        $coverage = count($first) + count($last) + $matched;
+
+        if ($gap > 0 && $matched === $gap) {
+            return [self::typed($question, $tokens, $firstAt, $lastAt + count($last) - $firstAt), $coverage];
+        }
+
+        return [self::typed($question, $tokens, $firstAt, count($first)).' '.self::typed($question, $tokens, $lastAt, count($last)), $coverage];
     }
 
     /**
-     * A walk-in's stored full name in the question, as stored or with its
-     * last part first, as typed in stored order, or null.
+     * A walk-in's stored full name (free text) in the question: compared
+     * without dots, commas, initials or accents, as stored or with its last
+     * part first ("Soriano, Carmen"), as typed, and how many typed words it
+     * covers; or null.
      *
      * @param  list<array{word: string, start: int, end: int}>  $tokens
+     * @return ?array{string, int}
      */
-    private static function walkInNamed(#[\SensitiveParameter] string $question, array $tokens, #[\SensitiveParameter] string $fullName): ?string
+    private static function walkInNamed(#[\SensitiveParameter] string $question, array $tokens, #[\SensitiveParameter] string $fullName): ?array
     {
-        $full = self::words($fullName);
-        $words = array_column($tokens, 'word');
+        $full = array_values(array_filter(self::words($fullName), fn (string $word) => mb_strlen($word) > 1));
         $count = count($full);
+        $kept = array_values(array_filter(array_keys($tokens), fn (int $i) => mb_strlen($tokens[$i]['word']) > 1));
+        $words = array_map(fn (int $i) => $tokens[$i]['word'], $kept);
 
         if ($count < 2) {
             return null;
         }
 
         foreach (array_keys($words) as $i) {
-            if (self::at($words, $i, $full)) {
-                return self::typed($question, $tokens, $i, $count);
-            }
+            for ($split = 0; $split < $count; $split++) {
+                $rotated = [...array_slice($full, $split), ...array_slice($full, 0, $split)];
 
-            for ($split = 1; $split < $count; $split++) {
-                $head = array_slice($full, 0, $split);
-                $tail = array_slice($full, $split);
+                if (self::at($words, $i, $rotated)) {
+                    $from = $kept[$i];
 
-                if (self::at($words, $i, $tail) && self::at($words, $i + count($tail), $head)) {
-                    return self::typed($question, $tokens, $i + count($tail), $split).' '.self::typed($question, $tokens, $i, count($tail));
+                    return [self::typed($question, $tokens, $from, $kept[$i + $count - 1] - $from + 1), $count];
                 }
             }
         }
@@ -240,7 +263,7 @@ final readonly class LindaNameCheck
      * @param  list<string>  $first
      * @param  list<string>  $last
      * @param  list<string>  $middle
-     * @return ?array{int, int}
+     * @return ?array{int, int, int, int} first name's index, last name's index, the words between, and how many of them are the stored middle name or its initial
      */
     private static function named(#[\SensitiveParameter] array $words, array $first, array $last, array $middle): ?array
     {
@@ -254,17 +277,35 @@ final readonly class LindaNameCheck
                     }
 
                     if (self::at($words, $i + count($first) + $gap, $last)) {
-                        return [$i, $i + count($first) + $gap];
+                        $matched = count(array_filter($between, fn (string $word) => self::isOfMiddleName($word, $middle)));
+
+                        return [$i, $i + count($first) + $gap, $gap, $matched];
                     }
                 }
             }
 
             if (self::at($words, $i, $last) && self::at($words, $i + count($last), $first)) {
-                return [$i + count($last), $i];
+                return [$i + count($last), $i, 0, 0];
             }
         }
 
         return null;
+    }
+
+    /**
+     * A word of the stored middle name, or its initial.
+     *
+     * @param  list<string>  $middle
+     */
+    private static function isOfMiddleName(#[\SensitiveParameter] string $word, #[\SensitiveParameter] array $middle): bool
+    {
+        foreach ($middle as $part) {
+            if ($word === $part || (mb_strlen($word) === 1 && str_starts_with($part, $word))) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**
@@ -292,24 +333,23 @@ final readonly class LindaNameCheck
     }
 
     /**
-     * The question's 1–3-word spans that could be a name: those with a
-     * name-like word, and, for last names, a short single word straight after
-     * one ("Tan" after "Pedro"), each once.
+     * The question's 1–3-word spans that could be a last name: those with a
+     * name-like word, and any single word of up to 4 letters (a surname that
+     * is also a common word: "Tan", "Go"), each once.
      *
      * @param  list<string>  $words
      * @return list<string>
      */
-    private static function spans(#[\SensitiveParameter] array $words, bool $lastNames): array
+    private static function lastNameSpans(#[\SensitiveParameter] array $words): array
     {
         $nameLike = array_map(fn (string $word) => LindaLookup::isNameLike($word), $words);
         $spans = [];
 
         foreach (array_keys($words) as $i) {
             for ($length = 1; $length <= self::SPAN_MAX && $i + $length <= count($words); $length++) {
-                $slice = array_slice($nameLike, $i, $length);
-                $besideOne = $lastNames && $length === 1 && mb_strlen($words[$i]) <= 3 && ($nameLike[$i - 1] ?? false);
+                $short = $length === 1 && mb_strlen($words[$i]) <= 4;
 
-                if (in_array(true, $slice, true) || $besideOne) {
+                if ($short || in_array(true, array_slice($nameLike, $i, $length), true)) {
                     $spans[implode(' ', array_slice($words, $i, $length))] = true;
                 }
             }
@@ -319,52 +359,80 @@ final readonly class LindaNameCheck
     }
 
     /**
-     * The spans, plus each with a dot after its one- and two-letter words, so a
-     * stored "Ma. Theresa" is read too.
+     * Every 1–3-word span of the question, for first names: a first name may
+     * be a common word ("May", "Will", "Isa"). The last-name filter and the
+     * question's length keep the read bounded.
+     *
+     * @param  list<string>  $words
+     * @return list<string>
+     */
+    private static function allSpans(#[\SensitiveParameter] array $words): array
+    {
+        $spans = [];
+
+        foreach (array_keys($words) as $i) {
+            for ($length = 1; $length <= self::SPAN_MAX && $i + $length <= count($words); $length++) {
+                $spans[implode(' ', array_slice($words, $i, $length))] = true;
+            }
+        }
+
+        return array_keys($spans);
+    }
+
+    /**
+     * The spans, each also with every short word (up to $letters letters)
+     * with and without a trailing dot, so a stored "Sta. Maria" or "Ma.
+     * Theresa" is read when typed without it (at most 8 forms a span).
      *
      * @param  list<string>  $spans
      * @return list<string>
      */
-    private static function withInitialDots(#[\SensitiveParameter] array $spans): array
+    private static function withDots(#[\SensitiveParameter] array $spans, int $letters): array
     {
-        $all = array_fill_keys($spans, true);
+        $all = [];
 
         foreach ($spans as $span) {
-            $dotted = implode(' ', array_map(fn (string $word) => mb_strlen($word) <= 2 ? $word.'.' : $word, explode(' ', $span)));
-            $all[$dotted] = true;
+            $forms = [''];
+
+            foreach (explode(' ', $span) as $word) {
+                $choices = mb_strlen($word) <= $letters ? [$word, $word.'.'] : [$word];
+                $next = [];
+
+                foreach ($forms as $form) {
+                    foreach ($choices as $choice) {
+                        $next[] = $form === '' ? $choice : $form.' '.$choice;
+                    }
+                }
+
+                $forms = $next;
+            }
+
+            foreach ($forms as $form) {
+                $all[$form] = true;
+            }
         }
 
         return array_keys($all);
     }
 
     /**
-     * The question's 2–6-word spans with a name-like word, for walk-ins' full
-     * names, and the shorter ones with their last part first.
+     * The question's name-like words of two or more letters, each once, for
+     * the walk-ins' full names read by prefix.
      *
      * @param  list<string>  $words
      * @return list<string>
      */
-    private static function fullNameSpans(#[\SensitiveParameter] array $words): array
+    private static function prefixWords(#[\SensitiveParameter] array $words): array
     {
-        $spans = [];
+        $prefixes = [];
 
-        foreach (array_keys($words) as $i) {
-            for ($length = 2; $length <= self::FULL_NAME_MAX && $i + $length <= count($words); $length++) {
-                $span = array_slice($words, $i, $length);
-
-                if (! in_array(true, array_map(fn (string $word) => LindaLookup::isNameLike($word), $span), true)) {
-                    continue;
-                }
-
-                $spans[implode(' ', $span)] = true;
-
-                for ($split = 1; $length <= self::ROTATED_MAX && $split < $length; $split++) {
-                    $spans[implode(' ', [...array_slice($span, $split), ...array_slice($span, 0, $split)])] = true;
-                }
+        foreach ($words as $word) {
+            if (mb_strlen($word) > 1 && LindaLookup::isNameLike($word)) {
+                $prefixes[$word] = true;
             }
         }
 
-        return array_keys($spans);
+        return array_slice(array_keys($prefixes), 0, self::PREFIX_WORDS_MAX);
     }
 
     /**
@@ -457,16 +525,17 @@ final readonly class LindaNameCheck
     /**
      * The people whose names fit the spans, any branch, at most
      * CANDIDATES_MAX a table: members, staff users and co-makers by last and
-     * first name (the collation ignores case and accents), walk-ins by full
-     * name, soft-deleted ones included. A read that reaches the cap adds a
+     * first name (the collation ignores case and accents), walk-ins whose free
+     * full name starts with one of the question's name words (an
+     * index-friendly prefix), soft-deleted ones included. A read that reaches the cap adds a
      * `capped` row for its kind.
      *
      * @param  list<string>  $lastNames
      * @param  list<string>  $firstNames
-     * @param  list<string>  $fullNames
+     * @param  list<string>  $prefixes
      * @return list<array<string, mixed>>
      */
-    private static function fromDatabase(array $lastNames, array $firstNames, array $fullNames): array
+    private static function fromDatabase(array $lastNames, array $firstNames, array $prefixes): array
     {
         $rows = [];
         $capped = function (string $kind, int $count) use (&$rows): void {
@@ -498,8 +567,15 @@ final readonly class LindaNameCheck
             }
         }
 
-        if ($fullNames !== []) {
-            $walkIns = GCashNonMember::withTrashed()->whereIn('full_name', $fullNames)->limit(self::CANDIDATES_MAX)->get(['full_name']);
+        if ($prefixes !== []) {
+            $walkIns = GCashNonMember::withTrashed()
+                ->where(function ($query) use ($prefixes): void {
+                    foreach ($prefixes as $prefix) {
+                        $query->orWhere('full_name', 'like', addcslashes($prefix, '%_\\').'%');
+                    }
+                })
+                ->limit(self::CANDIDATES_MAX)
+                ->get(['full_name']);
             $capped(self::WALK_IN, $walkIns->count());
             foreach ($walkIns as $walkIn) {
                 $rows[] = ['kind' => self::WALK_IN, 'full_name' => $walkIn->full_name];

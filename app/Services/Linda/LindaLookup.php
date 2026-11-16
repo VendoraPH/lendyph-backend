@@ -298,7 +298,7 @@ final class LindaLookup
     ];
 
     /** Bisaya and Tagalog verb prefixes, for "kay" (because) before a verb. */
-    private const VERB_PREFIXES = ['gipa', 'gipang', 'gi', 'mi', 'ni', 'nag', 'mag', 'naka', 'maka', 'nanga', 'na', 'ma', 'mo', 'ga', 'ka', 'pag', 'ipa'];
+    private const VERB_PREFIXES = ['gipang', 'gipa', 'gi', 'nag', 'mag', 'naka', 'maka', 'nanga', 'pag', 'ipa'];
 
     /** The longest name taken, in words. */
     private const MAX_NAME_WORDS = 6;
@@ -364,15 +364,19 @@ final class LindaLookup
     /**
      * Whether a word could be part of a member's name: not a stop word,
      * period, subject, record or category word, and no digit. For the
-     * full-name check (LindaNameCheck).
+     * full-name check (LindaNameCheck). It fails closed: invalid UTF-8 or a
+     * regular-expression failure throws, and the check keeps the question
+     * local.
+     *
+     * @throws UnexpectedValueException
      */
     public static function isNameLike(#[\SensitiveParameter] string $word): bool
     {
-        try {
-            return mb_check_encoding($word, 'UTF-8') && self::isNameWord(mb_strtolower($word));
-        } catch (UnexpectedValueException) {
-            return false;
+        if (! mb_check_encoding($word, 'UTF-8')) {
+            throw new UnexpectedValueException('utf8');
         }
+
+        return self::isNameWord(mb_strtolower($word));
     }
 
     /**
@@ -979,8 +983,10 @@ final class LindaLookup
     }
 
     /**
-     * A Bisaya or Tagalog verb typed in lower case: a verb prefix (gi-, mi-,
-     * nag-, naka-, …) on a word of 5 or more letters, never a title.
+     * A Bisaya or Tagalog verb typed in lower case: a clear verb prefix (gi-,
+     * gipa-, gipang-, nag-, mag-, naka-, maka-, nanga-, pag-, ipa-) on a word
+     * of 5 or more letters, never a title. Names like "maria", "michael" and
+     * "nicole" carry none of them.
      */
     private static function isLowerCaseVerb(#[\SensitiveParameter] string $text): bool
     {

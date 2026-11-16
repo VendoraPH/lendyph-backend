@@ -138,7 +138,8 @@ final class LindaAssistant
      * a lookup turn, as a reply naming its target. A "name" that is one of the
      * user's own branches or a loan product is no lookup: its words are taken
      * out and the rest of the question is read again ("collections from Main
-     * and balance of Juan").
+     * and balance of Juan"). A re-read that gives up (after 3 tries, or when
+     * the name can't be found again) stays local, asking which member.
      */
     private function lookupIn(User $user, #[\SensitiveParameter] string $question, LindaHistory $history): ?LindaLookupRequest
     {
@@ -151,8 +152,9 @@ final class LindaAssistant
         for ($tries = 0; $lookup !== null && $this->namesAPlaceOrProduct($user, $lookup); $tries++) {
             $rest = $tries < self::REREAD_MAX ? self::without((string) $lookup->name, $question) : null;
 
+            // Giving up stays local: a member lookup with no target asks which one.
             if ($rest === null) {
-                return null;
+                return new LindaLookupRequest(LindaLookupRequest::MEMBER, LindaIntent::BorrowerLookup);
             }
 
             $question = $rest;

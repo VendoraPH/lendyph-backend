@@ -31,14 +31,14 @@ class LindaNameCheckReReviewTest extends LindaTestCase
         return [
             'a middle initial with a dot' => ['Is Juan A. Dela Cruz overdue?', LindaNameCheck::MEMBER, 'Juan Dela Cruz'],
             'a middle initial without a dot' => ['Is Juan A Dela Cruz overdue?', LindaNameCheck::MEMBER, 'Juan Dela Cruz'],
-            'a stop word as the stored middle name' => ['Is Juan Tan Dela Cruz overdue?', LindaNameCheck::MEMBER, 'Juan Dela Cruz'],
+            'a stop word as the stored middle name' => ['Is Juan Tan Dela Cruz overdue?', LindaNameCheck::MEMBER, 'Juan Tan Dela Cruz'],
             'typed without the accent' => ['Is Rosa Pena late?', LindaNameCheck::MEMBER, 'Rosa Pena'],
             'typed with the accent' => ['Is Ana Peña late?', LindaNameCheck::MEMBER, 'Ana Peña'],
             'a zero-width space inside a name' => ["Is Ju\u{200B}an Dela Cruz overdue?", LindaNameCheck::MEMBER, 'Juan Dela Cruz'],
             'a soft hyphen inside a name' => ["Is Juan Dela Cr\u{00AD}uz overdue?", LindaNameCheck::MEMBER, 'Juan Dela Cruz'],
             'a co-maker' => ['Is Lito Lapid a good co-maker?', LindaNameCheck::CO_MAKER, 'Lito Lapid'],
             'a walk-in' => ['Did Carmen Soriano cash in today?', LindaNameCheck::WALK_IN, 'Carmen Soriano'],
-            'a walk-in, reversed' => ['Soriano, Carmen GCash', LindaNameCheck::WALK_IN, 'Carmen Soriano'],
+            'a walk-in, reversed' => ['Soriano, Carmen GCash', LindaNameCheck::WALK_IN, 'Soriano, Carmen'],
         ];
     }
 
