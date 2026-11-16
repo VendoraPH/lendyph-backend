@@ -83,7 +83,42 @@ jobs:
           echo "NOTE: no Linda key on the box; Linda answers with its matcher only."
         fi
 
+        # While deploy.sh runs, config:cache writes config.php (which holds the proxy
+        # secret and Linda's key) at 0644, and the trap above only sets 0640 when this
+        # script exits, about 4 s later. Close bootstrap/cache to other users first, so
+        # nobody else on the box can reach the file in that window. Only when www-data
+        # keeps its access (it owns the folder or is its group) and this user keeps its
+        # own (root, the owner, or in the group); otherwise warn and leave it. Never
+        # fails the deploy.
+        seal_cache_dir() {
+          d="$DEPLOY_DIR/bootstrap/cache"
+          [ -d "$d" ] || return 0
+          owner="$(stat -c %U "$d" 2>/dev/null || true)"
+          group="$(stat -c %G "$d" 2>/dev/null || true)"
+          me="$(id -un 2>/dev/null || true)"
+          if [ -z "$owner" ] || [ -z "$group" ] || [ -z "$me" ]; then
+            echo "::warning title=Config cache folder left open::could not read its owner"
+            return 0
+          fi
+          if [ "$owner" != www-data ] && [ "$group" != www-data ]; then
+            echo "::warning title=Config cache folder left open::www-data reaches it only as other ($owner:$group)"
+            return 0
+          fi
+          if [ "$me" != root ] && [ "$me" != "$owner" ] && ! id -nG "$me" 2>/dev/null | tr ' ' '\n' | grep -qx "$group"; then
+            echo "::warning title=Config cache folder left open::$me reaches it only as other ($owner:$group)"
+            return 0
+          fi
+          if chmod o-rwx "$d" 2>/dev/null; then
+            echo "config cache folder: closed to other users ($owner:$group)"
+          else
+            echo "::warning title=Config cache folder left open::could not chmod it as $me"
+          fi
+        }
+        seal_cache_dir
+
         bash "$DEPLOY_DIR/deploy.sh"
+        # Put config.php back to 0640 at once, not only when this script exits.
+        protect_config_cache
 
         # --- Did this deploy actually land? -----------------------------------------
         # Nothing here used to assert the OUTCOME of a deploy. A green job proved that
