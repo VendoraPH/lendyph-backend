@@ -488,4 +488,77 @@ class LindaLookupAnswersTest extends LindaAnswersTestCase
         $this->assertSame([$ana->id], $reply->memberIds);
         $this->assertSame([$loan->id], $reply->loanIds);
     }
+
+    public function test_a_payment_lookup_by_member_needs_borrowers_view(): void
+    {
+        $ana = $this->member($this->branch, 'Ana', 'Cruz');
+        $loan = $this->releaseTo($ana);
+        $this->pay($loan, 1500);
+        $receipt = Repayment::query()->where('loan_id', $loan->id)->latest('id')->firstOrFail();
+
+        foreach ([$this->branchUser(['payments:view']), $this->headOffice(['payments:view', 'loans:view'])] as $user) {
+            foreach ([[null, 'Ana Cruz'], [$ana->borrower_code, null]] as [$code, $name]) {
+                $reply = $this->findReceipt($user, $code, $name);
+
+                $this->assertSame('denied', $reply->outcome);
+                $this->assertSame("Your role doesn't have access to the member details. Please ask your administrator if you need them.", $reply->answer);
+                $this->assertSame([], $reply->blocks);
+                $this->assertSame([], $reply->memberIds);
+                $this->assertSame([], $reply->loanIds);
+                $this->assertStringNotContainsString('Ana', $reply->answer);
+            }
+
+            // A receipt by its own number still needs only payments:view.
+            $this->assertSame('answered', $this->findReceipt($user, $receipt->receipt_number)->outcome);
+        }
+    }
+
+    public function test_a_payment_lookup_by_member_matches_payment_history_in_the_users_scope(): void
+    {
+        $ana = $this->member($this->branch, 'Ana', 'Cruz');
+        $near = $this->releaseTo($ana);
+        $this->pay($near, 1500);
+        $this->pay($near, 700);
+        // A loan of hers booked in another branch: only head office counts it.
+        $far = $this->releaseTo($ana, 20000);
+        $far->update(['branch_id' => $this->far->id]);
+        $this->pay($far, 900);
+
+        foreach ([$this->branchUser(['payments:view', 'borrowers:view']), $this->headOffice(['payments:view', 'borrowers:view'])] as $user) {
+            foreach ([[null, 'Ana Cruz'], [$ana->borrower_code, null]] as [$code, $name]) {
+                $reply = $this->findReceipt($user, $code, $name);
+                $history = $this->actingAs($user)->getJson('/api/repayments?status=posted&borrower_id='.$ana->id)->assertOk();
+
+                $this->assertSame('answered', $reply->outcome);
+                $this->assertSame($history->json('meta.total'), $this->stats($reply)['Payments']);
+                $this->assertEquals($history->json('meta.totals.collected'), $this->stats($reply)['Total Collected']);
+                $this->assertCount($history->json('meta.total'), $this->listItems($reply));
+                $this->assertSame([$ana->id], $reply->memberIds);
+                $this->assertNoContactDetails($reply, $ana);
+            }
+        }
+
+        $this->assertSame(2, $this->stats($this->findReceipt($this->branchUser(['payments:view', 'borrowers:view']), null, 'Ana Cruz'))['Payments']);
+        $this->assertSame(3, $this->stats($this->findReceipt($this->headOffice(['payments:view', 'borrowers:view']), null, 'Ana Cruz'))['Payments']);
+    }
+
+    public function test_a_payment_lookup_never_finds_another_branchs_member(): void
+    {
+        $ben = $this->member($this->far, 'Ben', 'Reyes');
+        $this->pay($this->releaseTo($ben), 1500);
+        $user = $this->branchUser(['payments:view', 'borrowers:view']);
+
+        $byName = $this->findReceipt($user, null, 'Ben Reyes');
+        $byCode = $this->findReceipt($user, $ben->borrower_code);
+
+        $this->assertSame('not_found', $byName->outcome);
+        $this->assertSame('No member named "Ben Reyes" in your branches.', $byName->answer);
+        $this->assertSame('not_found', $byCode->outcome);
+        $this->assertSame('No member with code '.$ben->borrower_code.' in your branches.', $byCode->answer);
+        foreach ([$byName, $byCode] as $reply) {
+            $this->assertSame([], $reply->blocks);
+            $this->assertSame([], $reply->memberIds);
+            $this->assertSame([], $reply->loanIds);
+        }
+    }
 }

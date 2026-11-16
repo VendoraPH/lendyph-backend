@@ -110,7 +110,7 @@ final class LoanLookupAnswer extends LookupAnswer
                 : ', and nothing is past due.')
             .($summary['next_due_date'] === null
                 ? ''
-                : ' '.W::nextDue($summary['next_due_amount'], $summary['next_due_date']))
+                : ' '.W::nextDue($summary['next_due_amount'], $summary['next_due_date'], (float) $summary['overdue_amount'] <= 0))
             .($last === null
                 ? ' No payment has been made yet.'
                 : ' The last payment was '.W::money((string) $last->amount_paid).' on '.W::date($last->payment_date->toDateString()).'.');
