@@ -178,7 +178,7 @@ final class AnthropicModel implements LindaModel
         $client = $this->client();
         $arguments = [
             'maxTokens' => $this->maxTokens,
-            'messages' => [['role' => 'user', 'content' => LindaPrompt::userMessage($request->question, $request->earlier)]],
+            'messages' => [['role' => 'user', 'content' => LindaPrompt::userMessage($request->question, $request->topics)]],
             'model' => $request->model,
             'outputConfig' => ['effort' => $this->effort, 'format' => ['type' => 'json_schema', 'schema' => LindaPrompt::schema()]],
             'system' => [['type' => 'text', 'text' => LindaPrompt::system(), 'cacheControl' => ['type' => 'ephemeral']]],

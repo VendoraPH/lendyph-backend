@@ -15,7 +15,8 @@ use Illuminate\Support\Carbon;
  * `linda.retention_days` days (`linda:prune`).
  *
  * `branch_scope` is null for a caller who sees every branch, else the list of
- * branch ids they could see. `member_ids` lists the members the answer named.
+ * branch ids they could see. `member_ids` lists the members the answer named,
+ * and `loan_ids` the loans.
  *
  * @property int $id
  * @property int|null $user_id
@@ -30,6 +31,7 @@ use Illuminate\Support\Carbon;
  * @property list<int>|null $branch_scope
  * @property int|null $branch_id
  * @property list<int>|null $member_ids
+ * @property list<int>|null $loan_ids
  * @property string|null $model
  * @property int $input_tokens
  * @property int $output_tokens
@@ -49,8 +51,11 @@ class LindaQuestion extends Model
     /** Neither understood it (the none driver, or a refusal before any call). */
     public const SOURCE_NONE = 'none';
 
-    /** A lookup the local guard (LindaGuard) answered, with no model call. */
+    /** A lookup the local guard (LindaGuard) answered "not yet", with no model call (Linda v1 rows; round 2 writes SOURCE_LOOKUP). */
     public const SOURCE_GUARD = 'guard';
+
+    /** A lookup (a member, a loan or a receipt) the server answered itself, with no model call. */
+    public const SOURCE_LOOKUP = 'lookup';
 
     protected $fillable = [
         'user_id',
@@ -65,6 +70,7 @@ class LindaQuestion extends Model
         'branch_scope',
         'branch_id',
         'member_ids',
+        'loan_ids',
         'model',
         'input_tokens',
         'output_tokens',
@@ -93,6 +99,7 @@ class LindaQuestion extends Model
             'branch_scope' => 'array',
             'branch_id' => 'integer',
             'member_ids' => 'array',
+            'loan_ids' => 'array',
             'input_tokens' => 'integer',
             'output_tokens' => 'integer',
             'cache_read_tokens' => 'integer',

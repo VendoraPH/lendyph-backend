@@ -34,24 +34,60 @@ enum LindaIntent: string
      * Whether a question of this kind is read for a period at all. Overdue
      * accounts and active loans are as of today, so any period words a
      * question or the model gives them are ignored, never refused or called
-     * unclear; an unsupported question has no period either.
+     * unclear; an unsupported question has no period either, and nor does a
+     * lookup (a member, a loan or a receipt), which is about one record.
      */
     public function takesPeriod(): bool
     {
         return match ($this) {
-            self::OverdueAccounts, self::LoanSummary, self::UnsupportedQuestion => false,
+            self::OverdueAccounts, self::LoanSummary, self::UnsupportedQuestion,
+            self::BorrowerLookup, self::LoanDetails, self::TransactionLookup => false,
             default => true,
         };
     }
 
     /**
-     * Whether a question of this kind that names no period means this month.
-     * Overdue accounts and active loans are as of now, so they have none.
+     * The three lookups (a member, a loan or a receipt): the server answers
+     * them itself (LindaLookup), and a follow-up never carries one on, since
+     * a lookup is about one record and takes no period.
+     */
+    public function isLookup(): bool
+    {
+        return match ($this) {
+            self::BorrowerLookup, self::LoanDetails, self::TransactionLookup => true,
+            default => false,
+        };
+    }
+
+    /**
+     * The LindaLookupRequest kind a lookup intent asks for (a member, a loan
+     * or a receipt), or null for any other intent.
+     *
+     * @return 'member'|'loan'|'receipt'|null
+     */
+    public function lookupKind(): ?string
+    {
+        return match ($this) {
+            self::BorrowerLookup => LindaLookupRequest::MEMBER,
+            self::LoanDetails => LindaLookupRequest::LOAN,
+            self::TransactionLookup => LindaLookupRequest::RECEIPT,
+            default => null,
+        };
+    }
+
+    /**
+     * Whether a question of this kind that names no period means this month:
+     * the figures over a period Linda answers (collections, payments,
+     * disbursements, collection efficiency, branch and officer performance
+     * and the summary). Overdue accounts and active loans are as of now, so
+     * they have none.
      */
     public function defaultsToThisMonth(): bool
     {
         return match ($this) {
-            self::CollectionSummary, self::DisbursementSummary, self::GeneralLendingSummary => true,
+            self::CollectionSummary, self::CollectionDetails, self::DisbursementSummary,
+            self::BranchPerformance, self::OfficerPerformance, self::CollectionEfficiency,
+            self::GeneralLendingSummary => true,
             default => false,
         };
     }

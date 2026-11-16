@@ -19,10 +19,14 @@ use App\Services\Linda\LindaText;
 final class LindaUnderstanding
 {
     /**
-     * Words a model may leave around a period ("so far", "the month of")
-     * that don't change it.
+     * Words a model may leave around a period ("so far", "the month of",
+     * "noong", "niadtong sa") that don't change it, in English, Tagalog and
+     * Bisaya.
      */
-    private const PERIOD_FILLERS = ['the', 'of', 'for', 'in', 'on', 'during', 'from', 'so', 'far', 'po', 'month'];
+    private const PERIOD_FILLERS = [
+        'the', 'of', 'for', 'in', 'on', 'during', 'from', 'so', 'far', 'po', 'month',
+        'noong', 'nung', 'ng', 'na', 'ang', 'sa', 'nga', 'niadtong', 'sadtong', 'ba', 'lang', 'ra', 'pa',
+    ];
 
     public function __construct(
         public readonly LindaIntent $intent,

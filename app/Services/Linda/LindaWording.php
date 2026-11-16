@@ -3,6 +3,7 @@
 namespace App\Services\Linda;
 
 use App\Services\Accounting\Money;
+use Carbon\CarbonImmutable;
 
 /**
  * Every sentence Linda writes, in simple English: "Member", never
@@ -33,6 +34,18 @@ final class LindaWording
         return Money::format(Money::toCentavos(is_string($pesos) ? $pesos : (float) $pesos) ?? 0);
     }
 
+    /** A whole percent, two decimals at most, trailing zeros dropped: 87.5 → "87.5%". */
+    public static function percent(int|float $percent): string
+    {
+        return rtrim(rtrim(number_format((float) $percent, 2, '.', ','), '0'), '.').'%';
+    }
+
+    /** A rate as the reports show it, one decimal: 54.35 → "54.4%", 0 → "0.0%". */
+    public static function rate(int|float $percent): string
+    {
+        return number_format((float) $percent, 1, '.', ',').'%';
+    }
+
     /** "1 payment", "1,204 payments". */
     public static function count(int $count, string $singular, ?string $plural = null): string
     {
@@ -58,6 +71,24 @@ final class LindaWording
     }
 
     /**
+     * The earliest unpaid instalment, in words. A date before today (Manila)
+     * reads as still unpaid: "₱250.00 was due on October 16, 2026 and is
+     * still unpaid.", adding "(still within its grace period)" when nothing
+     * is past due yet. Today or later reads as the next payment.
+     */
+    public static function nextDue(int|float|string $amount, string $date, bool $withinGrace = false): string
+    {
+        $today = LindaPeriod::today()->toDateString();
+
+        if ($date < $today) {
+            return self::money($amount).' was due on '.self::date($date).' and is still unpaid'
+                .($withinGrace ? ' (still within its grace period).' : '.');
+        }
+
+        return 'The next payment, '.self::money($amount).', is due '.($date === $today ? 'today, ' : 'on ').self::date($date).'.';
+    }
+
+    /**
      * The note added when a question about figures that are only kept as of
      * today named a period.
      */
@@ -76,7 +107,9 @@ final class LindaWording
     {
         return "I can't answer that question yet. Here's what I can answer for now:\n\n"
             .self::suggestions()
-            ."\n\nYou can also name a period (\"last month\") or one of your branches.";
+            ."\n\nI can also answer about payments, collection efficiency, and branch and officer performance, "
+            .'and look up a member, a loan or a receipt by name or number (BRW-…, LN-…, RCP-…). '
+            .'You can also name a period ("last month") or one of your branches.';
     }
 
     public static function aiOffForNow(): string
@@ -103,12 +136,12 @@ final class LindaWording
 
     public static function unsupported(): string
     {
-        return 'Sorry, I can only answer questions about your cooperative\'s lending figures, like collections, disbursements, active loans and overdue payments.';
+        return 'Sorry, I can only answer questions about your cooperative\'s lending figures, like collections, payments, disbursements, active loans, overdue payments, members, loans and receipts.';
     }
 
     public static function notYet(): string
     {
-        return 'I can\'t answer that kind of question yet. For now I can answer questions about collections, disbursements, active loans, overdue payments and a lending summary.';
+        return 'I can\'t answer that kind of question yet. For now I can answer questions about collections, payments, disbursements, active loans, overdue payments, collection efficiency, branch and officer performance and a lending summary, and look up a member, a loan or a receipt.';
     }
 
     public static function notYetWithReport(): string
@@ -138,6 +171,90 @@ final class LindaWording
         return "Your role doesn't have access to the {$what}. Please ask your administrator if you need them.";
     }
 
+    /**
+     * The question a lookup asks when it names no member, loan or receipt.
+     *
+     * @param  'member'|'loan'|'receipt'  $kind
+     */
+    public static function whichRecord(string $kind): string
+    {
+        return match ($kind) {
+            LindaLookupRequest::LOAN => 'Which loan? Type its loan number (LN-…) or application number (LA-…).',
+            LindaLookupRequest::RECEIPT => 'Which receipt? Type its receipt number (RCP-…).',
+            default => 'Which member? Type their name or member code (BRW-…).',
+        };
+    }
+
+    public static function noMemberNamed(string $name): string
+    {
+        return 'No member named "'.self::echoed($name).'" in your branches.';
+    }
+
+    public static function noMemberWithCode(string $code): string
+    {
+        return 'No member with code '.self::echoed($code).' in your branches.';
+    }
+
+    public static function noLoanNumbered(string $number): string
+    {
+        return 'No loan numbered '.self::echoed($number).' in your branches.';
+    }
+
+    public static function noReceiptNumbered(string $number): string
+    {
+        return 'No receipt numbered '.self::echoed($number).' in your branches.';
+    }
+
+    /** For a record number Linda can't look up, by its first part ("JE"). */
+    public static function cantLookUpNumber(string $prefix): string
+    {
+        return 'I can look up members (BRW-…), loans (LN-… or LA-…) and receipts (RCP-…) by their number, but not '
+            .self::echoed($prefix).'- numbers yet.';
+    }
+
+    /**
+     * A loan's status as the loan pages word it (LOAN_STATUS_LABELS in the
+     * frontend), from Loan::displayStatus(): released and ongoing read
+     * "Current", one past grace "Past Due".
+     */
+    public static function loanStatus(?string $status): string
+    {
+        return match ($status) {
+            'draft' => 'Draft',
+            'for_review' => 'For Approval',
+            'approved' => 'Approved',
+            'rejected' => 'Rejected',
+            'released', 'ongoing' => 'Current',
+            'past_due' => 'Past Due',
+            'completed' => 'Completed',
+            'defaulted' => 'Defaulted',
+            'restructured' => 'Restructured',
+            'void' => 'Voided',
+            default => ucwords(str_replace('_', ' ', (string) $status)),
+        };
+    }
+
+    /** A payment method in words, as the reports word it. */
+    public static function paymentMethod(?string $method): string
+    {
+        return match ($method) {
+            'cash' => 'Cash',
+            'gcash' => 'GCash',
+            'maya' => 'Maya',
+            'bank_transfer' => 'Bank Transfer',
+            'online' => 'Online',
+            'auto_pay' => 'Auto-pay',
+            null, '' => 'Not recorded',
+            default => ucwords(str_replace('_', ' ', $method)),
+        };
+    }
+
+    /** A `YYYY-MM-DD` date in words: "December 1, 2026". */
+    public static function date(string $date): string
+    {
+        return CarbonImmutable::parse($date, LindaPeriod::timezone())->format('F j, Y');
+    }
+
     /** "A, B and C" */
     public static function listOf(array $items): string
     {
@@ -160,10 +277,28 @@ final class LindaWording
      * A typed name as repeated back: spaces squeezed, control characters
      * dropped, cut to a sensible length.
      */
-    private static function echoed(string $name): string
+    public static function echoed(string $name): string
     {
         $clean = trim((string) preg_replace('/\s+/u', ' ', (string) preg_replace('/[\p{C}]/u', '', $name)));
 
         return mb_strlen($clean) > self::ECHO_MAX ? rtrim(mb_substr($clean, 0, self::ECHO_MAX)).'…' : $clean;
+    }
+
+    /**
+     * For a question that names a staff member without asking how they
+     * perform: answered locally, never by the model (D2).
+     */
+    public static function staffNotYet(): string
+    {
+        return 'I can\'t answer questions about one staff member yet. I can rank account officers and collectors: ask "Who are the top account officers this month?"';
+    }
+
+    /**
+     * For a question that names a co-maker or a GCash walk-in: answered
+     * locally, never by the model (D2).
+     */
+    public static function otherPersonNotYet(): string
+    {
+        return 'I can\'t look up co-makers or walk-ins yet. Open the loan or the GCash page to see them.';
     }
 }

@@ -37,7 +37,7 @@ final class LoanSummaryAnswer extends Answer
         return 'loan figures';
     }
 
-    public function build(User $user, LindaScope $scope, ?LindaPeriod $period): LindaReply
+    public function build(User $user, LindaScope $scope, ?LindaPeriod $period, #[\SensitiveParameter] ?string $question = null): LindaReply
     {
         $summary = $this->reports->loanBalanceSummary($scope->filters());
         $active = (int) $summary['active_loans'];

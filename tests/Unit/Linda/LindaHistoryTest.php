@@ -84,3 +84,21 @@ it('takes the previous intent from the last assistant turn only', function () {
         ->earlier->toBe([])
         ->previousIntent->toBeNull();
 });
+
+it('skips lookup turns when choosing the intent a follow-up carries on', function () {
+    $history = LindaHistory::from([
+        ['role' => 'user', 'content' => 'How much did we collect this month?'],
+        ['role' => 'assistant', 'content' => '', 'intent' => 'collection_summary'],
+        ['role' => 'user', 'content' => 'Find receipt RCP-000002'],
+        ['role' => 'assistant', 'content' => '', 'intent' => 'transaction_lookup'],
+    ], 5);
+
+    expect($history->previousIntent)->toBe(LindaIntent::CollectionSummary);
+
+    $onlyLookups = LindaHistory::from([
+        ['role' => 'user', 'content' => 'status of LN-000001'],
+        ['role' => 'assistant', 'content' => '', 'intent' => 'loan_details'],
+    ], 5);
+
+    expect($onlyLookups->previousIntent)->toBeNull();
+});

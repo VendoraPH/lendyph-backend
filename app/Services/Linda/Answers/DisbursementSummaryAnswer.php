@@ -36,7 +36,7 @@ final class DisbursementSummaryAnswer extends Answer
         return 'disbursement figures';
     }
 
-    public function build(User $user, LindaScope $scope, ?LindaPeriod $period): LindaReply
+    public function build(User $user, LindaScope $scope, ?LindaPeriod $period, #[\SensitiveParameter] ?string $question = null): LindaReply
     {
         $period ??= LindaPeriod::named('this_month');
 
@@ -61,6 +61,6 @@ final class DisbursementSummaryAnswer extends Answer
                 LindaReply::number('Loans Released', $released),
                 LindaReply::money('Principal Released', $principal),
             ], self::sentence(W::during($period))),
-        ], LindaLinks::for($user, 'disbursement_report'));
+        ], LindaLinks::forPeriod($user, $period, $scope->branchId, 'disbursement_report'));
     }
 }

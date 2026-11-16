@@ -37,7 +37,7 @@ class LindaIntentTest extends TestCase
         ], array_map(fn (LindaIntent $intent) => $intent->value, LindaIntent::cases()));
     }
 
-    public function test_collection_disbursement_and_summary_default_to_this_month(): void
+    public function test_figures_over_a_period_default_to_this_month(): void
     {
         $defaulting = array_values(array_filter(
             LindaIntent::cases(),
@@ -46,8 +46,29 @@ class LindaIntentTest extends TestCase
 
         $this->assertSame([
             LindaIntent::CollectionSummary,
+            LindaIntent::CollectionDetails,
             LindaIntent::DisbursementSummary,
+            LindaIntent::BranchPerformance,
+            LindaIntent::OfficerPerformance,
+            LindaIntent::CollectionEfficiency,
             LindaIntent::GeneralLendingSummary,
         ], $defaulting);
+    }
+
+    public function test_lookups_and_as_of_today_answers_take_no_period(): void
+    {
+        $timeless = array_values(array_filter(
+            LindaIntent::cases(),
+            fn (LindaIntent $intent) => ! $intent->takesPeriod(),
+        ));
+
+        $this->assertSame([
+            LindaIntent::LoanSummary,
+            LindaIntent::LoanDetails,
+            LindaIntent::BorrowerLookup,
+            LindaIntent::OverdueAccounts,
+            LindaIntent::TransactionLookup,
+            LindaIntent::UnsupportedQuestion,
+        ], $timeless);
     }
 }

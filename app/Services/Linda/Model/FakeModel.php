@@ -10,10 +10,11 @@ use App\Services\Linda\LindaText;
  * The `fake` driver, for tests and local runs: it walks the model path with
  * no network.
  *
- * It is deterministic. Keyword rules map a question to an intent, the
- * period it names to period words and a "sa X" or "X branch" phrase to a
- * branch, and a question with no subject after an earlier one follows on
- * from it. Its answers then go through the same LindaUnderstanding as the
+ * It is deterministic. Keyword rules in English, Tagalog and Bisaya map a
+ * question to an intent, the period it names to period words and a "sa X",
+ * "in X" or "X branch" phrase to a branch, and a question with no subject
+ * follows on from the latest earlier topic (it sees topics only, never an
+ * earlier question's text, as the real model does). Its answers then go through the same LindaUnderstanding as the
  * real model's. It reports fixed usage (1,000 input and 100 output tokens on
  * the requested model) and keeps every request it received.
  */
@@ -31,27 +32,33 @@ final class FakeModel implements LindaModel
      * @var list<array{string, list<string>}>
      */
     private const RULES = [
-        ['unsupported_question', ['ignore', 'you are now', 'pretend', 'system prompt', 'instructions', 'weather', 'joke', 'poem', 'delete', 'send']],
-        ['collection_efficiency', ['efficiency', 'collection rate']],
-        ['income_summary', ['income', 'interest earned', 'earn', 'earned', 'revenue', 'kita', 'kinita']],
-        ['expense_summary', ['expense', 'expenses', 'gastos']],
-        ['officer_performance', ['officer', 'officers', 'collector', 'collectors']],
-        ['branch_performance', ['branches', 'compare', 'ikumpara', 'best branch', 'top branch']],
+        ['unsupported_question', ['ignore', 'you are now', 'pretend', 'system prompt', 'instructions', 'weather', 'joke', 'poem', 'delete', 'send', 'kalimti']],
+        ['collection_efficiency', ['efficiency', 'collection rate', 'porsyento', 'porsiyento', 'percent', 'percentage']],
+        ['income_summary', ['income', 'interest earned', 'earn', 'earned', 'revenue', 'kita', 'kinita', 'ganansya', 'kinitaan']],
+        ['expense_summary', ['expense', 'expenses', 'gastos', 'gasto', 'gigasto', 'gastu']],
+        ['officer_performance', ['officer', 'officers', 'collector', 'collectors', 'ao', 'aos', 'kolektor']],
+        ['branch_performance', ['branches', 'compare', 'ikumpara', 'itandi', 'best branch', 'top branch', 'which branch', 'unsang branch', 'anong branch', 'asa nga branch', 'by branch', 'per branch', 'kada branch']],
         ['portfolio_summary', ['portfolio', 'par', 'par 30']],
-        ['transaction_lookup', ['receipt', 'transaction', 'reference']],
+        ['transaction_lookup', ['receipt', 'transaction', 'reference', 'resibo']],
         ['loan_details', ['loan ln', 'loan number', 'schedule of loan']],
-        ['borrower_lookup', ['find member', 'find', 'hanapin', 'look up', 'contact']],
-        ['borrower_summary', ['new members', 'how many members', 'ilan ang members', 'repeat members']],
-        ['overdue_accounts', ['overdue', 'past due', 'atraso', 'delayed', 'late']],
-        ['collection_details', ['list of payments', 'who paid', 'nagbayad', 'payments list']],
-        ['collection_summary', ['collect', 'collected', 'collection', 'collections', 'koleksyon', 'nakolekta']],
-        ['disbursement_summary', ['disburse', 'disbursed', 'disbursement', 'disbursements', 'release', 'released', 'nailabas']],
-        ['loan_summary', ['active loans', 'active loan', 'outstanding']],
-        ['general_lending_summary', ['summary', 'overview', 'buod']],
+        ['borrower_lookup', ['find member', 'find', 'hanapin', 'pangitaa', 'pangita', 'look up', 'contact']],
+        ['borrower_summary', ['new members', 'how many members', 'ilan ang members', 'repeat members', 'bag ong members', 'pila ka members']],
+        ['overdue_accounts', ['overdue', 'past due', 'atraso', 'naatraso', 'nalangan', 'lapas', 'delayed', 'late', 'wala pa nakabayad', 'dili pa bayad', 'hindi pa nakakabayad']],
+        ['collection_details', ['list of payments', 'who paid', 'nagbayad', 'mibayad', 'nibayad', 'payments list']],
+        ['collection_summary', ['collect', 'collected', 'collection', 'collections', 'koleksyon', 'koleksiyon', 'nakolekta', 'nakubra', 'nadawat', 'bayad']],
+        ['disbursement_summary', ['disburse', 'disbursed', 'disbursement', 'disbursements', 'release', 'released', 'nailabas', 'gi release', 'na release', 'gipagawas', 'napagawas', 'nahatag', 'naibigay']],
+        ['loan_summary', ['active loans', 'active loan', 'outstanding', 'aktibo', 'nagdagan', 'tumatakbo']],
+        ['general_lending_summary', ['summary', 'overview', 'buod', 'kinatibuk an', 'kinatibuk ang']],
     ];
 
-    /** Words that aren't a branch name after "sa". */
-    private const NOT_BRANCH = ['mga', 'ating', 'atin', 'amin', 'lahat', 'ngayon', 'ngayong', 'kahapon', 'nakaraang', 'isang', 'loob'];
+    /** Words that aren't a branch name after "sa" or "in", or before "branch". */
+    private const NOT_BRANCH = [
+        'mga', 'ating', 'atin', 'amin', 'lahat', 'ngayon', 'ngayong', 'kahapon', 'nakaraang', 'isang', 'loob',
+        'the', 'which', 'what', 'anong', 'unsang', 'asa', 'nga', 'each', 'every', 'by', 'per', 'kada', 'best', 'top', 'my', 'our', 'all',
+        'niaging', 'miaging', 'karong', 'karon', 'kining', 'niining', 'gahapon', 'kagahapon', 'atong', 'among', 'tanan', 'tanang', 'ilang',
+        'koleksyon', 'nakolekta', 'bayad', 'atraso', 'loan', 'loans', 'interest', 'income', 'penalties', 'penalty', 'fees', 'pesos',
+        'peso', 'gcash', 'cash', 'total', 'full', 'advance', 'arrears', 'percent',
+    ];
 
     /** @var list<LindaModelRequest> */
     public array $requests = [];
@@ -159,11 +166,13 @@ final class FakeModel implements LindaModel
 
     private static function branch(string $clean): ?string
     {
-        if (preg_match('/(?:^|\s)(?:in|at|sa)?\s*(?:the\s+)?([\pL]+(?:\s[\pL]+)?)\s+branch(?:$|\s)/u', $clean, $found) === 1) {
-            return $found[1];
+        if (preg_match('/(?:^|\s)(?:in|at|sa)?\s*(?:the\s+)?([\pL]+(?:\s[\pL]+)?)\s+(?:nga\s+)?branch(?:$|\s)/u', $clean, $found) === 1) {
+            $words = array_values(array_diff(explode(' ', $found[1]), self::NOT_BRANCH));
+
+            return $words === [] ? null : implode(' ', $words);
         }
 
-        if (preg_match('/(?:^|\s)sa\s+([\pL]+(?:\s[\pL]+)?)\s*$/u', $clean, $found) === 1 || preg_match('/(?:^|\s)sa\s+([\pL]+)/u', $clean, $found) === 1) {
+        if (preg_match('/(?:^|\s)(?:sa|in)\s+([\pL]+(?:\s[\pL]+)?)\s*$/u', $clean, $found) === 1 || preg_match('/(?:^|\s)(?:sa|in)\s+([\pL]+)/u', $clean, $found) === 1) {
             return in_array(explode(' ', $found[1])[0], self::NOT_BRANCH, true) ? null : $found[1];
         }
 

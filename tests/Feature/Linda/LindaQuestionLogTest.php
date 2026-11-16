@@ -21,7 +21,7 @@ class LindaQuestionLogTest extends TestCase
     {
         $this->assertEqualsCanonicalizing([
             'id', 'user_id', 'asked_at', 'source', 'intent', 'answer_function', 'outcome', 'error_code',
-            'period_from', 'period_to', 'branch_scope', 'branch_id', 'member_ids', 'model',
+            'period_from', 'period_to', 'branch_scope', 'branch_id', 'member_ids', 'loan_ids', 'model',
             'input_tokens', 'output_tokens', 'cache_read_tokens', 'cache_write_tokens', 'cost', 'duration_ms',
             'created_at', 'updated_at',
         ], Schema::getColumnListing('linda_questions'));
@@ -54,6 +54,7 @@ class LindaQuestionLogTest extends TestCase
             'period_to' => '2026-11-30',
             'branch_scope' => [3, 5],
             'member_ids' => [11, 12],
+            'loan_ids' => [21, 22],
             'duration_ms' => 42,
         ])->refresh();
 
@@ -61,6 +62,8 @@ class LindaQuestionLogTest extends TestCase
         $this->assertSame('2026-11-01', $row->period_from->toDateString());
         $this->assertSame([3, 5], $row->branch_scope);
         $this->assertSame([11, 12], $row->member_ids);
+        $this->assertSame([21, 22], $row->loan_ids);
+        $this->assertSame('lookup', LindaQuestion::SOURCE_LOOKUP);
         $this->assertSame(0, $row->input_tokens);
         $this->assertSame(0, $row->cache_write_tokens);
         $this->assertSame('0.000000', $row->cost);

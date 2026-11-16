@@ -2,7 +2,9 @@
 
 namespace App\Services\Linda;
 
+use App\Models\Branch;
 use App\Models\LindaQuestion;
+use App\Models\LoanProduct;
 use App\Models\User;
 use App\Services\BranchAccess;
 use App\Services\Diagnostics\ErrorDigest;
@@ -21,15 +23,28 @@ use Throwable;
  * Answers one Linda question (Linda v1 plan, "How a question is answered").
  *
  * 1. The matcher runs first; what it understands never leaves the server.
- *    A question it misses that names a record or asks to look one up ends at
- *    the local guard (LindaGuard) with the "not yet" reply.
- * 2. With no match and the none driver, the reply lists what Linda can
- *    answer. Otherwise, below the monthly cap, the model reads the question
- *    (and up to 5 earlier questions with their intents, never an answer) and
- *    returns only the intent, the period words, a branch name and whether it
- *    follows on.
- * 3. The answerer writes the reply from the reports' own figures.
- * 4. One `linda_questions` row is written, with no text.
+ *    A question it misses that names a record or a person, or asks to look
+ *    one up, is a lookup (LindaLookup::parse()): the server answers it from
+ *    the record in the user's branches (LindaAnswerer::lookup()), logged as
+ *    source `lookup`, and the model never sees it. A "name" that is one of
+ *    the user's own branches or a loan product is no lookup ("collections
+ *    from Main"); the rest of the question is read again without it.
+ * 2. Right after a lookup turn ("Which member?"), a short reply (a record
+ *    number, or a name) is that lookup's target (LindaLookup::reply()).
+ * 3. With no match and the none driver, the reply lists what Linda can
+ *    answer. Otherwise the full-name check runs (LindaNameCheck, D2): a
+ *    question naming a member of the deployment is a member lookup, one
+ *    naming a staff user gets the officer performance answer (with officer
+ *    or ranking words) or a local "not yet", and one naming a co-maker or a
+ *    walk-in a local "not yet"; all are logged as `lookup`. A failure reading
+ *    the people answers data_unavailable, never the model.
+ * 4. Only then, below the monthly cap, the model reads the question and the
+ *    topics (intents) of up to 5 earlier turns, never their text or an
+ *    answer (D1), and returns only the intent, the period words, a branch
+ *    name and whether it follows on. A lookup intent it returns gets the
+ *    "which one?" prompt, answered locally.
+ * 5. The answerer writes the reply from the reports' own figures.
+ * 6. One `linda_questions` row is written, with no text.
  *
  * A follow-up keeps the period and branch of the question it follows
  * (LindaFollowUp, the rule `linda:evaluate` scores).
@@ -49,6 +64,9 @@ final class LindaAssistant
 
     /** Any other failure of the model call (security review S4). */
     public const REASON_INTERNAL = 'internal';
+
+    /** How many times a question is read again after a branch or product name is taken out. */
+    private const REREAD_MAX = 3;
 
     public function __construct(
         private readonly LindaAnswerer $answerer,
@@ -80,19 +98,27 @@ final class LindaAssistant
             $log->source = LindaQuestion::SOURCE_MATCHER;
             [$period, $branchName] = LindaFollowUp::carry($match->intent, $match->period, $match->branchName, $match->followUp, $history->earlier, $user);
 
-            return $this->answered($log, $started, $user, $match->intent, $period, $this->asTyped($branchName, $question, $history));
+            return $this->answered($log, $started, $user, $match->intent, $period, $this->asTyped($branchName, $question, $history), $question);
         }
 
-        $lookup = LindaGuard::check($question);
+        $lookup = $this->lookupIn($user, $question, $history);
 
         if ($lookup !== null) {
-            $log->fill(['source' => LindaQuestion::SOURCE_GUARD, 'intent' => $lookup->value]);
+            $log->source = LindaQuestion::SOURCE_LOOKUP;
 
-            return $this->finish($log, $started, $this->answerer->notYet($lookup, $user));
+            return $this->lookedUp($log, $started, $user, $lookup);
         }
 
         if (! in_array(config('linda.driver'), ['fake', 'anthropic'], true)) {
             return $this->finish($log, $started, $this->answerer->unmatched());
+        }
+
+        $named = $this->nameCheck($log, $started, $question);
+
+        if ($named !== null) {
+            $log->source = LindaQuestion::SOURCE_LOOKUP;
+
+            return $this->namedPerson($log, $started, $user, $question, $named);
         }
 
         $model = $this->settings->model();
@@ -108,6 +134,151 @@ final class LindaAssistant
     }
 
     /**
+     * The lookup a question asks for: by the lookup parser, else, right after
+     * a lookup turn, as a reply naming its target. A "name" that is one of the
+     * user's own branches or a loan product is no lookup: its words are taken
+     * out and the rest of the question is read again ("collections from Main
+     * and balance of Juan"). A re-read that gives up (after 3 tries, or when
+     * the name can't be found again) stays local, asking which member.
+     */
+    private function lookupIn(User $user, #[\SensitiveParameter] string $question, LindaHistory $history): ?LindaLookupRequest
+    {
+        $lookup = LindaLookup::parse($question);
+
+        if ($lookup === null && $history->pendingLookup !== null) {
+            $lookup = LindaLookup::reply($question, $history->pendingLookup);
+        }
+
+        for ($tries = 0; $lookup !== null && $this->namesAPlaceOrProduct($user, $lookup); $tries++) {
+            $rest = $tries < self::REREAD_MAX ? self::without((string) $lookup->name, $question) : null;
+
+            // Giving up stays local: a member lookup with no target asks which one.
+            if ($rest === null) {
+                return new LindaLookupRequest(LindaLookupRequest::MEMBER, LindaIntent::BorrowerLookup);
+            }
+
+            $question = $rest;
+            $lookup = LindaLookup::parse($question);
+
+            // A lookup with no target now only lacks the words taken out.
+            if ($lookup !== null && $lookup->code === null && $lookup->name === null) {
+                return null;
+            }
+        }
+
+        return $lookup;
+    }
+
+    /**
+     * Whether a name lookup's name is one of the user's own branch names or a
+     * loan product's name (case, spaces and a trailing "Branch" or "Loan"
+     * ignored).
+     */
+    private function namesAPlaceOrProduct(User $user, LindaLookupRequest $lookup): bool
+    {
+        if ($lookup->code !== null || $lookup->name === null) {
+            return false;
+        }
+
+        $wanted = self::nameKey($lookup->name);
+
+        if ($wanted === '') {
+            return false;
+        }
+
+        $branchIds = $this->branchAccess->for($user);
+        $names = $branchIds === [] ? collect() : Branch::query()
+            ->when($branchIds !== null, fn ($query) => $query->whereIn('id', $branchIds))
+            ->pluck('name');
+
+        return $names->merge(LoanProduct::query()->pluck('name'))
+            ->contains(fn ($name) => self::nameKey((string) $name) === $wanted);
+    }
+
+    /** "  Main   Branch " → "main", "Salary Loan" → "salary" */
+    private static function nameKey(#[\SensitiveParameter] string $name): string
+    {
+        $words = LindaText::words(LindaText::clean($name));
+
+        if ($words !== [] && in_array(end($words), ['branch', 'loan', 'loans'], true)) {
+            array_pop($words);
+        }
+
+        return implode(' ', $words);
+    }
+
+    /** The question with a name's words taken out once, or null when they aren't found as typed. */
+    private static function without(#[\SensitiveParameter] string $name, #[\SensitiveParameter] string $question): ?string
+    {
+        $words = preg_split('/\s+/u', trim($name)) ?: [];
+        $pattern = '/(?<![\pL\pN])'.implode('\s+', array_map(fn (string $word) => preg_quote($word, '/'), $words)).'(?![\pL\pN])/iu';
+        $rest = $words === [] ? null : preg_replace($pattern, ' ', $question, 1, $count);
+
+        return $rest === null || $count !== 1 ? null : $rest;
+    }
+
+    /**
+     * The full-name check (D2). A failure reading the people (the database)
+     * never lets the question through to the model: it logs a digest only,
+     * writes the question row with data_unavailable and answers 503.
+     *
+     * @throws LindaHttpError data_unavailable
+     */
+    private function nameCheck(LindaQuestion $log, int $started, #[\SensitiveParameter] string $question): ?LindaNameCheck
+    {
+        try {
+            return LindaNameCheck::find($question);
+        } catch (Throwable $e) {
+            Log::warning('Linda name check failed.', ErrorDigest::context($e));
+            $log->fill(['source' => LindaQuestion::SOURCE_LOOKUP, 'outcome' => self::OUTCOME_ERROR, 'error_code' => LindaHttpError::DATA_UNAVAILABLE]);
+            $this->write($log, $started);
+
+            throw LindaHttpError::dataUnavailable();
+        }
+    }
+
+    /**
+     * A question naming someone by full name (D2), answered locally: a member
+     * lookup (with no target when the read was capped); for a staff user, the
+     * officer performance answer when it has officer or ranking words, for the
+     * period it names (this month by default), else a fixed "not yet"; for a
+     * co-maker or a walk-in, a fixed "not yet". Any other capped read gets the
+     * neutral "not yet": it doesn't mean someone was named.
+     *
+     * @throws LindaHttpError data_unavailable
+     */
+    private function namedPerson(LindaQuestion $log, int $started, User $user, #[\SensitiveParameter] string $question, LindaNameCheck $named): LindaReply
+    {
+        if ($named->kind === LindaNameCheck::MEMBER) {
+            return $this->lookedUp($log, $started, $user, new LindaLookupRequest(LindaLookupRequest::MEMBER, LindaIntent::BorrowerLookup, null, $named->name));
+        }
+
+        // A capped read named no one in particular: a neutral reply, kept local.
+        if ($named->name === null) {
+            return $this->finish($log, $started, new LindaReply(LindaIntent::UnsupportedQuestion->value, LindaWording::notYet(), 'not_yet', answerFunction: class_basename(LindaNameCheck::class)));
+        }
+
+        if ($named->kind !== LindaNameCheck::STAFF) {
+            return $this->finish($log, $started, new LindaReply(LindaIntent::UnsupportedQuestion->value, LindaWording::otherPersonNotYet(), 'not_yet', answerFunction: class_basename(LindaNameCheck::class)));
+        }
+
+        if (! $named->performance) {
+            return $this->finish($log, $started, new LindaReply(LindaIntent::UnsupportedQuestion->value, LindaWording::staffNotYet(), 'not_yet', answerFunction: class_basename(LindaNameCheck::class)));
+        }
+
+        $intent = LindaIntent::OfficerPerformance;
+        $found = LindaPeriod::extract(LindaText::clean($question));
+
+        if ($found['refused']) {
+            return $this->finish($log, $started, $this->answerer->periodRefused((string) ($found['reason'] ?? LindaPeriod::REFUSED_INVALID), $intent));
+        }
+
+        [$period] = LindaFollowUp::carry($intent, $found['period'], null, false, []);
+
+        return $this->answered($log, $started, $user, $intent, $period, null, $question);
+    }
+
+    /**
      * Ask the model, below the cap, with its prices checked first so a broken
      * price table, rate or cap sends nothing (`no_prices`). A failed call is
      * logged with its reason code and the cost it may have run up: the usage
@@ -115,8 +286,8 @@ final class LindaAssistant
      * failure once the call may have been sent (either may still be billed),
      * the worst-case estimate on the requested model.
      *
-     * Earlier questions the local guard flags never go to the model: a lookup
-     * it kept local stays local on every later question, its intent with it.
+     * Earlier questions go to the model as their topics (intents) only, never
+     * their text (D1); a lookup's topic is left out too.
      *
      * @throws LindaHttpError monthly_limit or ai_unavailable
      */
@@ -134,7 +305,7 @@ final class LindaAssistant
 
             LindaPrices::worstCaseEstimate($model);
             $log->fill(['source' => LindaQuestion::SOURCE_MODEL, 'model' => $model]);
-            $request = new LindaModelRequest($question, LindaGuard::withoutLookups($history->earlier), $model);
+            $request = new LindaModelRequest($question, array_column($history->earlier, 'intent'), $model);
             $driver = LindaModelFactory::make((string) config('linda.driver'));
             $sent = true;
             $understanding = $driver->understand($request);
@@ -209,6 +380,14 @@ final class LindaAssistant
             return $this->finish($log, $started, $this->answerer->unsupported());
         }
 
+        $lookupKind = $intent->lookupKind();
+
+        // The question already passed the parser, so the model's lookup intent
+        // asks which record is meant.
+        if ($lookupKind !== null) {
+            return $this->lookedUp($log, $started, $user, new LindaLookupRequest($lookupKind, $intent));
+        }
+
         // Overdue and active loans are as of today: the model's period words
         // are ignored, never refused or called unclear.
         $period = null;
@@ -227,7 +406,7 @@ final class LindaAssistant
 
         [$period, $branchName] = LindaFollowUp::carry($intent, $period, $understanding->branchName, $understanding->followUp, $history->earlier, $user);
 
-        return $this->answered($log, $started, $user, $intent, $period, $this->asTyped($branchName, $question, $history));
+        return $this->answered($log, $started, $user, $intent, $period, $this->asTyped($branchName, $question, $history), $question);
     }
 
     /** A branch name as staff typed it, from this question or an earlier one, for the reply. */
@@ -241,7 +420,7 @@ final class LindaAssistant
     /**
      * @throws LindaHttpError data_unavailable
      */
-    private function answered(LindaQuestion $log, int $started, User $user, LindaIntent $intent, ?LindaPeriod $period, ?string $branchName): LindaReply
+    private function answered(LindaQuestion $log, int $started, User $user, LindaIntent $intent, ?LindaPeriod $period, ?string $branchName, #[\SensitiveParameter] string $question): LindaReply
     {
         $log->fill([
             'intent' => $intent->value,
@@ -250,13 +429,35 @@ final class LindaAssistant
         ]);
 
         try {
-            $reply = $this->answerer->answer($user, $intent, $period, $branchName);
+            $reply = $this->answerer->answer($user, $intent, $period, $branchName, $question);
 
             if ($branchName !== null && $reply->outcome === 'answered') {
                 $log->branch_id = LindaScope::resolve($user, $branchName)->branchId;
             }
         } catch (Throwable $e) {
             Log::warning('Linda answer failed.', ['intent' => $intent->value] + ErrorDigest::context($e));
+            $log->fill(['outcome' => self::OUTCOME_ERROR, 'error_code' => LindaHttpError::DATA_UNAVAILABLE]);
+            $this->write($log, $started);
+
+            throw LindaHttpError::dataUnavailable();
+        }
+
+        return $this->finish($log, $started, $reply);
+    }
+
+    /**
+     * A lookup, answered on the server from the record it names.
+     *
+     * @throws LindaHttpError data_unavailable
+     */
+    private function lookedUp(LindaQuestion $log, int $started, User $user, LindaLookupRequest $lookup): LindaReply
+    {
+        $log->intent = $lookup->intent->value;
+
+        try {
+            $reply = $this->answerer->lookup($user, $lookup);
+        } catch (Throwable $e) {
+            Log::warning('Linda answer failed.', ['intent' => $lookup->intent->value] + ErrorDigest::context($e));
             $log->fill(['outcome' => self::OUTCOME_ERROR, 'error_code' => LindaHttpError::DATA_UNAVAILABLE]);
             $this->write($log, $started);
 
@@ -273,6 +474,7 @@ final class LindaAssistant
             'answer_function' => $reply->answerFunction,
             'outcome' => $outcome ?? $reply->outcome,
             'member_ids' => $reply->memberIds === [] ? null : array_values(array_map('intval', $reply->memberIds)),
+            'loan_ids' => $reply->loanIds === [] ? null : array_values(array_map('intval', $reply->loanIds)),
         ]);
         $this->write($log, $started);
 

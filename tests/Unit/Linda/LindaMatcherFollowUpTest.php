@@ -55,12 +55,22 @@ class LindaMatcherFollowUpTest extends LindaTestCase
 
     public function test_the_word_branch_with_no_name_is_not_understood(): void
     {
-        $this->assertNull(LindaMatcher::match('which branch collected the most?', null));
+        $this->assertNull(LindaMatcher::match('collections at the branch', null));
     }
 
     public function test_a_branch_name_is_at_most_three_words(): void
     {
         $this->assertNull(LindaMatcher::match('collections in north east river side branch', null));
         $this->assertSame('north east river', LindaMatcher::match('collections in north east river branch', null)?->branchName);
+    }
+
+    public function test_a_lookup_is_never_carried_on_by_a_follow_up(): void
+    {
+        foreach ([LindaIntent::TransactionLookup, LindaIntent::LoanDetails, LindaIntent::BorrowerLookup] as $lookup) {
+            $this->assertNull(LindaMatcher::match('Show the payments last month', $lookup), $lookup->value);
+            $this->assertNull(LindaMatcher::match('how about last month?', $lookup), $lookup->value);
+        }
+
+        $this->assertSame(LindaIntent::CollectionSummary, LindaMatcher::match('how about last month?', LindaIntent::CollectionSummary)?->intent);
     }
 }

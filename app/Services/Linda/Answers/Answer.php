@@ -27,9 +27,11 @@ abstract class Answer
 
     /**
      * The answer, for a user it allows and a scope that resolved. $period is
-     * null only for an answer that is as of today.
+     * null only for an answer that is as of today. $question is the text as
+     * typed, read only by an answer that ranks or names within its figures
+     * (performance); it is never stored or logged.
      */
-    abstract public function build(User $user, LindaScope $scope, ?LindaPeriod $period): LindaReply;
+    abstract public function build(User $user, LindaScope $scope, ?LindaPeriod $period, #[\SensitiveParameter] ?string $question = null): LindaReply;
 
     /** The name the question log records for this answer. */
     public function name(): string
@@ -46,10 +48,11 @@ abstract class Answer
      * @param  list<array<string, mixed>>  $blocks
      * @param  list<array{label: string, url: string}>  $links
      * @param  list<int>  $memberIds
+     * @param  list<int>  $loanIds
      */
-    protected function reply(string $answer, array $blocks, array $links, array $memberIds = []): LindaReply
+    protected function reply(string $answer, array $blocks, array $links, array $memberIds = [], array $loanIds = []): LindaReply
     {
-        return new LindaReply($this->intent()->value, $answer, 'answered', $blocks, $links, $memberIds, $this->name());
+        return new LindaReply($this->intent()->value, $answer, 'answered', $blocks, $links, $memberIds, $this->name(), loanIds: $loanIds);
     }
 
     /** @param  list<string>  $permissions */

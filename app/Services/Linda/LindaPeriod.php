@@ -12,7 +12,7 @@ use InvalidArgumentException;
  * period, its key ("this_month").
  *
  * Also the parser that finds one in a question. It reads named periods in
- * English and Tagalog, month names (the latest one that has started; the
+ * English, Tagalog and Bisaya/Cebuano, month names (the latest one that has started; the
  * current month runs to today), single dates, and date ranges with or without
  * a year. A future end is cut back to today. A period that hasn't started,
  * an impossible date and a span over 10 years are refused.
@@ -37,23 +37,44 @@ final class LindaPeriod
     public const REFUSED_INVALID = 'invalid';
 
     /**
-     * Phrases for each named period, in cleaned text (LindaText::clean()).
+     * Phrases for each named period, in cleaned text (LindaText::clean()):
+     * English, Tagalog and Bisaya/Cebuano.
      *
      * @var array<string, list<string>>
      */
     private const NAMED_PHRASES = [
-        'today' => ['today', 'ngayong araw na ito', 'ngayong araw', 'ngayon araw', 'as of today', 'as of now', 'right now', 'currently', 'now', 'ngayon'],
-        'yesterday' => ['yesterday', 'kahapon'],
-        'this_week' => ['this week', 'week to date', 'ngayong linggong ito', 'ngayong linggo', 'ngayong week'],
-        'last_week' => ['last week', 'previous week', 'noong nakaraang linggo', 'nakaraang linggo', 'noong isang linggo', 'nakaraang week'],
-        'this_month' => ['this month', 'month to date', 'ngayong buwang ito', 'ngayong buwan', 'ngayong month', 'buwang ito'],
-        'last_month' => ['last month', 'previous month', 'noong nakaraang buwan', 'nakaraang buwan', 'noong isang buwan', 'nakaraang month'],
-        'this_quarter' => ['this quarter', 'quarter to date', 'ngayong quarter'],
-        'this_year' => ['this year', 'year to date', 'ytd', 'ngayong taong ito', 'ngayong taon', 'ngayong year'],
+        'today' => [
+            'today', 'ngayong araw na ito', 'ngayong araw', 'ngayon araw', 'as of today', 'as of now', 'right now', 'currently', 'now', 'ngayon',
+            'karong adlawa', 'karong adlaw', 'karon nga adlaw', 'niining adlawa', 'kining adlawa', 'karon dayon', 'karon',
+        ],
+        'yesterday' => ['yesterday', 'kahapon', 'gahapon', 'kagahapon'],
+        'this_week' => [
+            'this week', 'week to date', 'ngayong linggong ito', 'ngayong linggo', 'ngayong week',
+            'karong semanaha', 'karong semana', 'karon nga semana', 'kining semanaha', 'niining semanaha', 'karong simana', 'karong week',
+        ],
+        'last_week' => [
+            'last week', 'previous week', 'noong nakaraang linggo', 'nakaraang linggo', 'noong isang linggo', 'nakaraang week',
+            'sa niaging semana', 'sa miaging semana', 'niadtong niaging semana', 'niaging semana', 'miaging semana', 'niaging simana',
+            'miaging simana', 'niaging week', 'miaging week',
+        ],
+        'this_month' => [
+            'this month', 'month to date', 'ngayong buwang ito', 'ngayong buwan', 'ngayong month', 'buwang ito',
+            'karong bulana', 'karong bulan', 'karon nga bulan', 'kining bulana', 'niining bulana', 'karong month',
+        ],
+        'last_month' => [
+            'last month', 'previous month', 'noong nakaraang buwan', 'nakaraang buwan', 'noong isang buwan', 'nakaraang month',
+            'sa niaging bulan', 'sa miaging bulan', 'niadtong niaging bulan', 'niaging bulan', 'miaging bulan', 'niaging month', 'miaging month',
+        ],
+        'this_quarter' => ['this quarter', 'quarter to date', 'ngayong quarter', 'karong quarter', 'kining quarter'],
+        'this_year' => [
+            'this year', 'year to date', 'ytd', 'ngayong taong ito', 'ngayong taon', 'ngayong year',
+            'karong tuiga', 'karong tuig', 'karon nga tuig', 'kining tuiga', 'niining tuiga', 'karong year',
+        ],
     ];
 
     /**
-     * Month names and abbreviations, English and Tagalog. "May" is left out:
+     * Month names and abbreviations, English, Tagalog and Bisaya (which share
+     * their Spanish month names), with common spellings. "May" is left out:
      * on its own it is Tagalog for "there is", so it is a month only where
      * the patterns below say so.
      *
@@ -61,17 +82,17 @@ final class LindaPeriod
      */
     private const MONTHS = [
         'january' => 1, 'jan' => 1, 'enero' => 1,
-        'february' => 2, 'feb' => 2, 'pebrero' => 2,
+        'february' => 2, 'feb' => 2, 'pebrero' => 2, 'febrero' => 2,
         'march' => 3, 'mar' => 3, 'marso' => 3,
         'april' => 4, 'apr' => 4, 'abril' => 4,
         'mayo' => 5,
         'june' => 6, 'jun' => 6, 'hunyo' => 6,
         'july' => 7, 'jul' => 7, 'hulyo' => 7,
-        'august' => 8, 'aug' => 8, 'agosto' => 8,
-        'september' => 9, 'sept' => 9, 'sep' => 9, 'setyembre' => 9, 'septiyembre' => 9,
-        'october' => 10, 'oct' => 10, 'oktubre' => 10,
-        'november' => 11, 'nov' => 11, 'nobyembre' => 11,
-        'december' => 12, 'dec' => 12, 'disyembre' => 12,
+        'august' => 8, 'aug' => 8, 'agosto' => 8, 'agusto' => 8,
+        'september' => 9, 'sept' => 9, 'sep' => 9, 'setyembre' => 9, 'septiyembre' => 9, 'septyembre' => 9, 'setiyembre' => 9,
+        'october' => 10, 'oct' => 10, 'oktubre' => 10, 'oktobre' => 10,
+        'november' => 11, 'nov' => 11, 'nobyembre' => 11, 'nobiyembre' => 11,
+        'december' => 12, 'dec' => 12, 'disyembre' => 12, 'disiyembre' => 12,
     ];
 
     private function __construct(
@@ -220,8 +241,9 @@ final class LindaPeriod
         $day = '\d{1,2}(?:st|nd|rd|th)?(?!\d)';
         $year = '\d{4}(?!\d)';
         $iso = '\d{4}-\d{2}-\d{2}';
-        $from = '(?:(?<between>between)\s+|(?:from|mula|simula)\s+(?:sa\s+|noong\s+)?)?';
-        $to = '\s+(?:(?<and>and|at)|to|until|till|through|thru|hanggang(?:\s+sa)?)\s+';
+        $from = '(?:(?<between>between|taliwala(?:\s+sa)?)\s+|(?:from|mula|simula|gikan|sukad)\s+(?:sa\s+|noong\s+|niadtong\s+)?)?';
+        $to = '\s+(?:(?<and>and|at|ug|og)|to|until|till|through|thru|hanggang(?:\s+sa)?|hangtod(?:\s+sa)?|hantod(?:\s+sa)?|kutob(?:\s+sa)?)\s+';
+        $on = '(?:on\s+|noong\s+|niadtong\s+|sadtong\s+|sa\s+)?';
         $edge = fn (string $body): string => '/(?<![\pL\pN])'.$body.'(?![\pL\pN])/u';
 
         $range = fn (array $g): self|string => self::rangeOrNull($g, fn () => self::range(
@@ -251,15 +273,15 @@ final class LindaPeriod
                 $range,
             ],
             [
-                $edge("(?:on\s+|noong\s+)?(?<iso1>{$iso})"),
+                $edge("{$on}(?<iso1>{$iso})"),
                 fn (array $g): self|string => self::isoRange($g['iso1'], $g['iso1']),
             ],
             [
-                $edge("(?:on\s+|noong\s+)?(?<m1>{$month})\s+(?<d1>{$day})(?:\s+(?<y1>{$year}))?"),
+                $edge("{$on}(?<m1>{$month})\s+(?<d1>{$day})(?:\s+(?<y1>{$year}))?"),
                 fn (array $g): self|string => self::singleDay(self::monthNumber($g['m1']), (int) $g['d1'], isset($g['y1']) ? (int) $g['y1'] : null),
             ],
             [
-                $edge("(?:on\s+|noong\s+)?(?<d1>{$day})\s+(?<m1>{$month})(?:\s+(?<y1>{$year}))?"),
+                $edge("{$on}(?<d1>{$day})\s+(?<m1>{$month})(?:\s+(?<y1>{$year}))?"),
                 fn (array $g): self|string => self::singleDay(self::monthNumber($g['m1']), (int) $g['d1'], isset($g['y1']) ? (int) $g['y1'] : null),
             ],
             [
@@ -271,7 +293,7 @@ final class LindaPeriod
                 fn (array $g): self|string => self::named($named[$g['named']]),
             ],
             [
-                $edge("(?:(?:in|noong|nung|during)\s+(?<m1>may)|(?<m2>{$bareMonth}))"),
+                $edge("(?:(?:in|noong|nung|during|niadtong)\s+(?<m1>may)|(?<m2>{$bareMonth}))"),
                 fn (array $g): self|string => self::month(self::monthNumber($g['m1'] ?? $g['m2']), null),
             ],
         ];

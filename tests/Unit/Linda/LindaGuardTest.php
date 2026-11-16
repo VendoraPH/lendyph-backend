@@ -4,14 +4,15 @@ namespace Tests\Unit\Linda;
 
 use App\Services\Linda\LindaGuard;
 use App\Services\Linda\LindaIntent;
+use App\Services\Linda\LindaLookup;
 use App\Services\Linda\LindaMatcher;
 use PHPUnit\Framework\Attributes\DataProvider;
 
 /**
  * The local guard (security review S3): a question the matcher missed that
  * names a record (the app's own numbers, an email, a mobile number, a long
- * digit run) or asks to look one up never goes to the model. v1 can't answer
- * lookups, so it gets the "not yet" reply for the fitting intent.
+ * digit run), asks to look one up, or asks about one person's balance, loan
+ * or payments never goes to the model. It reads them with LindaLookup.
  */
 class LindaGuardTest extends LindaTestCase
 {
@@ -53,8 +54,15 @@ class LindaGuardTest extends LindaTestCase
             'details of' => ['details of Rosa Santos', LindaIntent::BorrowerLookup],
             'profile of' => ['profile of Rosa Santos', LindaIntent::BorrowerLookup],
             'look up a payment' => ['Look up the payment with reference 7781', LindaIntent::TransactionLookup],
-            'find a receipt' => ['find the receipt for Rosa', LindaIntent::TransactionLookup],
-            'details of a loan' => ['details of the loan of Rosa Santos', LindaIntent::LoanDetails],
+            // A name is only ever looked up as a member, whose answer lists their loans.
+            'find a receipt for a member' => ['find the receipt for Rosa', LindaIntent::BorrowerLookup],
+            'details of a member\'s loan' => ['details of the loan of Rosa Santos', LindaIntent::BorrowerLookup],
+            'find a receipt' => ['find the receipt', LindaIntent::TransactionLookup],
+            'details of a loan' => ['details of the loan', LindaIntent::LoanDetails],
+            'utang ni, Bisaya' => ['Unsa ang utang ni Juan Dela Cruz?', LindaIntent::BorrowerLookup],
+            'balance ni, Tagalog' => ['balance ni Maria Santos', LindaIntent::BorrowerLookup],
+            'a possessive' => ["What's Juan's balance?", LindaIntent::BorrowerLookup],
+            'pangitaa' => ['Pangitaa ang resibo RCP-000777', LindaIntent::TransactionLookup],
         ];
     }
 
@@ -93,9 +101,10 @@ class LindaGuardTest extends LindaTestCase
     }
 
     /**
-     * Every question in the evaluation set that is neither a lookup nor
-     * answered by the matcher passes the guard, so the guard never takes a
-     * question the model could have answered.
+     * Every question in the evaluation set that is neither a lookup, nor
+     * answered by the matcher, nor one naming a case's people (the full-name
+     * check's) passes the guard, so the guard never takes a question the
+     * model could have answered.
      */
     public function test_it_leaves_every_non_lookup_question_in_the_evaluation_set_alone(): void
     {
@@ -103,7 +112,7 @@ class LindaGuardTest extends LindaTestCase
         $lookups = ['borrower_lookup', 'loan_details', 'transaction_lookup'];
 
         foreach ($cases as $case) {
-            if (in_array($case['intent'], $lookups, true)) {
+            if (in_array($case['intent'], $lookups, true) || ($case['people'] ?? []) !== [] || LindaMatcher::match($case['question'], self::previousTopic($case)) !== null) {
                 continue;
             }
 
@@ -111,18 +120,74 @@ class LindaGuardTest extends LindaTestCase
         }
     }
 
+    /**
+     * Every lookup question in the evaluation set the matcher misses is
+     * caught, except a reply to a lookup turn ("Juan Dela Cruz" after "Which
+     * member?") and a question naming a case's people, which the pending
+     * lookup and the full-name check keep local.
+     */
     public function test_it_catches_every_lookup_question_in_the_evaluation_set_the_matcher_misses(): void
     {
         $cases = require base_path('tests/Fixtures/linda/evaluation.php');
 
         foreach ($cases as $case) {
+            $earlier = $case['earlier'] ?? [];
+            $afterLookup = $earlier !== [] && LindaIntent::from($earlier[count($earlier) - 1][1])->isLookup();
+
             if (! in_array($case['intent'], ['borrower_lookup', 'loan_details', 'transaction_lookup'], true)
-                || LindaMatcher::match($case['question']) !== null) {
+                || $afterLookup || ($case['people'] ?? []) !== [] || LindaMatcher::match($case['question']) !== null) {
                 continue;
             }
 
             $this->assertSame($case['intent'], LindaGuard::check($case['question'])?->value, $case['question']);
         }
+    }
+
+    /**
+     * The latest earlier topic that wasn't a lookup, as LindaHistory reads it.
+     *
+     * @param  array{earlier?: list<array{string, string}>}  $case
+     */
+    private static function previousTopic(array $case): ?LindaIntent
+    {
+        $topics = array_values(array_filter(array_map(fn (array $entry) => LindaIntent::from($entry[1]), $case['earlier'] ?? []), fn (LindaIntent $intent) => ! $intent->isLookup()));
+
+        return $topics === [] ? null : $topics[count($topics) - 1];
+    }
+
+    /**
+     * The guard and the lookup parser agree on every question: whatever
+     * LindaLookup::parse() treats as a lookup, the guard catches with the
+     * same intent, so no lookup the parser reads can reach the model.
+     */
+    public function test_the_guard_catches_exactly_what_the_lookup_parser_reads(): void
+    {
+        $questions = array_merge(
+            array_column(self::caught(), 0),
+            array_column(self::passed(), 0),
+            array_column(LindaLookupTest::codes(), 0),
+            array_column(LindaLookupTest::names(), 0),
+            array_column(LindaLookupTest::noTarget(), 0),
+            array_column(LindaLookupTest::contactDetails(), 0),
+            array_column(LindaLookupTest::notLookups(), 0),
+            array_column(require base_path('tests/Fixtures/linda/evaluation.php'), 'question'),
+        );
+
+        foreach ($questions as $question) {
+            $this->assertSame(LindaLookup::parse($question)?->intent, LindaGuard::check($question), $question);
+        }
+    }
+
+    public function test_earlier_bisaya_and_tagalog_lookups_are_dropped_too(): void
+    {
+        $this->assertSame([
+            ['question' => 'Pila ang nakolekta karong bulana?', 'intent' => 'collection_summary'],
+        ], LindaGuard::withoutLookups([
+            ['question' => 'Unsa ang utang ni Juan Dela Cruz?', 'intent' => 'borrower_lookup'],
+            ['question' => 'Pila ang nakolekta karong bulana?', 'intent' => 'collection_summary'],
+            ['question' => 'Magkano ang bayad ni Pedro?', 'intent' => 'borrower_lookup'],
+            ['question' => "What's Maria's balance?", 'intent' => null],
+        ]));
     }
 
     public function test_earlier_lookups_are_dropped_with_their_intents(): void

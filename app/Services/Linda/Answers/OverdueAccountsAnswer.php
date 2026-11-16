@@ -45,7 +45,7 @@ final class OverdueAccountsAnswer extends Answer
         return 'overdue figures';
     }
 
-    public function build(User $user, LindaScope $scope, ?LindaPeriod $period): LindaReply
+    public function build(User $user, LindaScope $scope, ?LindaPeriod $period, #[\SensitiveParameter] ?string $question = null): LindaReply
     {
         $figures = $this->reports->overdueMembers($scope->filters());
         $max = max(1, (int) config('linda.list_max', 10));
