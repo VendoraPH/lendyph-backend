@@ -49,6 +49,9 @@ class LindaQuestion extends Model
     /** Neither understood it (the none driver, or a refusal before any call). */
     public const SOURCE_NONE = 'none';
 
+    /** A lookup the local guard (LindaGuard) answered, with no model call. */
+    public const SOURCE_GUARD = 'guard';
+
     protected $fillable = [
         'user_id',
         'asked_at',

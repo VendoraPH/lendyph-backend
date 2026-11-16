@@ -48,12 +48,15 @@ final class CollectionSummaryAnswer extends Answer
 
         $count = (int) $report['payment_count'];
 
-        $answer = $count === 0
-            ? 'No payments were received '.W::during($period).'. This covers '.$scope->label.'.'
-            : self::sentence(W::during($period)).', we received '.W::money($report['total_received'])
+        $answer = match (true) {
+            $count === 0 && (float) $report['total_collected'] > 0 => 'No payments were received '.W::during($period).'; '
+                .W::money($report['total_collected']).' of principal and interest due in that period was paid earlier. This covers '.$scope->label.'.',
+            $count === 0 => 'No payments were received '.W::during($period).'. This covers '.$scope->label.'.',
+            default => self::sentence(W::during($period)).', we received '.W::money($report['total_received'])
                 .' from '.W::count($count, 'payment').' '.W::forScope($scope).'. '
                 .'Collected (Principal + Interest) on the periods due in those dates is '.W::money($report['total_collected'])
-                .', and Penalty Collected is '.W::money($report['penalty_collected']).'.';
+                .', and Penalty Collected is '.W::money($report['penalty_collected']).'.',
+        };
 
         return $this->reply($answer, [
             LindaReply::stats([

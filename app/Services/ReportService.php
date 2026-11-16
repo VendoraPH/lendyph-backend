@@ -1501,7 +1501,7 @@ class ReportService
             ->toBase()
             // The insurance premium a payment collected first is not loan
             // collection: it is left out of the money taken in.
-            ->selectRaw('COALESCE(SUM(amount_paid - insurance_applied), 0) as total_received, COALESCE(SUM(penalty_applied), 0) as penalty_collected, COUNT(*) as payment_count')
+            ->selectRaw('COALESCE(SUM(amount_paid - insurance_applied), 0) as total_received, COALESCE(SUM(penalty_applied), 0) as penalty_collected, COUNT(CASE WHEN amount_paid - insurance_applied > 0 THEN 1 END) as payment_count')
             ->first();
 
         return [
@@ -1516,7 +1516,8 @@ class ReportService
             'penalty_collected' => round((float) $receipts->penalty_collected, 2),
             'total_received' => round((float) $receipts->total_received, 2),
             // How many receipts `total_received` is made of: the same posted
-            // payments, dated in the range, on the same loans.
+            // payments, dated in the range, on the same loans, that added to
+            // it (a receipt that only paid the insurance premium adds nothing).
             'payment_count' => (int) $receipts->payment_count,
         ];
     }

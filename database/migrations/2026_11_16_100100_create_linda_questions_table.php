@@ -7,7 +7,7 @@ use Illuminate\Support\Facades\Schema;
 /**
  * Linda's question log (Linda v1 plan, "Privacy and the log"): one row per
  * question, recording who asked, when, how it was understood (the matcher,
- * the model or neither), the intent, the answer function, the outcome, the
+ * the local guard, the model or neither), the intent, the answer function, the outcome, the
  * period, the branch scope (null means every branch), the members the answer
  * listed, the model, its tokens, the cost in pesos (6 decimals: a question
  * costs fractions of a centavo) and the time taken.

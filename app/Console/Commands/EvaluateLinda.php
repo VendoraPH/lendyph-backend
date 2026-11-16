@@ -4,10 +4,11 @@ declare(strict_types=1);
 
 namespace App\Console\Commands;
 
+use App\Services\Linda\LindaFollowUp;
+use App\Services\Linda\LindaGuard;
 use App\Services\Linda\LindaIntent;
 use App\Services\Linda\LindaMatcher;
 use App\Services\Linda\LindaPeriod;
-use App\Services\Linda\LindaText;
 use App\Services\Linda\Model\LindaModel;
 use App\Services\Linda\Model\LindaModelFactory;
 use App\Services\Linda\Model\LindaModelRequest;
@@ -19,15 +20,18 @@ use Brick\Math\RoundingMode;
 use Illuminate\Console\Attributes\Description;
 use Illuminate\Console\Attributes\Signature;
 use Illuminate\Console\Command;
+use Throwable;
 
 /**
  * Scores Linda's question understanding on the synthetic question set
  * (tests/Fixtures/linda/evaluation.php), through the production flow: the
- * matcher first, and the model only when the matcher finds nothing.
+ * matcher first, then the local guard (LindaGuard, lookups end there), and
+ * the model only when neither answers.
  *
- * A follow-up without its own period or branch keeps the earlier question's,
- * and a question with no period whose intent defaults to this month gets this
- * month, as the answers do.
+ * A follow-up keeps the period and branch of the question it follows
+ * (LindaFollowUp, the endpoint's rule), a question with no period whose
+ * intent defaults to this month gets this month, and overdue and active loans
+ * take no period, as the answers do.
  *
  * ## It costs money on a live driver
  * The `anthropic` driver makes one paid call per model-handled case, so it
@@ -100,7 +104,7 @@ class EvaluateLinda extends Command
     {
         $this->line("Driver: {$driver}".($driver === 'none' ? '' : ", model: {$modelId}"));
 
-        $totals = ['run' => 0, 'matcher' => 0, 'model' => 0, 'none' => 0, 'intent' => 0, 'period' => 0, 'period_scored' => 0, 'branch' => 0, 'branch_scored' => 0, 'refusals' => 0];
+        $totals = ['run' => 0, 'matcher' => 0, 'guard' => 0, 'model' => 0, 'none' => 0, 'intent' => 0, 'period' => 0, 'period_scored' => 0, 'branch' => 0, 'branch_scored' => 0, 'refusals' => 0];
         $tokens = ['input' => 0, 'output' => 0, 'cache_read' => 0, 'cache_write' => 0];
         $errors = [];
         $latencies = [];
@@ -119,11 +123,19 @@ class EvaluateLinda extends Command
                 continue;
             }
 
+            $lookup = $match === null ? LindaGuard::check($case['question']) : null;
+
+            if ($modelOnly && $lookup !== null) {
+                continue;
+            }
+
             $totals['run']++;
             $actual = ['source' => 'matcher', 'intent' => null, 'period' => null, 'period_state' => null, 'branch' => null, 'follow_up' => false, 'error' => null];
 
             if ($match !== null) {
                 $actual = ['intent' => $match->intent, 'period' => $match->period, 'branch' => $match->branchName, 'follow_up' => $match->followUp] + $actual;
+            } elseif ($lookup !== null) {
+                $actual = ['source' => 'guard', 'intent' => $lookup] + $actual;
             } else {
                 $actual['source'] = 'model';
                 $started = hrtime(true);
@@ -134,6 +146,9 @@ class EvaluateLinda extends Command
                 } catch (LindaModelUnavailable $e) {
                     $actual['error'] = $e->reason;
                     $errors[$e->reason] = ($errors[$e->reason] ?? 0) + 1;
+                } catch (Throwable) {
+                    $actual['error'] = 'internal';
+                    $errors['internal'] = ($errors['internal'] ?? 0) + 1;
                 }
 
                 if ($understanding === null && $actual['error'] === null) {
@@ -177,6 +192,7 @@ class EvaluateLinda extends Command
         $this->newLine();
         $this->line("Cases run: {$totals['run']}");
         $this->line("Matcher-handled: {$totals['matcher']}");
+        $this->line("Guard-handled: {$totals['guard']}");
         $this->line("Model-handled: {$totals['model']}");
         $this->line("Unanswered (no model): {$totals['none']}");
         $this->line('Intent accuracy: '.$this->ratio($totals['intent'], $totals['run']));
@@ -196,8 +212,11 @@ class EvaluateLinda extends Command
     private function fromUnderstanding(LindaUnderstanding $understanding, array $actual): array
     {
         $actual['intent'] = $understanding->intent;
-        $actual['period'] = $understanding->period;
-        $actual['period_state'] = $understanding->periodRefused !== null ? 'refused' : ($understanding->periodUnclear ? 'unclear' : null);
+        // Overdue and active loans are as of today: their period words are
+        // ignored, never refused or called unclear, as on the endpoint.
+        $takesPeriod = $understanding->intent->takesPeriod();
+        $actual['period'] = $takesPeriod ? $understanding->period : null;
+        $actual['period_state'] = ! $takesPeriod ? null : ($understanding->periodRefused !== null ? 'refused' : ($understanding->periodUnclear ? 'unclear' : null));
         $actual['branch'] = $understanding->branchName;
         $actual['follow_up'] = $understanding->followUp;
 
@@ -205,13 +224,10 @@ class EvaluateLinda extends Command
     }
 
     /**
-     * A follow-up keeps the earlier question's branch when it names none (each
-     * earlier question read with its own intent, as LindaAssistant reads it,
-     * so a branch an earlier follow-up named carries on), and
-     * its period too when it keeps the earlier subject ("how about overdue?"
-     * after a collections question asks about overdue as of today). A
-     * question with no period whose intent defaults to this month gets this
-     * month.
+     * The endpoint's follow-up rule (LindaFollowUp): a follow-up keeps the
+     * period and branch of the question it follows, a question with no period
+     * whose intent defaults to this month gets this month, and an intent that
+     * takes no period has none.
      *
      * @param  array<string, mixed>  $actual
      * @param  list<array{question: string, intent: string}>  $earlier
@@ -225,20 +241,7 @@ class EvaluateLinda extends Command
             return $actual;
         }
 
-        if ($actual['follow_up']) {
-            $sameSubject = $earlier !== [] && $earlier[count($earlier) - 1]['intent'] === $intent->value;
-
-            foreach (array_reverse($earlier) as $entry) {
-                if ($sameSubject) {
-                    $actual['period'] ??= LindaPeriod::extract(LindaText::clean($entry['question']))['period'];
-                }
-                $actual['branch'] ??= LindaMatcher::match($entry['question'], LindaIntent::tryFrom((string) $entry['intent']))?->branchName;
-            }
-        }
-
-        if ($actual['period'] === null && $intent->defaultsToThisMonth()) {
-            $actual['period'] = LindaPeriod::named('this_month');
-        }
+        [$actual['period'], $actual['branch']] = LindaFollowUp::carry($intent, $actual['period'], $actual['branch'], (bool) $actual['follow_up'], $earlier);
 
         return $actual;
     }

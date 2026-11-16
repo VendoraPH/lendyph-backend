@@ -8,7 +8,7 @@ namespace App\Services\Linda\Model;
  */
 final class NoneModel implements LindaModel
 {
-    public function understand(LindaModelRequest $request): ?LindaUnderstanding
+    public function understand(#[\SensitiveParameter] LindaModelRequest $request): ?LindaUnderstanding
     {
         return null;
     }

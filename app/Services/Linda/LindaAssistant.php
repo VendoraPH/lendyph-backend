@@ -21,6 +21,8 @@ use Throwable;
  * Answers one Linda question (Linda v1 plan, "How a question is answered").
  *
  * 1. The matcher runs first; what it understands never leaves the server.
+ *    A question it misses that names a record or asks to look one up ends at
+ *    the local guard (LindaGuard) with the "not yet" reply.
  * 2. With no match and the none driver, the reply lists what Linda can
  *    answer. Otherwise, below the monthly cap, the model reads the question
  *    (and up to 5 earlier questions with their intents, never an answer) and
@@ -29,10 +31,8 @@ use Throwable;
  * 3. The answerer writes the reply from the reports' own figures.
  * 4. One `linda_questions` row is written, with no text.
  *
- * A follow-up that names no branch keeps the earlier question's, and one that
- * keeps the earlier subject keeps its period too; a question with no period
- * whose intent defaults to this month gets this month (the rule
- * `linda:evaluate` scores).
+ * A follow-up keeps the period and branch of the question it follows
+ * (LindaFollowUp, the rule `linda:evaluate` scores).
  *
  * Errors answer through LindaHttpError: `monthly_limit` at the cap,
  * `ai_unavailable` when the model can't be asked and `data_unavailable` when
@@ -47,6 +47,9 @@ final class LindaAssistant
 
     public const OUTCOME_ERROR = 'error';
 
+    /** Any other failure of the model call (security review S4). */
+    public const REASON_INTERNAL = 'internal';
+
     public function __construct(
         private readonly LindaAnswerer $answerer,
         private readonly LindaSettings $settings,
@@ -59,7 +62,7 @@ final class LindaAssistant
      *
      * @throws LindaHttpError monthly_limit, ai_unavailable or data_unavailable
      */
-    public function ask(User $user, string $question, array $history): LindaReply
+    public function ask(User $user, #[\SensitiveParameter] string $question, #[\SensitiveParameter] array $history): LindaReply
     {
         $started = hrtime(true);
         $askedAt = now();
@@ -75,38 +78,25 @@ final class LindaAssistant
 
         if ($match !== null) {
             $log->source = LindaQuestion::SOURCE_MATCHER;
-            [$period, $branchName] = $this->carried($match->intent, $match->period, $match->branchName, $match->followUp, $history);
+            [$period, $branchName] = LindaFollowUp::carry($match->intent, $match->period, $match->branchName, $match->followUp, $history->earlier);
 
-            return $this->answered($log, $started, $user, $match->intent, $period, $branchName);
+            return $this->answered($log, $started, $user, $match->intent, $period, $this->asTyped($branchName, $question, $history));
+        }
+
+        $lookup = LindaGuard::check($question);
+
+        if ($lookup !== null) {
+            $log->fill(['source' => LindaQuestion::SOURCE_GUARD, 'intent' => $lookup->value]);
+
+            return $this->finish($log, $started, $this->answerer->notYet($lookup, $user));
         }
 
         if (! in_array(config('linda.driver'), ['fake', 'anthropic'], true)) {
             return $this->finish($log, $started, $this->answerer->unmatched());
         }
 
-        if ($this->budget->reached()) {
-            $log->fill(['outcome' => self::OUTCOME_LIMITED, 'error_code' => LindaHttpError::MONTHLY_LIMIT]);
-            $this->write($log, $started);
-
-            throw LindaHttpError::monthlyLimit();
-        }
-
         $model = $this->settings->model();
-        $log->fill(['source' => LindaQuestion::SOURCE_MODEL, 'model' => $model]);
-
-        try {
-            $understanding = LindaModelFactory::make((string) config('linda.driver'))
-                ->understand(new LindaModelRequest($question, $history->earlier, $model));
-
-            if ($understanding !== null) {
-                $this->recordUsage($log, $understanding->usage);
-            }
-        } catch (LindaModelUnavailable $e) {
-            $log->fill(['outcome' => self::OUTCOME_ERROR, 'error_code' => $e->reason]);
-            $this->write($log, $started);
-
-            throw LindaHttpError::aiUnavailable();
-        }
+        $understanding = $this->understand($log, $started, $question, $history, $model);
 
         if ($understanding === null) {
             $log->fill(['source' => LindaQuestion::SOURCE_NONE, 'model' => null]);
@@ -114,10 +104,75 @@ final class LindaAssistant
             return $this->finish($log, $started, $this->answerer->unmatched());
         }
 
-        return $this->fromUnderstanding($log, $started, $user, $understanding, $history);
+        return $this->fromUnderstanding($log, $started, $user, $question, $understanding, $history);
     }
 
-    private function fromUnderstanding(LindaQuestion $log, int $started, User $user, LindaUnderstanding $understanding, LindaHistory $history): LindaReply
+    /**
+     * Ask the model, below the cap, with its prices checked first so a broken
+     * price table, rate or cap sends nothing (`no_prices`). A failed call is
+     * logged with its reason code and the cost it may have run up: the usage
+     * of an answer that couldn't be used, or for a timeout (which may still be
+     * billed) the typical cost of a question on the requested model.
+     *
+     * @throws LindaHttpError monthly_limit or ai_unavailable
+     */
+    private function understand(LindaQuestion $log, int $started, #[\SensitiveParameter] string $question, LindaHistory $history, string $model): ?LindaUnderstanding
+    {
+        try {
+            if ($this->budget->reached()) {
+                $log->fill(['outcome' => self::OUTCOME_LIMITED, 'error_code' => LindaHttpError::MONTHLY_LIMIT]);
+                $this->write($log, $started);
+
+                throw LindaHttpError::monthlyLimit();
+            }
+
+            LindaPrices::estimate($model);
+            $log->fill(['source' => LindaQuestion::SOURCE_MODEL, 'model' => $model]);
+
+            $understanding = LindaModelFactory::make((string) config('linda.driver'))
+                ->understand(new LindaModelRequest($question, $history->earlier, $model));
+
+            if ($understanding !== null) {
+                $this->recordUsage($log, $understanding->usage);
+            }
+
+            return $understanding;
+        } catch (LindaModelUnavailable $e) {
+            $this->recordFailure($log, $e, $model);
+        } catch (LindaHttpError $e) {
+            throw $e;
+        } catch (Throwable $e) {
+            Log::warning('Linda model call failed.', ['reason' => self::REASON_INTERNAL] + ErrorDigest::context($e));
+            $log->fill(['source' => LindaQuestion::SOURCE_MODEL, 'model' => $model, 'outcome' => self::OUTCOME_ERROR, 'error_code' => self::REASON_INTERNAL]);
+        }
+
+        $this->write($log, $started);
+
+        throw LindaHttpError::aiUnavailable();
+    }
+
+    private function recordFailure(LindaQuestion $log, LindaModelUnavailable $e, string $model): void
+    {
+        $log->fill(['outcome' => self::OUTCOME_ERROR, 'error_code' => $e->reason]);
+
+        if ($e->reason === 'no_prices') {
+            $log->fill(['source' => LindaQuestion::SOURCE_MODEL, 'model' => $model]);
+
+            return;
+        }
+
+        try {
+            if ($e->usage !== null) {
+                $this->recordUsage($log, $e->usage);
+            } elseif ($e->reason === 'timeout') {
+                $log->cost = LindaPrices::estimate($model);
+            }
+        } catch (LindaModelUnavailable) {
+            $log->error_code = 'no_prices';
+        }
+    }
+
+    private function fromUnderstanding(LindaQuestion $log, int $started, User $user, #[\SensitiveParameter] string $question, LindaUnderstanding $understanding, LindaHistory $history): LindaReply
     {
         $intent = $understanding->intent;
 
@@ -127,52 +182,37 @@ final class LindaAssistant
             return $this->finish($log, $started, $reply, self::OUTCOME_REFUSED);
         }
 
-        if ($understanding->periodRefused !== null) {
-            return $this->finish($log, $started, $this->answerer->periodRefused($understanding->periodRefused, $intent));
-        }
-
-        if ($understanding->periodUnclear) {
-            return $this->finish($log, $started, $this->answerer->unclearPeriod($intent));
-        }
-
         if ($intent === LindaIntent::UnsupportedQuestion) {
             return $this->finish($log, $started, $this->answerer->unsupported());
         }
 
-        [$period, $branchName] = $this->carried($intent, $understanding->period, $understanding->branchName, $understanding->followUp, $history);
+        // Overdue and active loans are as of today: the model's period words
+        // are ignored, never refused or called unclear.
+        $period = null;
 
-        return $this->answered($log, $started, $user, $intent, $period, $branchName);
+        if ($intent->takesPeriod()) {
+            if ($understanding->periodRefused !== null) {
+                return $this->finish($log, $started, $this->answerer->periodRefused($understanding->periodRefused, $intent));
+            }
+
+            if ($understanding->periodUnclear) {
+                return $this->finish($log, $started, $this->answerer->unclearPeriod($intent));
+            }
+
+            $period = $understanding->period;
+        }
+
+        [$period, $branchName] = LindaFollowUp::carry($intent, $period, $understanding->branchName, $understanding->followUp, $history->earlier);
+
+        return $this->answered($log, $started, $user, $intent, $period, $this->asTyped($branchName, $question, $history));
     }
 
-    /**
-     * The period and branch a question is answered for, after the follow-up
-     * rule: the earlier questions are read newest first, the branch is
-     * carried always, and the period only when the subject is unchanged. An
-     * earlier question is read with its own intent, so a branch it named as
-     * a follow-up ("how about sa Cabadbaran?") carries on too.
-     *
-     * @return array{0: ?LindaPeriod, 1: ?string}
-     */
-    private function carried(LindaIntent $intent, ?LindaPeriod $period, ?string $branchName, bool $followUp, LindaHistory $history): array
+    /** A branch name as staff typed it, from this question or an earlier one, for the reply. */
+    private function asTyped(?string $branchName, #[\SensitiveParameter] string $question, LindaHistory $history): ?string
     {
-        if ($followUp) {
-            $earlier = $history->earlier;
-            $sameSubject = $earlier !== [] && $earlier[count($earlier) - 1]['intent'] === $intent->value;
-
-            foreach (array_reverse($earlier) as $entry) {
-                if ($sameSubject) {
-                    $period ??= LindaPeriod::extract(LindaText::clean($entry['question']))['period'];
-                }
-
-                $branchName ??= LindaMatcher::match($entry['question'], LindaIntent::tryFrom((string) $entry['intent']))?->branchName;
-            }
-        }
-
-        if ($period === null && $intent->defaultsToThisMonth()) {
-            $period = LindaPeriod::named('this_month');
-        }
-
-        return [$period, $branchName];
+        return $branchName === null
+            ? null
+            : LindaText::asTyped($branchName, $question, ...array_reverse(array_column($history->earlier, 'question')));
     }
 
     /**

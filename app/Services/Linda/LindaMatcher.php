@@ -80,7 +80,7 @@ final class LindaMatcher
     /** The longest branch name taken from a branch phrase, in words. */
     private const MAX_BRANCH_WORDS = 3;
 
-    public static function match(string $question, ?LindaIntent $previous = null): ?LindaMatch
+    public static function match(#[\SensitiveParameter] string $question, ?LindaIntent $previous = null): ?LindaMatch
     {
         $clean = LindaText::clean($question);
 
@@ -124,6 +124,13 @@ final class LindaMatcher
 
         $intent = $subjects[0];
         $followUp = $followUpPhrase && $canFollow;
+
+        // Overdue and active loans are as of today, so "now", "currently" or
+        // "today" on them names no period of their own. Any other period is
+        // reported as read; the caller answers them as of today all the same.
+        if (! $intent->takesPeriod() && $period?->key === 'today') {
+            $period = null;
+        }
 
         // A follow-up without its own period keeps the earlier one, which the
         // caller holds; a fresh question takes its intent's default.

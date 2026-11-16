@@ -14,7 +14,10 @@
  *  - `branch`: the expected branch name, cleaned (lower case), or null.
  *
  * A question with no period whose intent defaults to this month expects
- * 'this_month'; a follow-up without its own period expects the earlier one's.
+ * 'this_month'; a follow-up without its own period or branch expects those of
+ * the question it follows (the first earlier one that wasn't a follow-up),
+ * none included. A question that names a record or asks to look one up ends
+ * at the local guard, which answers it as its lookup intent.
  * Period and branch aren't scored on unsupported questions.
  *
  * @return list<array{question: string, earlier?: list<array{string, string}>, intent: string, period: string|array{from: string, to: string}|null, branch: ?string}>
@@ -82,7 +85,8 @@ return [
     $case('Magkano ang nailabas ngayong linggo?', 'disbursement_summary', 'this_week'),
     $case('Pakibigay ang buod ng nakaraang buwan', 'general_lending_summary', 'last_month'),
     $case('Magkano ang nakolekta sa Riverside?', 'collection_summary', 'this_month', 'riverside'),
-    $case('Ilan ang atraso sa San Jose ngayong buwan?', 'overdue_accounts', 'this_month', 'san jose'),
+    // Overdue is as of today: the period words are ignored.
+    $case('Ilan ang atraso sa San Jose ngayong buwan?', 'overdue_accounts', null, 'san jose'),
     $case('Magkano ang nailabas noong isang linggo?', 'disbursement_summary', 'last_week'),
     $case('koleksyon ngayong araw', 'collection_summary', 'today'),
     $case('Buod ngayong taon po', 'general_lending_summary', 'this_year'),
@@ -106,6 +110,8 @@ return [
     $case('how about this year?', 'collection_efficiency', 'this_year', null, [$efficiency]),
     $case('what about the San Jose branch?', 'loan_summary', null, 'san jose', [$active]),
     $case('What about yesterday?', 'collection_summary', 'yesterday', 'riverside', [$collected, ['how about sa Riverside?', 'collection_summary']]),
+    $case('how about sa Riverside?', 'collection_summary', 'this_month', 'riverside', [['How much did we collect last month?', 'collection_summary'], ['How much did we collect?', 'collection_summary']]),
+    $case('how about last month?', 'disbursement_summary', 'last_month', null, [['How much did we collect in Main branch?', 'collection_summary'], ['How much have we disbursed?', 'disbursement_summary']]),
     $case('How much have we disbursed this month?', 'disbursement_summary', 'this_month', null, [$collected]),
     $case('paano naman noong isang buwan?', 'income_summary', 'last_month', null, [$collected, $income]),
     $case('eh ngayong taon?', 'collection_summary', 'this_year', null, [$collected, ['how about last month?', 'collection_summary']]),
@@ -187,7 +193,8 @@ return [
     $case('Hello Linda!', 'unsupported_question'),
     $case('Ano ang ulam mamaya?', 'unsupported_question'),
     $case('Translate "thank you" to Spanish', 'unsupported_question'),
-    $case('Delete loan LN-000042', 'unsupported_question'),
+    // Names a loan number, so the local guard answers it (not yet) before any model call.
+    $case('Delete loan LN-000042', 'loan_details'),
     $case('Send an SMS to every overdue member', 'unsupported_question'),
     $case('Change the interest rate of all loans to 1%', 'unsupported_question'),
 

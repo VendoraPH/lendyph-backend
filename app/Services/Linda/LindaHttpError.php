@@ -58,7 +58,7 @@ final class LindaHttpError extends RuntimeException implements ShouldntReport
     {
         $limit = (int) config('linda.limits.per_day');
 
-        return new self(self::DAILY_LIMIT, 429, "You've reached Linda's limit of {$limit} questions a day. Please try again later.", $headers);
+        return new self(self::DAILY_LIMIT, 429, "You've reached Linda's limit of {$limit} questions in 24 hours. Please try again later.", $headers);
     }
 
     /** This month's AI cost reached `linda.monthly_cap`; matcher answers carry on. */

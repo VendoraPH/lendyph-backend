@@ -548,10 +548,11 @@ class AppServiceProvider extends ServiceProvider
         /**
          * POST /linda/chat, per user (Linda v1 plan, "Limits and cost"):
          * `linda.limits.per_minute` (10) a minute answers 429 `rate_limited`,
-         * and `per_day` (100) in a rolling day answers 429 `daily_limit`. The
-         * api group's limiter still applies. Nothing is counted while Linda is
-         * switched off (EnsureLindaEnabled answers 501 then), so turning it on
-         * starts everyone at zero. The route sits behind auth:sanctum, so the
+         * and `per_day` (100) in a fixed 24-hour window that starts at the
+         * user's first question (Limit::perDay, not a calendar day) answers
+         * 429 `daily_limit`. The api group's limiter still applies. Nothing is
+         * counted while Linda is switched off (EnsureLindaEnabled answers 501
+         * then), so turning it on starts everyone at zero. The route sits behind auth:sanctum, so the
          * caller is always a staff user here.
          */
         RateLimiter::for('linda', function (Request $request) {

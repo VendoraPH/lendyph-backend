@@ -7,17 +7,27 @@ use App\Models\LindaQuestion;
 use App\Models\User;
 use App\Services\Linda\Answers\CollectionSummaryAnswer;
 use App\Services\Linda\LindaAnswerer;
+use App\Services\Linda\LindaAssistant;
+use App\Services\Linda\LindaGuard;
 use App\Services\Linda\LindaIntent;
+use App\Services\Linda\LindaMatcher;
 use App\Services\Linda\LindaPeriod;
+use App\Services\Linda\Model\AnthropicModel;
 use App\Services\Linda\Model\FakeModel;
+use App\Services\Linda\Model\LindaModel;
 use App\Services\Linda\Model\LindaModelRequest;
 use App\Services\Linda\Model\LindaPrices;
+use App\Services\Linda\Model\LindaUnderstanding;
 use App\Services\Linda\Model\LindaUsage;
+use App\Services\Linda\Model\NoneModel;
 use Carbon\CarbonImmutable;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Schema;
 use PHPUnit\Framework\Attributes\DataProvider;
+use ReflectionMethod;
 use RuntimeException;
+use SensitiveParameter;
+use TypeError;
 
 /**
  * `POST /api/linda/chat` end to end (Linda v1 plan, "How a question is
@@ -394,6 +404,258 @@ class LindaAssistantTest extends LindaAnswersTestCase
         $row = LindaQuestion::query()->latest('id')->firstOrFail();
         $this->assertSame('claude-sonnet-5-5', $row->model);
         $this->assertSame(LindaPrices::cost(new LindaUsage('claude-sonnet-5-5', FakeModel::INPUT_TOKENS, FakeModel::OUTPUT_TOKENS)), $row->cost);
+    }
+
+    public function test_a_follow_up_after_a_question_with_no_period_answers_this_month_not_the_older_month(): void
+    {
+        $cabadbaran = Branch::factory()->create(['name' => 'Cabadbaran Branch', 'code' => 'CBD']);
+
+        $this->actingAs($this->asker)->postJson(self::URL, [
+            'message' => 'how about sa Cabadbaran?',
+            'history' => [
+                ['role' => 'user', 'content' => 'How much did we collect last month?'],
+                ['role' => 'assistant', 'content' => null, 'intent' => 'collection_summary'],
+                ['role' => 'user', 'content' => 'How much did we collect?'],
+                ['role' => 'assistant', 'content' => null, 'intent' => 'collection_summary'],
+            ],
+        ])->assertOk()->assertJsonPath('data.intent', 'collection_summary');
+
+        $row = LindaQuestion::query()->latest('id')->firstOrFail();
+        $this->assertSame(LindaPeriod::named('this_month')->from->toDateString(), $row->period_from->toDateString());
+        $this->assertSame($cabadbaran->id, $row->branch_id);
+    }
+
+    public function test_a_follow_up_after_a_question_for_all_branches_answers_all_branches_not_the_older_branch(): void
+    {
+        $this->actingAs($this->asker)->postJson(self::URL, [
+            'message' => 'how about last month?',
+            'history' => [
+                ['role' => 'user', 'content' => 'How much did we collect in Main branch?'],
+                ['role' => 'assistant', 'content' => null, 'intent' => 'collection_summary'],
+                ['role' => 'user', 'content' => 'How much have we disbursed?'],
+                ['role' => 'assistant', 'content' => null, 'intent' => 'disbursement_summary'],
+            ],
+        ])->assertOk()->assertJsonPath('data.intent', 'disbursement_summary');
+
+        $row = LindaQuestion::query()->latest('id')->firstOrFail();
+        $this->assertSame(LindaPeriod::named('last_month')->from->toDateString(), $row->period_from->toDateString());
+        $this->assertNull($row->branch_id);
+        $this->assertStringContainsString('all branches', (string) $this->actingAs($this->asker)->postJson(self::URL, [
+            'message' => 'how about last month?',
+            'history' => [
+                ['role' => 'user', 'content' => 'How much did we collect in Main branch?'],
+                ['role' => 'assistant', 'content' => null, 'intent' => 'collection_summary'],
+                ['role' => 'user', 'content' => 'How much have we disbursed?'],
+                ['role' => 'assistant', 'content' => null, 'intent' => 'disbursement_summary'],
+            ],
+        ])->json('data.answer'));
+    }
+
+    /** @return array<string, array{string, string}> */
+    public static function brokenPrices(): array
+    {
+        return [
+            'exchange rate' => ['linda.usd_to_php', 'sixty-two'],
+            'a price' => ['linda.models.claude-haiku-5-5.input', 'free'],
+            'the cap' => ['linda.monthly_cap', 'a thousand'],
+        ];
+    }
+
+    #[DataProvider('brokenPrices')]
+    public function test_a_broken_price_table_rate_or_cap_fails_closed_before_any_call(string $key, string $value): void
+    {
+        config()->set('linda.driver', 'fake');
+        config()->set($key, $value);
+        $fake = new FakeModel;
+        $this->app->instance(FakeModel::class, $fake);
+
+        $this->actingAs($this->asker)->postJson(self::URL, ['message' => 'What is our collection efficiency this month?'])
+            ->assertStatus(503)
+            ->assertJsonPath('error_code', 'ai_unavailable');
+
+        $this->assertSame([], $fake->requests);
+        $row = LindaQuestion::query()->latest('id')->firstOrFail();
+        $this->assertSame('no_prices', $row->error_code);
+        $this->assertSame('0.000000', $row->cost);
+
+        $this->actingAs($this->asker)->postJson(self::URL, ['message' => 'How much have we collected this month?'])->assertOk();
+    }
+
+    /** @return array<string, array{string}> */
+    public static function answeredFailures(): array
+    {
+        return ['bad output' => ['bad_output'], 'max tokens' => ['max_tokens']];
+    }
+
+    #[DataProvider('answeredFailures')]
+    public function test_a_call_that_answered_but_couldnt_be_used_books_its_cost(string $reason): void
+    {
+        config()->set('linda.driver', 'fake');
+        $this->app->instance(FakeModel::class, FakeModel::failingWith($reason));
+
+        $this->actingAs($this->asker)->postJson(self::URL, ['message' => 'What is our collection efficiency this month?'])
+            ->assertStatus(503)
+            ->assertJsonPath('error_code', 'ai_unavailable');
+
+        $row = LindaQuestion::query()->latest('id')->firstOrFail();
+        $this->assertSame($reason, $row->error_code);
+        $this->assertSame(FakeModel::INPUT_TOKENS, $row->input_tokens);
+        $this->assertSame(FakeModel::OUTPUT_TOKENS, $row->output_tokens);
+        $this->assertSame('0.009300', $row->cost);
+        $this->assertSame('claude-haiku-5-5', $row->model);
+    }
+
+    public function test_a_timeout_books_the_typical_cost_of_the_requested_model(): void
+    {
+        config()->set('linda.driver', 'fake');
+        $this->app->instance(FakeModel::class, FakeModel::failingWith('timeout'));
+
+        $this->actingAs($this->asker)->postJson(self::URL, ['message' => 'What is our collection efficiency this month?'])
+            ->assertStatus(503);
+
+        $row = LindaQuestion::query()->latest('id')->firstOrFail();
+        $this->assertSame('timeout', $row->error_code);
+        $this->assertSame(LindaPrices::estimate('claude-haiku-5-5'), $row->cost);
+        // 1,500 cache read × 0.01 + 500 input × 0.10 + 300 output × 0.50 = 215 USD per million, × 62.
+        $this->assertSame('0.013330', $row->cost);
+        $this->assertSame(0, $row->input_tokens);
+    }
+
+    public function test_a_failure_before_the_answer_books_nothing(): void
+    {
+        config()->set('linda.driver', 'fake');
+        $this->app->instance(FakeModel::class, FakeModel::failingWith('overloaded'));
+
+        $this->actingAs($this->asker)->postJson(self::URL, ['message' => 'What is our collection efficiency this month?'])->assertStatus(503);
+
+        $this->assertSame('0.000000', LindaQuestion::query()->latest('id')->value('cost'));
+    }
+
+    public function test_a_lookup_ends_at_the_guard_with_no_model_call(): void
+    {
+        config()->set('linda.driver', 'fake');
+        $fake = new FakeModel;
+        $this->app->instance(FakeModel::class, $fake);
+
+        $response = $this->actingAs($this->asker)->postJson(self::URL, ['message' => 'What is the status of loan LN-000042?'])
+            ->assertOk()
+            ->assertJsonPath('data.intent', 'loan_details');
+
+        $expected = app(LindaAnswerer::class)->notYet(LindaIntent::LoanDetails, $this->asker);
+        $this->assertSame($expected->answer, $response->json('data.answer'));
+        $this->assertSame($expected->links, $response->json('data.links'));
+        $this->assertSame([], $fake->requests);
+
+        $row = LindaQuestion::query()->latest('id')->firstOrFail();
+        $this->assertSame(LindaQuestion::SOURCE_GUARD, $row->source);
+        $this->assertSame('not_yet', $row->outcome);
+        $this->assertSame('loan_details', $row->intent);
+        $this->assertNull($row->model);
+        $this->assertSame('0.000000', $row->cost);
+    }
+
+    public function test_the_guard_also_answers_with_no_model_and_holds_at_the_cap(): void
+    {
+        $this->actingAs($this->asker)->postJson(self::URL, ['message' => 'find juan.delacruz@example.com'])
+            ->assertOk()
+            ->assertJsonPath('data.intent', 'borrower_lookup');
+
+        config()->set('linda.driver', 'fake');
+        $this->logged(cost: '1000.000000');
+
+        $this->actingAs($this->asker)->postJson(self::URL, ['message' => 'Find receipt RCP-000123'])
+            ->assertOk()
+            ->assertJsonPath('data.intent', 'transaction_lookup');
+    }
+
+    public function test_any_other_failure_of_the_model_is_internal_and_logs_its_class_only(): void
+    {
+        Log::spy();
+        config()->set('linda.driver', 'fake');
+        $this->app->bind(FakeModel::class, fn () => new class implements LindaModel
+        {
+            public function understand(LindaModelRequest $request): ?LindaUnderstanding
+            {
+                throw new TypeError('secret-model-text');
+            }
+        });
+
+        $response = $this->actingAs($this->asker)->postJson(self::URL, ['message' => 'What is our collection efficiency this month?'])
+            ->assertStatus(503)
+            ->assertJsonPath('error_code', 'ai_unavailable');
+
+        $this->assertStringNotContainsString('secret-model-text', $response->getContent());
+        $this->assertSame('internal', LindaQuestion::query()->latest('id')->value('error_code'));
+        Log::shouldHaveReceived('warning')->once()->withArgs(fn (string $message, array $context) => $message === 'Linda model call failed.'
+            && $context['reason'] === 'internal'
+            && $context['exception'] === TypeError::class
+            && ! str_contains(json_encode($context), 'secret-model-text'));
+    }
+
+    /** @return array<string, array{class-string, string, list<string>}> */
+    public static function sensitiveParameters(): array
+    {
+        return [
+            'the assistant' => [LindaAssistant::class, 'ask', ['question', 'history']],
+            'the model request' => [LindaModelRequest::class, '__construct', ['question', 'earlier']],
+            'the matcher' => [LindaMatcher::class, 'match', ['question']],
+            'the anthropic driver' => [AnthropicModel::class, 'understand', ['request']],
+            'the fake driver' => [FakeModel::class, 'understand', ['request']],
+            'the none driver' => [NoneModel::class, 'understand', ['request']],
+            'the guard' => [LindaGuard::class, 'check', ['question']],
+        ];
+    }
+
+    /**
+     * @param  class-string  $class
+     * @param  list<string>  $parameters
+     */
+    #[DataProvider('sensitiveParameters')]
+    public function test_the_question_is_a_sensitive_parameter_so_traces_never_carry_it(string $class, string $method, array $parameters): void
+    {
+        foreach ((new ReflectionMethod($class, $method))->getParameters() as $parameter) {
+            if (in_array($parameter->getName(), $parameters, true)) {
+                $this->assertNotEmpty($parameter->getAttributes(SensitiveParameter::class), "{$class}::{$method}(\${$parameter->getName()})");
+            }
+        }
+    }
+
+    /** @return array<string, array{string}> */
+    public static function periodWordsForAsOfToday(): array
+    {
+        return ['now' => ['right now'], 'words that never parse' => ['as things stand'], 'a refused period' => ['January 1, 2001 to November 8, 2026']];
+    }
+
+    #[DataProvider('periodWordsForAsOfToday')]
+    public function test_period_words_the_model_gives_an_as_of_today_question_are_ignored(string $words): void
+    {
+        config()->set('linda.driver', 'fake');
+        $this->app->bind(FakeModel::class, fn () => new class($words) implements LindaModel
+        {
+            public function __construct(private readonly string $words) {}
+
+            public function understand(LindaModelRequest $request): ?LindaUnderstanding
+            {
+                return LindaUnderstanding::fromAnswer(LindaIntent::LoanSummary, $this->words, null, false, new LindaUsage($request->model, 10, 5));
+            }
+        });
+        $this->releaseTo($this->member($this->branch, 'Ana', 'Cruz'));
+
+        $response = $this->actingAs($this->asker)->postJson(self::URL, ['message' => 'How many loans are out right now?'])->assertOk();
+
+        $expected = app(LindaAnswerer::class)->answer($this->asker, LindaIntent::LoanSummary, null, null);
+        $this->assertSame('loan_summary', $response->json('data.intent'));
+        $this->assertSame($expected->answer, $response->json('data.answer'));
+        $row = LindaQuestion::query()->latest('id')->firstOrFail();
+        $this->assertSame('answered', $row->outcome);
+        $this->assertNull($row->period_from);
+    }
+
+    public function test_a_branch_linda_cant_find_is_repeated_as_it_was_typed(): void
+    {
+        $this->actingAs($this->asker)->postJson(self::URL, ['message' => 'How much did we collect sa Atlantis this month?'])
+            ->assertOk()
+            ->assertJsonPath('data.answer', '"Atlantis" is not among your branches. Please check the branch name and ask again.');
     }
 
     private function logged(string $cost, string $source = LindaQuestion::SOURCE_MODEL, mixed $at = null): void

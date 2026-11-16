@@ -21,8 +21,8 @@ final class LindaModelRequest
      * @param  list<array{question: string, intent: LindaIntent|string|null}>  $earlier  oldest first
      */
     public function __construct(
-        public readonly string $question,
-        array $earlier,
+        #[\SensitiveParameter] public readonly string $question,
+        #[\SensitiveParameter] array $earlier,
         public readonly string $model,
     ) {
         $kept = [];

@@ -145,6 +145,50 @@ class EvaluateLindaTest extends LindaTestCase
             ->assertSuccessful();
     }
 
+    /**
+     * The follow-up rule of the money review (M1), the endpoint's: a
+     * follow-up keeps the period and branch of the question it follows, never
+     * an older one's.
+     */
+    public function test_a_follow_up_keeps_the_question_it_follows_not_an_older_one(): void
+    {
+        $cases = require base_path(EvaluateLinda::QUESTION_SET);
+        $find = fn (string $question, string $earlier) => collect($cases)->search(fn (array $case) => $case['question'] === $question
+            && (end($case['earlier']) ?: [null])[0] === $earlier);
+
+        $thisMonth = $find('how about sa Riverside?', 'How much did we collect?');
+        $allBranches = $find('how about last month?', 'How much have we disbursed?');
+        $this->assertIsInt($thisMonth);
+        $this->assertIsInt($allBranches);
+
+        $this->artisan('linda:evaluate', ['--driver' => 'none'])
+            ->expectsOutputToContain(sprintf('PASS %3d %-7s %s', $thisMonth + 1, 'matcher', 'how about sa Riverside?'))
+            ->expectsOutputToContain(sprintf('PASS %3d %-7s %s', $allBranches + 1, 'matcher', 'how about last month?'))
+            ->assertSuccessful();
+    }
+
+    /**
+     * Lookups the matcher misses end at the local guard (security review S3),
+     * as they do on the endpoint, and never reach the model.
+     */
+    public function test_lookups_end_at_the_guard_and_never_reach_the_model(): void
+    {
+        $fake = new FakeModel;
+        $this->app->instance(FakeModel::class, $fake);
+        $cases = require base_path(EvaluateLinda::QUESTION_SET);
+        $number = collect($cases)->search(fn (array $case) => $case['question'] === 'Find receipt RCP-000123');
+
+        $this->artisan('linda:evaluate')
+            ->expectsOutputToContain(sprintf('PASS %3d %-7s %s', $number + 1, 'guard', 'Find receipt RCP-000123'))
+            ->expectsOutputToContain('Guard-handled: ')
+            ->assertSuccessful();
+
+        foreach ($fake->requests as $request) {
+            $this->assertStringNotContainsString('RCP-000123', $request->question);
+            $this->assertStringNotContainsString('LN-0000', $request->question);
+        }
+    }
+
     public function test_the_question_set_is_well_formed(): void
     {
         $cases = require base_path('tests/Fixtures/linda/evaluation.php');

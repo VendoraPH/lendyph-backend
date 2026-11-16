@@ -9,6 +9,7 @@ use App\Models\Role;
 use App\Models\User;
 use App\Services\BranchAccess;
 use App\Services\Linda\LindaSettings;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use PHPUnit\Framework\Attributes\DataProvider;
 use Spatie\Permission\PermissionRegistrar;
@@ -45,7 +46,7 @@ class LindaSettingsTest extends TestCase
 
     public function test_a_stored_model_wins_while_the_price_table_still_has_it(): void
     {
-        LindaSetting::query()->create(['model' => 'claude-sonnet-5-5']);
+        LindaSetting::query()->forceCreate(['id' => LindaSettings::ROW_ID, 'model' => 'claude-sonnet-5-5']);
 
         $this->assertSame('claude-sonnet-5-5', app(LindaSettings::class)->model());
 
@@ -185,6 +186,74 @@ class LindaSettingsTest extends TestCase
     {
         $this->getJson('/api/linda/settings')->assertUnauthorized();
         $this->putJson('/api/linda/settings', ['model' => 'claude-sonnet-5-5'])->assertUnauthorized();
+    }
+
+    /** @return array<string, array{string, string, bool}> */
+    public static function brokenPrices(): array
+    {
+        return [
+            'exchange rate' => ['linda.usd_to_php', 'sixty-two', false],
+            'a price' => ['linda.models.claude-sonnet-5-5.output', 'ten', false],
+            'the cap' => ['linda.monthly_cap', 'a thousand', true],
+        ];
+    }
+
+    #[DataProvider('brokenPrices')]
+    public function test_a_broken_price_rate_or_cap_shows_no_prices_instead_of_failing(string $key, string $value, bool $capBroken): void
+    {
+        $this->seedAndLogin();
+        config()->set('linda.enabled', true);
+        config()->set('linda.driver', 'anthropic');
+        config()->set('linda.anthropic.api_key', 'test-placeholder');
+        config()->set($key, $value);
+
+        $response = $this->getJson('/api/linda/settings')->assertOk();
+
+        $response->assertJsonPath('data.ai', ['on' => false, 'reason' => 'no_prices']);
+        $this->assertSame(['claude-haiku-5-5', 'claude-sonnet-5-5', 'claude-opus-5-5'], array_column($response->json('data.models'), 'id'));
+
+        if ($capBroken) {
+            $this->assertNull($response->json('data.month.cap'));
+            $this->assertSame('6.20', $response->json('data.models.0.input_per_million'));
+        } else {
+            $this->assertSame('1000.00', $response->json('data.month.cap'));
+            foreach ($response->json('data.models') as $model) {
+                $this->assertNull($model['input_per_million']);
+                $this->assertNull($model['output_per_million']);
+                $this->assertNull($model['per_question']);
+                $this->assertIsString($model['label']);
+            }
+        }
+
+        $this->assertSame('0.00', $response->json('data.month.cost'));
+        $this->putJson('/api/linda/settings', ['model' => 'claude-sonnet-5-5'])->assertOk()->assertJsonPath('data.ai.reason', 'no_prices');
+    }
+
+    public function test_the_setting_is_always_row_1_so_two_first_saves_cant_make_two_rows(): void
+    {
+        $admin = $this->staff(['linda:settings', BranchAccess::VIEW_ALL]);
+        LindaSetting::query()->forceCreate(['model' => 'claude-haiku-5-5'])->delete();
+
+        app(LindaSettings::class)->update('claude-sonnet-5-5', $admin);
+        app(LindaSettings::class)->update('claude-opus-5-5', $admin);
+
+        $this->assertSame([1], LindaSetting::query()->pluck('id')->all());
+        $this->assertSame('claude-opus-5-5', app(LindaSettings::class)->model());
+    }
+
+    public function test_a_first_save_that_finds_the_row_another_save_just_wrote_updates_it(): void
+    {
+        $admin = $this->staff(['linda:settings', BranchAccess::VIEW_ALL]);
+        DB::table('linda_settings')->insert(['id' => 1, 'model' => 'claude-sonnet-5-5', 'created_at' => now(), 'updated_at' => now()]);
+        $before = AuditLog::query()->max('id') ?? 0;
+
+        app(LindaSettings::class)->update('claude-opus-5-5', $admin);
+
+        $this->assertSame(1, LindaSetting::query()->count());
+        $this->assertSame(
+            ['Linda model changed from Claude Sonnet 5.5 to Claude Opus 5.5'],
+            AuditLog::query()->where('id', '>', $before)->pluck('description')->all(),
+        );
     }
 
     /**

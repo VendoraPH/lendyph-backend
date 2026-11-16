@@ -3,6 +3,7 @@
 namespace App\Services\Linda;
 
 use App\Models\LindaQuestion;
+use App\Services\Linda\Model\LindaModelUnavailable;
 use Brick\Math\BigDecimal;
 use Brick\Math\RoundingMode;
 use Carbon\CarbonImmutable;
@@ -14,8 +15,9 @@ use Carbon\CarbonImmutable;
  * `monthly_limit`; matcher answers cost nothing and carry on.
  *
  * Costs are exact decimals (6 places in the log); the figures shown are ₱
- * with two decimals, half up. Calls already in flight when the cap is reached
- * can pass it by a few centavos (flagged in the plan).
+ * with two decimals, half up. The cap is checked before each call, so calls
+ * already in flight when it is reached can pass it by up to one call's cost
+ * each. A cap that isn't a plain amount fails closed (`no_prices`).
  */
 final class LindaBudget
 {
@@ -29,12 +31,35 @@ final class LindaBudget
         return BigDecimal::of((string) ($sum ?: '0'))->toScale(6, RoundingMode::HalfUp);
     }
 
+    /**
+     * @throws LindaModelUnavailable no_prices, for a cap that isn't a plain amount
+     */
     public function cap(): BigDecimal
     {
-        return BigDecimal::of((string) config('linda.monthly_cap'))->toScale(2, RoundingMode::HalfUp);
+        $cap = trim((string) config('linda.monthly_cap'));
+
+        if (preg_match('/^\d+(\.\d+)?$/', $cap) !== 1) {
+            throw new LindaModelUnavailable('no_prices');
+        }
+
+        return BigDecimal::of($cap)->toScale(2, RoundingMode::HalfUp);
     }
 
-    /** Whether this month's model cost has reached the cap. */
+    /** The cap, or null when it isn't a plain amount. */
+    public function capOrNull(): ?BigDecimal
+    {
+        try {
+            return $this->cap();
+        } catch (LindaModelUnavailable) {
+            return null;
+        }
+    }
+
+    /**
+     * Whether this month's model cost has reached the cap.
+     *
+     * @throws LindaModelUnavailable no_prices, for a cap that isn't a plain amount
+     */
     public function reached(): bool
     {
         return $this->monthToDate()->isGreaterThanOrEqualTo($this->cap());
@@ -43,7 +68,7 @@ final class LindaBudget
     /**
      * This month's figures for Settings → Linda, every one from the log.
      *
-     * @return array{label: string, cost: string, cap: string, questions: int, model_questions: int}
+     * @return array{label: string, cost: string, cap: ?string, questions: int, model_questions: int}
      */
     public function summary(): array
     {
@@ -53,7 +78,7 @@ final class LindaBudget
         return [
             'label' => $from->format('F Y'),
             'cost' => (string) $this->monthToDate()->toScale(2, RoundingMode::HalfUp),
-            'cap' => (string) $this->cap(),
+            'cap' => ($cap = $this->capOrNull()) === null ? null : (string) $cap,
             'questions' => (clone $questions)->count(),
             'model_questions' => (clone $questions)->where('source', LindaQuestion::SOURCE_MODEL)->count(),
         ];

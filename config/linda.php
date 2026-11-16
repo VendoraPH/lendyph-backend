@@ -23,7 +23,7 @@ return [
         'api_key' => env('LINDA_ANTHROPIC_API_KEY'),
         'workspace_id' => env('LINDA_ANTHROPIC_WORKSPACE_ID'),
         'effort' => 'low',
-        'max_tokens' => 1024,
+        'max_tokens' => 512,
         'timeout' => 9.0,
         'max_retries' => 1,
     ],

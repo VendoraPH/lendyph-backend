@@ -11,7 +11,8 @@ use OpenApi\Attributes as OA;
 /**
  * `POST /linda/chat`: one question to Linda. The route answers 501 `linda_off`
  * while the backend switch is off and is metered by the `linda` limiter (10 a
- * minute, 100 a day per user); the request needs `linda:use`. LindaAssistant
+ * minute, and 100 in a fixed 24-hour window from the first question, per
+ * user); the request needs `linda:use`. LindaAssistant
  * answers it, or throws a LindaHttpError that renders the contract's error.
  */
 class LindaController extends Controller

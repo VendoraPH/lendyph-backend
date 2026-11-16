@@ -150,10 +150,10 @@ final class LindaWording
         return implode(', ', array_slice($items, 0, -1)).' and '.$items[count($items) - 1];
     }
 
-    /** "for Main Branch", "for all your branches", "for all branches" */
+    /** "for Main Branch", "across all your branches", "across all branches" */
     public static function forScope(LindaScope $scope): string
     {
-        return 'for '.$scope->label;
+        return (str_starts_with($scope->label, 'all ') ? 'across ' : 'for ').$scope->label;
     }
 
     /**

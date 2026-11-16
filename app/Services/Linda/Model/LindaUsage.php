@@ -9,12 +9,24 @@ namespace App\Services\Linda\Model;
  */
 final class LindaUsage
 {
+    /**
+     * @param  list<LindaUsage>  $parts  with a server-side fallback, each sampling
+     *                                   iteration on its own model: the cost is
+     *                                   their sum
+     * @param  list<string>  $priceAtHighestOf  other models these tokens may have
+     *                                          run on (a fallback that lists no
+     *                                          iterations): every token is priced
+     *                                          at the highest price of each kind
+     *                                          among them and `model`
+     */
     public function __construct(
         public readonly string $model,
         public readonly int $inputTokens = 0,
         public readonly int $outputTokens = 0,
         public readonly int $cacheReadTokens = 0,
         public readonly int $cacheWriteTokens = 0,
+        public readonly array $parts = [],
+        public readonly array $priceAtHighestOf = [],
     ) {}
 
     /**

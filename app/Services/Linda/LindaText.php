@@ -50,4 +50,28 @@ final class LindaText
     {
         return $clean === '' ? [] : explode(' ', $clean);
     }
+
+    /**
+     * A cleaned name (a branch, lower case) as staff typed it: found as whole
+     * words, ignoring case and spacing, in the first text that has it, else
+     * title-cased. Only for repeating a name back in a reply.
+     */
+    public static function asTyped(string $name, #[\SensitiveParameter] string ...$texts): string
+    {
+        $words = self::words(self::clean($name));
+
+        if ($words === []) {
+            return $name;
+        }
+
+        $pattern = '/(?<![\pL\pN])'.implode('\s+', array_map(fn (string $word) => preg_quote($word, '/'), $words)).'(?![\pL\pN])/iu';
+
+        foreach ($texts as $text) {
+            if (preg_match($pattern, $text, $found) === 1) {
+                return $found[0];
+            }
+        }
+
+        return mb_convert_case(implode(' ', $words), MB_CASE_TITLE, 'UTF-8');
+    }
 }

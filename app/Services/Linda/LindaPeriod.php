@@ -42,7 +42,7 @@ final class LindaPeriod
      * @var array<string, list<string>>
      */
     private const NAMED_PHRASES = [
-        'today' => ['today', 'ngayong araw na ito', 'ngayong araw', 'ngayon araw'],
+        'today' => ['today', 'ngayong araw na ito', 'ngayong araw', 'ngayon araw', 'as of today', 'as of now', 'right now', 'currently', 'now', 'ngayon'],
         'yesterday' => ['yesterday', 'kahapon'],
         'this_week' => ['this week', 'week to date', 'ngayong linggong ito', 'ngayong linggo', 'ngayong week'],
         'last_week' => ['last week', 'previous week', 'noong nakaraang linggo', 'nakaraang linggo', 'noong isang linggo', 'nakaraang week'],

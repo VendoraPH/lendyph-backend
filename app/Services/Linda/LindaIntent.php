@@ -31,6 +31,20 @@ enum LindaIntent: string
     case UnsupportedQuestion = 'unsupported_question';
 
     /**
+     * Whether a question of this kind is read for a period at all. Overdue
+     * accounts and active loans are as of today, so any period words a
+     * question or the model gives them are ignored, never refused or called
+     * unclear; an unsupported question has no period either.
+     */
+    public function takesPeriod(): bool
+    {
+        return match ($this) {
+            self::OverdueAccounts, self::LoanSummary, self::UnsupportedQuestion => false,
+            default => true,
+        };
+    }
+
+    /**
      * Whether a question of this kind that names no period means this month.
      * Overdue accounts and active loans are as of now, so they have none.
      */

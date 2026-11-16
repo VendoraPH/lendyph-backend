@@ -64,7 +64,7 @@ class LindaSettingsController extends Controller
     }
 
     /**
-     * @return array{model: string, models: list<array<string, string>>, ai: array{on: bool, reason: ?string}, month: array{label: string, cost: string, cap: string, questions: int, model_questions: int}, updated_at: ?string, updated_by: ?string}
+     * @return array{model: string, models: list<array<string, ?string>>, ai: array{on: bool, reason: ?string}, month: array{label: string, cost: string, cap: ?string, questions: int, model_questions: int}, updated_at: ?string, updated_by: ?string}
      */
     private function present(): array
     {

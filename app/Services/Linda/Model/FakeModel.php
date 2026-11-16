@@ -69,7 +69,7 @@ final class FakeModel implements LindaModel
         return $fake;
     }
 
-    /** A fake that fails every question with a reason code. */
+    /** A fake that fails every question with a reason code (max_tokens and bad_output keep their usage). */
     public static function failingWith(string $reason): self
     {
         $fake = new self;
@@ -78,13 +78,15 @@ final class FakeModel implements LindaModel
         return $fake;
     }
 
-    public function understand(LindaModelRequest $request): LindaUnderstanding
+    public function understand(#[\SensitiveParameter] LindaModelRequest $request): LindaUnderstanding
     {
         $this->requests[] = $request;
         $usage = new LindaUsage($request->model, self::INPUT_TOKENS, self::OUTPUT_TOKENS);
 
         if ($this->failure !== null) {
-            throw new LindaModelUnavailable($this->failure);
+            // Like the real model, a call that was answered but couldn't be
+            // used carries the usage it was billed.
+            throw new LindaModelUnavailable($this->failure, in_array($this->failure, ['max_tokens', 'bad_output'], true) ? $usage : null);
         }
 
         if ($this->refuses) {

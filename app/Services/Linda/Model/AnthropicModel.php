@@ -51,14 +51,20 @@ use Throwable;
  * ## Limits
  * The SDK leaves the timeout to the HTTP client, so the Guzzle client handed
  * to it carries the configured timeout per attempt; the SDK's own retries
- * follow `max_retries`. The key comes only from `config('linda.anthropic')`,
- * never from the SDK's ANTHROPIC_* environment variables, and the base URL is
- * fixed, so the key can't be sent anywhere else.
+ * follow `max_retries`, and LindaHttpGuard caps the wait the server asks for
+ * between attempts at 2 s and refuses redirects, so a worker is held about
+ * 20 s at worst (worstCaseSeconds()). The key comes only from
+ * `config('linda.anthropic')`, never from the SDK's ANTHROPIC_* environment
+ * variables, and the base URL is fixed, so the key can't be sent anywhere
+ * else. ANTHROPIC_CUSTOM_HEADERS, which the SDK would add to every request,
+ * refuses the call (`custom_headers`) before anything is sent.
  *
  * ## Failures
  * Every failure is a LindaModelUnavailable with a fixed reason code, logged
  * once as a warning with ErrorDigest::context() and the code: never the
- * provider's message, the prompt or the question.
+ * provider's message, the prompt or the question. One that was answered but
+ * can't be used (`max_tokens`, `bad_output`, including a period or branch
+ * over MAX_FIELD_LENGTH characters) carries the usage it was billed.
  */
 final class AnthropicModel implements LindaModel
 {
@@ -69,6 +75,12 @@ final class AnthropicModel implements LindaModel
 
     /** The stop reasons after which the answer is complete. */
     private const COMPLETE = ['end_turn', 'stop_sequence'];
+
+    /** The longest period words or branch name read from the model. */
+    public const MAX_FIELD_LENGTH = 100;
+
+    /** The SDK reads this to add headers to every request; Linda never sends them. */
+    private const CUSTOM_HEADERS_ENV = 'ANTHROPIC_CUSTOM_HEADERS';
 
     /**
      * @param  list<callable>  $middleware  SDK middleware, for tests
@@ -97,7 +109,7 @@ final class AnthropicModel implements LindaModel
             apiKey: isset($config['api_key']) ? trim((string) $config['api_key']) : null,
             workspaceId: $workspace === '' ? null : $workspace,
             effort: (string) ($config['effort'] ?? 'low'),
-            maxTokens: (int) ($config['max_tokens'] ?? 1024),
+            maxTokens: (int) ($config['max_tokens'] ?? 512),
             maxRetries: (int) ($config['max_retries'] ?? 1),
             middleware: $middleware,
             transporter: $transporter,
@@ -116,7 +128,18 @@ final class AnthropicModel implements LindaModel
         return ['timeout' => $timeout, 'connect_timeout' => min($timeout, self::CONNECT_TIMEOUT)];
     }
 
-    public function understand(LindaModelRequest $request): LindaUnderstanding
+    /**
+     * The longest a question can hold a PHP worker, in seconds: every attempt
+     * at its full timeout, plus the capped wait before each retry.
+     */
+    public static function worstCaseSeconds(): float
+    {
+        $retries = max(0, (int) config('linda.anthropic.max_retries', 1));
+
+        return self::httpOptions()['timeout'] * ($retries + 1) + LindaHttpGuard::MAX_RETRY_AFTER_SECONDS * $retries;
+    }
+
+    public function understand(#[\SensitiveParameter] LindaModelRequest $request): LindaUnderstanding
     {
         try {
             return $this->ask($request);
@@ -136,7 +159,7 @@ final class AnthropicModel implements LindaModel
      * @throws LindaModelUnavailable
      * @throws AnthropicException
      */
-    private function ask(LindaModelRequest $request): LindaUnderstanding
+    private function ask(#[\SensitiveParameter] LindaModelRequest $request): LindaUnderstanding
     {
         if ($this->apiKey === null || trim($this->apiKey) === '') {
             throw new LindaModelUnavailable('no_key');
@@ -146,6 +169,10 @@ final class AnthropicModel implements LindaModel
 
         if (! LindaPrices::knows($request->model) || ! is_array($model)) {
             throw new LindaModelUnavailable('no_prices');
+        }
+
+        if (self::customHeadersSet()) {
+            throw new LindaModelUnavailable('custom_headers');
         }
 
         $client = $this->client();
@@ -186,7 +213,7 @@ final class AnthropicModel implements LindaModel
             requestOptions: RequestOptions::with(
                 timeout: self::httpOptions()['timeout'],
                 maxRetries: $this->maxRetries,
-                middleware: $this->middleware === [] ? null : $this->middleware,
+                middleware: [new LindaHttpGuard, ...$this->middleware],
                 transporter: $this->transporter ?? new GuzzleClient(self::httpOptions()),
             ),
             openTelemetry: false,
@@ -207,17 +234,29 @@ final class AnthropicModel implements LindaModel
             return LindaUnderstanding::refusal($usage);
         }
 
-        if ($stop === 'max_tokens') {
-            throw new LindaModelUnavailable('max_tokens');
-        }
+        try {
+            if ($stop === 'max_tokens') {
+                throw new LindaModelUnavailable('max_tokens');
+            }
 
-        if (! in_array($stop, self::COMPLETE, true)) {
-            throw new LindaModelUnavailable('bad_output');
-        }
+            if (! in_array($stop, self::COMPLETE, true)) {
+                throw new LindaModelUnavailable('bad_output');
+            }
 
-        $answer = self::answer(self::text($message));
+            $answer = self::answer(self::text($message));
+        } catch (LindaModelUnavailable $e) {
+            throw new LindaModelUnavailable($e->reason, $usage);
+        }
 
         return LindaUnderstanding::fromAnswer($answer['intent'], $answer['period'], $answer['branch'], $answer['follow_up'], $usage);
+    }
+
+    /** Whether ANTHROPIC_CUSTOM_HEADERS is set anywhere the SDK or PHP reads it. */
+    private static function customHeadersSet(): bool
+    {
+        return getenv(self::CUSTOM_HEADERS_ENV) !== false
+            || array_key_exists(self::CUSTOM_HEADERS_ENV, $_ENV)
+            || array_key_exists(self::CUSTOM_HEADERS_ENV, $_SERVER);
     }
 
     /**
@@ -271,6 +310,8 @@ final class AnthropicModel implements LindaModel
         if ($intent === null
             || ! (is_string($data['period']) || $data['period'] === null)
             || ! (is_string($data['branch']) || $data['branch'] === null)
+            || mb_strlen((string) $data['period']) > self::MAX_FIELD_LENGTH
+            || mb_strlen((string) $data['branch']) > self::MAX_FIELD_LENGTH
             || ! is_bool($data['follow_up'])) {
             throw new LindaModelUnavailable('bad_output');
         }
@@ -281,19 +322,44 @@ final class AnthropicModel implements LindaModel
     /**
      * The tokens used and the model that answered: with a server-side
      * fallback, the model of the `fallback_message` iteration.
+     *
+     * How a fallback is priced (security review S7): when the usage lists its
+     * iterations, each is priced at its own model (the requested one unless
+     * the iteration names another). When a fallback happened but no
+     * iterations are listed, every token is priced at the higher of the
+     * requested and answering models' prices.
      */
     private static function usage(Message|BetaMessage $message, string $requested): LindaUsage
     {
         $usage = $message->usage;
         $model = $message->model !== '' ? $message->model : $requested;
+        $parts = [];
+        $fellBack = false;
 
         if ($usage instanceof BetaUsage) {
             foreach ($usage->iterations ?? [] as $iteration) {
+                $iterationModel = isset($iteration->model) && $iteration->model !== '' ? $iteration->model : $requested;
+
                 if ($iteration instanceof BetaFallbackMessageIterationUsage) {
                     $model = $iteration->model;
+                    $fellBack = true;
                 }
+
+                $parts[] = new LindaUsage(
+                    $iterationModel,
+                    inputTokens: (int) ($iteration->inputTokens ?? 0),
+                    outputTokens: (int) ($iteration->outputTokens ?? 0),
+                    cacheReadTokens: (int) ($iteration->cacheReadInputTokens ?? 0),
+                    cacheWriteTokens: (int) ($iteration->cacheCreationInputTokens ?? 0),
+                );
             }
         }
+
+        foreach ($message->content as $block) {
+            $fellBack = $fellBack || $block instanceof BetaFallbackBlock;
+        }
+
+        $fellBack = $fellBack || $model !== $requested;
 
         return new LindaUsage(
             $model,
@@ -301,6 +367,8 @@ final class AnthropicModel implements LindaModel
             outputTokens: $usage->outputTokens,
             cacheReadTokens: $usage->cacheReadInputTokens ?? 0,
             cacheWriteTokens: $usage->cacheCreationInputTokens ?? 0,
+            parts: $fellBack ? $parts : [],
+            priceAtHighestOf: $fellBack && $parts === [] && $model !== $requested ? [$requested] : [],
         );
     }
 

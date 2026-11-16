@@ -5,6 +5,7 @@ namespace Tests\Feature\Linda;
 use App\Models\Branch;
 use App\Models\Role;
 use App\Models\User;
+use Carbon\CarbonImmutable;
 use Illuminate\Support\Str;
 use Spatie\Permission\PermissionRegistrar;
 use Tests\TestCase;
@@ -14,7 +15,8 @@ use Tests\TestCase;
  * "Access and switches" and "Limits and cost"): 401 signed out, 501
  * `linda_off` while the backend switch is off (never counted by the limiter),
  * 403 without `linda:use`, 422 on the request's shape, and the `linda`
- * limiter: 10 a minute (`rate_limited`) and 100 a day (`daily_limit`) per user.
+ * limiter: 10 a minute (`rate_limited`) and 100 in a fixed 24-hour window from
+ * the first question (`daily_limit`) per user.
  */
 class LindaChatRouteTest extends TestCase
 {
@@ -179,6 +181,26 @@ class LindaChatRouteTest extends TestCase
             ->assertStatus(429)
             ->assertJsonPath('success', false)
             ->assertJsonPath('error_code', 'daily_limit');
+    }
+
+    public function test_the_day_limit_is_24_hours_from_the_first_question_not_a_calendar_day(): void
+    {
+        $user = $this->staff(['linda:use']);
+        $this->travelTo(CarbonImmutable::parse('2026-11-16 22:00', 'Asia/Manila'));
+
+        foreach (range(0, 99) as $asked) {
+            if ($asked > 0 && $asked % 10 === 0) {
+                $this->travel(61)->seconds();
+            }
+
+            $this->actingAs($user)->postJson(self::URL, ['message' => 'Hi']);
+        }
+
+        $this->travelTo(CarbonImmutable::parse('2026-11-17 00:30', 'Asia/Manila'));
+        $this->actingAs($user)->postJson(self::URL, ['message' => 'Hi'])->assertStatus(429)->assertJsonPath('error_code', 'daily_limit');
+
+        $this->travelTo(CarbonImmutable::parse('2026-11-17 22:01', 'Asia/Manila'));
+        $this->assertNotSame(429, $this->actingAs($user)->postJson(self::URL, ['message' => 'Hi'])->status());
     }
 
     /** @param list<string> $permissions */

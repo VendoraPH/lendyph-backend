@@ -172,7 +172,7 @@ class FakeModelTest extends LindaTestCase
             $this->assertSame("The Linda model is unavailable ({$reason}).", $e->getMessage());
         }
 
-        $this->assertSame(['rate_limited', 'overloaded', 'timeout', 'connection', 'auth', 'bad_request', 'bad_output', 'max_tokens', 'no_key', 'no_prices'], LindaModelUnavailable::REASONS);
+        $this->assertSame(['rate_limited', 'overloaded', 'timeout', 'connection', 'auth', 'bad_request', 'bad_output', 'max_tokens', 'no_key', 'no_prices', 'internal', 'redirect', 'custom_headers'], LindaModelUnavailable::REASONS);
 
         $this->expectException(InvalidArgumentException::class);
         new LindaModelUnavailable('something the SDK said');

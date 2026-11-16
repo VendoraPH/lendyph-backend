@@ -19,7 +19,10 @@ use Brick\Math\RoundingMode;
  * ("claude-sonnet-5-5-20261101") takes its alias's price. Any other model is
  * priced at the highest configured price of each kind, so an unknown model
  * can only overstate the month's cost against the cap, never understate it.
- * Missing or unreadable prices fail closed (`no_prices`).
+ * After a server-side fallback, each sampling iteration is priced at its own
+ * model when the response lists them; otherwise every token is priced at the
+ * higher of the requested and answering models' prices. Missing or
+ * unreadable prices fail closed (`no_prices`).
  */
 final class LindaPrices
 {
@@ -45,12 +48,40 @@ final class LindaPrices
      */
     public static function cost(LindaUsage $usage): string
     {
-        return self::pesos($usage->model, [
+        return self::exactCost($usage)->toScale(self::COST_SCALE, RoundingMode::HalfUp)->toString();
+    }
+
+    /**
+     * What one question of the typical size (`config('linda.typical_question')`)
+     * costs on a model, in ₱ at 6 decimal places: the conservative charge for a
+     * call whose response never arrived (a timeout may still be billed).
+     *
+     * @throws LindaModelUnavailable no_prices
+     */
+    public static function estimate(string $model): string
+    {
+        return self::typical($model)->toScale(self::COST_SCALE, RoundingMode::HalfUp)->toString();
+    }
+
+    /**
+     * The exact cost of a usage: each fallback iteration at its own model
+     * when the usage lists them, else every token at the highest price of
+     * each kind among the models it may have run on.
+     *
+     * @throws LindaModelUnavailable no_prices
+     */
+    private static function exactCost(LindaUsage $usage): BigDecimal
+    {
+        if ($usage->parts !== []) {
+            return array_reduce($usage->parts, fn (BigDecimal $total, LindaUsage $part) => $total->plus(self::exactCost($part)), BigDecimal::zero());
+        }
+
+        return self::pesos([$usage->model, ...$usage->priceAtHighestOf], [
             'input' => $usage->inputTokens,
             'output' => $usage->outputTokens,
             'cache_read' => $usage->cacheReadTokens,
             'cache_write' => $usage->cacheWriteTokens,
-        ])->toScale(self::COST_SCALE, RoundingMode::HalfUp)->toString();
+        ]);
     }
 
     /**
@@ -61,14 +92,22 @@ final class LindaPrices
      */
     public static function perQuestion(string $model): string
     {
+        return self::typical($model)->toScale(2, RoundingMode::HalfUp)->toString();
+    }
+
+    /**
+     * @throws LindaModelUnavailable no_prices
+     */
+    private static function typical(string $model): BigDecimal
+    {
         $typical = (array) config('linda.typical_question', []);
 
-        return self::pesos($model, [
+        return self::pesos([$model], [
             'input' => (int) ($typical['input'] ?? 0),
             'output' => (int) ($typical['output'] ?? 0),
             'cache_read' => (int) ($typical['cache_read'] ?? 0),
             'cache_write' => (int) ($typical['cache_write'] ?? 0),
-        ])->toScale(2, RoundingMode::HalfUp)->toString();
+        ]);
     }
 
     /**
@@ -97,9 +136,19 @@ final class LindaPrices
      *
      * @throws LindaModelUnavailable no_prices
      */
-    private static function pesos(string $model, array $tokens): BigDecimal
+    /**
+     * @param  non-empty-list<string>  $models  priced at the highest of each kind among them
+     */
+    private static function pesos(array $models, array $tokens): BigDecimal
     {
-        $prices = self::prices($model);
+        $prices = self::prices(array_shift($models));
+
+        foreach ($models as $model) {
+            foreach (self::prices($model) as $kind => $price) {
+                $prices[$kind] = BigDecimal::max($prices[$kind], $price);
+            }
+        }
+
         $usd = BigDecimal::zero();
 
         foreach (self::KINDS as $kind) {
