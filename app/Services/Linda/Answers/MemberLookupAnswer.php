@@ -91,7 +91,7 @@ final class MemberLookupAnswer extends LookupAnswer
                     : ', and nothing is past due.')
                 .($nextDate === null
                     ? ''
-                    : ' The next payment, '.W::money(Money::fromCentavos($nextCentavos)).', is due on '.W::date($nextDate).'.');
+                    : ' '.W::nextDue(Money::fromCentavos($nextCentavos), $nextDate));
         }
 
         $stats = [

@@ -65,6 +65,22 @@ final class LindaWording
     }
 
     /**
+     * The earliest unpaid instalment, in words. A date before today (Manila)
+     * reads as still unpaid: "₱250.00 was due on October 16, 2026 and is
+     * still unpaid." Today or later reads as the next payment.
+     */
+    public static function nextDue(int|float|string $amount, string $date): string
+    {
+        $today = LindaPeriod::today()->toDateString();
+
+        if ($date < $today) {
+            return self::money($amount).' was due on '.self::date($date).' and is still unpaid.';
+        }
+
+        return 'The next payment, '.self::money($amount).', is due '.($date === $today ? 'today, ' : 'on ').self::date($date).'.';
+    }
+
+    /**
      * The note added when a question about figures that are only kept as of
      * today named a period.
      */

@@ -180,13 +180,39 @@ abstract class PerformanceAnswer extends Answer
             return 'There are no '.mb_strtolower($this->plural()).' with loans '.W::forScope($scope).'.';
         }
 
-        $words = self::METRICS[$metric][0];
-        $top = $listed[0];
+        if (count($ranked) === 1) {
+            return $this->aboutOne($ranked[0], $period);
+        }
 
-        return self::sentence(W::during($period)).', ranked by '.($lowestFirst ? 'least ' : '').$words.' '.W::forScope($scope).', '
-            .$top['name'].' comes first with '.W::money($top[$metric]).'.'
+        $words = self::METRICS[$metric][0];
+        $top = W::money($listed[0][$metric]);
+        $tied = array_values(array_filter($ranked, fn (array $row): bool => W::money($row[$metric]) === $top));
+        $rows = mb_strtolower($this->plural());
+        $ranking = 'ranked by '.($lowestFirst ? 'least ' : '').$words.' '.W::forScope($scope).', ';
+
+        $standing = match (true) {
+            count($tied) === count($ranked) => (count($ranked) === 2 ? 'both '.$rows : 'all '.count($ranked).' '.$rows)
+                .' have '.$top.' '.$words.' '.W::forScope($scope).'.',
+            count($tied) > 3 => $ranking.count($tied).' '.$rows.' are tied first with '.$top.'.',
+            count($tied) > 1 => $ranking.self::joined(array_column($tied, 'name')).' are tied first with '.$top.'.',
+            default => $ranking.$listed[0]['name'].' comes first with '.$top.'.',
+        };
+
+        return self::sentence(W::during($period)).', '.$standing
             .(count($ranked) > count($listed) ? ' The top '.count($listed).' of '.count($ranked).' are listed below.' : '')
             .' Released and collected cover those dates; Outstanding and past due are as of today, and past due counts only payments late beyond their grace period.';
+    }
+
+    /**
+     * "Far Branch and Main Branch", "A, B and C".
+     *
+     * @param  list<string>  $names
+     */
+    private static function joined(array $names): string
+    {
+        $last = (string) array_pop($names);
+
+        return $names === [] ? $last : implode(', ', $names).' and '.$last;
     }
 
     /** @param  array<string, mixed>  $row */

@@ -62,8 +62,8 @@ final class LoanLookupAnswer extends LookupAnswer
         $shown = (string) ($loan->loan_account_number ?? $loan->application_number);
         $status = W::loanStatus($loan->displayStatus());
         $product = (string) ($loan->loanProduct?->name ?? '');
-        $intro = $shown.' for '.self::memberLabel($loan->borrower).' is '
-            .($product === '' ? 'a loan' : 'a '.$product.' loan').' of '.W::money((string) $loan->principal_amount).', now '.$status.'.';
+        $intro = $shown.' for '.self::memberLabel($loan->borrower).' is a '
+            .W::money((string) $loan->principal_amount).' '.self::kindOfLoan($product).', now '.$status.'.';
 
         $stats = [
             LindaReply::text('Status', $status),
@@ -111,7 +111,7 @@ final class LoanLookupAnswer extends LookupAnswer
                 : ', and nothing is past due.')
             .($summary['next_due_date'] === null
                 ? ''
-                : ' The next payment, '.W::money($summary['next_due_amount']).', is due on '.W::date($summary['next_due_date']).'.')
+                : ' '.W::nextDue($summary['next_due_amount'], $summary['next_due_date']))
             .($last === null
                 ? ' No payment has been made yet.'
                 : ' The last payment was '.W::money((string) $last->amount_paid).' on '.W::date($last->payment_date->toDateString()).'.');
@@ -124,5 +124,18 @@ final class LoanLookupAnswer extends LookupAnswer
             [(int) $loan->borrower_id],
             [$loan->id],
         );
+    }
+
+    /**
+     * The product as a kind of loan, naming "loan" once: "Salary Loan" stays
+     * as it is, "Emergency" reads "Emergency loan", and no product reads "loan".
+     */
+    private static function kindOfLoan(string $product): string
+    {
+        if ($product === '') {
+            return 'loan';
+        }
+
+        return preg_match('/(?<![\pL\pN])loans?$/iu', $product) === 1 ? $product : $product.' loan';
     }
 }
