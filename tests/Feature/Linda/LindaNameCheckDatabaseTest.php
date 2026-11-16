@@ -182,6 +182,92 @@ class LindaNameCheckDatabaseTest extends LindaAnswersTestCase
         $this->assertSame(LindaWording::whichRecord(LindaLookupRequest::MEMBER), $response->json('data.answer'));
     }
 
+    /**
+     * Round 4: walk-ins whose first name is a common word.
+     *
+     * @return array<string, array{string, string}>
+     */
+    public static function commonWordWalkIns(): array
+    {
+        return [
+            'May Lucero' => ['May Lucero', 'Did May Lucero cash in today?'],
+            'May Lucero, reversed' => ['May Lucero', 'Did Lucero, May cash in today?'],
+            'Maya Cruz' => ['Maya Cruz', 'Did Maya Cruz cash out yesterday?'],
+            'Maya Cruz, reversed' => ['Maya Cruz', 'Did Cruz, Maya cash out yesterday?'],
+        ];
+    }
+
+    #[DataProvider('commonWordWalkIns')]
+    public function test_a_walk_in_whose_name_is_common_words_stays_local(string $stored, string $question): void
+    {
+        GCashNonMember::factory()->create(['full_name' => $stored]);
+
+        $response = $this->actingAs($this->asker)->postJson(self::URL, ['message' => $question])->assertOk();
+
+        $this->assertSame([], $this->fake->requests, 'The model was asked: '.$question);
+        $this->assertSame(LindaWording::otherPersonNotYet(), $response->json('data.answer'));
+    }
+
+    public function test_a_long_question_naming_a_walk_in_at_the_end_stays_local(): void
+    {
+        GCashNonMember::factory()->create(['full_name' => 'Carmen Soriano']);
+        $question = 'Please tell me quickly whether our new cashier at the busy front desk already processed the late afternoon transfer request sent from Carmen Soriano';
+
+        $this->assertGreaterThan(20, count(array_unique(explode(' ', mb_strtolower($question)))));
+
+        $this->actingAs($this->asker)->postJson(self::URL, ['message' => $question])->assertOk();
+
+        $this->assertSame([], $this->fake->requests);
+        $this->assertSame(LindaQuestion::SOURCE_LOOKUP, LindaQuestion::query()->latest('id')->value('source'));
+    }
+
+    public function test_a_question_naming_no_one_reaches_the_model_beside_common_word_walk_ins(): void
+    {
+        GCashNonMember::factory()->create(['full_name' => 'May Lucero']);
+        GCashNonMember::factory()->create(['full_name' => 'Earn Interest']);
+
+        $this->actingAs($this->asker)->postJson(self::URL, ['message' => 'How much interest income did we earn in May?'])->assertOk();
+
+        $this->assertCount(1, $this->fake->requests);
+    }
+
+    /**
+     * Round 4: surnames that are common words, longer than 4 letters.
+     *
+     * @return array<string, array{string, string, string}>
+     */
+    public static function commonWordSurnames(): array
+    {
+        return [
+            'Salamat' => ['Ana', 'Salamat', 'Is Ana Salamat overdue?'],
+            'Bulan' => ['Rosa', 'Bulan', 'Is Rosa Bulan current?'],
+            'Semana' => ['Lito', 'Semana', 'How is Lito Semana doing?'],
+        ];
+    }
+
+    #[DataProvider('commonWordSurnames')]
+    public function test_a_member_whose_surname_is_a_common_word_stays_local(string $first, string $last, string $question): void
+    {
+        $member = $this->stored($first, null, $last);
+
+        $this->assertSame(LindaNameCheck::MEMBER, LindaNameCheck::find($question)?->kind);
+
+        $this->actingAs($this->asker)->postJson(self::URL, ['message' => $question])->assertOk();
+
+        $this->assertSame([], $this->fake->requests);
+        $this->assertSame([$member->id], LindaQuestion::query()->latest('id')->first()->member_ids);
+    }
+
+    public function test_an_aggregate_question_of_common_words_still_gets_its_answer(): void
+    {
+        $this->stored('Ana', null, 'Salamat');
+
+        $response = $this->actingAs($this->asker)->postJson(self::URL, ['message' => 'Salamat, how much did we collect this month?'])->assertOk();
+
+        $this->assertCount(1, $this->fake->requests);
+        $this->assertSame('collection_summary', $response->json('data.intent'));
+    }
+
     private function stored(string $first, ?string $middle, string $last): Borrower
     {
         return Borrower::factory()->create([

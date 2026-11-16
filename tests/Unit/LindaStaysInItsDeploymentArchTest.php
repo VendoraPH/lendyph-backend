@@ -88,7 +88,7 @@ $forbidden = [
     'the environment' => '/(?<![\w>:$\\\\])env\s*\(|\bEnv::|Illuminate\\\\Support\\\\Env\b|\bgetenv\s*\(|\bputenv\s*\(|\$_ENV\b|\$_SERVER\b|\bfilter_input(?:_array)?\s*\(\s*INPUT_(?:ENV|SERVER)\b/i',
     'mail' => '/\bMail::|Illuminate\\\\Support\\\\Facades\\\\Mail\b|(?<![\w>:$\\\\])mail\s*\(/i',
     'a named log channel' => '/\bLog::(?:channel|build|stack)\s*\(|\blogger\s*\(\s*\)\s*->\s*channel\s*\(/i',
-    'a runtime config write' => '/(?<![\w>:$\\\\])config\s*\(\s*\[|\bConfig::set\s*\(|\bconfig\s*\(\s*\)\s*->\s*set\s*\(|\b(?:app|resolve)\s*\(\s*[\'"]config[\'"]\s*\)\s*->\s*set\s*\(/i',
+    'a runtime config write' => '/(?<![\w>:$\\\\])config\s*\(\s*\[|(?<![\w>:$\\\\])config\s*\(\s*\)\s*\[[^\]]*\]\s*=(?![=>])|\bConfig::(?:set|push|prepend|offsetSet|offsetUnset)\s*\(|(?:\bconfig\s*\(\s*\)|\b(?:app|resolve)\s*\(\s*[\'"]config[\'"]\s*\)|\b(?:app|resolve)\s*\(\s*\)\s*->\s*make\s*\(\s*[\'"]config[\'"]\s*\))\s*->\s*(?:set|push|prepend|offsetSet|offsetUnset)\s*\(/i',
     'a process' => '/(?<![\w>:$\\\\])(?<!function\s)(?:exec|shell_exec|proc_open|popen|passthru|system|pcntl_exec)\s*\(|\bProcess::|Illuminate\\\\Support\\\\Facades\\\\Process\b|Symfony\\\\Component\\\\Process\\\\/i',
 ];
 
@@ -191,4 +191,41 @@ it('lets only the Anthropic model and its HTTP guard call out', function () use 
     }
 
     expect($mayCallOut)->toHaveCount(2);
+});
+
+it('catches every runtime config write, and no config read', function () use ($forbidden) {
+    $pattern = $forbidden['a runtime config write'];
+
+    $writes = [
+        "config(['database.default' => 'x']);",
+        "config()->set('database.default', 'x');",
+        "config()->push('app.providers', 'X');",
+        "config()['database.default'] = 'x';",
+        "config() ['linda.driver']= 'fake';",
+        "app('config')->set('database.default', 'x');",
+        "app()->make('config')->set('database.default', 'x');",
+        "app()->make(\"config\")->push('x', 'y');",
+        "config()->offsetSet('database.default', 'x');",
+        "app('config')->offsetSet('x', 'y');",
+        "Config::set('database.default', 'x');",
+        "Config::push('app.providers', 'X');",
+        "Config::prepend('app.providers', 'X');",
+    ];
+
+    $reads = [
+        "config('linda.model');",
+        "config('linda.limits.history_max', 5);",
+        "config()->get('linda.model');",
+        "config()['linda.model'] === 'x';",
+        "Config::get('linda.model');",
+        "app('config')->get('linda.model');",
+    ];
+
+    foreach ($writes as $line) {
+        expect(preg_match($pattern, $line))->toBe(1, $line);
+    }
+
+    foreach ($reads as $line) {
+        expect(preg_match($pattern, $line))->toBe(0, $line);
+    }
 });

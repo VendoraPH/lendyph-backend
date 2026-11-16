@@ -100,14 +100,16 @@ class LindaNameCheckTest extends LindaTestCase
         $this->assertContains('juan dela cruz', $spans);
         $this->assertContains('cruz', $spans);
         $this->assertNotContains('juan dela cruz overdue', $spans);
-        $this->assertNotContains('overdue', $spans);
+        // No read leaves out common words: first and last name together decide.
+        $this->assertContains('overdue', $spans);
+        $this->assertContains('is', $spans);
     }
 
-    public function test_a_question_of_stop_words_only_names_no_one(): void
+    public function test_a_question_of_common_words_names_no_one_without_a_stored_match(): void
     {
         $this->assertNull(LindaNameCheck::find('how much is it?', $this->people(...)));
         $this->assertNull(LindaNameCheck::find('collections overdue performance', $this->people(...)));
-        $this->assertSame([], $this->asked[1] ?? []);
+        $this->assertCount(2, $this->asked);
     }
 
     /**

@@ -21,8 +21,8 @@ use UnexpectedValueException;
  *   "Dela Cruz, Juan"), any case, extra spaces ignored. Between them, up to
  *   three words, each an initial ("A." or "A"), a word of the stored middle
  *   name, or a name-like word. First and last names of several words work
- *   ("Maria Clara Santos"), a first name may be a common word ("May",
- *   "Will"), and a dotted surname matches with or without its dot ("Sta.
+ *   ("Maria Clara Santos"), first and last names may be common words ("May",
+ *   "Will", "Salamat", "Bulan"), and a dotted surname matches with or without its dot ("Sta.
  *   Maria"). A walk-in's free-text full name is compared without dots,
  *   commas, initials or accents, as stored or with its last part first
  *   ("Soriano, Carmen").
@@ -62,7 +62,7 @@ final readonly class LindaNameCheck
     /** The longest first or last name looked for, in words. */
     private const SPAN_MAX = 3;
 
-    /** The most question words a walk-in's full name is read by, as a prefix. */
+    /** The most distinct question words a walk-in read takes; more and the read counts as capped. */
     private const PREFIX_WORDS_MAX = 20;
 
     /** The most words allowed between a first and a last name (a middle name). */
@@ -98,8 +98,8 @@ final readonly class LindaNameCheck
      * after every named hit.
      *
      * $people gives the candidates for the given lower-case, accent-folded
-     * spans: (last names, first names, name words a walk-in's full name may
-     * start with). By default, the
+     * spans: (last names, first names, a walk-in's `full_name LIKE`
+     * patterns). By default, the
      * database. A row is a person (`kind`, `first_name`, `middle_name`,
      * `last_name`, or a walk-in's `full_name`) or `['kind' => …, 'capped' =>
      * true]` for a read that reached its cap.
@@ -123,7 +123,7 @@ final readonly class LindaNameCheck
         $question = self::normalise($question);
         $tokens = self::tokens($question);
         $words = array_column($tokens, 'word');
-        $lastNames = self::withDots(self::lastNameSpans($words), 4);
+        $lastNames = self::withDots(self::allSpans($words), 4);
 
         if ($lastNames === []) {
             return null;
@@ -131,8 +131,15 @@ final readonly class LindaNameCheck
 
         $hits = [];
         $capped = [];
+        $prefixes = self::walkInPrefixes($words);
 
-        foreach ($people($lastNames, self::withDots(self::allSpans($words), 2), self::prefixWords($words)) as $person) {
+        // More distinct words than a walk-in read takes: the read counts as
+        // capped, so the question stays local.
+        if ($prefixes === null) {
+            $capped[self::WALK_IN] = true;
+        }
+
+        foreach ($people($lastNames, self::withDots(self::allSpans($words), 2), $prefixes ?? []) as $person) {
             $kind = in_array($person['kind'] ?? null, self::ORDER, true) ? $person['kind'] : self::MEMBER;
 
             if (($person['capped'] ?? false) === true) {
@@ -234,14 +241,18 @@ final readonly class LindaNameCheck
         $kept = array_values(array_filter(array_keys($tokens), fn (int $i) => mb_strlen($tokens[$i]['word']) > 1));
         $words = array_map(fn (int $i) => $tokens[$i]['word'], $kept);
 
-        if ($count < 2) {
+        // A name longer than the question can't be in it.
+        if ($count < 2 || $count > count($words)) {
             return null;
         }
 
-        foreach (array_keys($words) as $i) {
-            for ($split = 0; $split < $count; $split++) {
-                $rotated = [...array_slice($full, $split), ...array_slice($full, 0, $split)];
+        $rotations = [];
+        for ($split = 0; $split < $count; $split++) {
+            $rotations[] = [...array_slice($full, $split), ...array_slice($full, 0, $split)];
+        }
 
+        foreach (array_keys($words) as $i) {
+            foreach ($rotations as $rotated) {
                 if (self::at($words, $i, $rotated)) {
                     $from = $kept[$i];
 
@@ -333,32 +344,6 @@ final readonly class LindaNameCheck
     }
 
     /**
-     * The question's 1–3-word spans that could be a last name: those with a
-     * name-like word, and any single word of up to 4 letters (a surname that
-     * is also a common word: "Tan", "Go"), each once.
-     *
-     * @param  list<string>  $words
-     * @return list<string>
-     */
-    private static function lastNameSpans(#[\SensitiveParameter] array $words): array
-    {
-        $nameLike = array_map(fn (string $word) => LindaLookup::isNameLike($word), $words);
-        $spans = [];
-
-        foreach (array_keys($words) as $i) {
-            for ($length = 1; $length <= self::SPAN_MAX && $i + $length <= count($words); $length++) {
-                $short = $length === 1 && mb_strlen($words[$i]) <= 4;
-
-                if ($short || in_array(true, array_slice($nameLike, $i, $length), true)) {
-                    $spans[implode(' ', array_slice($words, $i, $length))] = true;
-                }
-            }
-        }
-
-        return array_keys($spans);
-    }
-
-    /**
      * Every 1–3-word span of the question, for first names: a first name may
      * be a common word ("May", "Will", "Isa"). The last-name filter and the
      * question's length keep the read bounded.
@@ -416,23 +401,35 @@ final readonly class LindaNameCheck
     }
 
     /**
-     * The question's name-like words of two or more letters, each once, for
-     * the walk-ins' full names read by prefix.
+     * The `full_name LIKE` patterns a walk-in read takes: one for every
+     * distinct question word of 2 or more letters, common words included. A
+     * name-like word is any prefix ("soriano%"); a common word only a whole
+     * first word ("may %", "may,%", "may.%"), so it doesn't read every name
+     * that merely starts with it. Null when the question has more distinct
+     * words than a read takes (the read then counts as capped).
      *
      * @param  list<string>  $words
-     * @return list<string>
+     * @return ?list<string>
      */
-    private static function prefixWords(#[\SensitiveParameter] array $words): array
+    private static function walkInPrefixes(#[\SensitiveParameter] array $words): ?array
     {
-        $prefixes = [];
+        $distinct = array_values(array_unique(array_filter($words, fn (string $word) => mb_strlen($word) > 1)));
 
-        foreach ($words as $word) {
-            if (mb_strlen($word) > 1 && LindaLookup::isNameLike($word)) {
-                $prefixes[$word] = true;
+        if (count($distinct) > self::PREFIX_WORDS_MAX) {
+            return null;
+        }
+
+        $patterns = [];
+
+        foreach ($distinct as $word) {
+            $escaped = addcslashes($word, '%_\\');
+
+            foreach (LindaLookup::isNameLike($word) ? [$escaped.'%'] : [$escaped.' %', $escaped.',%', $escaped.'.%'] as $pattern) {
+                $patterns[] = $pattern;
             }
         }
 
-        return array_slice(array_keys($prefixes), 0, self::PREFIX_WORDS_MAX);
+        return $patterns;
     }
 
     /**
@@ -526,13 +523,14 @@ final readonly class LindaNameCheck
      * The people whose names fit the spans, any branch, at most
      * CANDIDATES_MAX a table: members, staff users and co-makers by last and
      * first name (the collation ignores case and accents), walk-ins whose free
-     * full name starts with one of the question's name words (an
-     * index-friendly prefix), soft-deleted ones included. A read that reaches the cap adds a
+     * full name starts with one of the question's words (index-friendly
+     * prefixes), soft-deleted ones included. No read leaves out common words:
+     * first and last name together, and the comparison here, decide. A read that reaches the cap adds a
      * `capped` row for its kind.
      *
      * @param  list<string>  $lastNames
      * @param  list<string>  $firstNames
-     * @param  list<string>  $prefixes
+     * @param  list<string>  $prefixes  `full_name LIKE` patterns, already escaped
      * @return list<array<string, mixed>>
      */
     private static function fromDatabase(array $lastNames, array $firstNames, array $prefixes): array
@@ -570,8 +568,8 @@ final readonly class LindaNameCheck
         if ($prefixes !== []) {
             $walkIns = GCashNonMember::withTrashed()
                 ->where(function ($query) use ($prefixes): void {
-                    foreach ($prefixes as $prefix) {
-                        $query->orWhere('full_name', 'like', addcslashes($prefix, '%_\\').'%');
+                    foreach ($prefixes as $pattern) {
+                        $query->orWhere('full_name', 'like', $pattern);
                     }
                 })
                 ->limit(self::CANDIDATES_MAX)
