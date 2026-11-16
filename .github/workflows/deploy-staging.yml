@@ -293,7 +293,7 @@ jobs:
           # No secret means off: remove the box's copy (paths only, nothing on stdin).
           if [ -z "$LINDA_KEY" ]; then
             for attempt in 1 2 3; do
-              if box "rm -f \"\$HOME/.lendyph-linda-key/lendyph-com-api-staging\"; echo 'linda key removed'" < /dev/null; then
+              if box "rm -f \"\$HOME/.lendyph-linda-key/lendyph-com-api-staging\" \"\$HOME/.lendyph-linda-key/lendyph-com-api-staging.tmp\"; echo 'linda key removed'" < /dev/null; then
                 echo "::warning title=Linda key removed::LINDA_ANTHROPIC_API_KEY_STAGING is not set; the box's key was removed and Linda answers with its matcher only."
                 exit 0
               fi
@@ -497,4 +497,4 @@ jobs:
         run: echo "::warning title=Proxy secret not delivered::The deploy ran with the box's previous proxy secret, or none (X-Forwarded-For stays untrusted)."
       - name: Warn if Linda's key was not delivered
         if: ${{ !cancelled() && steps.linda_key.outcome == 'failure' }}
-        run: echo "::warning title=Linda key not delivered::The deploy ran with the box's previous Linda key, or none (Linda answers with its matcher only)."
+        run: echo "::warning title=Linda key not delivered::The box keeps its previous Linda key, if any, and Linda's AI stays on with it; with none, Linda answers with its matcher only."
