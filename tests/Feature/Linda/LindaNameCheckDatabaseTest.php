@@ -7,10 +7,15 @@ use App\Models\CoMaker;
 use App\Models\GCashNonMember;
 use App\Models\LindaQuestion;
 use App\Models\User;
+use App\Services\Linda\LindaIntent;
 use App\Services\Linda\LindaLookupRequest;
 use App\Services\Linda\LindaNameCheck;
 use App\Services\Linda\LindaWording;
 use App\Services\Linda\Model\FakeModel;
+use App\Services\Linda\Model\LindaModel;
+use App\Services\Linda\Model\LindaModelRequest;
+use App\Services\Linda\Model\LindaUnderstanding;
+use App\Services\Linda\Model\LindaUsage;
 use PHPUnit\Framework\Attributes\DataProvider;
 
 /**
@@ -266,6 +271,52 @@ class LindaNameCheckDatabaseTest extends LindaAnswersTestCase
 
         $this->assertCount(1, $this->fake->requests);
         $this->assertSame('collection_summary', $response->json('data.intent'));
+    }
+
+    /**
+     * Round 5: a long ordinary question is no capped read; it reaches the model.
+     */
+    public function test_a_long_aggregate_question_reaches_the_model(): void
+    {
+        $asked = [];
+        $this->app->instance(FakeModel::class, new class($asked) implements LindaModel
+        {
+            /** @param  list<string>  $asked */
+            public function __construct(public array &$asked) {}
+
+            public function understand(#[\SensitiveParameter] LindaModelRequest $request): ?LindaUnderstanding
+            {
+                $this->asked[] = $request->question;
+
+                return LindaUnderstanding::fromAnswer(LindaIntent::CollectionSummary, 'this month', null, false, new LindaUsage($request->model, 10, 5));
+            }
+        });
+        GCashNonMember::factory()->create(['full_name' => 'Carmen Soriano']);
+        $question = 'Can you please tell me how much we collected this month across all branches compared to last month and which branch did best?';
+
+        $this->assertGreaterThan(20, count(array_unique(str_word_count(mb_strtolower($question), 1))));
+
+        $response = $this->actingAs($this->asker)->postJson(self::URL, ['message' => $question])->assertOk();
+
+        $this->assertSame([$question], $asked);
+        $this->assertSame('collection_summary', $response->json('data.intent'));
+        $this->assertSame(LindaQuestion::SOURCE_MODEL, LindaQuestion::query()->latest('id')->value('source'));
+    }
+
+    /**
+     * Round 5: a pair read that reaches its cap stays local with a neutral
+     * reply: it doesn't mean a walk-in was named.
+     */
+    public function test_a_capped_pair_read_stays_local_with_a_neutral_reply(): void
+    {
+        GCashNonMember::factory()->count(LindaNameCheck::CANDIDATES_MAX)->create(['full_name' => 'Ana Ramosa']);
+
+        $response = $this->actingAs($this->asker)->postJson(self::URL, ['message' => 'Is Ana Ramos around today?'])->assertOk();
+
+        $this->assertSame([], $this->fake->requests);
+        $this->assertSame(LindaWording::notYet(), $response->json('data.answer'));
+        $this->assertNotSame(LindaWording::otherPersonNotYet(), $response->json('data.answer'));
+        $this->assertSame(LindaQuestion::SOURCE_LOOKUP, LindaQuestion::query()->latest('id')->value('source'));
     }
 
     private function stored(string $first, ?string $middle, string $last): Borrower

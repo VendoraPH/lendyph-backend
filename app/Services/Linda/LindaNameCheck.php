@@ -38,8 +38,9 @@ use UnexpectedValueException;
  *   applies its own permission and branch scope.
  *
  * Cost: one indexed read per table (borrowers, users and co_makers by last
- * name and first name, gcash_non_members by a full-name prefix), from the
- * question's spans, and the names are compared here. A read that reaches its cap may
+ * name and first name, gcash_non_members by full-name prefixes built from
+ * pairs of question words), from the question's spans, and the names are
+ * compared here. A read that reaches its cap may
  * have left the person out, so it keeps the question local too (a hit with
  * no name). Nothing is stored or logged.
  *
@@ -62,8 +63,8 @@ final readonly class LindaNameCheck
     /** The longest first or last name looked for, in words. */
     private const SPAN_MAX = 3;
 
-    /** The most distinct question words a walk-in read takes; more and the read counts as capped. */
-    private const PREFIX_WORDS_MAX = 20;
+    /** The most `full_name LIKE` patterns in one walk-in read; more go in further reads. */
+    private const PATTERNS_PER_READ = 100;
 
     /** The most words allowed between a first and a last name (a middle name). */
     private const BETWEEN_MAX = 3;
@@ -131,15 +132,8 @@ final readonly class LindaNameCheck
 
         $hits = [];
         $capped = [];
-        $prefixes = self::walkInPrefixes($words);
 
-        // More distinct words than a walk-in read takes: the read counts as
-        // capped, so the question stays local.
-        if ($prefixes === null) {
-            $capped[self::WALK_IN] = true;
-        }
-
-        foreach ($people($lastNames, self::withDots(self::allSpans($words), 2), $prefixes ?? []) as $person) {
+        foreach ($people($lastNames, self::withDots(self::allSpans($words), 2), self::walkInPatterns($words)) as $person) {
             $kind = in_array($person['kind'] ?? null, self::ORDER, true) ? $person['kind'] : self::MEMBER;
 
             if (($person['capped'] ?? false) === true) {
@@ -401,35 +395,36 @@ final readonly class LindaNameCheck
     }
 
     /**
-     * The `full_name LIKE` patterns a walk-in read takes: one for every
-     * distinct question word of 2 or more letters, common words included. A
-     * name-like word is any prefix ("soriano%"); a common word only a whole
-     * first word ("may %", "may,%", "may.%"), so it doesn't read every name
-     * that merely starts with it. Null when the question has more distinct
-     * words than a read takes (the read then counts as capped).
+     * The `full_name LIKE` patterns a walk-in read takes: for every pair of
+     * question words (2 or more letters) next to each other or with one word
+     * between, common words included, the name starting with both, in either
+     * order: "wi wj%", "wi % wj%" (a middle name or initial between), "wj,
+     * wi%" and "wj wi%". The pair makes a common word precise, and the
+     * question's length bounds the list.
      *
      * @param  list<string>  $words
-     * @return ?list<string>
+     * @return list<string>
      */
-    private static function walkInPrefixes(#[\SensitiveParameter] array $words): ?array
+    private static function walkInPatterns(#[\SensitiveParameter] array $words): array
     {
-        $distinct = array_values(array_unique(array_filter($words, fn (string $word) => mb_strlen($word) > 1)));
-
-        if (count($distinct) > self::PREFIX_WORDS_MAX) {
-            return null;
-        }
-
+        $words = array_values(array_map(fn (string $word) => addcslashes($word, '%_\\'), array_filter($words, fn (string $word) => mb_strlen($word) > 1)));
         $patterns = [];
 
-        foreach ($distinct as $word) {
-            $escaped = addcslashes($word, '%_\\');
+        foreach (array_keys($words) as $i) {
+            foreach ([$i + 1, $i + 2] as $j) {
+                if (! isset($words[$j])) {
+                    continue;
+                }
 
-            foreach (LindaLookup::isNameLike($word) ? [$escaped.'%'] : [$escaped.' %', $escaped.',%', $escaped.'.%'] as $pattern) {
-                $patterns[] = $pattern;
+                [$a, $b] = [$words[$i], $words[$j]];
+
+                foreach (["{$a} {$b}%", "{$a} % {$b}%", "{$b}, {$a}%", "{$b} {$a}%"] as $pattern) {
+                    $patterns[$pattern] = true;
+                }
             }
         }
 
-        return $patterns;
+        return array_keys($patterns);
     }
 
     /**
@@ -523,17 +518,19 @@ final readonly class LindaNameCheck
      * The people whose names fit the spans, any branch, at most
      * CANDIDATES_MAX a table: members, staff users and co-makers by last and
      * first name (the collation ignores case and accents), walk-ins whose free
-     * full name starts with one of the question's words (index-friendly
-     * prefixes), soft-deleted ones included. No read leaves out common words:
-     * first and last name together, and the comparison here, decide. A read that reaches the cap adds a
+     * full name starts with a pair of the question's words (index-friendly
+     * prefixes, at most 100 a read), soft-deleted ones included. No read
+     * leaves out common words: first and last name together, and the
+     * comparison here, decide. Only a read that actually reaches its cap keeps
+     * the question local. A read that reaches the cap adds a
      * `capped` row for its kind.
      *
      * @param  list<string>  $lastNames
      * @param  list<string>  $firstNames
-     * @param  list<string>  $prefixes  `full_name LIKE` patterns, already escaped
+     * @param  list<string>  $patterns  `full_name LIKE` patterns, already escaped
      * @return list<array<string, mixed>>
      */
-    private static function fromDatabase(array $lastNames, array $firstNames, array $prefixes): array
+    private static function fromDatabase(array $lastNames, array $firstNames, array $patterns): array
     {
         $rows = [];
         $capped = function (string $kind, int $count) use (&$rows): void {
@@ -565,10 +562,10 @@ final readonly class LindaNameCheck
             }
         }
 
-        if ($prefixes !== []) {
+        foreach (array_chunk($patterns, self::PATTERNS_PER_READ) as $batch) {
             $walkIns = GCashNonMember::withTrashed()
-                ->where(function ($query) use ($prefixes): void {
-                    foreach ($prefixes as $pattern) {
+                ->where(function ($query) use ($batch): void {
+                    foreach ($batch as $pattern) {
                         $query->orWhere('full_name', 'like', $pattern);
                     }
                 })

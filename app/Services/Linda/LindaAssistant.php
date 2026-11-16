@@ -242,7 +242,8 @@ final class LindaAssistant
      * lookup (with no target when the read was capped); for a staff user, the
      * officer performance answer when it has officer or ranking words, for the
      * period it names (this month by default), else a fixed "not yet"; for a
-     * co-maker or a walk-in, a fixed "not yet".
+     * co-maker or a walk-in, a fixed "not yet". Any other capped read gets the
+     * neutral "not yet": it doesn't mean someone was named.
      *
      * @throws LindaHttpError data_unavailable
      */
@@ -252,11 +253,16 @@ final class LindaAssistant
             return $this->lookedUp($log, $started, $user, new LindaLookupRequest(LindaLookupRequest::MEMBER, LindaIntent::BorrowerLookup, null, $named->name));
         }
 
+        // A capped read named no one in particular: a neutral reply, kept local.
+        if ($named->name === null) {
+            return $this->finish($log, $started, new LindaReply(LindaIntent::UnsupportedQuestion->value, LindaWording::notYet(), 'not_yet', answerFunction: class_basename(LindaNameCheck::class)));
+        }
+
         if ($named->kind !== LindaNameCheck::STAFF) {
             return $this->finish($log, $started, new LindaReply(LindaIntent::UnsupportedQuestion->value, LindaWording::otherPersonNotYet(), 'not_yet', answerFunction: class_basename(LindaNameCheck::class)));
         }
 
-        if (! $named->performance || $named->name === null) {
+        if (! $named->performance) {
             return $this->finish($log, $started, new LindaReply(LindaIntent::UnsupportedQuestion->value, LindaWording::staffNotYet(), 'not_yet', answerFunction: class_basename(LindaNameCheck::class)));
         }
 
