@@ -168,6 +168,10 @@ jobs:
                 fi
               }
               trap protect_config_cache EXIT
+              # Staging only: Linda answers with its matcher (Arvin, 2026-11-16). LINDA_DRIVER keeps
+              # its default (none), so no question leaves the server until the owner signs off on
+              # privacy. Exported so config:cache (inside deploy.sh) bakes it in.
+              export LINDA_ENABLED=true
             fi
 
             bash "$DEPLOY_DIR/deploy.sh"
@@ -318,6 +322,10 @@ jobs:
                 fi
               }
               trap protect_config_cache EXIT
+              # Staging only: Linda answers with its matcher (Arvin, 2026-11-16). LINDA_DRIVER keeps
+              # its default (none), so no question leaves the server until the owner signs off on
+              # privacy. Exported so config:cache (inside deploy.sh) bakes it in.
+              export LINDA_ENABLED=true
             fi
 
             bash "$DEPLOY_DIR/deploy.sh"
