@@ -27,7 +27,8 @@ use Illuminate\Http\Request;
  * latest payments, with Payment History's count and Total Collected for
  * them (its `borrower_id` filter), in the user's branches.
  *
- * It mirrors the payment pages, so it needs `payments:view`.
+ * It mirrors the payment pages, so it needs `payments:view`; finding the
+ * member by name or code also needs `borrowers:view`.
  */
 final class ReceiptLookupAnswer extends LookupAnswer
 {
@@ -60,6 +61,12 @@ final class ReceiptLookupAnswer extends LookupAnswer
 
         if ($code !== '' && str_starts_with($code, Repayment::RECEIPT_PREFIX.'-')) {
             return $this->receipt($user, $code);
+        }
+
+        // Searching members by name or code reads the member list, so it
+        // needs `borrowers:view` as well, like the member pages.
+        if (! $user->can('borrowers:view')) {
+            return $this->reply(W::denied('member details'), 'denied');
         }
 
         $member = $this->member($user, $request);
@@ -97,7 +104,7 @@ final class ReceiptLookupAnswer extends LookupAnswer
             $applied[] = LindaReply::money('Build-Up or Overpayment', $shown['overpayment']);
         }
 
-        $answer = 'Receipt '.$receipt->receipt_number.' is '.W::money($shown['amount_paid']).' paid in '.W::paymentMethod($shown['method'])
+        $answer = 'Receipt '.$receipt->receipt_number.' is '.W::money($shown['amount_paid']).' '.self::paidBy($shown['method'])
             .' on '.W::date((string) $shown['payment_date']).' by '.self::memberLabel($receipt->loan?->borrower)
             .($loanNumber === '' ? '' : ' on loan '.$loanNumber).'.'
             .($voided
@@ -120,6 +127,24 @@ final class ReceiptLookupAnswer extends LookupAnswer
             array_filter([(int) $receipt->loan?->borrower_id]),
             [(int) $receipt->loan_id],
         );
+    }
+
+    /**
+     * How a payment was made, mid-sentence: "paid in cash", "paid by bank
+     * transfer", "paid by GCash", "paid by auto-pay". The method's words in
+     * lower case, keeping proper names (GCash, Maya) as they are.
+     */
+    private static function paidBy(?string $method): string
+    {
+        $words = W::paymentMethod($method);
+
+        return match ($method) {
+            'cash' => 'paid in cash',
+            'online' => 'paid online',
+            null, '' => 'paid (method not recorded)',
+            'gcash', 'maya' => 'paid by '.$words,
+            default => 'paid by '.mb_strtolower($words),
+        };
     }
 
     private function paymentsOf(User $user, Borrower $member): LindaReply

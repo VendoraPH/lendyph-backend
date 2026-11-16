@@ -103,6 +103,54 @@ class LindaRound2WordingTest extends LindaAnswersTestCase
         }
     }
 
+    public function test_an_instalment_due_before_today_but_within_grace_says_so(): void
+    {
+        $ana = $this->member($this->branch, 'Ana', 'Cruz');
+        // Started a month and a day ago: its first instalment fell due
+        // yesterday, still inside the 3-day grace.
+        $loan = $this->releaseTo($ana, 60000, now()->subMonthNoOverflow()->subDay()->toDateString());
+        $summary = app(RepaymentService::class)->getLoanSummary($loan->fresh());
+        $this->assertLessThan(now()->toDateString(), $summary['next_due_date']);
+        $this->assertEquals(0, $summary['overdue_amount']);
+        $owed = LindaWording::money($summary['next_due_amount']).' was due on '.LindaWording::date($summary['next_due_date'])
+            .' and is still unpaid (still within its grace period).';
+
+        foreach ([$this->findLoan($loan->loan_account_number), $this->findMember($ana->borrower_code)] as $reply) {
+            $this->assertStringContainsString('nothing is past due.', $reply->answer);
+            $this->assertStringContainsString($owed, $reply->answer);
+
+            // The stats keep their labels.
+            $stats = $this->stats($reply);
+            $this->assertSame($summary['next_due_date'], $stats['Unpaid Since']);
+            $this->assertEquals($summary['next_due_amount'], $stats['Amount Unpaid']);
+        }
+    }
+
+    public function test_a_receipt_reads_its_method_mid_sentence_in_lower_case(): void
+    {
+        $loan = $this->releaseTo($this->member($this->branch, 'Ana', 'Cruz'));
+        $this->actingAs($this->admin);
+        $this->postJson("/api/loans/{$loan->id}/repayments", ['payment_date' => now()->toDateString(), 'amount_paid' => 1500, 'method' => 'cash'])->assertCreated();
+        $receipt = $loan->repayments()->latest('id')->firstOrFail();
+        $user = $this->branchUser(['payments:view']);
+
+        foreach ([
+            'cash' => ['paid in cash', 'Cash'],
+            'gcash' => ['paid by GCash', 'GCash'],
+            'bank_transfer' => ['paid by bank transfer', 'Bank Transfer'],
+            'auto_pay' => ['paid by auto-pay', 'Auto-pay'],
+            'maya' => ['paid by Maya', 'Maya'],
+        ] as $method => [$words, $label]) {
+            $receipt->forceFill(['method' => $method])->save();
+
+            $reply = $this->answerer()->lookup($user, new LindaLookupRequest(LindaLookupRequest::RECEIPT, LindaIntent::TransactionLookup, $receipt->receipt_number));
+
+            $this->assertStringContainsString('₱1,500.00 '.$words.' on ', $reply->answer, $method);
+            $this->assertStringNotContainsString('paid in '.$label, $reply->answer, $method);
+            $this->assertSame($label, $this->stats($reply)['Method'], $method);
+        }
+    }
+
     public function test_an_instalment_due_later_reads_and_is_labelled_as_the_next_payment(): void
     {
         $ben = $this->member($this->branch, 'Ben', 'Reyes');

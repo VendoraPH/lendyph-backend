@@ -73,14 +73,16 @@ final class LindaWording
     /**
      * The earliest unpaid instalment, in words. A date before today (Manila)
      * reads as still unpaid: "₱250.00 was due on October 16, 2026 and is
-     * still unpaid." Today or later reads as the next payment.
+     * still unpaid.", adding "(still within its grace period)" when nothing
+     * is past due yet. Today or later reads as the next payment.
      */
-    public static function nextDue(int|float|string $amount, string $date): string
+    public static function nextDue(int|float|string $amount, string $date, bool $withinGrace = false): string
     {
         $today = LindaPeriod::today()->toDateString();
 
         if ($date < $today) {
-            return self::money($amount).' was due on '.self::date($date).' and is still unpaid.';
+            return self::money($amount).' was due on '.self::date($date).' and is still unpaid'
+                .($withinGrace ? ' (still within its grace period).' : '.');
         }
 
         return 'The next payment, '.self::money($amount).', is due '.($date === $today ? 'today, ' : 'on ').self::date($date).'.';
