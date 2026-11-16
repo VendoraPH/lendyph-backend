@@ -213,6 +213,35 @@ class LindaNameCheckDatabaseTest extends LindaAnswersTestCase
         $this->assertSame(LindaWording::otherPersonNotYet(), $response->json('data.answer'));
     }
 
+    /**
+     * Round 6: walk-in names are saved as typed, so the read must return
+     * every layout the comparison accepts: surname first over a middle
+     * initial, no space after the comma, a dotted first word.
+     *
+     * @return array<string, array{string, string}>
+     */
+    public static function walkInLayouts(): array
+    {
+        return [
+            'middle initial, asked surname first' => ['Carmen R. Soriano', 'Did Soriano, Carmen cash in today?'],
+            'two-word surname, asked surname first' => ['Lito A. Dela Paz', 'Did Dela Paz, Lito send the transfer?'],
+            'no space after the comma' => ['Soriano,Carmen', 'Did Carmen Soriano cash in today?'],
+            'dotted first word, asked with the dot' => ['Ma. Lourdes Ocampo', 'Did Ma. Lourdes Ocampo cash in today?'],
+            'dotted first word, asked without the dot' => ['Ma. Lourdes Ocampo', 'Did Ma Lourdes Ocampo cash in today?'],
+        ];
+    }
+
+    #[DataProvider('walkInLayouts')]
+    public function test_a_walk_in_saved_in_any_layout_stays_local(string $stored, string $question): void
+    {
+        GCashNonMember::factory()->create(['full_name' => $stored]);
+
+        $response = $this->actingAs($this->asker)->postJson(self::URL, ['message' => $question])->assertOk();
+
+        $this->assertSame([], $this->fake->requests, 'The model was asked: '.$question);
+        $this->assertSame(LindaWording::otherPersonNotYet(), $response->json('data.answer'));
+    }
+
     public function test_a_long_question_naming_a_walk_in_at_the_end_stays_local(): void
     {
         GCashNonMember::factory()->create(['full_name' => 'Carmen Soriano']);

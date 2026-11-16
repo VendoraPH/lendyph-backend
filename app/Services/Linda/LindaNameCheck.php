@@ -397,10 +397,13 @@ final readonly class LindaNameCheck
     /**
      * The `full_name LIKE` patterns a walk-in read takes: for every pair of
      * question words (2 or more letters) next to each other or with one word
-     * between, common words included, the name starting with both, in either
-     * order: "wi wj%", "wi % wj%" (a middle name or initial between), "wj,
-     * wi%" and "wj wi%". The pair makes a common word precise, and the
-     * question's length bounds the list.
+     * between, common words included, the name starting with one and holding
+     * the other after it, in either order: "wi%wj%" and "wj%wi%". Walk-in
+     * names are saved as typed, so `%` between the two covers every layout the
+     * comparison accepts: a space, a comma with or without a space, a middle
+     * name or initial, a dotted first word ("Ma. Lourdes"). Each still starts
+     * with a fixed word, so the index applies; the pair makes a common word
+     * precise, and the question's length bounds the list.
      *
      * @param  list<string>  $words
      * @return list<string>
@@ -418,7 +421,7 @@ final readonly class LindaNameCheck
 
                 [$a, $b] = [$words[$i], $words[$j]];
 
-                foreach (["{$a} {$b}%", "{$a} % {$b}%", "{$b}, {$a}%", "{$b} {$a}%"] as $pattern) {
+                foreach (["{$a}%{$b}%", "{$b}%{$a}%"] as $pattern) {
                     $patterns[$pattern] = true;
                 }
             }
@@ -516,7 +519,7 @@ final readonly class LindaNameCheck
 
     /**
      * The people whose names fit the spans, any branch, at most
-     * CANDIDATES_MAX a table: members, staff users and co-makers by last and
+     * CANDIDATES_MAX a read: members, staff users and co-makers by last and
      * first name (the collation ignores case and accents), walk-ins whose free
      * full name starts with a pair of the question's words (index-friendly
      * prefixes, at most 100 a read), soft-deleted ones included. No read
