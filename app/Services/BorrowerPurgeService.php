@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Models\Borrower;
 use App\Models\CsvImportRow;
+use App\Models\LindaQuestion;
 use App\Models\PortalUser;
 use App\Services\CsvImport\CsvImportRowRedactor;
 use Illuminate\Database\Eloquent\Builder;
@@ -207,6 +208,8 @@ class BorrowerPurgeService
                 }),
             );
 
+            $this->removeFromLindaLog($borrower);
+
             // Both are restrictOnDelete; the pledge always exists.
             $borrower->shareCapitalLedger()->delete();
             $borrower->shareCapitalPledge()->delete();
@@ -232,5 +235,30 @@ class BorrowerPurgeService
                 $disk->deleteDirectory($directory);
             }
         });
+    }
+
+    /**
+     * Take the member's id out of every Linda log row whose answer listed
+     * them (Linda v1 plan, "Privacy and the log"). The rest of each row stays:
+     * it names no one else. Runs inside the purge's transaction, so a purge
+     * that fails leaves the log as it was. A row left listing nobody keeps an
+     * empty list.
+     */
+    private function removeFromLindaLog(Borrower $borrower): void
+    {
+        $memberId = (int) $borrower->getKey();
+
+        LindaQuestion::query()
+            ->whereJsonContains('member_ids', $memberId)
+            ->select(['id', 'member_ids'])
+            ->lazyById(500)
+            ->each(function (LindaQuestion $row) use ($memberId): void {
+                $remaining = array_values(array_filter(
+                    (array) $row->member_ids,
+                    fn (mixed $id): bool => (int) $id !== $memberId,
+                ));
+
+                LindaQuestion::query()->whereKey($row->getKey())->update(['member_ids' => json_encode($remaining)]);
+            });
     }
 }
