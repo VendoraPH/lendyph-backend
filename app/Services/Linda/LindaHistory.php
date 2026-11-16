@@ -6,7 +6,9 @@ namespace App\Services\Linda;
  * What the server keeps of the conversation the panel sends back (Linda v1
  * plan, "Request size" and "What it sees"): the last few user questions, each
  * paired with the intent of the assistant turn that answered it, oldest first,
- * and the last assistant turn's intent for a follow-up.
+ * and the intent a follow-up carries on: the last assistant turn's, skipping
+ * lookups, so "how about last month?" after a receipt lookup follows the
+ * topic asked before it.
  *
  * Assistant content is never read, whatever it holds: the panel sends "" or
  * null, and anything else could be an earlier answer (member rows) or text
@@ -35,7 +37,11 @@ final readonly class LindaHistory
             $role = $entry['role'] ?? null;
 
             if ($role === 'assistant') {
-                $previousIntent = self::intent($entry);
+                $intent = self::intent($entry);
+
+                if ($intent?->isLookup() !== true) {
+                    $previousIntent = $intent;
+                }
 
                 continue;
             }

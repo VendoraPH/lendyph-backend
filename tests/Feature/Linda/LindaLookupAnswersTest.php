@@ -134,8 +134,9 @@ class LindaLookupAnswersTest extends LindaAnswersTestCase
             $this->assertEquals($summary['total_outstanding'], $stats['Outstanding']);
             $this->assertEquals($summary['overdue_amount'], $stats['Past Due']);
             $this->assertSame($summary['current_loans'], $stats['Current Loans']);
-            $this->assertSame($nextDate, $stats['Next Due Date']);
-            $this->assertEquals($nextAmount, $stats['Next Due Amount']);
+            [$dateLabel, $amountLabel] = $nextDate < now()->toDateString() ? ['Unpaid Since', 'Amount Unpaid'] : ['Next Due Date', 'Next Due Amount'];
+            $this->assertSame($nextDate, $stats[$dateLabel]);
+            $this->assertEquals($nextAmount, $stats[$amountLabel]);
 
             $items = $this->listItems($reply);
             $this->assertCount($visible->count(), $items);
@@ -328,8 +329,9 @@ class LindaLookupAnswersTest extends LindaAnswersTestCase
                 $this->assertEquals($summary['total_outstanding'], $stats['Outstanding']);
                 $this->assertEquals($summary['outstanding_principal'], $stats['Principal Balance']);
                 $this->assertEquals($summary['overdue_amount'], $stats['Past Due']);
-                $this->assertSame($summary['next_due_date'], $stats['Next Due Date']);
-                $this->assertEquals($summary['next_due_amount'], $stats['Next Due Amount']);
+                [$dateLabel, $amountLabel] = $summary['next_due_date'] < now()->toDateString() ? ['Unpaid Since', 'Amount Unpaid'] : ['Next Due Date', 'Next Due Amount'];
+                $this->assertSame($summary['next_due_date'], $stats[$dateLabel]);
+                $this->assertEquals($summary['next_due_amount'], $stats[$amountLabel]);
                 $this->assertEquals((float) $last->amount_paid, $stats['Last Payment']);
                 $this->assertSame($last->payment_date->toDateString(), $stats['Last Payment Date']);
                 $this->assertSame('Past Due', $stats['Status']);

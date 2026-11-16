@@ -46,6 +46,12 @@ final class OfficerPerformanceAnswer extends PerformanceAnswer
         return (string) $row['account_officer_name'];
     }
 
+    /** The "Unassigned" row reads "Loans with no account officer" in a sentence. */
+    protected function sentenceName(array $row): string
+    {
+        return $row['source']['account_officer_id'] === null ? 'Loans with no account officer' : $row['name'];
+    }
+
     protected function named(array $rows, #[\SensitiveParameter] string $question): array
     {
         $text = ' '.trim((string) preg_replace('/[^\pL\pN]+/u', ' ', mb_strtolower($question))).' ';

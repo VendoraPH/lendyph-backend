@@ -8,6 +8,7 @@ use App\Services\ContactVisibility;
 use App\Services\Linda\LindaFinder;
 use App\Services\Linda\LindaIntent;
 use App\Services\Linda\LindaLookupRequest;
+use App\Services\Linda\LindaPeriod;
 use App\Services\Linda\LindaReply;
 use App\Services\Linda\LindaWording as W;
 
@@ -125,5 +126,22 @@ abstract class LookupAnswer
     protected static function memberLabel(?Borrower $member): string
     {
         return $member === null ? 'an unknown member' : $member->full_name.' ('.$member->borrower_code.')';
+    }
+
+    /**
+     * The earliest unpaid instalment as two stats: "Next Due Date" and "Next
+     * Due Amount", or "Unpaid Since" and "Amount Unpaid" once its date is
+     * before today (Manila), as the answer's own sentence reads.
+     *
+     * @return list<array<string, mixed>>
+     */
+    protected static function nextDueStats(int|float|string $amount, string $date): array
+    {
+        $past = $date < LindaPeriod::today()->toDateString();
+
+        return [
+            LindaReply::date($past ? 'Unpaid Since' : 'Next Due Date', $date),
+            LindaReply::money($past ? 'Amount Unpaid' : 'Next Due Amount', $amount),
+        ];
     }
 }

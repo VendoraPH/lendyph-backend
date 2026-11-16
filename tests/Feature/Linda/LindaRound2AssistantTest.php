@@ -161,6 +161,40 @@ class LindaRound2AssistantTest extends LindaAnswersTestCase
         $this->assertSame([], $this->fake->requests[0]->earlier);
     }
 
+    public function test_a_period_after_a_receipt_lookup_is_never_read_as_another_receipt_lookup(): void
+    {
+        $response = $this->actingAs($this->asker)->postJson(self::URL, [
+            'message' => 'Show the payments last month',
+            'history' => [
+                ['role' => 'user', 'content' => 'Find receipt '.$this->receipt->receipt_number],
+                ['role' => 'assistant', 'content' => '', 'intent' => 'transaction_lookup'],
+            ],
+        ])->assertOk();
+
+        $this->assertNotSame('transaction_lookup', $response->json('data.intent'));
+        $this->assertNotSame(LindaWording::whichRecord(LindaLookupRequest::RECEIPT), $response->json('data.answer'));
+        $this->assertCount(1, $this->fake->requests);
+        $this->assertSame([], $this->fake->requests[0]->earlier);
+    }
+
+    public function test_a_follow_up_after_a_lookup_carries_on_the_topic_asked_before_it(): void
+    {
+        $response = $this->actingAs($this->asker)->postJson(self::URL, [
+            'message' => 'how about last month?',
+            'history' => [
+                ['role' => 'user', 'content' => 'How much have we collected this month?'],
+                ['role' => 'assistant', 'content' => '', 'intent' => 'collection_summary'],
+                ['role' => 'user', 'content' => 'Find receipt '.$this->receipt->receipt_number],
+                ['role' => 'assistant', 'content' => '', 'intent' => 'transaction_lookup'],
+            ],
+        ])->assertOk();
+
+        $this->assertSame('collection_summary', $response->json('data.intent'));
+        $this->assertStringContainsString(LindaPeriod::named('last_month')->label, (string) $response->json('data.answer'));
+        $this->assertSame(LindaQuestion::SOURCE_MATCHER, LindaQuestion::query()->latest('id')->value('source'));
+        $this->assertCount(0, $this->fake->requests);
+    }
+
     public function test_a_lookup_intent_from_the_model_is_answered_locally_with_no_target(): void
     {
         $this->app->instance(FakeModel::class, new class implements LindaModel

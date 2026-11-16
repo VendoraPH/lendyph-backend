@@ -40,6 +40,12 @@ final class LindaWording
         return rtrim(rtrim(number_format((float) $percent, 2, '.', ','), '0'), '.').'%';
     }
 
+    /** A rate as the reports show it, one decimal: 54.35 → "54.4%", 0 → "0.0%". */
+    public static function rate(int|float $percent): string
+    {
+        return number_format((float) $percent, 1, '.', ',').'%';
+    }
+
     /** "1 payment", "1,204 payments". */
     public static function count(int $count, string $singular, ?string $plural = null): string
     {

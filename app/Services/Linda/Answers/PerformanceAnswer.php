@@ -70,6 +70,16 @@ abstract class PerformanceAnswer extends Answer
     abstract protected function rowName(array $row): string;
 
     /**
+     * A row's name at the start of a sentence about that row alone.
+     *
+     * @param  array<string, mixed>  $row  a ranked row (`name`, `source`, …)
+     */
+    protected function sentenceName(array $row): string
+    {
+        return $row['name'];
+    }
+
+    /**
      * The rows the question names, when it names any (officers only).
      *
      * @param  list<array<string, mixed>>  $rows
@@ -115,7 +125,10 @@ abstract class PerformanceAnswer extends Answer
         [$metric, $lowestFirst] = self::ranking((string) $question);
 
         $ranked = $named !== [] ? $named : $rows;
+        // A tie on the asked figure puts the busier row first (more
+        // outstanding), then goes by name.
         usort($ranked, fn (array $a, array $b): int => ($lowestFirst ? $a[$metric] <=> $b[$metric] : $b[$metric] <=> $a[$metric])
+            ?: $b['outstanding'] <=> $a['outstanding']
             ?: strcmp($a['name'], $b['name']));
 
         $max = max(1, (int) config('linda.list_max', 10));
@@ -192,7 +205,7 @@ abstract class PerformanceAnswer extends Answer
 
         $standing = match (true) {
             count($tied) === count($ranked) => (count($ranked) === 2 ? 'both '.$rows : 'all '.count($ranked).' '.$rows)
-                .' have '.$top.' '.$words.' '.W::forScope($scope).'.',
+                .' have '.$top.' '.$words.'.',
             count($tied) > 3 => $ranking.count($tied).' '.$rows.' are tied first with '.$top.'.',
             count($tied) > 1 => $ranking.self::joined(array_column($tied, 'name')).' are tied first with '.$top.'.',
             default => $ranking.$listed[0]['name'].' comes first with '.$top.'.',
@@ -218,7 +231,7 @@ abstract class PerformanceAnswer extends Answer
     /** @param  array<string, mixed>  $row */
     private function aboutOne(array $row, LindaPeriod $period): string
     {
-        return $row['name'].', '.W::during($period).': released '.W::count($row['released_count'], 'loan').' for '
+        return $this->sentenceName($row).', '.W::during($period).': released '.W::count($row['released_count'], 'loan').' for '
             .W::money($row['released_amount']).' and collected '.W::money($row['collected']).'. '
             .W::asOfToday().', Outstanding is '.W::money($row['outstanding']).' and '.W::money($row['past_due'])
             .' is past due beyond the grace period.';

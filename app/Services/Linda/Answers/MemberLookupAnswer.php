@@ -84,7 +84,7 @@ final class MemberLookupAnswer extends LookupAnswer
         if ($loans->isEmpty()) {
             $answer = $who.', has no loans that still owe anything as of today, '.W::today().'.';
         } else {
-            $answer = $who.', has '.W::count($current, 'current loan').'. '
+            $answer = $who.', has '.W::count($loans->count(), 'loan').' still owing. '
                 .W::asOfToday().', Outstanding is '.W::money($summary['total_outstanding'])
                 .((float) $summary['overdue_amount'] > 0
                     ? ', of which '.W::money($summary['overdue_amount']).' is past due.'
@@ -101,8 +101,7 @@ final class MemberLookupAnswer extends LookupAnswer
         ];
 
         if ($nextDate !== null) {
-            $stats[] = LindaReply::date('Next Due Date', $nextDate);
-            $stats[] = LindaReply::money('Next Due Amount', Money::fromCentavos($nextCentavos));
+            array_push($stats, ...self::nextDueStats(Money::fromCentavos($nextCentavos), $nextDate));
         }
 
         $listed = $loans->take(self::listMax());

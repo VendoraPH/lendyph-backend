@@ -47,6 +47,19 @@ enum LindaIntent: string
     }
 
     /**
+     * The three lookups (a member, a loan or a receipt): the server answers
+     * them itself (LindaLookup), and a follow-up never carries one on, since
+     * a lookup is about one record and takes no period.
+     */
+    public function isLookup(): bool
+    {
+        return match ($this) {
+            self::BorrowerLookup, self::LoanDetails, self::TransactionLookup => true,
+            default => false,
+        };
+    }
+
+    /**
      * Whether a question of this kind that names no period means this month:
      * the figures over a period Linda answers (collections, payments,
      * disbursements, collection efficiency, branch and officer performance

@@ -95,8 +95,7 @@ final class LoanLookupAnswer extends LookupAnswer
         $stats[] = LindaReply::money('Past Due', $summary['overdue_amount']);
 
         if ($summary['next_due_date'] !== null) {
-            $stats[] = LindaReply::date('Next Due Date', $summary['next_due_date']);
-            $stats[] = LindaReply::money('Next Due Amount', $summary['next_due_amount']);
+            array_push($stats, ...self::nextDueStats($summary['next_due_amount'], $summary['next_due_date']));
         }
 
         if ($last !== null) {

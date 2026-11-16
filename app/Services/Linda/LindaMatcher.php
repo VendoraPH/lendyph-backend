@@ -209,7 +209,7 @@ final class LindaMatcher
             }
         }
 
-        $canFollow = $previous !== null && $previous !== LindaIntent::UnsupportedQuestion;
+        $canFollow = $previous !== null && $previous !== LindaIntent::UnsupportedQuestion && ! $previous->isLookup();
 
         if ($subjects === []) {
             // A follow-up on its own must bring something new: a period or a branch.

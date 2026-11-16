@@ -49,7 +49,7 @@ final class CollectionEfficiencyAnswer extends Answer
 
         $answer = (float) $report['total_due'] <= 0
             ? 'Nothing fell due '.W::during($period).' '.W::forScope($scope).', so there is no collection rate for it.'
-            : self::sentence(W::during($period)).', the collection rate '.W::forScope($scope).' is '.W::percent($report['collection_rate'])
+            : self::sentence(W::during($period)).', the collection rate '.W::forScope($scope).' is '.W::rate($report['collection_rate'])
                 .': '.W::money($report['total_collected']).' of principal and interest collected on the periods due, out of '
                 .W::money($report['total_due']).' due, leaving '.W::money($report['uncollected']).' uncollected.';
 
