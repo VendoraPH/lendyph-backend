@@ -249,7 +249,7 @@ class LindaMatcherTest extends LindaTestCase
         return [
             'an unknown word left over' => ['How much have we collected from GCash this month?'],
             'another unknown word' => ['How many active loans do we have in pesos?'],
-            'collection efficiency is another intent' => ['What is our collection efficiency this month?'],
+            'income is left to the model' => ['How much interest income did we earn this month?'],
             'no subject' => ['How many loans do we have?'],
             'off topic' => ['What is the weather today?'],
             'two subjects' => ['collections and overdue this month'],

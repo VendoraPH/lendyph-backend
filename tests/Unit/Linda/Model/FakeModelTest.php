@@ -11,6 +11,7 @@ use App\Services\Linda\Model\LindaModelRequest;
 use App\Services\Linda\Model\LindaModelUnavailable;
 use App\Services\Linda\Model\NoneModel;
 use InvalidArgumentException;
+use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\Unit\Linda\LindaTestCase;
 
 /**
@@ -102,6 +103,50 @@ class FakeModelTest extends LindaTestCase
             $this->assertSame('overloaded', $e->reason);
         }
         $this->assertCount(1, $failing->requests);
+    }
+
+    /**
+     * The fake reads the Bisaya and Tagalog words the matcher can't place,
+     * so a model-handled case in the question set scores like the real one.
+     *
+     * @return array<string, array{string, LindaIntent, ?string, ?string}>
+     */
+    public static function roundTwoWords(): array
+    {
+        return [
+            'Bisaya income' => ['Pila ang ganansya nato niaging bulan?', LindaIntent::IncomeSummary, 'last_month', null],
+            'Bisaya expenses' => ['Pila ang gigasto karong bulana sa Main?', LindaIntent::ExpenseSummary, 'this_month', 'main'],
+            'Bisaya officer' => ['Kinsa nga AO ang nanguna sa koleksyon?', LindaIntent::OfficerPerformance, null, null],
+            'Bisaya branch ranking' => ['Unsang branch ang nanguna karong semanaha?', LindaIntent::BranchPerformance, 'this_week', null],
+            'Tagalog efficiency' => ['Ilang porsyento ng dapat bayaran ang nakolekta?', LindaIntent::CollectionEfficiency, null, null],
+            'Bisaya who paid' => ['Kinsa ang mibayad gahapon?', LindaIntent::CollectionDetails, 'yesterday', null],
+            'Bisaya overdue' => ['Kinsa ang wala pa nakabayad sa ilang hulog?', LindaIntent::OverdueAccounts, null, null],
+            'Bisaya releases' => ['Pila ka loan ang napagawas sa Riverside?', LindaIntent::DisbursementSummary, null, 'riverside'],
+            'Bisaya active loans' => ['Pila ang nagdagan pa nga mga loan?', LindaIntent::LoanSummary, null, null],
+            'in as a branch marker' => ['interest income in Riverside last month', LindaIntent::IncomeSummary, 'last_month', 'riverside'],
+            'in before a non-branch' => ['How much did we earn in penalties this year?', LindaIntent::IncomeSummary, 'this_year', null],
+        ];
+    }
+
+    #[DataProvider('roundTwoWords')]
+    public function test_the_fake_reads_round_two_words(string $question, LindaIntent $intent, ?string $periodKey, ?string $branch): void
+    {
+        $understanding = (new FakeModel)->understand(new LindaModelRequest($question, [], 'claude-haiku-5-5'));
+
+        $this->assertSame($intent, $understanding->intent, $question);
+        $this->assertSame($periodKey, $understanding->period?->key, $question);
+        $this->assertSame($branch, $understanding->branchName, $question);
+    }
+
+    public function test_the_fake_follows_up_on_a_bisaya_follow_up(): void
+    {
+        $understanding = (new FakeModel)->understand(new LindaModelRequest('Unya, niaging bulan?', [
+            ['question' => 'Pila ang ganansya nato?', 'intent' => 'income_summary'],
+        ], 'claude-haiku-5-5'));
+
+        $this->assertSame(LindaIntent::IncomeSummary, $understanding->intent);
+        $this->assertTrue($understanding->followUp);
+        $this->assertSame('last_month', $understanding->period?->key);
     }
 
     public function test_the_none_driver_has_no_model(): void
