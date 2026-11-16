@@ -21,8 +21,12 @@ use Throwable;
  * Answers one Linda question (Linda v1 plan, "How a question is answered").
  *
  * 1. The matcher runs first; what it understands never leaves the server.
- *    A question it misses that names a record or asks to look one up ends at
- *    the local guard (LindaGuard) with the "not yet" reply.
+ *    A question it misses that names a record or a person, or asks to look
+ *    one up, is a lookup (LindaLookup::parse()): the server answers it from
+ *    the record in the user's branches (LindaAnswerer::lookup()), logged as
+ *    source `lookup`, and the model never sees it. A lookup intent the model
+ *    returns for text the parser missed is answered locally too: with the
+ *    record, or by asking which one.
  * 2. With no match and the none driver, the reply lists what Linda can
  *    answer. Otherwise, below the monthly cap, the model reads the question
  *    (and up to 5 earlier questions with their intents, never an answer) and
@@ -49,6 +53,13 @@ final class LindaAssistant
 
     /** Any other failure of the model call (security review S4). */
     public const REASON_INTERNAL = 'internal';
+
+    /** @var array<string, string> lookup intent => LindaLookupRequest kind */
+    private const LOOKUP_KINDS = [
+        'borrower_lookup' => LindaLookupRequest::MEMBER,
+        'loan_details' => LindaLookupRequest::LOAN,
+        'transaction_lookup' => LindaLookupRequest::RECEIPT,
+    ];
 
     public function __construct(
         private readonly LindaAnswerer $answerer,
@@ -83,12 +94,12 @@ final class LindaAssistant
             return $this->answered($log, $started, $user, $match->intent, $period, $this->asTyped($branchName, $question, $history), $question);
         }
 
-        $lookup = LindaGuard::check($question);
+        $lookup = LindaLookup::parse($question);
 
         if ($lookup !== null) {
-            $log->fill(['source' => LindaQuestion::SOURCE_GUARD, 'intent' => $lookup->value]);
+            $log->source = LindaQuestion::SOURCE_LOOKUP;
 
-            return $this->finish($log, $started, $this->answerer->notYet($lookup, $user));
+            return $this->lookedUp($log, $started, $user, $lookup);
         }
 
         if (! in_array(config('linda.driver'), ['fake', 'anthropic'], true)) {
@@ -209,6 +220,12 @@ final class LindaAssistant
             return $this->finish($log, $started, $this->answerer->unsupported());
         }
 
+        $lookupKind = self::LOOKUP_KINDS[$intent->value] ?? null;
+
+        if ($lookupKind !== null) {
+            return $this->lookedUp($log, $started, $user, LindaLookup::parse($question) ?? new LindaLookupRequest($lookupKind, $intent));
+        }
+
         // Overdue and active loans are as of today: the model's period words
         // are ignored, never refused or called unclear.
         $period = null;
@@ -257,6 +274,28 @@ final class LindaAssistant
             }
         } catch (Throwable $e) {
             Log::warning('Linda answer failed.', ['intent' => $intent->value] + ErrorDigest::context($e));
+            $log->fill(['outcome' => self::OUTCOME_ERROR, 'error_code' => LindaHttpError::DATA_UNAVAILABLE]);
+            $this->write($log, $started);
+
+            throw LindaHttpError::dataUnavailable();
+        }
+
+        return $this->finish($log, $started, $reply);
+    }
+
+    /**
+     * A lookup, answered on the server from the record it names.
+     *
+     * @throws LindaHttpError data_unavailable
+     */
+    private function lookedUp(LindaQuestion $log, int $started, User $user, LindaLookupRequest $lookup): LindaReply
+    {
+        $log->intent = $lookup->intent->value;
+
+        try {
+            $reply = $this->answerer->lookup($user, $lookup);
+        } catch (Throwable $e) {
+            Log::warning('Linda answer failed.', ['intent' => $lookup->intent->value] + ErrorDigest::context($e));
             $log->fill(['outcome' => self::OUTCOME_ERROR, 'error_code' => LindaHttpError::DATA_UNAVAILABLE]);
             $this->write($log, $started);
 

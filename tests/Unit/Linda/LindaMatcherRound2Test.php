@@ -153,30 +153,30 @@ class LindaMatcherRound2Test extends LindaTestCase
             // Collection efficiency.
             'collection efficiency' => ['What is our collection efficiency this month?', LindaIntent::CollectionEfficiency, 'this_month', null],
             'collection rate' => ['collection rate last week', LindaIntent::CollectionEfficiency, 'last_week', null],
-            'efficiency in a branch' => ['efficiency in Main branch', LindaIntent::CollectionEfficiency, null, 'main'],
+            'efficiency in a branch' => ['efficiency in Main branch', LindaIntent::CollectionEfficiency, 'this_month', 'main'],
             'percent of dues collected' => ['What percent of dues did we collect last month?', LindaIntent::CollectionEfficiency, 'last_month', null],
             'porsyento, Tagalog' => ['Ilang porsyento ang nakolekta natin last week?', LindaIntent::CollectionEfficiency, 'last_week', null],
             'porsyento sa koleksyon, Bisaya' => ['Pila ang porsyento sa koleksyon karong bulana?', LindaIntent::CollectionEfficiency, 'this_month', null],
             // Branch performance.
             'which branch collected the most' => ['Which branch collected the most this month?', LindaIntent::BranchPerformance, 'this_month', null],
-            'compare the branches' => ['Compare the branches by collections', LindaIntent::BranchPerformance, null, null],
+            'compare the branches' => ['Compare the branches by collections', LindaIntent::BranchPerformance, 'this_month', null],
             'branch performance' => ['branch performance last month', LindaIntent::BranchPerformance, 'last_month', null],
             'collections by branch' => ['collections by branch this week', LindaIntent::BranchPerformance, 'this_week', null],
             'best branch' => ['best branch this year', LindaIntent::BranchPerformance, 'this_year', null],
-            'anong branch, Tagalog' => ['Anong branch ang may pinakamalaking koleksyon?', LindaIntent::BranchPerformance, null, null],
+            'anong branch, Tagalog' => ['Anong branch ang may pinakamalaking koleksyon?', LindaIntent::BranchPerformance, 'this_month', null],
             'ikumpara, Tagalog' => ['Ikumpara ang mga branch ngayong buwan', LindaIntent::BranchPerformance, 'this_month', null],
             'unsang branch pinakadaghan, Bisaya' => ['Unsang branch ang pinakadaghan og nakolekta sa niaging semana?', LindaIntent::BranchPerformance, 'last_week', null],
             'itandi ang mga branch, Bisaya' => ['Itandi ang mga branch karong bulana', LindaIntent::BranchPerformance, 'this_month', null],
-            'asa nga branch atraso, Bisaya' => ['Asa nga branch ang daghang atraso?', LindaIntent::BranchPerformance, null, null],
-            'compare all branches' => ['compare all branches', LindaIntent::BranchPerformance, null, null],
+            'asa nga branch atraso, Bisaya' => ['Asa nga branch ang daghang atraso?', LindaIntent::BranchPerformance, 'this_month', null],
+            'compare all branches' => ['compare all branches', LindaIntent::BranchPerformance, 'this_month', null],
             // Officer performance.
             'top account officers' => ['Who are the top account officers this month?', LindaIntent::OfficerPerformance, 'this_month', null],
-            'each collector' => ['How is each collector doing?', LindaIntent::OfficerPerformance, null, null],
+            'each collector' => ['How is each collector doing?', LindaIntent::OfficerPerformance, 'this_month', null],
             'officer released the most' => ['Which loan officer released the most this month?', LindaIntent::OfficerPerformance, 'this_month', null],
             'AO performance' => ['AO performance last month', LindaIntent::OfficerPerformance, 'last_month', null],
             'pinakamagaling na collector, Tagalog' => ['Sino ang pinakamagaling na collector ngayong buwan?', LindaIntent::OfficerPerformance, 'this_month', null],
             'kinsa nga officer, Bisaya' => ['Kinsa nga officer ang pinakadaghan og nakolekta karong bulana?', LindaIntent::OfficerPerformance, 'this_month', null],
-            'pinakamaayo nga officer, Bisaya' => ['Kinsa ang pinakamaayo nga officer sa Main?', LindaIntent::OfficerPerformance, null, 'main'],
+            'pinakamaayo nga officer, Bisaya' => ['Kinsa ang pinakamaayo nga officer sa Main?', LindaIntent::OfficerPerformance, 'this_month', 'main'],
         ];
     }
 

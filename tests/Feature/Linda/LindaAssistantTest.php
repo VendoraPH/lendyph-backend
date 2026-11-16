@@ -583,7 +583,7 @@ class LindaAssistantTest extends LindaAnswersTestCase
         $this->assertSame('0.000000', LindaQuestion::query()->latest('id')->value('cost'));
     }
 
-    public function test_a_lookup_ends_at_the_guard_with_no_model_call(): void
+    public function test_a_lookup_is_answered_locally_with_no_model_call(): void
     {
         config()->set('linda.driver', 'fake');
         $fake = new FakeModel;
@@ -593,14 +593,14 @@ class LindaAssistantTest extends LindaAnswersTestCase
             ->assertOk()
             ->assertJsonPath('data.intent', 'loan_details');
 
-        $expected = app(LindaAnswerer::class)->notYet(LindaIntent::LoanDetails, $this->asker);
-        $this->assertSame($expected->answer, $response->json('data.answer'));
-        $this->assertSame($expected->links, $response->json('data.links'));
+        // No such loan in this book: the server says so, and nothing reaches the model.
+        $this->assertSame('No loan numbered LN-000042 in your branches.', $response->json('data.answer'));
+        $this->assertSame([], $response->json('data.links'));
         $this->assertSame([], $fake->requests);
 
         $row = LindaQuestion::query()->latest('id')->firstOrFail();
-        $this->assertSame(LindaQuestion::SOURCE_GUARD, $row->source);
-        $this->assertSame('not_yet', $row->outcome);
+        $this->assertSame(LindaQuestion::SOURCE_LOOKUP, $row->source);
+        $this->assertSame('not_found', $row->outcome);
         $this->assertSame('loan_details', $row->intent);
         $this->assertNull($row->model);
         $this->assertSame('0.000000', $row->cost);

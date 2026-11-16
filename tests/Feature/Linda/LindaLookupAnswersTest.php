@@ -343,6 +343,22 @@ class LindaLookupAnswersTest extends LindaAnswersTestCase
         }
     }
 
+    public function test_numbers_are_found_with_or_without_their_leading_zeros(): void
+    {
+        $ana = $this->member($this->branch, 'Ana', 'Cruz');
+        $loan = $this->releaseTo($ana);
+        $this->pay($loan, 1500);
+        $receipt = Repayment::query()->where('loan_id', $loan->id)->latest('id')->firstOrFail();
+        $user = $this->branchUser(['loans:view', 'borrowers:view', 'payments:view']);
+        $short = fn (string $code): string => strstr($code, '-', true).'-'.ltrim(substr(strstr($code, '-'), 1), '0');
+
+        $this->assertSame([$ana->id], $this->findMember($user, $short($ana->borrower_code))->memberIds);
+        $this->assertSame([$loan->id], $this->findLoan($user, $short($loan->loan_account_number))->loanIds);
+        $this->assertSame([$loan->id], $this->findLoan($user, $short($loan->application_number))->loanIds);
+        $this->assertSame('answered', $this->findReceipt($user, $short($receipt->receipt_number))->outcome);
+        $this->assertSame('not_found', $this->findLoan($user, 'LN-9999')->outcome);
+    }
+
     public function test_a_loan_not_yet_released_shows_its_status_and_amount_only(): void
     {
         $ana = $this->member($this->branch, 'Ana', 'Cruz');

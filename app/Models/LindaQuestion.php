@@ -51,7 +51,7 @@ class LindaQuestion extends Model
     /** Neither understood it (the none driver, or a refusal before any call). */
     public const SOURCE_NONE = 'none';
 
-    /** A lookup the local guard (LindaGuard) answered, with no model call. */
+    /** A lookup the local guard (LindaGuard) answered "not yet", with no model call (Linda v1 rows; round 2 writes SOURCE_LOOKUP). */
     public const SOURCE_GUARD = 'guard';
 
     /** A lookup (a member, a loan or a receipt) the server answered itself, with no model call. */

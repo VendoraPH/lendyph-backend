@@ -6,6 +6,7 @@ use App\Models\Borrower;
 use App\Models\Loan;
 use App\Models\Repayment;
 use App\Models\User;
+use App\Services\SequenceCode;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Collection;
 
@@ -16,7 +17,8 @@ use Illuminate\Support\Collection;
  * its loan), so another branch's record is never found, by name or by
  * number, and reads exactly like one that doesn't exist.
  *
- * Numbers match whole, case ignored, never as a "contains" search. A name
+ * Numbers match whole, case ignored, with or without their leading zeros,
+ * never as a "contains" search. A name
  * matches when every typed word is a whole word of the member's first,
  * middle or last name (or suffix), case and extra spaces ignored; a single
  * letter, with or without a dot, matches a name word that starts with it
@@ -31,7 +33,7 @@ final class LindaFinder
     {
         return Borrower::query()
             ->visibleTo($user)
-            ->where('borrowers.borrower_code', mb_strtoupper(trim($code)))
+            ->whereIn('borrowers.borrower_code', self::numberForms($code))
             ->first();
     }
 
@@ -69,15 +71,36 @@ final class LindaFinder
         $number = mb_strtoupper(trim($number));
         $column = str_starts_with($number, Loan::CODE_PREFIX.'-') ? 'loans.application_number' : 'loans.loan_account_number';
 
-        return Loan::query()->visibleTo($user)->where($column, $number)->first();
+        return Loan::query()->visibleTo($user)->whereIn($column, self::numberForms($number))->first();
     }
 
     public function receiptByNumber(User $user, string $number): ?Repayment
     {
         return Repayment::query()
-            ->where('receipt_number', mb_strtoupper(trim($number)))
+            ->whereIn('receipt_number', self::numberForms($number))
             ->whereIn('loan_id', Loan::query()->visibleTo($user)->select('loans.id'))
             ->first();
+    }
+
+    /**
+     * A record number as typed and as stored: upper case, and its digits
+     * padded to the stored width (SequenceCode::PAD_LENGTH), so "LN-42" and
+     * "LN-0042" find LN-000042. A longer number is matched as typed.
+     *
+     * @return list<string>
+     */
+    public static function numberForms(string $number): array
+    {
+        $typed = mb_strtoupper(trim($number));
+
+        if (preg_match('/^(\pL+)-0*(\d+)$/u', $typed, $parts) !== 1) {
+            return [$typed];
+        }
+
+        return array_values(array_unique([
+            $typed,
+            $parts[1].'-'.str_pad($parts[2], SequenceCode::PAD_LENGTH, '0', STR_PAD_LEFT),
+        ]));
     }
 
     /**
