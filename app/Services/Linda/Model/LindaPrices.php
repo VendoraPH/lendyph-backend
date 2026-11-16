@@ -52,15 +52,26 @@ final class LindaPrices
     }
 
     /**
-     * What one question of the typical size (`config('linda.typical_question')`)
-     * costs on a model, in ₱ at 6 decimal places: the conservative charge for a
-     * call whose response never arrived (a timeout may still be billed).
+     * The worst-case estimate of one question on a model, in ₱ at 6 decimal
+     * places: the charge booked for a call whose response never arrived (a
+     * timeout, or an internal failure after it may have been sent), which may
+     * still be billed. Each attempt (`max_retries` + 1) is priced as the
+     * typical prompt written to the cache afresh, the typical input, and the
+     * full `max_tokens` of output.
      *
      * @throws LindaModelUnavailable no_prices
      */
-    public static function estimate(string $model): string
+    public static function worstCaseEstimate(string $model): string
     {
-        return self::typical($model)->toScale(self::COST_SCALE, RoundingMode::HalfUp)->toString();
+        $typical = (array) config('linda.typical_question', []);
+        $attempts = max(0, (int) config('linda.anthropic.max_retries', 1)) + 1;
+
+        return self::pesos([$model], [
+            'input' => (int) ($typical['input'] ?? 0) * $attempts,
+            'output' => max(0, (int) config('linda.anthropic.max_tokens', 512)) * $attempts,
+            'cache_read' => 0,
+            'cache_write' => (int) ($typical['cache_read'] ?? 0) * $attempts,
+        ])->toScale(self::COST_SCALE, RoundingMode::HalfUp)->toString();
     }
 
     /**

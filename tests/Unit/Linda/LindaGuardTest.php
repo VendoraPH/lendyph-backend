@@ -124,4 +124,18 @@ class LindaGuardTest extends LindaTestCase
             $this->assertSame($case['intent'], LindaGuard::check($case['question'])?->value, $case['question']);
         }
     }
+
+    public function test_earlier_lookups_are_dropped_with_their_intents(): void
+    {
+        $this->assertSame([
+            ['question' => 'Which members currently have overdue payments?', 'intent' => 'overdue_accounts'],
+            ['question' => 'collections last week', 'intent' => 'collection_summary'],
+        ], LindaGuard::withoutLookups([
+            ['question' => 'find juan.delacruz@example.com', 'intent' => 'borrower_lookup'],
+            ['question' => 'Which members currently have overdue payments?', 'intent' => 'overdue_accounts'],
+            ['question' => 'Find receipt RCP-000123', 'intent' => 'transaction_lookup'],
+            ['question' => 'collections last week', 'intent' => 'collection_summary'],
+            ['question' => 'call 09171234567', 'intent' => null],
+        ]));
+    }
 }

@@ -184,8 +184,9 @@ class EvaluateLindaTest extends LindaTestCase
             ->assertSuccessful();
 
         foreach ($fake->requests as $request) {
-            $this->assertStringNotContainsString('RCP-000123', $request->question);
-            $this->assertStringNotContainsString('LN-0000', $request->question);
+            $this->assertStringNotContainsString('RCP-000123', serialize($request));
+            $this->assertStringNotContainsString('LN-0000', serialize($request));
+            $this->assertStringNotContainsString('juan.delacruz', serialize($request));
         }
     }
 

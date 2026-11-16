@@ -73,6 +73,61 @@ final class LindaScope
         return new self($branchIds, null, '', 'ambiguous', $matches->pluck('name')->map(fn ($name) => (string) $name)->all());
     }
 
+    /**
+     * The one branch the user can see whose name appears in a question as
+     * whole words (case and spacing ignored, a trailing "Branch" optional),
+     * as the name to resolve() with, or null when none or several do. A
+     * branch the user can't see is never looked for, so it is never found.
+     * For a question only the model understood, whose branch the matcher
+     * never read.
+     */
+    public static function visibleBranchIn(User $user, #[\SensitiveParameter] string $text): ?string
+    {
+        $branchIds = app(BranchAccess::class)->for($user);
+
+        if ($branchIds === []) {
+            return null;
+        }
+
+        $clean = LindaText::clean($text);
+        $found = [];
+
+        $names = Branch::query()
+            ->when($branchIds !== null, fn ($q) => $q->whereIn('id', $branchIds))
+            ->pluck('name');
+
+        foreach ($names as $name) {
+            $words = LindaText::words(LindaText::clean((string) $name));
+
+            if ($words !== [] && end($words) === 'branch') {
+                array_pop($words);
+            }
+
+            if ($words === []) {
+                continue;
+            }
+
+            $pattern = '/(?<![\pL\pN])'.implode('\s+', array_map(fn (string $word) => preg_quote($word, '/'), $words)).'(?:\s+branch)?(?![\pL\pN])/u';
+
+            if (preg_match($pattern, $clean) === 1) {
+                $found[implode(' ', $words)] = true;
+            }
+        }
+
+        $found = array_keys($found);
+        usort($found, fn (string $a, string $b) => strlen($b) <=> strlen($a));
+
+        // A longer name that contains a shorter one ("San Jose North" and
+        // "San Jose") is the one meant; two unrelated names are ambiguous.
+        foreach (array_slice($found, 1) as $shorter) {
+            if (! str_contains($found[0], $shorter)) {
+                return null;
+            }
+        }
+
+        return $found[0] ?? null;
+    }
+
     public function ok(): bool
     {
         return $this->problem === null;

@@ -78,7 +78,7 @@ final class LindaAssistant
 
         if ($match !== null) {
             $log->source = LindaQuestion::SOURCE_MATCHER;
-            [$period, $branchName] = LindaFollowUp::carry($match->intent, $match->period, $match->branchName, $match->followUp, $history->earlier);
+            [$period, $branchName] = LindaFollowUp::carry($match->intent, $match->period, $match->branchName, $match->followUp, $history->earlier, $user);
 
             return $this->answered($log, $started, $user, $match->intent, $period, $this->asTyped($branchName, $question, $history));
         }
@@ -111,13 +111,19 @@ final class LindaAssistant
      * Ask the model, below the cap, with its prices checked first so a broken
      * price table, rate or cap sends nothing (`no_prices`). A failed call is
      * logged with its reason code and the cost it may have run up: the usage
-     * of an answer that couldn't be used, or for a timeout (which may still be
-     * billed) the typical cost of a question on the requested model.
+     * of an answer that couldn't be used, or, for a timeout or an internal
+     * failure once the call may have been sent (either may still be billed),
+     * the worst-case estimate on the requested model.
+     *
+     * Earlier questions the local guard flags never go to the model: a lookup
+     * it kept local stays local on every later question, its intent with it.
      *
      * @throws LindaHttpError monthly_limit or ai_unavailable
      */
     private function understand(LindaQuestion $log, int $started, #[\SensitiveParameter] string $question, LindaHistory $history, string $model): ?LindaUnderstanding
     {
+        $sent = false;
+
         try {
             if ($this->budget->reached()) {
                 $log->fill(['outcome' => self::OUTCOME_LIMITED, 'error_code' => LindaHttpError::MONTHLY_LIMIT]);
@@ -126,11 +132,12 @@ final class LindaAssistant
                 throw LindaHttpError::monthlyLimit();
             }
 
-            LindaPrices::estimate($model);
+            LindaPrices::worstCaseEstimate($model);
             $log->fill(['source' => LindaQuestion::SOURCE_MODEL, 'model' => $model]);
-
-            $understanding = LindaModelFactory::make((string) config('linda.driver'))
-                ->understand(new LindaModelRequest($question, $history->earlier, $model));
+            $request = new LindaModelRequest($question, LindaGuard::withoutLookups($history->earlier), $model);
+            $driver = LindaModelFactory::make((string) config('linda.driver'));
+            $sent = true;
+            $understanding = $driver->understand($request);
 
             if ($understanding !== null) {
                 $this->recordUsage($log, $understanding->usage);
@@ -144,6 +151,10 @@ final class LindaAssistant
         } catch (Throwable $e) {
             Log::warning('Linda model call failed.', ['reason' => self::REASON_INTERNAL] + ErrorDigest::context($e));
             $log->fill(['source' => LindaQuestion::SOURCE_MODEL, 'model' => $model, 'outcome' => self::OUTCOME_ERROR, 'error_code' => self::REASON_INTERNAL]);
+
+            if ($sent) {
+                $this->bookWorstCase($log, $model);
+            }
         }
 
         $this->write($log, $started);
@@ -165,8 +176,18 @@ final class LindaAssistant
             if ($e->usage !== null) {
                 $this->recordUsage($log, $e->usage);
             } elseif ($e->reason === 'timeout') {
-                $log->cost = LindaPrices::estimate($model);
+                $log->cost = LindaPrices::worstCaseEstimate($model);
             }
+        } catch (LindaModelUnavailable) {
+            $log->error_code = 'no_prices';
+        }
+    }
+
+    /** The worst-case estimate on the requested model, for a call that may have been billed. */
+    private function bookWorstCase(LindaQuestion $log, string $model): void
+    {
+        try {
+            $log->cost = LindaPrices::worstCaseEstimate($model);
         } catch (LindaModelUnavailable) {
             $log->error_code = 'no_prices';
         }
@@ -202,7 +223,7 @@ final class LindaAssistant
             $period = $understanding->period;
         }
 
-        [$period, $branchName] = LindaFollowUp::carry($intent, $period, $understanding->branchName, $understanding->followUp, $history->earlier);
+        [$period, $branchName] = LindaFollowUp::carry($intent, $period, $understanding->branchName, $understanding->followUp, $history->earlier, $user);
 
         return $this->answered($log, $started, $user, $intent, $period, $this->asTyped($branchName, $question, $history));
     }

@@ -66,6 +66,19 @@ final class LindaGuard
         return null;
     }
 
+    /**
+     * The earlier questions without the ones the guard flags, each dropped
+     * with its intent, so a lookup kept local never reaches the model later
+     * as an earlier question.
+     *
+     * @param  list<array{question: string, intent: ?string}>  $earlier
+     * @return list<array{question: string, intent: ?string}>
+     */
+    public static function withoutLookups(#[\SensitiveParameter] array $earlier): array
+    {
+        return array_values(array_filter($earlier, fn (array $entry): bool => self::check((string) $entry['question']) === null));
+    }
+
     /** @param  list<string>  $prefixes  the codes' first parts, upper case */
     private static function byCode(array $prefixes, string $question): LindaIntent
     {

@@ -142,7 +142,7 @@ class EvaluateLinda extends Command
                 $understanding = null;
 
                 try {
-                    $understanding = $model->understand(new LindaModelRequest($case['question'], $earlier, $modelId));
+                    $understanding = $model->understand(new LindaModelRequest($case['question'], LindaGuard::withoutLookups($earlier), $modelId));
                 } catch (LindaModelUnavailable $e) {
                     $actual['error'] = $e->reason;
                     $errors[$e->reason] = ($errors[$e->reason] ?? 0) + 1;

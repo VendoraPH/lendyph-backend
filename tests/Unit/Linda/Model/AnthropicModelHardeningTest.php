@@ -146,6 +146,16 @@ class AnthropicModelHardeningTest extends LindaTestCase
         $this->assertSame('claude-haiku-5-5', $e->usage?->model);
     }
 
+    public function test_a_response_field_of_the_wrong_type_is_bad_output_and_keeps_its_usage(): void
+    {
+        $reply = $this->reply('', overrides: ['content' => [['type' => 'text', 'text' => ['not', 'text']]]]);
+
+        $e = $this->unavailable(fn () => $this->model($reply)->understand($this->request()));
+
+        $this->assertSame('bad_output', $e->reason);
+        $this->assertSame(120, $e->usage?->inputTokens);
+    }
+
     public function test_period_and_branch_of_100_characters_are_still_read(): void
     {
         $hundred = str_repeat('a', 100);

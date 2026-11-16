@@ -95,4 +95,14 @@ class LindaFollowUpTest extends LindaTestCase
         $this->assertSame('last_week', $period?->key);
         $this->assertNull($branch);
     }
+
+    public function test_the_period_search_stops_at_a_change_of_subject(): void
+    {
+        [$period] = LindaFollowUp::carry(LindaIntent::DisbursementSummary, null, null, true, [
+            ['question' => 'disbursed last year', 'intent' => 'disbursement_summary'],
+            ['question' => 'how about collected?', 'intent' => 'collection_summary'],
+        ]);
+
+        $this->assertSame('this_month', $period?->key);
+    }
 }

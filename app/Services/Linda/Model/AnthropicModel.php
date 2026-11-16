@@ -246,6 +246,10 @@ final class AnthropicModel implements LindaModel
             $answer = self::answer(self::text($message));
         } catch (LindaModelUnavailable $e) {
             throw new LindaModelUnavailable($e->reason, $usage);
+        } catch (Exception) {
+            // The SDK raises a plain Exception for a response field of the
+            // wrong type: the answer can't be read, but it was billed.
+            throw new LindaModelUnavailable('bad_output', $usage);
         }
 
         return LindaUnderstanding::fromAnswer($answer['intent'], $answer['period'], $answer['branch'], $answer['follow_up'], $usage);

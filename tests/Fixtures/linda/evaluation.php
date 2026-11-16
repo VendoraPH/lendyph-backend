@@ -141,6 +141,7 @@ return [
     $case('Who are the top account officers this month?', 'officer_performance', 'this_month'),
     $case('How is each collector doing?', 'officer_performance'),
     $case('What is our collection rate this week?', 'collection_efficiency', 'this_week'),
+    $case('What is our collection rate this month?', 'collection_efficiency', 'this_month', null, [['Find receipt RCP-000123', 'transaction_lookup'], ['find juan.delacruz@example.com', 'borrower_lookup']]),
     $case('What percent of dues did we collect last month?', 'collection_efficiency', 'last_month'),
     $case('What is our portfolio at risk?', 'portfolio_summary'),
     $case('Show the PAR 30', 'portfolio_summary'),

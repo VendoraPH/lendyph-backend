@@ -505,7 +505,7 @@ class LindaAssistantTest extends LindaAnswersTestCase
         $this->assertSame('claude-haiku-5-5', $row->model);
     }
 
-    public function test_a_timeout_books_the_typical_cost_of_the_requested_model(): void
+    public function test_a_timeout_books_the_worst_case_cost_of_the_requested_model(): void
     {
         config()->set('linda.driver', 'fake');
         $this->app->instance(FakeModel::class, FakeModel::failingWith('timeout'));
@@ -515,10 +515,20 @@ class LindaAssistantTest extends LindaAnswersTestCase
 
         $row = LindaQuestion::query()->latest('id')->firstOrFail();
         $this->assertSame('timeout', $row->error_code);
-        $this->assertSame(LindaPrices::estimate('claude-haiku-5-5'), $row->cost);
-        // 1,500 cache read × 0.01 + 500 input × 0.10 + 300 output × 0.50 = 215 USD per million, × 62.
-        $this->assertSame('0.013330', $row->cost);
+        $this->assertSame(LindaPrices::worstCaseEstimate('claude-haiku-5-5'), $row->cost);
+        // Each of 2 attempts: 1,500 prompt tokens written to the cache × 0.125 + 500 input × 0.10
+        // + 512 output (max_tokens) × 0.50 = 493.5 USD per million; × 2 attempts × 62.
+        $this->assertSame('0.061194', $row->cost);
         $this->assertSame(0, $row->input_tokens);
+    }
+
+    public function test_the_worst_case_follows_max_tokens_and_retries(): void
+    {
+        config()->set('linda.anthropic.max_tokens', 1024);
+        config()->set('linda.anthropic.max_retries', 0);
+
+        // 187.5 + 50 + 1,024 × 0.50 = 749.5 USD per million, one attempt, × 62.
+        $this->assertSame('0.046469', LindaPrices::worstCaseEstimate('claude-haiku-5-5'));
     }
 
     public function test_a_failure_before_the_answer_books_nothing(): void
@@ -585,7 +595,9 @@ class LindaAssistantTest extends LindaAnswersTestCase
             ->assertJsonPath('error_code', 'ai_unavailable');
 
         $this->assertStringNotContainsString('secret-model-text', $response->getContent());
-        $this->assertSame('internal', LindaQuestion::query()->latest('id')->value('error_code'));
+        $row = LindaQuestion::query()->latest('id')->firstOrFail();
+        $this->assertSame('internal', $row->error_code);
+        $this->assertSame(LindaPrices::worstCaseEstimate('claude-haiku-5-5'), $row->cost);
         Log::shouldHaveReceived('warning')->once()->withArgs(fn (string $message, array $context) => $message === 'Linda model call failed.'
             && $context['reason'] === 'internal'
             && $context['exception'] === TypeError::class
@@ -656,6 +668,84 @@ class LindaAssistantTest extends LindaAnswersTestCase
         $this->actingAs($this->asker)->postJson(self::URL, ['message' => 'How much did we collect sa Atlantis this month?'])
             ->assertOk()
             ->assertJsonPath('data.answer', '"Atlantis" is not among your branches. Please check the branch name and ask again.');
+    }
+
+    public function test_an_earlier_lookup_the_guard_kept_local_never_reaches_the_model(): void
+    {
+        config()->set('linda.driver', 'fake');
+        $fake = new FakeModel;
+        $this->app->instance(FakeModel::class, $fake);
+
+        $this->actingAs($this->asker)->postJson(self::URL, [
+            'message' => 'What is our collection efficiency this month?',
+            'history' => [
+                ['role' => 'user', 'content' => 'find juan.delacruz@example.com'],
+                ['role' => 'assistant', 'content' => null, 'intent' => 'borrower_lookup'],
+                ['role' => 'user', 'content' => 'Which members currently have overdue payments?'],
+                ['role' => 'assistant', 'content' => null, 'intent' => 'overdue_accounts'],
+                ['role' => 'user', 'content' => 'status of LN-000042'],
+                ['role' => 'assistant', 'content' => null, 'intent' => 'loan_details'],
+            ],
+        ])->assertOk();
+
+        $this->assertCount(1, $fake->requests);
+        $this->assertSame([['question' => 'Which members currently have overdue payments?', 'intent' => 'overdue_accounts']], $fake->requests[0]->earlier);
+        $this->assertStringNotContainsString('juan.delacruz', serialize($fake->requests[0]));
+        $this->assertStringNotContainsString('LN-000042', serialize($fake->requests[0]));
+    }
+
+    public function test_a_branch_named_in_a_question_only_the_model_understood_is_carried(): void
+    {
+        $cabadbaran = Branch::factory()->create(['name' => 'Cabadbaran Branch', 'code' => 'CBD']);
+
+        $this->actingAs($this->asker)->postJson(self::URL, [
+            'message' => 'how about yesterday?',
+            'history' => [
+                ['role' => 'user', 'content' => 'Magkano po ang na-disburse sa Cabadbaran nitong nakaraang linggo, pakisabi?'],
+                ['role' => 'assistant', 'content' => null, 'intent' => 'disbursement_summary'],
+            ],
+        ])->assertOk()->assertJsonPath('data.intent', 'disbursement_summary');
+
+        $row = LindaQuestion::query()->latest('id')->firstOrFail();
+        $this->assertSame($cabadbaran->id, $row->branch_id);
+        $this->assertSame(LindaPeriod::named('yesterday')->from->toDateString(), $row->period_from->toDateString());
+    }
+
+    public function test_a_branch_the_user_cant_see_is_never_carried_from_a_model_understood_question(): void
+    {
+        Branch::factory()->create(['name' => 'Tandag Branch', 'code' => 'TDG']);
+        $branchUser = $this->branchUser(['reports:view', 'loans:view', 'borrowers:view', 'linda:use']);
+
+        $this->actingAs($branchUser)->postJson(self::URL, [
+            'message' => 'how about yesterday?',
+            'history' => [
+                ['role' => 'user', 'content' => 'Magkano po ang na-disburse sa Tandag nitong nakaraang linggo, pakisabi?'],
+                ['role' => 'assistant', 'content' => null, 'intent' => 'disbursement_summary'],
+            ],
+        ])->assertOk()->assertJsonPath('data.intent', 'disbursement_summary');
+
+        // The matcher reads "sa Tandag nitong … pakisabi" as a branch name; none of
+        // the user's branches is in the words, so the reply is "not among your
+        // branches", never the hidden branch's figures.
+        $row = LindaQuestion::query()->latest('id')->firstOrFail();
+        $this->assertSame('no_branch', $row->outcome);
+        $this->assertNull($row->branch_id);
+    }
+
+    public function test_a_period_never_skips_a_change_of_subject(): void
+    {
+        $this->actingAs($this->asker)->postJson(self::URL, [
+            'message' => 'how about disbursed?',
+            'history' => [
+                ['role' => 'user', 'content' => 'disbursed last year'],
+                ['role' => 'assistant', 'content' => null, 'intent' => 'disbursement_summary'],
+                ['role' => 'user', 'content' => 'how about collected?'],
+                ['role' => 'assistant', 'content' => null, 'intent' => 'collection_summary'],
+            ],
+        ])->assertOk()->assertJsonPath('data.intent', 'disbursement_summary');
+
+        $row = LindaQuestion::query()->latest('id')->firstOrFail();
+        $this->assertSame(LindaPeriod::named('this_month')->from->toDateString(), $row->period_from->toDateString());
     }
 
     private function logged(string $cost, string $source = LindaQuestion::SOURCE_MODEL, mixed $at = null): void
