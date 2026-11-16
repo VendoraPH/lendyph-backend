@@ -107,7 +107,11 @@ final class LindaScope
                 continue;
             }
 
-            $pattern = '/(?<![\pL\pN])'.implode('\s+', array_map(fn (string $word) => preg_quote($word, '/'), $words)).'(?:\s+branch)?(?![\pL\pN])/u';
+            // A short name counts only after a place word ("sa Main", "in Main") or
+            // with "branch" after it ("Main branch"), so an ordinary word ("the main
+            // reason", "how far") is never read as a branch.
+            $core = implode('\s+', array_map(fn (string $word) => preg_quote($word, '/'), $words));
+            $pattern = '/(?:(?<![\pL\pN])(?:sa|in|at|for|from|ng|taga)\s+'.$core.'|(?<![\pL\pN])'.$core.'\s+branch)(?![\pL\pN])/u';
 
             if (preg_match($pattern, $clean) === 1) {
                 $found[implode(' ', $words)] = true;

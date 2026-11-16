@@ -104,6 +104,11 @@ final class LindaFollowUp
             return $named;
         }
 
+        // The matcher read the whole question and found no branch: it had none.
+        if ($match !== null && $named === null) {
+            return null;
+        }
+
         return LindaScope::visibleBranchIn($user, $question) ?? $named;
     }
 }

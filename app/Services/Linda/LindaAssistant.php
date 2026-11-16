@@ -175,7 +175,9 @@ final class LindaAssistant
         try {
             if ($e->usage !== null) {
                 $this->recordUsage($log, $e->usage);
-            } elseif ($e->reason === 'timeout') {
+            } elseif (in_array($e->reason, ['timeout', 'bad_output'], true)) {
+                // A timeout, or an answer that arrived but couldn't be read, may
+                // still have been billed.
                 $log->cost = LindaPrices::worstCaseEstimate($model);
             }
         } catch (LindaModelUnavailable) {

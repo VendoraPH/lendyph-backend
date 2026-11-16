@@ -16,6 +16,7 @@ use App\Services\Linda\Model\AnthropicModel;
 use App\Services\Linda\Model\FakeModel;
 use App\Services\Linda\Model\LindaModel;
 use App\Services\Linda\Model\LindaModelRequest;
+use App\Services\Linda\Model\LindaModelUnavailable;
 use App\Services\Linda\Model\LindaPrices;
 use App\Services\Linda\Model\LindaUnderstanding;
 use App\Services\Linda\Model\LindaUsage;
@@ -522,6 +523,26 @@ class LindaAssistantTest extends LindaAnswersTestCase
         $this->assertSame(0, $row->input_tokens);
     }
 
+    public function test_an_unreadable_answer_without_usage_books_the_worst_case_cost(): void
+    {
+        // As the Anthropic driver does for a 200 whose body (or usage) can't be read.
+        config()->set('linda.driver', 'anthropic');
+        $this->app->instance(AnthropicModel::class, new class implements LindaModel
+        {
+            public function understand(LindaModelRequest $request): ?LindaUnderstanding
+            {
+                throw new LindaModelUnavailable('bad_output');
+            }
+        });
+
+        $this->actingAs($this->asker)->postJson(self::URL, ['message' => 'What is our collection efficiency this month?'])
+            ->assertStatus(503);
+
+        $row = LindaQuestion::query()->latest('id')->firstOrFail();
+        $this->assertSame('bad_output', $row->error_code);
+        $this->assertSame(LindaPrices::worstCaseEstimate('claude-haiku-5-5'), $row->cost);
+    }
+
     public function test_the_worst_case_follows_max_tokens_and_retries(): void
     {
         config()->set('linda.anthropic.max_tokens', 1024);
@@ -729,6 +750,22 @@ class LindaAssistantTest extends LindaAnswersTestCase
         // branches", never the hidden branch's figures.
         $row = LindaQuestion::query()->latest('id')->firstOrFail();
         $this->assertSame('no_branch', $row->outcome);
+        $this->assertNull($row->branch_id);
+    }
+
+    public function test_an_ordinary_word_in_a_model_understood_question_never_becomes_a_branch(): void
+    {
+        Branch::factory()->create(['name' => 'Central Branch', 'code' => 'CTL']);
+
+        $this->actingAs($this->asker)->postJson(self::URL, [
+            'message' => 'how about yesterday?',
+            'history' => [
+                ['role' => 'user', 'content' => 'What is the central cause of the drop in collections, pakisabi?'],
+                ['role' => 'assistant', 'content' => null, 'intent' => 'collection_summary'],
+            ],
+        ])->assertOk()->assertJsonPath('data.intent', 'collection_summary');
+
+        $row = LindaQuestion::query()->latest('id')->firstOrFail();
         $this->assertNull($row->branch_id);
     }
 

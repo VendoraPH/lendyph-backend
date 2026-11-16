@@ -74,4 +74,19 @@ class LindaScopeTest extends LindaAnswersTestCase
         Branch::factory()->create(['name' => 'Mainland Branch', 'code' => 'ML']);
         $this->assertSame(['branch_ids' => [$this->branch->id], 'branch_id' => $this->branch->id], LindaScope::resolve($user, 'Main')->filters());
     }
+
+    public function test_a_branch_in_free_text_needs_a_place_word_or_its_full_name(): void
+    {
+        $user = $this->headOffice();
+
+        // An ordinary word that happens to be a branch's short name is not the branch.
+        $this->assertNull(LindaScope::visibleBranchIn($user, 'What is the main reason collections dropped?'));
+        $this->assertNull(LindaScope::visibleBranchIn($user, 'How far have we come this month?'));
+
+        // A place word before the short name, or the full name, is.
+        $this->assertSame('main', LindaScope::visibleBranchIn($user, 'collections in Main last week'));
+        $this->assertSame('main', LindaScope::visibleBranchIn($user, 'magkano ang koleksyon sa main ngayong buwan'));
+        $this->assertSame('main', LindaScope::visibleBranchIn($user, 'Main Branch collections, please'));
+        $this->assertSame('far', LindaScope::visibleBranchIn($user, 'disbursements at Far yesterday'));
+    }
 }
