@@ -86,7 +86,7 @@ final class LindaAnswerer
         return new LindaReply(($intent ?? LindaIntent::UnsupportedQuestion)->value, LindaWording::unclearPeriod(), 'unclear_period');
     }
 
-    /** @param  string  $reason  "future", or "over_10_years" */
+    /** @param  string  $reason  LindaPeriod::REFUSED_FUTURE, REFUSED_TOO_LONG or REFUSED_INVALID */
     public function periodRefused(string $reason, ?LindaIntent $intent = null): LindaReply
     {
         return new LindaReply(($intent ?? LindaIntent::UnsupportedQuestion)->value, LindaWording::periodRefused($reason), 'period_refused');

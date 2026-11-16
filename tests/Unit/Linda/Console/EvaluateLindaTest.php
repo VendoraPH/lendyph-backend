@@ -2,6 +2,7 @@
 
 namespace Tests\Unit\Linda\Console;
 
+use App\Console\Commands\EvaluateLinda;
 use App\Services\Linda\LindaIntent;
 use App\Services\Linda\Model\AnthropicModel;
 use App\Services\Linda\Model\FakeModel;
@@ -123,6 +124,24 @@ class EvaluateLindaTest extends LindaTestCase
         $this->artisan('linda:evaluate', ['--model-only' => true, '--limit' => 5])
             ->expectsOutputToContain('Errors: ')
             ->expectsOutputToContain('overloaded')
+            ->assertSuccessful();
+    }
+
+    /**
+     * A follow-up that names no branch keeps the one an earlier follow-up
+     * named ("how about sa Riverside?"), as the endpoint does: each earlier
+     * question is read with its own intent.
+     */
+    public function test_a_branch_an_earlier_follow_up_named_carries_on(): void
+    {
+        $cases = require base_path(EvaluateLinda::QUESTION_SET);
+        $number = collect($cases)->search(fn (array $case) => $case['question'] === 'What about yesterday?'
+            && ($case['earlier'][1][0] ?? null) === 'how about sa Riverside?');
+
+        $this->assertIsInt($number);
+
+        $this->artisan('linda:evaluate', ['--driver' => 'none'])
+            ->expectsOutputToContain(sprintf('PASS %3d %-7s %s', $number + 1, 'matcher', 'What about yesterday?'))
             ->assertSuccessful();
     }
 

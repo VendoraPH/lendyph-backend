@@ -205,7 +205,9 @@ class EvaluateLinda extends Command
     }
 
     /**
-     * A follow-up keeps the earlier question's branch when it names none, and
+     * A follow-up keeps the earlier question's branch when it names none (each
+     * earlier question read with its own intent, as LindaAssistant reads it,
+     * so a branch an earlier follow-up named carries on), and
      * its period too when it keeps the earlier subject ("how about overdue?"
      * after a collections question asks about overdue as of today). A
      * question with no period whose intent defaults to this month gets this
@@ -230,7 +232,7 @@ class EvaluateLinda extends Command
                 if ($sameSubject) {
                     $actual['period'] ??= LindaPeriod::extract(LindaText::clean($entry['question']))['period'];
                 }
-                $actual['branch'] ??= LindaMatcher::match($entry['question'])?->branchName;
+                $actual['branch'] ??= LindaMatcher::match($entry['question'], LindaIntent::tryFrom((string) $entry['intent']))?->branchName;
             }
         }
 

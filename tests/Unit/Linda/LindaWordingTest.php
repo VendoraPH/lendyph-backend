@@ -7,6 +7,22 @@ use App\Services\Linda\LindaWording;
 
 class LindaWordingTest extends LindaTestCase
 {
+    public function test_each_period_refusal_reads_its_own_reason(): void
+    {
+        $this->assertSame(
+            'That period is in the future, so there are no figures for it yet. Please ask about today or an earlier date.',
+            LindaWording::periodRefused(LindaPeriod::REFUSED_FUTURE),
+        );
+        $this->assertSame(
+            'That period is longer than 10 years. Please ask about a shorter period.',
+            LindaWording::periodRefused(LindaPeriod::REFUSED_TOO_LONG),
+        );
+        $this->assertSame(
+            'That period doesn\'t work: its start comes after its end. Try something like "October 1 to 15".',
+            LindaWording::periodRefused(LindaPeriod::REFUSED_INVALID),
+        );
+    }
+
     public function test_money_is_pesos_with_two_decimals(): void
     {
         $this->assertSame('₱0.00', LindaWording::money(0));

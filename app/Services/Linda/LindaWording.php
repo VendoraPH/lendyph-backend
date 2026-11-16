@@ -91,11 +91,14 @@ final class LindaWording
     }
 
     /** @param  string  $reason  "future", or "over_10_years" */
+    /** @param  string  $reason  LindaPeriod::REFUSED_FUTURE, REFUSED_TOO_LONG or REFUSED_INVALID */
     public static function periodRefused(string $reason): string
     {
-        return $reason === 'future'
-            ? 'That period is in the future, so there are no figures for it yet. Please ask about today or an earlier date.'
-            : 'That period is longer than 10 years. Please ask about a shorter period.';
+        return match ($reason) {
+            LindaPeriod::REFUSED_FUTURE => 'That period is in the future, so there are no figures for it yet. Please ask about today or an earlier date.',
+            LindaPeriod::REFUSED_INVALID => 'That period doesn\'t work: its start comes after its end. Try something like "October 1 to 15".',
+            default => 'That period is longer than 10 years. Please ask about a shorter period.',
+        };
     }
 
     public static function unsupported(): string

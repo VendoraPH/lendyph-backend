@@ -105,6 +105,7 @@ return [
     $case('eh last week?', 'collection_efficiency', 'last_week', null, [$efficiency]),
     $case('how about this year?', 'collection_efficiency', 'this_year', null, [$efficiency]),
     $case('what about the San Jose branch?', 'loan_summary', null, 'san jose', [$active]),
+    $case('What about yesterday?', 'collection_summary', 'yesterday', 'riverside', [$collected, ['how about sa Riverside?', 'collection_summary']]),
     $case('How much have we disbursed this month?', 'disbursement_summary', 'this_month', null, [$collected]),
     $case('paano naman noong isang buwan?', 'income_summary', 'last_month', null, [$collected, $income]),
     $case('eh ngayong taon?', 'collection_summary', 'this_year', null, [$collected, ['how about last month?', 'collection_summary']]),
