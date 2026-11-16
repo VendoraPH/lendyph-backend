@@ -36,7 +36,7 @@ final class CollectionSummaryAnswer extends Answer
         return 'collection figures';
     }
 
-    public function build(User $user, LindaScope $scope, ?LindaPeriod $period): LindaReply
+    public function build(User $user, LindaScope $scope, ?LindaPeriod $period, #[\SensitiveParameter] ?string $question = null): LindaReply
     {
         $period ??= LindaPeriod::named('this_month');
 
@@ -65,6 +65,6 @@ final class CollectionSummaryAnswer extends Answer
                 LindaReply::money('Penalty Collected', $report['penalty_collected']),
                 LindaReply::number('Payments', $count),
             ], self::sentence(W::during($period))),
-        ], LindaLinks::for($user, 'daily_collection'));
+        ], LindaLinks::forPeriod($user, $period, $scope->branchId, 'daily_collection'));
     }
 }

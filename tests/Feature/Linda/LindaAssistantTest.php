@@ -117,6 +117,27 @@ class LindaAssistantTest extends LindaAnswersTestCase
         $this->assertSame([$this->branch->id], $row->branch_scope);
     }
 
+    public function test_a_payments_answer_logs_the_members_and_loans_it_listed(): void
+    {
+        config()->set('linda.driver', 'fake');
+        $fake = new FakeModel;
+        $this->app->instance(FakeModel::class, $fake);
+        $ana = $this->releaseTo($this->member($this->branch, 'Ana', 'Cruz'), 60000);
+        $ben = $this->releaseTo($this->member($this->far, 'Ben', 'Reyes'), 60000);
+        $this->pay($ana, 1500);
+        $this->pay($ben, 900);
+        $asker = $this->branchUser(['payments:view', 'linda:use']);
+
+        $this->actingAs($asker)->postJson(self::URL, ['message' => 'Show me the list of payments this month'])
+            ->assertOk()
+            ->assertJsonPath('data.intent', 'collection_details');
+
+        $row = LindaQuestion::query()->latest('id')->firstOrFail();
+        $this->assertSame('answered', $row->outcome);
+        $this->assertSame([$ana->borrower_id], $row->member_ids);
+        $this->assertSame([$ana->id], $row->loan_ids);
+    }
+
     public function test_with_no_match_and_no_model_the_reply_lists_what_linda_answers(): void
     {
         $fake = new FakeModel;
@@ -142,7 +163,7 @@ class LindaAssistantTest extends LindaAnswersTestCase
         $response = $this->actingAs($this->asker)->postJson(self::URL, ['message' => 'What is our collection efficiency this month?'])
             ->assertOk();
 
-        $expected = app(LindaAnswerer::class)->notYet(LindaIntent::CollectionEfficiency, $this->asker);
+        $expected = app(LindaAnswerer::class)->answer($this->asker, LindaIntent::CollectionEfficiency, LindaPeriod::named('this_month'), null);
         $this->assertSame('collection_efficiency', $response->json('data.intent'));
         $this->assertSame($expected->answer, $response->json('data.answer'));
         $this->assertSame($expected->links, $response->json('data.links'));
@@ -151,7 +172,7 @@ class LindaAssistantTest extends LindaAnswersTestCase
         $this->assertSame('claude-haiku-5-5', $fake->requests[0]->model);
         $row = LindaQuestion::query()->latest('id')->firstOrFail();
         $this->assertSame(LindaQuestion::SOURCE_MODEL, $row->source);
-        $this->assertSame('not_yet', $row->outcome);
+        $this->assertSame('answered', $row->outcome);
         $this->assertSame('claude-haiku-5-5', $row->model);
         $this->assertSame(FakeModel::INPUT_TOKENS, $row->input_tokens);
         $this->assertSame(FakeModel::OUTPUT_TOKENS, $row->output_tokens);

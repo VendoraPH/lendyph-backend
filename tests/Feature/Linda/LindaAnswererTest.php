@@ -112,7 +112,7 @@ class LindaAnswererTest extends LindaAnswersTestCase
                 'Penalty Collected' => $report['penalty_collected'],
                 'Payments' => $report['payment_count'],
             ], $this->stats($reply));
-            $this->assertSame(['/reports/daily_collection'], $this->linkUrls($reply));
+            $this->assertSame(['/reports/daily_collection?from='.$period->from->toDateString().'&to='.$period->to->toDateString()], $this->linkUrls($reply));
             $this->assertSame('Open Daily Collection Report', $reply->links[0]['label']);
             $this->assertNotNull($reply->answerFunction);
             $this->assertStringContainsString($period->label, $reply->answer);
@@ -139,7 +139,7 @@ class LindaAnswererTest extends LindaAnswersTestCase
                 'Loans Released' => $report['loans_released'],
                 'Principal Released' => $releases['total_principal'],
             ], $this->stats($reply));
-            $this->assertSame(['/reports/disbursement_report'], $this->linkUrls($reply));
+            $this->assertSame(['/reports/disbursement_report?from='.$period->from->toDateString().'&to='.$period->to->toDateString()], $this->linkUrls($reply));
         }
 
         $this->assertSame(2, $this->stats($this->answerer()->answer($this->headOffice(), LindaIntent::DisbursementSummary, null, null))['Loans Released']);
@@ -450,15 +450,20 @@ class LindaAnswererTest extends LindaAnswersTestCase
         $this->assertSame([['label' => 'Open Income Report', 'url' => '/reports/income_report']], $reports->links);
         $this->assertSame([], $reports->blocks);
 
-        $this->assertSame(['/reports/collection_efficiency'], $this->linkUrls($this->answerer()->answer($this->branchUser(), LindaIntent::CollectionEfficiency, null, null)));
+        $month = $this->thisMonth();
+        $this->assertSame(
+            ['/reports/collection_efficiency?from='.$month->from->toDateString().'&to='.$month->to->toDateString()],
+            $this->linkUrls($this->answerer()->answer($this->branchUser(), LindaIntent::CollectionEfficiency, null, null)),
+        );
         $this->assertSame(['/reports/portfolio_summary'], $this->linkUrls($this->answerer()->answer($this->branchUser(), LindaIntent::PortfolioSummary, null, null)));
 
         $noReports = $this->answerer()->answer($this->branchUser(['loans:view']), LindaIntent::IncomeSummary, null, null);
         $this->assertSame('not_yet', $noReports->outcome);
         $this->assertSame([], $noReports->links);
 
+        // A lookup the model understood with no record named asks for one (round 2).
         $lookup = $this->answerer()->answer($this->branchUser(), LindaIntent::BorrowerLookup, null, null);
-        $this->assertSame('not_yet', $lookup->outcome);
+        $this->assertSame('no_target', $lookup->outcome);
         $this->assertSame([], $lookup->links);
 
         $this->assertSame([], $this->answerer()->notYet(LindaIntent::IncomeSummary)->links);

@@ -8,14 +8,17 @@ use InvalidArgumentException;
 /**
  * One Linda answer. toArray() is the frontend's reply (lendyph-frontend
  * src/types/linda.ts `LindaReply`): `{intent, answer, blocks, links, as_of}`.
- * The rest is for the question log, never sent: the member ids the answer
- * listed, the answer function that built it and how the question ended.
+ * The rest is for the question log, never sent: the member and loan ids the
+ * answer listed, the answer function that built it and how the question
+ * ended.
  */
 final class LindaReply
 {
     public const OUTCOMES = [
         'answered', 'not_yet', 'unsupported', 'denied', 'unmatched',
         'unclear_period', 'period_refused', 'no_branch', 'ambiguous_branch',
+        // A lookup with no member, loan or receipt named; none found; several found.
+        'no_target', 'not_found', 'ambiguous_record',
     ];
 
     /** When the figures were read, in Manila. */
@@ -25,6 +28,7 @@ final class LindaReply
      * @param  list<array<string, mixed>>  $blocks  stats and list blocks
      * @param  list<array{label: string, url: string}>  $links
      * @param  list<int>  $memberIds
+     * @param  list<int>  $loanIds
      */
     public function __construct(
         public readonly string $intent,
@@ -35,6 +39,7 @@ final class LindaReply
         public readonly array $memberIds = [],
         public readonly ?string $answerFunction = null,
         ?CarbonImmutable $asOf = null,
+        public readonly array $loanIds = [],
     ) {
         if (! in_array($outcome, self::OUTCOMES, true)) {
             throw new InvalidArgumentException("Unknown Linda outcome [{$outcome}].");
@@ -65,6 +70,32 @@ final class LindaReply
     public static function money(string $label, int|float|string $pesos): array
     {
         return ['label' => $label, 'value' => (float) $pesos, 'format' => 'currency', 'currency' => 'PHP'];
+    }
+
+    /**
+     * A whole percent: 87.5 reads "87.5%".
+     *
+     * @return array{label: string, value: float, format: string}
+     */
+    public static function percent(string $label, int|float $percent): array
+    {
+        return ['label' => $label, 'value' => (float) $percent, 'format' => 'percent'];
+    }
+
+    /**
+     * A Manila calendar date, `YYYY-MM-DD`.
+     *
+     * @return array{label: string, value: string, format: string}
+     */
+    public static function date(string $label, string $date): array
+    {
+        return ['label' => $label, 'value' => $date, 'format' => 'date'];
+    }
+
+    /** @return array{label: string, value: string, format: string} */
+    public static function text(string $label, string $text): array
+    {
+        return ['label' => $label, 'value' => $text, 'format' => 'text'];
     }
 
     /** @return array{label: string, value: int, format: string} */

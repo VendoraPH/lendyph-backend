@@ -40,7 +40,7 @@ final class GeneralLendingSummaryAnswer extends Answer
         return 'lending summary';
     }
 
-    public function build(User $user, LindaScope $scope, ?LindaPeriod $period): LindaReply
+    public function build(User $user, LindaScope $scope, ?LindaPeriod $period, #[\SensitiveParameter] ?string $question = null): LindaReply
     {
         $period ??= LindaPeriod::named('this_month');
 
@@ -92,6 +92,6 @@ final class GeneralLendingSummaryAnswer extends Answer
                         .W::money($overdue['past_due_amount']).' past due.');
         }
 
-        return $this->reply($answer, $blocks, LindaLinks::for($user, 'portfolio_summary'));
+        return $this->reply($answer, $blocks, LindaLinks::forPeriod($user, null, $scope->branchId, 'portfolio_summary'));
     }
 }

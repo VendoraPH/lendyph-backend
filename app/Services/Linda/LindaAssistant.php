@@ -80,7 +80,7 @@ final class LindaAssistant
             $log->source = LindaQuestion::SOURCE_MATCHER;
             [$period, $branchName] = LindaFollowUp::carry($match->intent, $match->period, $match->branchName, $match->followUp, $history->earlier, $user);
 
-            return $this->answered($log, $started, $user, $match->intent, $period, $this->asTyped($branchName, $question, $history));
+            return $this->answered($log, $started, $user, $match->intent, $period, $this->asTyped($branchName, $question, $history), $question);
         }
 
         $lookup = LindaGuard::check($question);
@@ -227,7 +227,7 @@ final class LindaAssistant
 
         [$period, $branchName] = LindaFollowUp::carry($intent, $period, $understanding->branchName, $understanding->followUp, $history->earlier, $user);
 
-        return $this->answered($log, $started, $user, $intent, $period, $this->asTyped($branchName, $question, $history));
+        return $this->answered($log, $started, $user, $intent, $period, $this->asTyped($branchName, $question, $history), $question);
     }
 
     /** A branch name as staff typed it, from this question or an earlier one, for the reply. */
@@ -241,7 +241,7 @@ final class LindaAssistant
     /**
      * @throws LindaHttpError data_unavailable
      */
-    private function answered(LindaQuestion $log, int $started, User $user, LindaIntent $intent, ?LindaPeriod $period, ?string $branchName): LindaReply
+    private function answered(LindaQuestion $log, int $started, User $user, LindaIntent $intent, ?LindaPeriod $period, ?string $branchName, #[\SensitiveParameter] string $question): LindaReply
     {
         $log->fill([
             'intent' => $intent->value,
@@ -250,7 +250,7 @@ final class LindaAssistant
         ]);
 
         try {
-            $reply = $this->answerer->answer($user, $intent, $period, $branchName);
+            $reply = $this->answerer->answer($user, $intent, $period, $branchName, $question);
 
             if ($branchName !== null && $reply->outcome === 'answered') {
                 $log->branch_id = LindaScope::resolve($user, $branchName)->branchId;
@@ -273,6 +273,7 @@ final class LindaAssistant
             'answer_function' => $reply->answerFunction,
             'outcome' => $outcome ?? $reply->outcome,
             'member_ids' => $reply->memberIds === [] ? null : array_values(array_map('intval', $reply->memberIds)),
+            'loan_ids' => $reply->loanIds === [] ? null : array_values(array_map('intval', $reply->loanIds)),
         ]);
         $this->write($log, $started);
 

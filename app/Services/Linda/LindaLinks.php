@@ -9,6 +9,11 @@ use App\Models\User;
  * permissions the page itself needs, so a link the user can't open is left
  * out. Labels use the names the menu and the report catalog show
  * (lendyph-frontend src/lib/page-titles.ts).
+ *
+ * A report link opens on the answer's own period and branch
+ * (`?from=YYYY-MM-DD&to=YYYY-MM-DD&branch=<id>`, forPeriod()): the period for
+ * a report with date controls, the branch only when the question named one.
+ * The report page checks both again and ignores what it can't use.
  */
 final class LindaLinks
 {
@@ -26,17 +31,26 @@ final class LindaLinks
     ];
 
     /**
+     * The reports whose page reads `?from=&to=`: the dated reports. The
+     * Portfolio Summary is as of today and has no date controls.
+     */
+    private const DATED_REPORTS = [
+        'daily_collection', 'disbursement_report', 'income_report', 'collection_efficiency', 'performance', 'repayments_list',
+    ];
+
+    /** The reports whose page reads `?branch=`. */
+    private const BRANCH_REPORTS = [
+        'daily_collection', 'disbursement_report', 'portfolio_summary', 'income_report', 'collection_efficiency', 'performance', 'repayments_list',
+    ];
+
+    /**
      * The report an intent Linda can't answer yet is about, when there is one.
      *
      * @var array<string, string>
      */
     private const NOT_YET_PAGES = [
         'income_summary' => 'income_report',
-        'collection_efficiency' => 'collection_efficiency',
         'portfolio_summary' => 'portfolio_summary',
-        'branch_performance' => 'performance',
-        'officer_performance' => 'performance',
-        'collection_details' => 'repayments_list',
     ];
 
     /**
@@ -54,6 +68,37 @@ final class LindaLinks
             if ($entry !== null && self::canOpen($user, $entry['needs'])) {
                 $links[] = ['label' => $entry['label'], 'url' => $entry['url']];
             }
+        }
+
+        return $links;
+    }
+
+    /**
+     * The links for $pages that $user may open, each report opening on
+     * $period (a dated report) and $branchId (a named branch), in the order
+     * named. Other pages keep their plain link.
+     *
+     * @return list<array{label: string, url: string}>
+     */
+    public static function forPeriod(User $user, ?LindaPeriod $period, ?int $branchId, string ...$pages): array
+    {
+        $links = [];
+
+        foreach ($pages as $page) {
+            $entry = self::PAGES[$page] ?? null;
+
+            if ($entry === null || ! self::canOpen($user, $entry['needs'])) {
+                continue;
+            }
+
+            $query = [
+                ...($period !== null && in_array($page, self::DATED_REPORTS, true)
+                    ? ['from' => $period->from->toDateString(), 'to' => $period->to->toDateString()]
+                    : []),
+                ...($branchId !== null && in_array($page, self::BRANCH_REPORTS, true) ? ['branch' => $branchId] : []),
+            ];
+
+            $links[] = ['label' => $entry['label'], 'url' => $entry['url'].($query === [] ? '' : '?'.http_build_query($query))];
         }
 
         return $links;

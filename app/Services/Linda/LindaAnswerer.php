@@ -2,14 +2,26 @@
 
 namespace App\Services\Linda;
 
+use App\Models\Borrower;
+use App\Models\Loan;
+use App\Models\Repayment;
 use App\Models\User;
+use App\Services\BranchAccess;
 use App\Services\Linda\Answers\Answer;
+use App\Services\Linda\Answers\BranchPerformanceAnswer;
+use App\Services\Linda\Answers\CollectionEfficiencyAnswer;
 use App\Services\Linda\Answers\CollectionSummaryAnswer;
 use App\Services\Linda\Answers\DisbursementSummaryAnswer;
 use App\Services\Linda\Answers\GeneralLendingSummaryAnswer;
+use App\Services\Linda\Answers\LoanLookupAnswer;
 use App\Services\Linda\Answers\LoanSummaryAnswer;
+use App\Services\Linda\Answers\LookupAnswer;
+use App\Services\Linda\Answers\MemberLookupAnswer;
 use App\Services\Linda\Answers\NotYetAnswer;
+use App\Services\Linda\Answers\OfficerPerformanceAnswer;
 use App\Services\Linda\Answers\OverdueAccountsAnswer;
+use App\Services\Linda\Answers\PaymentsAnswer;
+use App\Services\Linda\Answers\ReceiptLookupAnswer;
 use App\Services\Linda\Answers\UnsupportedAnswer;
 
 /**
@@ -23,6 +35,10 @@ use App\Services\Linda\Answers\UnsupportedAnswer;
  * in words, with no figures and no links); then the branch, matched only
  * among the user's own; then the figures. Collections, disbursements and the
  * summary default to this month; overdue and active loans are as of today.
+ *
+ * Lookups (a member, a loan or a receipt) are answered by lookup(), on the
+ * server, from the record the request names; an understood lookup intent
+ * with no request asks which record is meant.
  */
 final class LindaAnswerer
 {
@@ -33,12 +49,33 @@ final class LindaAnswerer
         'loan_summary' => LoanSummaryAnswer::class,
         'overdue_accounts' => OverdueAccountsAnswer::class,
         'general_lending_summary' => GeneralLendingSummaryAnswer::class,
+        'collection_details' => PaymentsAnswer::class,
+        'collection_efficiency' => CollectionEfficiencyAnswer::class,
+        'branch_performance' => BranchPerformanceAnswer::class,
+        'officer_performance' => OfficerPerformanceAnswer::class,
     ];
 
-    public function answer(User $user, LindaIntent $intent, ?LindaPeriod $period, ?string $branchName): LindaReply
+    /** The record numbers a lookup reads: receipts, loans (LN-, LA-) and members. */
+    private const LOOKUP_PREFIXES = [Repayment::RECEIPT_PREFIX, 'LN', Loan::CODE_PREFIX, Borrower::CODE_PREFIX];
+
+    /** @var array<string, string> lookup intent => LindaLookupRequest kind */
+    private const LOOKUP_KINDS = [
+        'borrower_lookup' => LindaLookupRequest::MEMBER,
+        'loan_details' => LindaLookupRequest::LOAN,
+        'transaction_lookup' => LindaLookupRequest::RECEIPT,
+    ];
+
+    /**
+     * @param  ?string  $question  the question as typed, read only to rank or name rows (performance); never stored
+     */
+    public function answer(User $user, LindaIntent $intent, ?LindaPeriod $period, ?string $branchName, #[\SensitiveParameter] ?string $question = null): LindaReply
     {
         if ($intent === LindaIntent::UnsupportedQuestion) {
             return $this->unsupported();
+        }
+
+        if (isset(self::LOOKUP_KINDS[$intent->value])) {
+            return $this->lookup($user, new LindaLookupRequest(self::LOOKUP_KINDS[$intent->value], $intent));
         }
 
         $class = self::ANSWERS[$intent->value] ?? null;
@@ -72,7 +109,50 @@ final class LindaAnswerer
             $period = LindaPeriod::named('this_month');
         }
 
-        return $answer->build($user, $scope, $period);
+        return $answer->build($user, $scope, $period, $question);
+    }
+
+    /**
+     * A lookup, answered from the record it names, in the user's own
+     * branches, never by the model. By its number when it has one: a member
+     * (BRW-), a loan (LN-, LA-) or a receipt (RCP-); else by the member's
+     * name. A member named in a loan lookup is answered with the member and
+     * their loans; one named in a receipt lookup, with their latest payments.
+     * A number Linda doesn't look up gets a fixed reply, and a lookup that
+     * names nothing asks for the record.
+     */
+    public function lookup(User $user, LindaLookupRequest $request): LindaReply
+    {
+        $code = $request->code === null ? '' : mb_strtoupper(trim($request->code));
+        $name = $request->name === null ? '' : trim($request->name);
+        $prefix = $code === '' ? null : (preg_match('/^\pL+/u', $code, $letters) === 1 ? $letters[0] : $code);
+
+        if ($prefix !== null && ! in_array($prefix, self::LOOKUP_PREFIXES, true)) {
+            return new LindaReply($request->intent->value, LindaWording::cantLookUpNumber($prefix), 'not_yet', answerFunction: 'LookupAnswer');
+        }
+
+        /** @var LookupAnswer $answer */
+        $answer = app(match (true) {
+            $prefix === Repayment::RECEIPT_PREFIX => ReceiptLookupAnswer::class,
+            in_array($prefix, ['LN', Loan::CODE_PREFIX], true) => LoanLookupAnswer::class,
+            $request->kind === LindaLookupRequest::RECEIPT => ReceiptLookupAnswer::class,
+            $request->kind === LindaLookupRequest::LOAN && $code === '' && $name === '' => LoanLookupAnswer::class,
+            default => MemberLookupAnswer::class,
+        });
+
+        if (! $answer->allows($user)) {
+            return $answer->denied();
+        }
+
+        if (app(BranchAccess::class)->for($user) === []) {
+            return new LindaReply($answer->intent()->value, LindaWording::noBranchAssigned(), 'denied', answerFunction: $answer->name());
+        }
+
+        if ($code === '' && $name === '') {
+            return new LindaReply($answer->intent()->value, LindaWording::whichRecord($request->kind), 'no_target', answerFunction: $answer->name());
+        }
+
+        return $answer->find($user, new LindaLookupRequest($request->kind, $request->intent, $code === '' ? null : $code, $name === '' ? null : $name));
     }
 
     /** What Linda can answer, with the five suggested questions. */
