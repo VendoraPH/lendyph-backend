@@ -55,7 +55,7 @@ class LindaMatcherFollowUpTest extends LindaTestCase
 
     public function test_the_word_branch_with_no_name_is_not_understood(): void
     {
-        $this->assertNull(LindaMatcher::match('which branch collected the most?', null));
+        $this->assertNull(LindaMatcher::match('collections at the branch', null));
     }
 
     public function test_a_branch_name_is_at_most_three_words(): void

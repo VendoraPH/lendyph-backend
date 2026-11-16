@@ -7,6 +7,8 @@ namespace App\Console\Commands;
 use App\Services\Linda\LindaFollowUp;
 use App\Services\Linda\LindaGuard;
 use App\Services\Linda\LindaIntent;
+use App\Services\Linda\LindaLookup;
+use App\Services\Linda\LindaLookupRequest;
 use App\Services\Linda\LindaMatcher;
 use App\Services\Linda\LindaPeriod;
 use App\Services\Linda\Model\LindaModel;
@@ -25,8 +27,20 @@ use Throwable;
 /**
  * Scores Linda's question understanding on the synthetic question set
  * (tests/Fixtures/linda/evaluation.php), through the production flow: the
- * matcher first, then the local guard (LindaGuard, lookups end there), and
- * the model only when neither answers.
+ * matcher first, then the local lookup parser (LindaLookup, lookups end
+ * there and are answered on the server), and the model only when neither
+ * answers.
+ *
+ * ## A lookup that would reach the model fails the run
+ * A case that expects a lookup intent but would be sent to the model fails
+ * the whole run (a non-zero exit), whatever the driver: no member name or
+ * record number may ever reach the model. A lookup case may also give the
+ * code or name the parser must pull out (`target`), scored as "Lookup
+ * target accuracy".
+ *
+ * ## Languages
+ * Each case names its language (en, tl, ceb or mixed), and the run prints
+ * the share of cases passed in each.
  *
  * A follow-up keeps the period and branch of the question it follows
  * (LindaFollowUp, the endpoint's rule), a question with no period whose
@@ -47,7 +61,8 @@ use Throwable;
     {--model= : The model id to ask (default: config linda.model)}
     {--confirm-spend : Required for the anthropic driver: each model-handled case is a paid call}
     {--limit= : Run at most this many cases}
-    {--model-only : Skip the cases the matcher answers}')]
+    {--model-only : Skip the cases the matcher and the lookup parser answer}
+    {--set= : Another question set under tests/Fixtures/linda/ (default: the full set)}')]
 #[Description('Score Linda\'s question understanding on the synthetic question set. Writes nothing')]
 class EvaluateLinda extends Command
 {
@@ -56,6 +71,12 @@ class EvaluateLinda extends Command
     private const DRIVERS = ['none', 'fake', 'anthropic'];
 
     private const NOTHING = '—';
+
+    private const LOOKUP_INTENTS = ['borrower_lookup', 'loan_details', 'transaction_lookup'];
+
+    private const LANGUAGES = ['en' => 'English', 'tl' => 'Tagalog/Taglish', 'ceb' => 'Bisaya/Cebuano', 'mixed' => 'Mixed'];
+
+    private const SET_FOLDER = 'tests/Fixtures/linda/';
 
     public function handle(): int
     {
@@ -89,22 +110,33 @@ class EvaluateLinda extends Command
             }
         }
 
-        /** @var list<array{question: string, earlier?: list<array{string, string}>, intent: string, period: string|array{from: string, to: string}|null, branch: ?string}> $cases */
-        $cases = require base_path(self::QUESTION_SET);
+        $set = (string) ($this->option('set') ?? self::QUESTION_SET);
 
-        $this->evaluate($cases, LindaModelFactory::make($driver), $driver, $model, $limit, (bool) $this->option('model-only'));
+        if (! str_starts_with($set, self::SET_FOLDER) || str_contains($set, '..') || ! str_ends_with($set, '.php') || ! is_file(base_path($set))) {
+            $this->error('The question set must be a PHP file under '.self::SET_FOLDER.'.');
 
-        return self::SUCCESS;
+            return self::FAILURE;
+        }
+
+        /** @var list<array{question: string, earlier?: list<array{string, string}>, intent: string, period: string|array{from: string, to: string}|null, branch: ?string, language?: string, target?: array{code?: string, name?: string}}> $cases */
+        $cases = require base_path($set);
+
+        $leaks = $this->evaluate($cases, LindaModelFactory::make($driver), $driver, $model, $limit, (bool) $this->option('model-only'));
+
+        return $leaks === 0 ? self::SUCCESS : self::FAILURE;
     }
 
     /**
-     * @param  list<array{question: string, earlier?: list<array{string, string}>, intent: string, period: string|array{from: string, to: string}|null, branch: ?string}>  $cases
+     * @param  list<array{question: string, earlier?: list<array{string, string}>, intent: string, period: string|array{from: string, to: string}|null, branch: ?string, language?: string, target?: array{code?: string, name?: string}}>  $cases
+     * @return int the lookup cases that would have been sent to the model
      */
-    private function evaluate(array $cases, LindaModel $model, string $driver, string $modelId, ?int $limit, bool $modelOnly): void
+    private function evaluate(array $cases, LindaModel $model, string $driver, string $modelId, ?int $limit, bool $modelOnly): int
     {
         $this->line("Driver: {$driver}".($driver === 'none' ? '' : ", model: {$modelId}"));
 
-        $totals = ['run' => 0, 'matcher' => 0, 'guard' => 0, 'model' => 0, 'none' => 0, 'intent' => 0, 'period' => 0, 'period_scored' => 0, 'branch' => 0, 'branch_scored' => 0, 'refusals' => 0];
+        $totals = ['run' => 0, 'matcher' => 0, 'lookup' => 0, 'model' => 0, 'none' => 0, 'intent' => 0, 'period' => 0, 'period_scored' => 0, 'branch' => 0, 'branch_scored' => 0, 'refusals' => 0, 'target' => 0, 'target_scored' => 0];
+        $languages = array_fill_keys(array_keys(self::LANGUAGES), ['run' => 0, 'passed' => 0]);
+        $leaks = [];
         $tokens = ['input' => 0, 'output' => 0, 'cache_read' => 0, 'cache_write' => 0];
         $errors = [];
         $latencies = [];
@@ -123,7 +155,7 @@ class EvaluateLinda extends Command
                 continue;
             }
 
-            $lookup = $match === null ? LindaGuard::check($case['question']) : null;
+            $lookup = $match === null ? LindaLookup::parse($case['question']) : null;
 
             if ($modelOnly && $lookup !== null) {
                 continue;
@@ -135,7 +167,7 @@ class EvaluateLinda extends Command
             if ($match !== null) {
                 $actual = ['intent' => $match->intent, 'period' => $match->period, 'branch' => $match->branchName, 'follow_up' => $match->followUp] + $actual;
             } elseif ($lookup !== null) {
-                $actual = ['source' => 'guard', 'intent' => $lookup] + $actual;
+                $actual = ['source' => 'lookup', 'intent' => $lookup->intent] + $actual;
             } else {
                 $actual['source'] = 'model';
                 $started = hrtime(true);
@@ -180,8 +212,24 @@ class EvaluateLinda extends Command
                 $totals['branch'] += $score['branch'] ? 1 : 0;
             }
 
-            $passed = $score['intent'] && $score['period'] !== false && $score['branch'] !== false;
+            $target = $this->scoreTarget($case, $lookup);
+            if ($target !== null) {
+                $totals['target_scored']++;
+                $totals['target'] += $target ? 1 : 0;
+            }
+
+            if (in_array($case['intent'], self::LOOKUP_INTENTS, true) && in_array($actual['source'], ['model', 'none'], true)) {
+                $leaks[] = $number + 1;
+            }
+
+            $passed = $score['intent'] && $score['period'] !== false && $score['branch'] !== false && $target !== false;
             $this->line(sprintf('%s %3d %-7s %s', $passed ? 'PASS' : 'FAIL', $number + 1, $actual['source'], $case['question']));
+
+            $language = $case['language'] ?? 'en';
+            if (isset($languages[$language])) {
+                $languages[$language]['run']++;
+                $languages[$language]['passed'] += $passed ? 1 : 0;
+            }
 
             if (! $passed) {
                 $this->line('           expected: '.$this->describeExpected($case));
@@ -192,17 +240,44 @@ class EvaluateLinda extends Command
         $this->newLine();
         $this->line("Cases run: {$totals['run']}");
         $this->line("Matcher-handled: {$totals['matcher']}");
-        $this->line("Guard-handled: {$totals['guard']}");
+        $this->line("Lookup-handled: {$totals['lookup']}");
         $this->line("Model-handled: {$totals['model']}");
         $this->line("Unanswered (no model): {$totals['none']}");
         $this->line('Intent accuracy: '.$this->ratio($totals['intent'], $totals['run']));
         $this->line('Period accuracy: '.$this->ratio($totals['period'], $totals['period_scored']));
         $this->line('Branch accuracy: '.$this->ratio($totals['branch'], $totals['branch_scored']));
+        $this->line('Lookup target accuracy: '.$this->ratio($totals['target'], $totals['target_scored']));
+        $this->line('Passed by language:');
+        foreach (self::LANGUAGES as $key => $label) {
+            $this->line("  {$label}: ".$this->ratio($languages[$key]['passed'], $languages[$key]['run']));
+        }
         $this->line("Refusals: {$totals['refusals']}");
         $this->line('Errors: '.array_sum($errors).($errors === [] ? '' : ' ('.implode(', ', array_map(fn (string $reason, int $count) => "{$reason} {$count}", array_keys($errors), $errors)).')'));
         $this->line(sprintf('Tokens: %s input, %s output, %s cache read, %s cache write', ...array_map(fn (int $n) => number_format($n), array_values($tokens))));
         $this->line('Cost: ₱'.$cost->toScale(6, RoundingMode::HalfUp)->toString().' (₱'.$cost->toScale(2, RoundingMode::HalfUp)->toString().')');
         $this->line('Latency p50: '.$this->percentile($latencies, 50).', p95: '.$this->percentile($latencies, 95));
+        $this->line('Lookups sent to the model: '.count($leaks));
+
+        if ($leaks !== []) {
+            $this->error('Lookup cases that would reach the model: '.implode(', ', $leaks).'. No lookup may ever be sent to the model.');
+        }
+
+        return count($leaks);
+    }
+
+    /**
+     * Whether the lookup parser pulled out the code and name a lookup case
+     * expects; null when the case gives none or the parser didn't answer it.
+     *
+     * @param  array{target?: array{code?: string, name?: string}}  $case
+     */
+    private function scoreTarget(array $case, ?LindaLookupRequest $lookup): ?bool
+    {
+        if (! array_key_exists('target', $case) || $lookup === null) {
+            return null;
+        }
+
+        return ($case['target']['code'] ?? null) === $lookup->code && ($case['target']['name'] ?? null) === $lookup->name;
     }
 
     /**

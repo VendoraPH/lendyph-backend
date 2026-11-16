@@ -4,6 +4,8 @@ namespace Tests\Unit\Linda\Console;
 
 use App\Console\Commands\EvaluateLinda;
 use App\Services\Linda\LindaIntent;
+use App\Services\Linda\LindaLookup;
+use App\Services\Linda\LindaMatcher;
 use App\Services\Linda\Model\AnthropicModel;
 use App\Services\Linda\Model\FakeModel;
 use Illuminate\Support\Facades\DB;
@@ -55,6 +57,13 @@ class EvaluateLindaTest extends LindaTestCase
             ->assertFailed();
     }
 
+    public function test_a_question_set_outside_the_fixtures_is_refused(): void
+    {
+        $this->artisan('linda:evaluate', ['--set' => '.env'])
+            ->expectsOutputToContain('tests/Fixtures/linda/')
+            ->assertFailed();
+    }
+
     public function test_an_unknown_driver_is_refused(): void
     {
         $this->artisan('linda:evaluate', ['--driver' => 'chat_completions'])->assertFailed();
@@ -93,7 +102,9 @@ class EvaluateLindaTest extends LindaTestCase
 
         $sent = array_map(fn ($request) => $request->question, $fake->requests);
         $this->assertNotContains('How much have we collected this month?', $sent);
-        $this->assertContains('What is our collection efficiency this month?', $sent);
+        $this->assertNotContains('What is our collection efficiency this month?', $sent);
+        $this->assertNotContains('Pila ang nakolekta karong bulana?', $sent);
+        $this->assertContains('What was our interest income last month?', $sent);
         $this->assertLessThan(count($cases), count($fake->requests));
     }
 
@@ -168,33 +179,110 @@ class EvaluateLindaTest extends LindaTestCase
     }
 
     /**
-     * Lookups the matcher misses end at the local guard (security review S3),
-     * as they do on the endpoint, and never reach the model.
+     * Lookups the matcher misses end at the local lookup parser, as they do
+     * on the endpoint, and never reach the model: no member name, record
+     * number, email or phone number in the question or in earlier questions.
      */
-    public function test_lookups_end_at_the_guard_and_never_reach_the_model(): void
+    public function test_lookups_end_at_the_lookup_parser_and_never_reach_the_model(): void
     {
         $fake = new FakeModel;
         $this->app->instance(FakeModel::class, $fake);
         $cases = require base_path(EvaluateLinda::QUESTION_SET);
         $number = collect($cases)->search(fn (array $case) => $case['question'] === 'Find receipt RCP-000123');
+        $bisaya = collect($cases)->search(fn (array $case) => $case['question'] === 'Unsa ang utang ni Juan Dela Cruz?');
+        $this->assertIsInt($bisaya);
 
         $this->artisan('linda:evaluate')
-            ->expectsOutputToContain(sprintf('PASS %3d %-7s %s', $number + 1, 'guard', 'Find receipt RCP-000123'))
-            ->expectsOutputToContain('Guard-handled: ')
+            ->expectsOutputToContain(sprintf('PASS %3d %-7s %s', $number + 1, 'lookup', 'Find receipt RCP-000123'))
+            ->expectsOutputToContain(sprintf('PASS %3d %-7s %s', $bisaya + 1, 'lookup', 'Unsa ang utang ni Juan Dela Cruz?'))
+            ->expectsOutputToContain('Lookup-handled: ')
+            ->expectsOutputToContain('Lookup target accuracy: ')
+            ->expectsOutputToContain('Lookups sent to the model: 0')
             ->assertSuccessful();
 
-        foreach ($fake->requests as $request) {
-            $this->assertStringNotContainsString('RCP-000123', serialize($request));
-            $this->assertStringNotContainsString('LN-0000', serialize($request));
-            $this->assertStringNotContainsString('juan.delacruz', serialize($request));
+        $targets = [];
+        foreach ($cases as $case) {
+            foreach ($case['target'] ?? [] as $value) {
+                $targets[] = $value;
+            }
         }
+        $this->assertNotEmpty($targets);
+
+        foreach ($fake->requests as $request) {
+            $sent = serialize($request);
+            foreach ($targets as $target) {
+                $this->assertStringNotContainsString($target, $sent);
+            }
+            $this->assertStringNotContainsString('juan.delacruz', $sent);
+            $this->assertStringNotContainsString('0917', $sent);
+        }
+    }
+
+    /**
+     * Every lookup case in the question set is caught before the model, and
+     * no other case is: checked here without running the command.
+     */
+    public function test_no_lookup_case_reaches_the_model_and_no_other_case_is_caught(): void
+    {
+        $cases = require base_path(EvaluateLinda::QUESTION_SET);
+        $lookups = ['borrower_lookup', 'loan_details', 'transaction_lookup'];
+
+        foreach ($cases as $case) {
+            $earlier = $case['earlier'] ?? [];
+            $previous = $earlier === [] ? null : LindaIntent::from($earlier[count($earlier) - 1][1]);
+            $request = LindaLookup::parse($case['question']);
+
+            if (in_array($case['intent'], $lookups, true)) {
+                $this->assertNull(LindaMatcher::match($case['question'], $previous), $case['question']);
+                $this->assertSame($case['intent'], $request?->intent->value, $case['question']);
+                if (array_key_exists('target', $case)) {
+                    $this->assertSame($case['target']['code'] ?? null, $request->code, $case['question']);
+                    $this->assertSame($case['target']['name'] ?? null, $request->name, $case['question']);
+                }
+
+                continue;
+            }
+
+            $this->assertNull($request, $case['question']);
+        }
+    }
+
+    /**
+     * A lookup case the parser misses would go to the model: the run fails.
+     */
+    public function test_a_lookup_that_would_reach_the_model_fails_the_run(): void
+    {
+        $fake = new FakeModel;
+        $this->app->instance(FakeModel::class, $fake);
+
+        $this->artisan('linda:evaluate', ['--set' => 'tests/Fixtures/linda/evaluation-lookup-leak.php'])
+            ->expectsOutputToContain('Lookups sent to the model: 1')
+            ->assertFailed();
+    }
+
+    public function test_it_prints_the_accuracy_for_each_language(): void
+    {
+        $this->artisan('linda:evaluate', ['--driver' => 'none'])
+            ->expectsOutputToContain('English: ')
+            ->expectsOutputToContain('Tagalog/Taglish: ')
+            ->expectsOutputToContain('Bisaya/Cebuano: ')
+            ->expectsOutputToContain('Mixed: ')
+            ->assertSuccessful();
     }
 
     public function test_the_question_set_is_well_formed(): void
     {
         $cases = require base_path('tests/Fixtures/linda/evaluation.php');
 
-        $this->assertGreaterThanOrEqual(140, count($cases));
+        $this->assertGreaterThanOrEqual(250, count($cases));
+        $languages = array_count_values(array_column($cases, 'language'));
+        $this->assertGreaterThanOrEqual(60, $languages['ceb'] ?? 0);
+        $this->assertGreaterThanOrEqual(5, $languages['mixed'] ?? 0);
+        $this->assertSame(count($cases), array_sum($languages));
+        $lookups = array_filter($cases, fn (array $case) => in_array($case['intent'], ['borrower_lookup', 'loan_details', 'transaction_lookup'], true));
+        $this->assertGreaterThanOrEqual(30, count($lookups));
+        $newIntents = array_filter($cases, fn (array $case) => in_array($case['intent'], ['collection_efficiency', 'branch_performance', 'officer_performance'], true));
+        $this->assertGreaterThanOrEqual(20, count($newIntents));
 
         foreach ($cases as $n => $case) {
             $this->assertIsString($case['question'], "case {$n}");
@@ -205,6 +293,7 @@ class EvaluateLindaTest extends LindaTestCase
             }
             $this->assertArrayHasKey('period', $case, "case {$n}");
             $this->assertArrayHasKey('branch', $case, "case {$n}");
+            $this->assertContains($case['language'] ?? null, ['en', 'tl', 'ceb', 'mixed'], "case {$n}");
         }
     }
 }
