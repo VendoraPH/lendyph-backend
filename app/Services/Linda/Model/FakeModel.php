@@ -12,8 +12,9 @@ use App\Services\Linda\LindaText;
  *
  * It is deterministic. Keyword rules in English, Tagalog and Bisaya map a
  * question to an intent, the period it names to period words and a "sa X",
- * "in X" or "X branch" phrase to a branch, and a question with no subject after an earlier one follows on
- * from it. Its answers then go through the same LindaUnderstanding as the
+ * "in X" or "X branch" phrase to a branch, and a question with no subject
+ * follows on from the latest earlier topic (it sees topics only, never an
+ * earlier question's text, as the real model does). Its answers then go through the same LindaUnderstanding as the
  * real model's. It reports fixed usage (1,000 input and 100 output tokens on
  * the requested model) and keeps every request it received.
  */

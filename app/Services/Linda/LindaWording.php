@@ -281,4 +281,13 @@ final class LindaWording
 
         return mb_strlen($clean) > self::ECHO_MAX ? rtrim(mb_substr($clean, 0, self::ECHO_MAX)).'…' : $clean;
     }
+
+    /**
+     * For a question that names a staff member without asking how they
+     * perform: answered locally, never by the model (D2).
+     */
+    public static function staffNotYet(): string
+    {
+        return 'I can\'t answer questions about one staff member yet. I can rank account officers and collectors: ask "Who are the top account officers this month?"';
+    }
 }

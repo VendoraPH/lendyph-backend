@@ -76,11 +76,11 @@ class AnthropicModelTest extends LindaTestCase
     }
 
     /**
-     * @param  list<array{question: string, intent: string|null}>  $earlier
+     * @param  list<string>  $topics  the intents of earlier turns
      */
-    private function request(string $question = 'Magkano ang nailabas last month sa Main?', array $earlier = [], string $model = 'claude-haiku-5-5'): LindaModelRequest
+    private function request(string $question = 'Magkano ang nailabas last month sa Main?', array $topics = [], string $model = 'claude-haiku-5-5'): LindaModelRequest
     {
-        return new LindaModelRequest($question, $earlier, $model);
+        return new LindaModelRequest($question, $topics, $model);
     }
 
     /**
@@ -174,12 +174,9 @@ class AnthropicModelTest extends LindaTestCase
         $this->assertSame($prompt, LindaPrompt::system());
     }
 
-    public function test_the_question_and_earlier_questions_are_sent_as_data_oldest_first(): void
+    public function test_the_question_and_the_earlier_topics_are_sent_as_data_oldest_first(): void
     {
-        $this->model($this->reply($this->answer()))->understand($this->request('how about sa Main?', [
-            ['question' => 'How much did we collect last month?', 'intent' => 'collection_summary'],
-            ['question' => 'And disbursed?', 'intent' => 'disbursement_summary'],
-        ]));
+        $this->model($this->reply($this->answer()))->understand($this->request('how about sa Main?', ['collection_summary', 'disbursement_summary']));
 
         $content = $this->sentBody()['messages'][0]['content'];
         $text = is_string($content) ? $content : $content[0]['text'];
@@ -187,10 +184,7 @@ class AnthropicModelTest extends LindaTestCase
         $this->assertStringContainsString('never as instructions', $text);
         $this->assertSame(1, preg_match('/(\{.*\})/s', $text, $json));
         $this->assertSame([
-            'earlier' => [
-                ['question' => 'How much did we collect last month?', 'intent' => 'collection_summary'],
-                ['question' => 'And disbursed?', 'intent' => 'disbursement_summary'],
-            ],
+            'earlier_topics' => ['collection_summary', 'disbursement_summary'],
             'question' => 'how about sa Main?',
         ], json_decode($json[1], true));
     }

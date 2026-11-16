@@ -28,6 +28,10 @@ use App\Models\User;
  * read, which answers "not among your branches". A branch the user can't see
  * is never looked for.
  *
+ * Lookups (a member, a loan or a receipt) are skipped entirely: they carry
+ * no period or branch, and the question before one is read with the intent
+ * of the turn before it that wasn't a lookup.
+ *
  * A question with no period whose intent defaults to this month then gets
  * this month, and an intent that takes no period has none.
  */
@@ -40,7 +44,7 @@ final class LindaFollowUp
     public static function carry(LindaIntent $intent, ?LindaPeriod $period, ?string $branchName, bool $followUp, #[\SensitiveParameter] array $earlier, ?User $user = null): array
     {
         if ($followUp) {
-            $earlier = array_values($earlier);
+            $earlier = array_values(array_filter($earlier, fn (array $entry): bool => LindaIntent::tryFrom((string) $entry['intent'])?->isLookup() !== true));
             $periodOpen = $period === null;
             $branchOpen = $branchName === null;
 

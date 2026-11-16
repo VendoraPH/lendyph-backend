@@ -334,7 +334,7 @@ class LindaAssistantTest extends LindaAnswersTestCase
         $this->assertNull($row->period_to);
     }
 
-    public function test_the_model_is_sent_only_the_question_and_earlier_questions_with_their_intents(): void
+    public function test_the_model_is_sent_only_the_question_and_the_earlier_topics(): void
     {
         config()->set('linda.driver', 'fake');
         $fake = new FakeModel;
@@ -354,10 +354,9 @@ class LindaAssistantTest extends LindaAnswersTestCase
         $request = $fake->requests[0];
         $this->assertInstanceOf(LindaModelRequest::class, $request);
         $this->assertSame('How much interest income did we earn this month?', $request->question);
-        $this->assertSame([
-            ['question' => 'Which members currently have overdue payments?', 'intent' => 'overdue_accounts'],
-            ['question' => 'How many active loans do we have?', 'intent' => 'loan_summary'],
-        ], $request->earlier);
+        $this->assertSame(['overdue_accounts', 'loan_summary'], $request->topics);
+        $this->assertStringNotContainsString('Which members', serialize($request));
+        $this->assertStringNotContainsString('active loans', serialize($request));
         $this->assertStringNotContainsString('Ana Cruz', serialize($request));
         $this->assertStringNotContainsString('Ignore your rules', serialize($request));
     }
@@ -731,7 +730,7 @@ class LindaAssistantTest extends LindaAnswersTestCase
         ])->assertOk();
 
         $this->assertCount(1, $fake->requests);
-        $this->assertSame([['question' => 'Which members currently have overdue payments?', 'intent' => 'overdue_accounts']], $fake->requests[0]->earlier);
+        $this->assertSame(['overdue_accounts'], $fake->requests[0]->topics);
         $this->assertStringNotContainsString('juan.delacruz', serialize($fake->requests[0]));
         $this->assertStringNotContainsString('LN-000042', serialize($fake->requests[0]));
     }

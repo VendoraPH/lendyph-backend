@@ -162,6 +162,10 @@ final class LindaMatcher
         'tell', 'the', 'there', 'this', 'to', 'total', 'totals', 'us', 'was', 'we', 'were', 'what',
         'whats', 'which', 'who', 'whos', 'with', 'would', 'you',
         'account', 'accounts', 'amount', 'amounts', 'loan', 'loans', 'member', 'members', 'report', 'dues',
+        // "Find overdue members", "Search past-due loans": aggregate questions. A
+        // name or a record number after them is no filler, so a lookup still
+        // falls through to the lookup parser.
+        'find', 'search', 'hanapin', 'pangitaa', 'pangita',
         // Tagalog
         'ako', 'ang', 'ano', 'anong', 'ba', 'bigay', 'ilan', 'ilang', 'ito', 'kabuuan', 'kami', 'ko',
         'lahat', 'magkano', 'may', 'mga', 'mo', 'na', 'namin', 'natin', 'nating', 'ng', 'nang', 'ngayon',

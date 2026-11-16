@@ -5,12 +5,13 @@ declare(strict_types=1);
 namespace App\Console\Commands;
 
 use App\Services\Linda\LindaFollowUp;
-use App\Services\Linda\LindaGuard;
 use App\Services\Linda\LindaIntent;
 use App\Services\Linda\LindaLookup;
 use App\Services\Linda\LindaLookupRequest;
 use App\Services\Linda\LindaMatcher;
+use App\Services\Linda\LindaNameCheck;
 use App\Services\Linda\LindaPeriod;
+use App\Services\Linda\LindaText;
 use App\Services\Linda\Model\LindaModel;
 use App\Services\Linda\Model\LindaModelFactory;
 use App\Services\Linda\Model\LindaModelRequest;
@@ -28,13 +29,23 @@ use Throwable;
  * Scores Linda's question understanding on the synthetic question set
  * (tests/Fixtures/linda/evaluation.php), through the production flow: the
  * matcher first, then the local lookup parser (LindaLookup, lookups end
- * there and are answered on the server), and the model only when neither
- * answers.
+ * there and are answered on the server), then, right after a lookup turn, a
+ * short reply naming its target (LindaLookup::reply()), then the full-name
+ * check (LindaNameCheck), and the model only when none answers. The model is
+ * sent the question and the earlier turns' topics (intents) only, never
+ * their text.
+ *
+ * ## The full-name check reads the case, not the database
+ * A case may list the deployment's `people` the check knows (each
+ * [kind, first name, last name], kind member or staff); the check reads
+ * only those, so the run stays synthetic and reads no database. It runs
+ * whatever the driver: with the none driver nothing reaches a model anyway.
  *
  * ## A lookup that would reach the model fails the run
- * A case that expects a lookup intent but would be sent to the model fails
- * the whole run (a non-zero exit), whatever the driver: no member name or
- * record number may ever reach the model. A lookup case may also give the
+ * A case that expects a lookup intent, or names one of its `people`, but
+ * would be sent to the model fails the whole run (a non-zero exit), whatever
+ * the driver: no member or staff name or record number may ever reach the
+ * model. A lookup case may also give the
  * code or name the parser must pull out (`target`), scored as "Lookup
  * target accuracy".
  *
@@ -134,7 +145,7 @@ class EvaluateLinda extends Command
     {
         $this->line("Driver: {$driver}".($driver === 'none' ? '' : ", model: {$modelId}"));
 
-        $totals = ['run' => 0, 'matcher' => 0, 'lookup' => 0, 'model' => 0, 'none' => 0, 'intent' => 0, 'period' => 0, 'period_scored' => 0, 'branch' => 0, 'branch_scored' => 0, 'refusals' => 0, 'target' => 0, 'target_scored' => 0];
+        $totals = ['run' => 0, 'matcher' => 0, 'lookup' => 0, 'name' => 0, 'model' => 0, 'none' => 0, 'intent' => 0, 'period' => 0, 'period_scored' => 0, 'branch' => 0, 'branch_scored' => 0, 'refusals' => 0, 'target' => 0, 'target_scored' => 0];
         $languages = array_fill_keys(array_keys(self::LANGUAGES), ['run' => 0, 'passed' => 0]);
         $leaks = [];
         $tokens = ['input' => 0, 'output' => 0, 'cache_read' => 0, 'cache_write' => 0];
@@ -148,7 +159,10 @@ class EvaluateLinda extends Command
             }
 
             $earlier = array_map(fn (array $entry) => ['question' => $entry[0], 'intent' => $entry[1]], $case['earlier'] ?? []);
-            $previous = $earlier === [] ? null : LindaIntent::from($earlier[count($earlier) - 1]['intent']);
+            // As on the endpoint (LindaHistory): a follow-up carries on the
+            // latest topic that wasn't a lookup.
+            $topics = array_values(array_filter(array_map(fn (array $entry) => LindaIntent::from($entry['intent']), $earlier), fn (LindaIntent $intent) => ! $intent->isLookup()));
+            $previous = $topics === [] ? null : $topics[count($topics) - 1];
             $match = LindaMatcher::match($case['question'], $previous);
 
             if ($modelOnly && $match !== null) {
@@ -156,8 +170,15 @@ class EvaluateLinda extends Command
             }
 
             $lookup = $match === null ? LindaLookup::parse($case['question']) : null;
+            $pending = $earlier === [] ? null : LindaIntent::tryFrom($earlier[count($earlier) - 1]['intent'])?->lookupKind();
 
-            if ($modelOnly && $lookup !== null) {
+            if ($match === null && $lookup === null && $pending !== null) {
+                $lookup = LindaLookup::reply($case['question'], $pending);
+            }
+
+            $named = $match === null && $lookup === null ? LindaNameCheck::find($case['question'], self::people($case['people'] ?? [])) : null;
+
+            if ($modelOnly && ($lookup !== null || $named !== null)) {
                 continue;
             }
 
@@ -168,13 +189,15 @@ class EvaluateLinda extends Command
                 $actual = ['intent' => $match->intent, 'period' => $match->period, 'branch' => $match->branchName, 'follow_up' => $match->followUp] + $actual;
             } elseif ($lookup !== null) {
                 $actual = ['source' => 'lookup', 'intent' => $lookup->intent] + $actual;
+            } elseif ($named !== null) {
+                $actual = ['source' => 'name', 'intent' => self::namedIntent($named), 'period' => $named->kind === LindaNameCheck::STAFF && $named->performance ? LindaPeriod::extract(LindaText::clean($case['question']))['period'] : null] + $actual;
             } else {
                 $actual['source'] = 'model';
                 $started = hrtime(true);
                 $understanding = null;
 
                 try {
-                    $understanding = $model->understand(new LindaModelRequest($case['question'], LindaGuard::withoutLookups($earlier), $modelId));
+                    $understanding = $model->understand(new LindaModelRequest($case['question'], array_column($earlier, 'intent'), $modelId));
                 } catch (LindaModelUnavailable $e) {
                     $actual['error'] = $e->reason;
                     $errors[$e->reason] = ($errors[$e->reason] ?? 0) + 1;
@@ -218,7 +241,8 @@ class EvaluateLinda extends Command
                 $totals['target'] += $target ? 1 : 0;
             }
 
-            if (in_array($case['intent'], self::LOOKUP_INTENTS, true) && in_array($actual['source'], ['model', 'none'], true)) {
+            // A lookup, or a case that names one of its `people`, must stay local.
+            if ((in_array($case['intent'], self::LOOKUP_INTENTS, true) || ($case['people'] ?? []) !== []) && in_array($actual['source'], ['model', 'none'], true)) {
                 $leaks[] = $number + 1;
             }
 
@@ -241,6 +265,7 @@ class EvaluateLinda extends Command
         $this->line("Cases run: {$totals['run']}");
         $this->line("Matcher-handled: {$totals['matcher']}");
         $this->line("Lookup-handled: {$totals['lookup']}");
+        $this->line("Name-check-handled: {$totals['name']}");
         $this->line("Model-handled: {$totals['model']}");
         $this->line("Unanswered (no model): {$totals['none']}");
         $this->line('Intent accuracy: '.$this->ratio($totals['intent'], $totals['run']));
@@ -263,6 +288,30 @@ class EvaluateLinda extends Command
         }
 
         return count($leaks);
+    }
+
+    /**
+     * The full-name check's candidates for a case: only the people it lists.
+     *
+     * @param  list<array{string, string, string}>  $people  [kind, first name, last name]
+     * @return \Closure(list<string>): list<array{kind: string, first_name: string, middle_name: null, last_name: string}>
+     */
+    private static function people(array $people): \Closure
+    {
+        return fn (array $lastNames): array => array_values(array_filter(
+            array_map(fn (array $person): array => ['kind' => $person[0], 'first_name' => $person[1], 'middle_name' => null, 'last_name' => $person[2]], $people),
+            fn (array $person): bool => in_array(mb_strtolower($person['last_name']), $lastNames, true),
+        ));
+    }
+
+    /** The intent the endpoint answers a full-name hit with. */
+    private static function namedIntent(LindaNameCheck $named): LindaIntent
+    {
+        return match (true) {
+            $named->kind === LindaNameCheck::MEMBER => LindaIntent::BorrowerLookup,
+            $named->performance => LindaIntent::OfficerPerformance,
+            default => LindaIntent::UnsupportedQuestion,
+        };
     }
 
     /**

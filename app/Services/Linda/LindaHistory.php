@@ -8,7 +8,9 @@ namespace App\Services\Linda;
  * paired with the intent of the assistant turn that answered it, oldest first,
  * and the intent a follow-up carries on: the last assistant turn's, skipping
  * lookups, so "how about last month?" after a receipt lookup follows the
- * topic asked before it.
+ * topic asked before it. Separately, the lookup kind of the last assistant
+ * turn when that turn was a lookup (`pendingLookup`), so a short reply to
+ * "Which member?" is read as that lookup's target and stays on the server.
  *
  * Assistant content is never read, whatever it holds: the panel sends "" or
  * null, and anything else could be an earlier answer (member rows) or text
@@ -18,10 +20,12 @@ final readonly class LindaHistory
 {
     /**
      * @param  list<array{question: string, intent: ?string}>  $earlier
+     * @param  'member'|'loan'|'receipt'|null  $pendingLookup  the lookup kind of the last assistant turn, when it was a lookup
      */
     private function __construct(
         public array $earlier,
         public ?LindaIntent $previousIntent,
+        public ?string $pendingLookup = null,
     ) {}
 
     /**
@@ -32,12 +36,14 @@ final readonly class LindaHistory
         $entries = array_values($entries);
         $earlier = [];
         $previousIntent = null;
+        $pendingLookup = null;
 
         foreach ($entries as $position => $entry) {
             $role = $entry['role'] ?? null;
 
             if ($role === 'assistant') {
                 $intent = self::intent($entry);
+                $pendingLookup = $intent?->lookupKind();
 
                 if ($intent?->isLookup() !== true) {
                     $previousIntent = $intent;
@@ -64,7 +70,7 @@ final readonly class LindaHistory
             ];
         }
 
-        return new self($max > 0 ? array_slice($earlier, -$max) : [], $previousIntent);
+        return new self($max > 0 ? array_slice($earlier, -$max) : [], $previousIntent, $pendingLookup);
     }
 
     /** @param array{intent?: mixed} $entry */

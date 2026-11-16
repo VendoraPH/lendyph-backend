@@ -5,49 +5,47 @@ namespace App\Services\Linda\Model;
 use App\Services\Linda\LindaIntent;
 
 /**
- * Everything a model sees for one question: the question, up to five earlier
- * questions with the intent each was given (oldest first), and the model id
- * to ask. Never an earlier answer, a member row or a figure.
+ * Everything a model sees for one question: the question, the topics (the
+ * intents) of up to five earlier turns, oldest first, and the model id to
+ * ask. Never an earlier question's text, an earlier answer, a member row or a
+ * figure (Arvin, 2026-11-16, D1): the server carries an earlier period and
+ * branch itself (LindaFollowUp).
+ *
+ * A lookup's topic is left out too, as is a topic the server doesn't know: a
+ * follow-up never carries a lookup on.
  */
 final class LindaModelRequest
 {
-    /** The most earlier questions a model sees. */
+    /** The most earlier topics a model sees. */
     public const EARLIER_MAX = 5;
 
-    /** @var list<array{question: string, intent: ?string}> */
-    public readonly array $earlier;
+    /** @var list<string> the intents of earlier turns, oldest first */
+    public readonly array $topics;
 
     /**
-     * @param  list<array{question: string, intent: LindaIntent|string|null}>  $earlier  oldest first
+     * @param  array<int, LindaIntent|string|null>  $topics  the intents of earlier turns, oldest first
      */
     public function __construct(
         #[\SensitiveParameter] public readonly string $question,
-        #[\SensitiveParameter] array $earlier,
+        array $topics,
         public readonly string $model,
     ) {
         $kept = [];
 
-        foreach ($earlier as $entry) {
-            $text = trim((string) ($entry['question'] ?? ''));
+        foreach ($topics as $topic) {
+            $intent = $topic instanceof LindaIntent ? $topic : (is_string($topic) ? LindaIntent::tryFrom($topic) : null);
 
-            if ($text === '') {
-                continue;
+            if ($intent !== null && ! $intent->isLookup()) {
+                $kept[] = $intent->value;
             }
-
-            $intent = $entry['intent'] ?? null;
-            $intent = $intent instanceof LindaIntent ? $intent : LindaIntent::tryFrom((string) $intent);
-
-            $kept[] = ['question' => $text, 'intent' => $intent?->value];
         }
 
-        $this->earlier = array_slice($kept, -self::EARLIER_MAX);
+        $this->topics = array_slice($kept, -self::EARLIER_MAX);
     }
 
-    /** The intent of the latest earlier question, when it had one. */
+    /** The topic of the latest earlier turn, when there is one. */
     public function previousIntent(): ?LindaIntent
     {
-        $last = $this->earlier === [] ? null : $this->earlier[count($this->earlier) - 1];
-
-        return $last === null || $last['intent'] === null ? null : LindaIntent::from($last['intent']);
+        return $this->topics === [] ? null : LindaIntent::from($this->topics[count($this->topics) - 1]);
     }
 }

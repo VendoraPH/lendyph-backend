@@ -158,7 +158,7 @@ class LindaRound2AssistantTest extends LindaAnswersTestCase
         ])->assertOk();
 
         $this->assertCount(1, $this->fake->requests);
-        $this->assertSame([], $this->fake->requests[0]->earlier);
+        $this->assertSame([], $this->fake->requests[0]->topics);
     }
 
     public function test_a_period_after_a_receipt_lookup_is_never_read_as_another_receipt_lookup(): void
@@ -174,7 +174,7 @@ class LindaRound2AssistantTest extends LindaAnswersTestCase
         $this->assertNotSame('transaction_lookup', $response->json('data.intent'));
         $this->assertNotSame(LindaWording::whichRecord(LindaLookupRequest::RECEIPT), $response->json('data.answer'));
         $this->assertCount(1, $this->fake->requests);
-        $this->assertSame([], $this->fake->requests[0]->earlier);
+        $this->assertSame([], $this->fake->requests[0]->topics);
     }
 
     public function test_a_follow_up_after_a_lookup_carries_on_the_topic_asked_before_it(): void

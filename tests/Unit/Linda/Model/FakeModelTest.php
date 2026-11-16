@@ -51,18 +51,16 @@ class FakeModelTest extends LindaTestCase
     {
         $fake = new FakeModel;
         $fake->understand(new LindaModelRequest('collection efficiency?', [], 'claude-haiku-5-5'));
-        $fake->understand(new LindaModelRequest('eh kahapon?', [['question' => 'collection efficiency?', 'intent' => 'collection_efficiency']], 'claude-haiku-5-5'));
+        $fake->understand(new LindaModelRequest('eh kahapon?', ['collection_efficiency'], 'claude-haiku-5-5'));
 
         $this->assertCount(2, $fake->requests);
         $this->assertSame('eh kahapon?', $fake->requests[1]->question);
-        $this->assertSame([['question' => 'collection efficiency?', 'intent' => 'collection_efficiency']], $fake->requests[1]->earlier);
+        $this->assertSame(['collection_efficiency'], $fake->requests[1]->topics);
     }
 
     public function test_the_fake_follows_up_on_the_earlier_intent(): void
     {
-        $understanding = (new FakeModel)->understand(new LindaModelRequest('eh kahapon?', [
-            ['question' => 'What is our collection efficiency?', 'intent' => 'collection_efficiency'],
-        ], 'claude-haiku-5-5'));
+        $understanding = (new FakeModel)->understand(new LindaModelRequest('eh kahapon?', [LindaIntent::CollectionEfficiency], 'claude-haiku-5-5'));
 
         $this->assertSame(LindaIntent::CollectionEfficiency, $understanding->intent);
         $this->assertTrue($understanding->followUp);
@@ -140,9 +138,7 @@ class FakeModelTest extends LindaTestCase
 
     public function test_the_fake_follows_up_on_a_bisaya_follow_up(): void
     {
-        $understanding = (new FakeModel)->understand(new LindaModelRequest('Unya, niaging bulan?', [
-            ['question' => 'Pila ang ganansya nato?', 'intent' => 'income_summary'],
-        ], 'claude-haiku-5-5'));
+        $understanding = (new FakeModel)->understand(new LindaModelRequest('Unya, niaging bulan?', ['income_summary'], 'claude-haiku-5-5'));
 
         $this->assertSame(LindaIntent::IncomeSummary, $understanding->intent);
         $this->assertTrue($understanding->followUp);
@@ -179,34 +175,22 @@ class FakeModelTest extends LindaTestCase
         $this->assertInstanceOf(AnthropicModel::class, LindaModelFactory::make('anthropic'));
     }
 
-    public function test_a_request_keeps_the_last_five_earlier_questions_oldest_first(): void
+    public function test_a_request_keeps_the_last_five_earlier_topics_oldest_first(): void
     {
-        $earlier = [];
-        foreach (range(1, 7) as $n) {
-            $earlier[] = ['question' => "question {$n}", 'intent' => 'collection_summary'];
-        }
+        $topics = ['income_summary', 'expense_summary', 'collection_summary', 'overdue_accounts', 'loan_summary', 'disbursement_summary', 'collection_efficiency'];
 
-        $request = new LindaModelRequest('and now?', $earlier, 'claude-haiku-5-5');
+        $request = new LindaModelRequest('and now?', $topics, 'claude-haiku-5-5');
 
-        $this->assertSame(['question 3', 'question 4', 'question 5', 'question 6', 'question 7'], array_column($request->earlier, 'question'));
-        $this->assertSame(LindaIntent::CollectionSummary, $request->previousIntent());
+        $this->assertSame(['collection_summary', 'overdue_accounts', 'loan_summary', 'disbursement_summary', 'collection_efficiency'], $request->topics);
+        $this->assertSame(LindaIntent::CollectionEfficiency, $request->previousIntent());
     }
 
-    public function test_a_request_drops_unknown_intents_and_empty_questions(): void
+    public function test_a_request_drops_unknown_intents_lookups_and_empty_topics(): void
     {
-        $request = new LindaModelRequest('and now?', [
-            ['question' => 'How much?', 'intent' => 'make_coffee'],
-            ['question' => '   ', 'intent' => 'collection_summary'],
-            ['question' => 'Overdue?', 'intent' => LindaIntent::OverdueAccounts],
-            ['question' => 'Disbursed?', 'intent' => null],
-        ], 'claude-haiku-5-5');
+        $request = new LindaModelRequest('and now?', ['make_coffee', LindaIntent::OverdueAccounts, null, 'transaction_lookup', ''], 'claude-haiku-5-5');
 
-        $this->assertSame([
-            ['question' => 'How much?', 'intent' => null],
-            ['question' => 'Overdue?', 'intent' => 'overdue_accounts'],
-            ['question' => 'Disbursed?', 'intent' => null],
-        ], $request->earlier);
-        $this->assertNull($request->previousIntent());
+        $this->assertSame(['overdue_accounts'], $request->topics);
+        $this->assertSame(LindaIntent::OverdueAccounts, $request->previousIntent());
     }
 
     public function test_an_unavailable_model_carries_only_a_fixed_reason_code(): void

@@ -6,6 +6,7 @@ use App\Console\Commands\EvaluateLinda;
 use App\Services\Linda\LindaIntent;
 use App\Services\Linda\LindaLookup;
 use App\Services\Linda\LindaMatcher;
+use App\Services\Linda\LindaNameCheck;
 use App\Services\Linda\Model\AnthropicModel;
 use App\Services\Linda\Model\FakeModel;
 use Illuminate\Support\Facades\DB;
@@ -219,8 +220,11 @@ class EvaluateLindaTest extends LindaTestCase
     }
 
     /**
-     * Every lookup case in the question set is caught before the model, and
-     * no other case is: checked here without running the command.
+     * Every lookup case in the question set, and every case naming one of its
+     * people, is answered before the model (by the lookup parser, a reply to
+     * a lookup turn or the full-name check), and no other case is: the
+     * matcher answers it or the parser leaves it alone. Checked here without
+     * running the command, in the endpoint's order.
      */
     public function test_no_lookup_case_reaches_the_model_and_no_other_case_is_caught(): void
     {
@@ -229,11 +233,26 @@ class EvaluateLindaTest extends LindaTestCase
 
         foreach ($cases as $case) {
             $earlier = $case['earlier'] ?? [];
-            $previous = $earlier === [] ? null : LindaIntent::from($earlier[count($earlier) - 1][1]);
-            $request = LindaLookup::parse($case['question']);
+            $topics = array_values(array_filter(array_map(fn (array $entry) => LindaIntent::from($entry[1]), $earlier), fn (LindaIntent $intent) => ! $intent->isLookup()));
+            $previous = $topics === [] ? null : end($topics);
+            $pending = $earlier === [] ? null : LindaIntent::from($earlier[count($earlier) - 1][1])->lookupKind();
+            $match = LindaMatcher::match($case['question'], $previous);
+            $request = LindaLookup::parse($case['question']) ?? ($pending === null ? null : LindaLookup::reply($case['question'], $pending));
+            $people = $case['people'] ?? [];
+            $named = LindaNameCheck::find($case['question'], fn (array $lastNames): array => array_values(array_filter(
+                array_map(fn (array $person): array => ['kind' => $person[0], 'first_name' => $person[1], 'middle_name' => null, 'last_name' => $person[2]], $people),
+                fn (array $person): bool => in_array(mb_strtolower($person['last_name']), $lastNames, true),
+            )));
+
+            if ($people !== []) {
+                $this->assertNull($match, $case['question']);
+                $this->assertTrue($request !== null || $named !== null, $case['question']);
+
+                continue;
+            }
 
             if (in_array($case['intent'], $lookups, true)) {
-                $this->assertNull(LindaMatcher::match($case['question'], $previous), $case['question']);
+                $this->assertNull($match, $case['question']);
                 $this->assertSame($case['intent'], $request?->intent->value, $case['question']);
                 if (array_key_exists('target', $case)) {
                     $this->assertSame($case['target']['code'] ?? null, $request->code, $case['question']);
@@ -243,7 +262,7 @@ class EvaluateLindaTest extends LindaTestCase
                 continue;
             }
 
-            $this->assertNull($request, $case['question']);
+            $this->assertTrue($match !== null || $request === null, $case['question']);
         }
     }
 

@@ -101,9 +101,10 @@ class LindaGuardTest extends LindaTestCase
     }
 
     /**
-     * Every question in the evaluation set that is neither a lookup nor
-     * answered by the matcher passes the guard, so the guard never takes a
-     * question the model could have answered.
+     * Every question in the evaluation set that is neither a lookup, nor
+     * answered by the matcher, nor one naming a case's people (the full-name
+     * check's) passes the guard, so the guard never takes a question the
+     * model could have answered.
      */
     public function test_it_leaves_every_non_lookup_question_in_the_evaluation_set_alone(): void
     {
@@ -111,7 +112,7 @@ class LindaGuardTest extends LindaTestCase
         $lookups = ['borrower_lookup', 'loan_details', 'transaction_lookup'];
 
         foreach ($cases as $case) {
-            if (in_array($case['intent'], $lookups, true)) {
+            if (in_array($case['intent'], $lookups, true) || ($case['people'] ?? []) !== [] || LindaMatcher::match($case['question'], self::previousTopic($case)) !== null) {
                 continue;
             }
 
@@ -119,18 +120,39 @@ class LindaGuardTest extends LindaTestCase
         }
     }
 
+    /**
+     * Every lookup question in the evaluation set the matcher misses is
+     * caught, except a reply to a lookup turn ("Juan Dela Cruz" after "Which
+     * member?") and a question naming a case's people, which the pending
+     * lookup and the full-name check keep local.
+     */
     public function test_it_catches_every_lookup_question_in_the_evaluation_set_the_matcher_misses(): void
     {
         $cases = require base_path('tests/Fixtures/linda/evaluation.php');
 
         foreach ($cases as $case) {
+            $earlier = $case['earlier'] ?? [];
+            $afterLookup = $earlier !== [] && LindaIntent::from($earlier[count($earlier) - 1][1])->isLookup();
+
             if (! in_array($case['intent'], ['borrower_lookup', 'loan_details', 'transaction_lookup'], true)
-                || LindaMatcher::match($case['question']) !== null) {
+                || $afterLookup || ($case['people'] ?? []) !== [] || LindaMatcher::match($case['question']) !== null) {
                 continue;
             }
 
             $this->assertSame($case['intent'], LindaGuard::check($case['question'])?->value, $case['question']);
         }
+    }
+
+    /**
+     * The latest earlier topic that wasn't a lookup, as LindaHistory reads it.
+     *
+     * @param  array{earlier?: list<array{string, string}>}  $case
+     */
+    private static function previousTopic(array $case): ?LindaIntent
+    {
+        $topics = array_values(array_filter(array_map(fn (array $entry) => LindaIntent::from($entry[1]), $case['earlier'] ?? []), fn (LindaIntent $intent) => ! $intent->isLookup()));
+
+        return $topics === [] ? null : $topics[count($topics) - 1];
     }
 
     /**

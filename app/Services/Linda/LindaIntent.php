@@ -60,6 +60,22 @@ enum LindaIntent: string
     }
 
     /**
+     * The LindaLookupRequest kind a lookup intent asks for (a member, a loan
+     * or a receipt), or null for any other intent.
+     *
+     * @return 'member'|'loan'|'receipt'|null
+     */
+    public function lookupKind(): ?string
+    {
+        return match ($this) {
+            self::BorrowerLookup => LindaLookupRequest::MEMBER,
+            self::LoanDetails => LindaLookupRequest::LOAN,
+            self::TransactionLookup => LindaLookupRequest::RECEIPT,
+            default => null,
+        };
+    }
+
+    /**
      * Whether a question of this kind that names no period means this month:
      * the figures over a period Linda answers (collections, payments,
      * disbursements, collection efficiency, branch and officer performance

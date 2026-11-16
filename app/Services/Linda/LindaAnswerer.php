@@ -58,13 +58,6 @@ final class LindaAnswerer
     /** The record numbers a lookup reads: receipts, loans (LN-, LA-) and members. */
     private const LOOKUP_PREFIXES = [Repayment::RECEIPT_PREFIX, 'LN', Loan::CODE_PREFIX, Borrower::CODE_PREFIX];
 
-    /** @var array<string, string> lookup intent => LindaLookupRequest kind */
-    private const LOOKUP_KINDS = [
-        'borrower_lookup' => LindaLookupRequest::MEMBER,
-        'loan_details' => LindaLookupRequest::LOAN,
-        'transaction_lookup' => LindaLookupRequest::RECEIPT,
-    ];
-
     /**
      * @param  ?string  $question  the question as typed, read only to rank or name rows (performance); never stored
      */
@@ -74,8 +67,10 @@ final class LindaAnswerer
             return $this->unsupported();
         }
 
-        if (isset(self::LOOKUP_KINDS[$intent->value])) {
-            return $this->lookup($user, new LindaLookupRequest(self::LOOKUP_KINDS[$intent->value], $intent));
+        $lookupKind = $intent->lookupKind();
+
+        if ($lookupKind !== null) {
+            return $this->lookup($user, new LindaLookupRequest($lookupKind, $intent));
         }
 
         $class = self::ANSWERS[$intent->value] ?? null;

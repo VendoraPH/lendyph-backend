@@ -15,14 +15,21 @@
  *  - `language`: en (English), tl (Tagalog/Taglish), ceb (Bisaya/Cebuano) or
  *    mixed;
  *  - `target`: on a lookup case, optionally the code and name the lookup
- *    parser must pull out (`[]` for a lookup with no target).
+ *    parser must pull out (`[]` for a lookup with no target);
+ *  - `people`: optionally, the members and staff the full-name check knows
+ *    for this case, each [kind, first name, last name] (kind member or
+ *    staff), so the check reads no database. A case that lists people must
+ *    stay local.
  *
  * A question with no period whose intent defaults to this month expects
  * 'this_month'; a follow-up without its own period or branch expects those of
  * the question it follows (the first earlier one that wasn't a follow-up),
  * none included. A question that names a record, asks to look one up or asks
  * about one person's balance ends at the local lookup parser, which answers
- * it on the server as its lookup intent; it must never reach the model.
+ * it on the server as its lookup intent; it must never reach the model. So
+ * does a short reply right after a lookup turn, and a question naming one of
+ * the case's people by full name. Earlier questions reach the model as their
+ * topics (intents) only, never their text.
  * Period and branch aren't scored on unsupported questions.
  *
  * @return list<array{question: string, earlier?: list<array{string, string}>, intent: string, period: string|array{from: string, to: string}|null, branch: ?string}>
@@ -39,6 +46,9 @@ $tl = fn (string $question, string $intent, string|array|null $period = null, ?s
 $ceb = fn (string $question, string $intent, string|array|null $period = null, ?string $branch = null, array $earlier = []): array => $case($question, $intent, $period, $branch, $earlier, 'ceb');
 $mixed = fn (string $question, string $intent, string|array|null $period = null, ?string $branch = null, array $earlier = []): array => $case($question, $intent, $period, $branch, $earlier, 'mixed');
 $find = fn (string $question, string $intent, array $target, string $language = 'en'): array => $case($question, $intent, null, null, [], $language) + ['target' => $target];
+$named = fn (string $question, string $intent, array $people, string|array|null $period = null, string $language = 'en'): array => $case($question, $intent, $period, null, [], $language) + ['people' => $people];
+$juan = [['member', 'Juan', 'Dela Cruz']];
+$bantay = [['staff', 'Pedro', 'Bantay']];
 
 $collected = ['How much have we collected this month?', 'collection_summary'];
 $overdue = ['Which members currently have overdue payments?', 'overdue_accounts'];
@@ -372,4 +382,59 @@ return [
     $mixed('Pila ang na-release natin last week?', 'disbursement_summary', 'last_week'),
     $mixed('Ilan ang atraso sa Riverside karon?', 'overdue_accounts', null, 'riverside'),
     $mixed('how about karong bulana?', 'collection_summary', 'this_month', null, [$collected]),
+
+    // Round 2 review fixes: every one stays local.
+    // Record numbers with any number of digits, Unicode dashes and fullwidth digits.
+    $find('Status of LN-42', 'loan_details', ['code' => 'LN-42']),
+    $find('ln#42', 'loan_details', ['code' => 'LN-42']),
+    $find('RCP-7', 'transaction_lookup', ['code' => 'RCP-7']),
+    $find('BRW-12 status', 'borrower_lookup', ['code' => 'BRW-12']),
+    $find('Status of LN–42', 'loan_details', ['code' => 'LN-42']),
+    $find('Status of LN-４２', 'loan_details', ['code' => 'LN-42']),
+    $find("Status of LN\u{00A0}42", 'loan_details', ['code' => 'LN-42']),
+    $find('Unsa ang status sa LN 42?', 'loan_details', ['code' => 'LN-42'], 'ceb'),
+    // Phone numbers with separators.
+    $find('Whose number is (0917) 123 4567?', 'borrower_lookup', []),
+    $find('Who has 0917.123.4567', 'borrower_lookup', []),
+    $find('Who called from (032) 234-5678?', 'borrower_lookup', []),
+    // Whole names.
+    $find('Magkano ang balance ni Henry Ang?', 'borrower_lookup', ['name' => 'Henry Ang'], 'tl'),
+    $find('Pila ang utang ni Pedro Tan?', 'borrower_lookup', ['name' => 'Pedro Tan'], 'ceb'),
+    $find("balance of Mary O'Neil", 'borrower_lookup', ['name' => "Mary O'Neil"]),
+    // A payment made: the member's latest payments.
+    $find('Did Pedro pay?', 'transaction_lookup', ['name' => 'Pedro']),
+    $find('Has Maria Santos paid?', 'transaction_lookup', ['name' => 'Maria Santos']),
+    $find("Ana Lim's payments", 'transaction_lookup', ['name' => 'Ana Lim']),
+    $find('payments from Ana Lim', 'transaction_lookup', ['name' => 'Ana Lim']),
+    $find('Nagbayad na ba si Rosa?', 'transaction_lookup', ['name' => 'Rosa'], 'tl'),
+    $find('Nakabayad na ba si Rosa Santos?', 'transaction_lookup', ['name' => 'Rosa Santos'], 'tl'),
+    $find('Mibayad na ba si Pedro?', 'transaction_lookup', ['name' => 'Pedro'], 'ceb'),
+    $find('Nibayad ba si Ana karon?', 'transaction_lookup', ['name' => 'Ana'], 'ceb'),
+    $find('Magkano ang bayad ni Pedro?', 'borrower_lookup', ['name' => 'Pedro'], 'tl'),
+    // More phrasings.
+    $find('collections from Juan Dela Cruz', 'transaction_lookup', ['name' => 'Juan Dela Cruz']),
+    $find('Pila ang nakolekta kang Pedro?', 'borrower_lookup', ['name' => 'Pedro'], 'ceb'),
+    $find('Kumusta si Juan?', 'borrower_lookup', ['name' => 'Juan'], 'tl'),
+    $find('Unsa na si Pedro Reyes?', 'borrower_lookup', ['name' => 'Pedro Reyes'], 'ceb'),
+    $find('how about Juan Dela Cruz?', 'borrower_lookup', ['name' => 'Juan Dela Cruz']),
+    $find('Juan Dela Cruz balance', 'borrower_lookup', ['name' => 'Juan Dela Cruz']),
+    $find('Rosa Santos utang', 'borrower_lookup', ['name' => 'Rosa Santos'], 'mixed'),
+    $find('who is juan dela cruz', 'borrower_lookup', ['name' => 'juan dela cruz']),
+    $find('Find out about Juan Dela Cruz', 'borrower_lookup', ['name' => 'Juan Dela Cruz']),
+    // A reply to "Which member?".
+    $case('Juan Dela Cruz', 'borrower_lookup', null, null, [['Pila ang utang ni?', 'borrower_lookup']], 'ceb') + ['target' => ['name' => 'Juan Dela Cruz']],
+    $case('kay Rosa Santos', 'borrower_lookup', null, null, [['Pila ang utang ni?', 'borrower_lookup']], 'ceb') + ['target' => ['name' => 'Rosa Santos']],
+    // The full-name check.
+    $named('Is Juan Dela Cruz overdue?', 'borrower_lookup', $juan),
+    $named('Is Dela Cruz, Juan overdue?', 'borrower_lookup', $juan),
+    $named('is juan dela cruz late', 'borrower_lookup', $juan),
+    $named('Atrasado na ba si Juan Dela Cruz?', 'borrower_lookup', $juan, null, 'tl'),
+    $named('How is Pedro Bantay performing this month?', 'officer_performance', $bantay, 'this_month'),
+    $named('Is Pedro Bantay around?', 'unsupported_question', $bantay),
+    // Aggregate "find" questions the matcher answers.
+    $case('Find overdue members', 'overdue_accounts'),
+    $case('Search past-due loans', 'overdue_accounts'),
+    $tl('Hanapin ang mga atraso', 'overdue_accounts'),
+    // A follow-up skips an earlier lookup.
+    $tl('sa Main naman?', 'collection_summary', 'last_week', 'main', [['collect last week', 'collection_summary'], ['utang ni Juan', 'borrower_lookup']]),
 ];

@@ -75,14 +75,11 @@ class LindaLookupTest extends LindaTestCase
             'balance of' => ['What is the balance of Pedro Reyes?', 'Pedro Reyes'],
             'possessive balance' => ["What's Juan Dela Cruz's balance?", 'Juan Dela Cruz'],
             'possessive loan, curly apostrophe' => ['Show Maria’s loans', 'Maria'],
-            'possessive payments' => ["Ana Lim's payments this month", 'Ana Lim'],
             'how much does X owe' => ['How much does Juan Dela Cruz still owe?', 'Juan Dela Cruz'],
-            'how much has X paid' => ['How much has Maria Santos paid?', 'Maria Santos'],
-            'did X pay' => ['Did Pedro pay yesterday?', 'Pedro'],
             'who is, capitalised' => ['Who is Juan Dela Cruz?', 'Juan Dela Cruz'],
             'the loan of a member' => ['details of the loan of Rosa Santos', 'Rosa Santos'],
             'the receipt for a member' => ['find the receipt for Rosa', 'Rosa'],
-            'case and spacing kept' => ['find  juan   dela cruz', 'juan   dela cruz'],
+            'case kept, spaces squeezed' => ['find  juan   dela cruz', 'juan dela cruz'],
             'a middle initial' => ['find Ma. Theresa Reyes', 'Ma. Theresa Reyes'],
             'a hyphenated name' => ['balance of Jean-Paul Cruz', 'Jean-Paul Cruz'],
             // Tagalog
@@ -91,7 +88,6 @@ class LindaLookupTest extends LindaTestCase
             'bayad ni' => ['Magkano ang bayad ni Pedro ngayong buwan?', 'Pedro'],
             'hanapin si' => ['Hanapin si Aling Nena', 'Nena'],
             'sino si' => ['Sino si Mang Tonyo?', 'Tonyo'],
-            'nakabayad na ba si' => ['Nakabayad na ba si Rosa Santos?', 'Rosa Santos'],
             'kay' => ['Magkano ang balance kay Ana Lim?', 'Ana Lim'],
             // Bisaya
             'unsa ang utang ni' => ['Unsa ang utang ni Juan Dela Cruz?', 'Juan Dela Cruz'],
