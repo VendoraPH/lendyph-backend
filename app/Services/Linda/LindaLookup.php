@@ -11,9 +11,10 @@ use UnexpectedValueException;
  * the model, so no member name, record number, email or phone number ever
  * reaches it. Pure: no database access.
  *
- * The question is first NFKC-normalised, with every Unicode dash read as "-"
- * and every space as a plain space, so fullwidth digits and letters, figure
- * and minus dashes and non-breaking spaces read like their plain forms.
+ * The question is first NFKC-normalised, with invisible format characters
+ * dropped, every Unicode dash read as "-" and every space as a plain space,
+ * so fullwidth digits and letters, figure and minus dashes, non-breaking
+ * spaces and zero-width characters read like their plain forms.
  *
  * It reads English, Tagalog/Taglish and Bisaya/Cebuano, in this order:
  * 1. A record number: member and co-maker codes (BRW-, CMK-), loan numbers
@@ -253,6 +254,9 @@ final class LindaLookup
         'pinakamarami', 'pinakamaraming', 'pinakamaliit', 'pinakamalaki', 'pinakamalaking', 'pinakamagaling',
         'pinakamataas', 'pinakamababa', 'dako', 'dakong', 'maayo', 'magaling', 'marami', 'maraming', 'malaki',
         'malaking', 'nanguna', 'nangunguna', 'nangungunang', 'una',
+        // Loan kinds and report words (re-review)
+        'kabuuang', 'agent', 'agents', 'team', 'target', 'delinquency', 'proceeds', 'size', 'volume', 'opening',
+        'closing', 'ending', 'regular', 'emergency', 'salary', 'business', 'fully', 'great', 'nice', 'wow',
         // English periods
         'tonight', 'tomorrow', 'yesterday', 'day', 'days', 'week', 'weeks', 'month', 'months', 'quarter',
         'quarters', 'year', 'years', 'ytd', 'date', 'dates',
@@ -292,6 +296,9 @@ final class LindaLookup
         'agosto', 'september', 'sept', 'sep', 'setyembre', 'septiyembre', 'septyembre', 'october', 'oct',
         'oktubre', 'november', 'nov', 'nobyembre', 'december', 'dec', 'disyembre',
     ];
+
+    /** Bisaya and Tagalog verb prefixes, for "kay" (because) before a verb. */
+    private const VERB_PREFIXES = ['gipa', 'gipang', 'gi', 'mi', 'ni', 'nag', 'mag', 'naka', 'maka', 'nanga', 'na', 'ma', 'mo', 'ga', 'ka', 'pag', 'ipa'];
 
     /** The longest name taken, in words. */
     private const MAX_NAME_WORDS = 6;
@@ -369,7 +376,8 @@ final class LindaLookup
     }
 
     /**
-     * NFKC, with every Unicode dash read as "-" and every space as " ".
+     * NFKC, with invisible format characters (zero-width spaces, soft
+     * hyphens) dropped, every Unicode dash read as "-" and every space as " ".
      */
     private static function normalise(#[\SensitiveParameter] string $question): string
     {
@@ -379,7 +387,8 @@ final class LindaLookup
             throw new UnexpectedValueException('normalise');
         }
 
-        $normal = self::replace('/[\x{2010}-\x{2015}\x{2212}\x{FE58}\x{FE63}\x{FF0D}]/u', '-', $normal);
+        $normal = self::replace('/\p{Cf}/u', '', $normal);
+        $normal = self::replace('/[\p{Pd}\x{2212}]/u', '-', $normal);
 
         return self::replace('/[\p{Zs}\x{00A0}\x{2007}\x{202F}]/u', ' ', $normal);
     }
@@ -449,6 +458,11 @@ final class LindaLookup
 
         if (self::matchAll(self::CODE_PATTERN, $question, $found) > 0) {
             foreach ($found[0] as $index => $code) {
+                // A month and a year ("Nov-2026") is a period, never a code.
+                if (in_array(mb_strtolower($found[1][$index]), self::MONTH_WORDS, true) && self::match('/^[A-Za-z]++-(?:19|20)\d{2}$/u', $code)) {
+                    continue;
+                }
+
                 $codes[] = [strtoupper($found[1][$index]), strtoupper($code)];
             }
         }
@@ -591,6 +605,11 @@ final class LindaLookup
 
             // A common word after the marker: Bisaya "kay wala" ("because"), "ni isa".
             if (self::isStopWord($next) && ! self::isTitle($next)) {
+                continue;
+            }
+
+            // Bisaya "kay" ("because") before a verb typed in lower case: "kay gikinahanglan nako".
+            if ($token['lower'] === 'kay' && self::isLowerCaseVerb($tokens[$at + 1]['text'])) {
                 continue;
             }
 
@@ -742,8 +761,11 @@ final class LindaLookup
     /**
      * Name-like words right before or after a balance, loan, payment or
      * collection word: "Juan Dela Cruz balance", "Rosa Santos utang",
-     * "balance Juan Dela Cruz". Payments and collections make it a receipt
-     * lookup; a name followed by a branch word is a branch.
+     * "balance Juan Dela Cruz". The name must be capitalised as typed, a
+     * capital on the question's first word not counting, so ordinary words
+     * ("salary loans", "Pangkabuhayan loans") are no name. Payments and
+     * collections make it a receipt lookup; a name followed by a branch word
+     * is a branch.
      *
      * @param  list<array{text: string, lower: string, start: int, end: int}>  $tokens
      */
@@ -762,7 +784,7 @@ final class LindaLookup
                 $start--;
             }
 
-            if ($start < $at) {
+            if ($start < $at && self::capitalisedName($tokens, $start, $at)) {
                 $name = self::cleanName(substr($question, $tokens[$start]['start'], $tokens[$at - 1]['end'] - $tokens[$start]['start']));
 
                 if ($name !== null) {
@@ -771,13 +793,36 @@ final class LindaLookup
             }
 
             [$name, $end] = self::nameFrom($question, $tokens, $at + 1);
+            $nameStart = $end - count(self::tokens((string) $name));
 
-            if ($name !== null && ! in_array($tokens[$end]['lower'] ?? null, self::BRANCH_WORDS, true)) {
+            if ($name !== null && self::capitalisedName($tokens, $nameStart, $end) && ! in_array($tokens[$end]['lower'] ?? null, self::BRANCH_WORDS, true)) {
                 return self::request($kind, null, $name);
             }
         }
 
         return null;
+    }
+
+    /**
+     * Whether the tokens from $start to before $end are all capitalised as
+     * typed, the question's first word aside (its capital proves nothing), with
+     * at least one other word.
+     *
+     * @param  list<array{text: string, lower: string, start: int, end: int}>  $tokens
+     */
+    private static function capitalisedName(array $tokens, int $start, int $end): bool
+    {
+        $checked = 0;
+
+        for ($i = max($start, 1); $i < $end; $i++) {
+            if (! self::isCapitalised($tokens[$i]['text'])) {
+                return false;
+            }
+
+            $checked++;
+        }
+
+        return $checked > 0;
     }
 
     /**
@@ -931,6 +976,35 @@ final class LindaLookup
         $between = substr($question, $previous['end'], $tokens[$at]['start'] - $previous['end']);
 
         return $first !== mb_strtolower($first) && trim($between, " \t") === '' && self::isNameWord($previous['lower']);
+    }
+
+    /**
+     * A Bisaya or Tagalog verb typed in lower case: a verb prefix (gi-, mi-,
+     * nag-, naka-, …) on a word of 5 or more letters, never a title.
+     */
+    private static function isLowerCaseVerb(#[\SensitiveParameter] string $text): bool
+    {
+        $lower = mb_strtolower($text);
+
+        if ($text !== $lower || mb_strlen($lower) < 5 || self::isTitle($lower)) {
+            return false;
+        }
+
+        foreach (self::VERB_PREFIXES as $prefix) {
+            if (str_starts_with($lower, $prefix)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /** Whether a word starts with a capital letter as typed. */
+    private static function isCapitalised(#[\SensitiveParameter] string $text): bool
+    {
+        $first = mb_substr($text, 0, 1);
+
+        return $first !== mb_strtolower($first);
     }
 
     /** The word before a trailing "'s" ("Cruz's" → "Cruz"), or null. */

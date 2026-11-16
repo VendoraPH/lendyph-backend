@@ -3,16 +3,19 @@
 namespace App\Services\Linda;
 
 /**
- * The local guard (security review S3), run after the matcher misses and
- * before any model call: a question that names a record, asks to look one up,
- * or asks about one person's balance, loan or payments is never sent to the
- * model, and neither is an earlier question that did.
+ * The local guard (security review S3): the lookup parser's verdict on one
+ * question, as a lookup intent. Whatever LindaLookup::parse() treats as a
+ * lookup (record numbers, emails, phone numbers, long digit runs, lookup
+ * wording, person markers and names beside money words, in English, Tagalog
+ * and Bisaya) the guard catches with the same intent. Dates, amounts and the
+ * period words the matcher reads never trip it.
  *
- * It reads questions with LindaLookup, so whatever the lookup parser treats
- * as a lookup is guarded with the same intent: record numbers, emails, mobile
- * numbers, long digit runs, lookup wording, and person markers in English,
- * Tagalog and Bisaya. Dates, amounts and the period words the matcher reads
- * never trip it.
+ * It is one of several steps that keep names and numbers on the server
+ * (LindaAssistant): the matcher, then the parser, then a reply to a lookup
+ * turn (LindaLookup::reply()), then the full-name check (LindaNameCheck),
+ * and only then the model, which sees the question and the earlier turns'
+ * topics, never their text (LindaModelRequest). withoutLookups() is kept for
+ * callers that still hold earlier questions with their text.
  */
 final class LindaGuard
 {

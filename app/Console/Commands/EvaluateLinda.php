@@ -37,7 +37,8 @@ use Throwable;
  *
  * ## The full-name check reads the case, not the database
  * A case may list the deployment's `people` the check knows (each
- * [kind, first name, last name], kind member or staff); the check reads
+ * [kind, first name, last name], kind member, staff, co_maker or walk_in);
+ * the check reads
  * only those, so the run stays synthetic and reads no database. It runs
  * whatever the driver: with the none driver nothing reaches a model anyway.
  *
@@ -291,17 +292,20 @@ class EvaluateLinda extends Command
     }
 
     /**
-     * The full-name check's candidates for a case: only the people it lists.
+     * The full-name check's candidates for a case: only the people it lists
+     * (a walk-in by its full name), however the question's spans read.
      *
      * @param  list<array{string, string, string}>  $people  [kind, first name, last name]
-     * @return \Closure(list<string>): list<array{kind: string, first_name: string, middle_name: null, last_name: string}>
+     * @return \Closure(list<string>, list<string>, list<string>): list<array<string, mixed>>
      */
     private static function people(array $people): \Closure
     {
-        return fn (array $lastNames): array => array_values(array_filter(
-            array_map(fn (array $person): array => ['kind' => $person[0], 'first_name' => $person[1], 'middle_name' => null, 'last_name' => $person[2]], $people),
-            fn (array $person): bool => in_array(mb_strtolower($person['last_name']), $lastNames, true),
-        ));
+        return fn (array $lastNames, array $firstNames = [], array $fullNames = []): array => array_map(
+            fn (array $person): array => $person[0] === LindaNameCheck::WALK_IN
+                ? ['kind' => $person[0], 'full_name' => $person[1].' '.$person[2]]
+                : ['kind' => $person[0], 'first_name' => $person[1], 'middle_name' => null, 'last_name' => $person[2]],
+            $people,
+        );
     }
 
     /** The intent the endpoint answers a full-name hit with. */
@@ -309,7 +313,7 @@ class EvaluateLinda extends Command
     {
         return match (true) {
             $named->kind === LindaNameCheck::MEMBER => LindaIntent::BorrowerLookup,
-            $named->performance => LindaIntent::OfficerPerformance,
+            $named->kind === LindaNameCheck::STAFF && $named->performance && $named->name !== null => LindaIntent::OfficerPerformance,
             default => LindaIntent::UnsupportedQuestion,
         };
     }

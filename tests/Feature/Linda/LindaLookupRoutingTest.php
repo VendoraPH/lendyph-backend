@@ -3,8 +3,11 @@
 namespace Tests\Feature\Linda;
 
 use App\Models\Borrower;
+use App\Models\CoMaker;
+use App\Models\GCashNonMember;
 use App\Models\LindaQuestion;
 use App\Models\Loan;
+use App\Models\LoanProduct;
 use App\Models\User;
 use App\Services\Linda\LindaAnswerer;
 use App\Services\Linda\LindaIntent;
@@ -17,9 +20,12 @@ use App\Services\Linda\Model\LindaModel;
 use App\Services\Linda\Model\LindaModelRequest;
 use App\Services\Linda\Model\LindaUnderstanding;
 use App\Services\Linda\Model\LindaUsage;
+use Illuminate\Database\Events\QueryExecuted;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Schema;
 use PHPUnit\Framework\Attributes\DataProvider;
+use RuntimeException;
 
 /**
  * `POST /api/linda/chat` after the round 2 reviews: names and record numbers
@@ -153,12 +159,15 @@ class LindaLookupRoutingTest extends LindaAnswersTestCase
     }
 
     /**
-     * D2's cost: two reads by an indexed last name, members and staff.
+     * D2's cost: one indexed read per table (members, staff and co-makers by
+     * last name, walk-ins by full name).
      */
     public function test_the_full_name_check_reads_members_and_staff_by_an_indexed_last_name(): void
     {
         $this->assertContains(['last_name'], array_column(Schema::getIndexes('borrowers'), 'columns'));
         $this->assertContains(['last_name'], array_column(Schema::getIndexes('users'), 'columns'));
+        $this->assertContains(['last_name'], array_column(Schema::getIndexes('co_makers'), 'columns'));
+        $this->assertContains(['full_name'], array_column(Schema::getIndexes('gcash_non_members'), 'columns'));
 
         DB::enableQueryLog();
         $hit = LindaNameCheck::find('Is Juan Dela Cruz overdue this month?');
@@ -166,7 +175,7 @@ class LindaLookupRoutingTest extends LindaAnswersTestCase
         DB::disableQueryLog();
 
         $this->assertSame(LindaNameCheck::MEMBER, $hit?->kind);
-        $this->assertCount(2, $queries);
+        $this->assertCount(4, $queries);
     }
 
     /**
@@ -335,5 +344,93 @@ class LindaLookupRoutingTest extends LindaAnswersTestCase
             ->assertJsonValidationErrors('history.0.content');
 
         $this->assertSame([], $this->fake->requests);
+    }
+
+    /**
+     * Re-review Medium 2: a "name" that is a loan product is no lookup.
+     */
+    public function test_a_loan_product_name_is_never_a_member_lookup(): void
+    {
+        LoanProduct::factory()->create(['name' => 'Pangkabuhayan Loan']);
+
+        $this->actingAs($this->asker)->postJson(self::URL, ['message' => 'collections of Pangkabuhayan'])->assertOk();
+
+        $this->assertCount(1, $this->fake->requests);
+        $this->assertSame(LindaQuestion::SOURCE_MODEL, LindaQuestion::query()->latest('id')->value('source'));
+    }
+
+    /**
+     * Re-review Low 4: a branch name doesn't throw away the rest of a lookup.
+     */
+    public function test_a_branch_name_keeps_the_rest_of_the_lookup(): void
+    {
+        $this->actingAs($this->asker)->postJson(self::URL, ['message' => 'collections from Main and balance of Pedro Walangtao'])->assertOk();
+
+        $this->assertSame([], $this->fake->requests);
+        $row = LindaQuestion::query()->latest('id')->firstOrFail();
+        $this->assertSame(LindaQuestion::SOURCE_LOOKUP, $row->source);
+        $this->assertSame('not_found', $row->outcome);
+    }
+
+    /**
+     * Re-review Low 1: a database error in the full-name check answers 503
+     * data_unavailable, logs a digest only, and never reaches the model.
+     */
+    public function test_a_database_error_in_the_name_check_is_data_unavailable(): void
+    {
+        Log::spy();
+        DB::listen(function (QueryExecuted $query): void {
+            if (str_contains($query->sql, 'last_name') && str_contains($query->sql, 'borrowers')) {
+                throw new RuntimeException('secret detail Juan Dela Cruz');
+            }
+        });
+
+        $this->actingAs($this->asker)->postJson(self::URL, ['message' => 'Is Juan Dela Cruz overdue?'])
+            ->assertStatus(503)
+            ->assertJsonPath('error_code', 'data_unavailable');
+
+        $this->assertSame([], $this->fake->requests);
+        $row = LindaQuestion::query()->latest('id')->firstOrFail();
+        $this->assertSame('data_unavailable', $row->error_code);
+        $this->assertNull($row->model);
+        Log::shouldHaveReceived('warning')->withArgs(fn (string $message, array $context): bool => ! str_contains(serialize($context), 'secret detail') && ! str_contains($message, 'Juan'))->once();
+    }
+
+    /**
+     * Re-review item 7: co-makers and walk-ins named in full stay local.
+     *
+     * @return array<string, array{string}>
+     */
+    public static function otherPeople(): array
+    {
+        return [
+            'a co-maker' => ['Is Lito Lapid a reliable co-maker?'],
+            'a walk-in' => ['Did Carmen Soriano cash in today?'],
+        ];
+    }
+
+    #[DataProvider('otherPeople')]
+    public function test_a_co_maker_or_walk_in_gets_a_local_not_yet(string $question): void
+    {
+        CoMaker::factory()->create(['borrower_id' => $this->juan->id, 'first_name' => 'Lito', 'last_name' => 'Lapid']);
+        GCashNonMember::factory()->create(['full_name' => 'Carmen Soriano']);
+
+        $response = $this->actingAs($this->asker)->postJson(self::URL, ['message' => $question])->assertOk();
+
+        $this->assertSame([], $this->fake->requests);
+        $row = LindaQuestion::query()->latest('id')->firstOrFail();
+        $this->assertSame(LindaQuestion::SOURCE_LOOKUP, $row->source);
+        $this->assertSame('not_yet', $row->outcome);
+        $this->assertSame(LindaWording::otherPersonNotYet(), $response->json('data.answer'));
+    }
+
+    public function test_an_accent_typed_without_it_stays_local(): void
+    {
+        $this->member($this->branch, 'Rosa', 'Peña');
+
+        $this->actingAs($this->asker)->postJson(self::URL, ['message' => 'Is Rosa Pena overdue?'])->assertOk();
+
+        $this->assertSame([], $this->fake->requests);
+        $this->assertSame(LindaQuestion::SOURCE_LOOKUP, LindaQuestion::query()->latest('id')->value('source'));
     }
 }

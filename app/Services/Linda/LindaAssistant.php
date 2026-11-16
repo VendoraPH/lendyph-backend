@@ -4,6 +4,7 @@ namespace App\Services\Linda;
 
 use App\Models\Branch;
 use App\Models\LindaQuestion;
+use App\Models\LoanProduct;
 use App\Models\User;
 use App\Services\BranchAccess;
 use App\Services\Diagnostics\ErrorDigest;
@@ -26,14 +27,17 @@ use Throwable;
  *    one up, is a lookup (LindaLookup::parse()): the server answers it from
  *    the record in the user's branches (LindaAnswerer::lookup()), logged as
  *    source `lookup`, and the model never sees it. A "name" that is one of
- *    the user's own branches is no lookup ("collections from Main").
+ *    the user's own branches or a loan product is no lookup ("collections
+ *    from Main"); the rest of the question is read again without it.
  * 2. Right after a lookup turn ("Which member?"), a short reply (a record
  *    number, or a name) is that lookup's target (LindaLookup::reply()).
  * 3. With no match and the none driver, the reply lists what Linda can
  *    answer. Otherwise the full-name check runs (LindaNameCheck, D2): a
- *    question naming a member of the deployment is a member lookup, and one
+ *    question naming a member of the deployment is a member lookup, one
  *    naming a staff user gets the officer performance answer (with officer
- *    or ranking words) or a local "not yet"; both are logged as `lookup`.
+ *    or ranking words) or a local "not yet", and one naming a co-maker or a
+ *    walk-in a local "not yet"; all are logged as `lookup`. A failure reading
+ *    the people answers data_unavailable, never the model.
  * 4. Only then, below the monthly cap, the model reads the question and the
  *    topics (intents) of up to 5 earlier turns, never their text or an
  *    answer (D1), and returns only the intent, the period words, a branch
@@ -60,6 +64,9 @@ final class LindaAssistant
 
     /** Any other failure of the model call (security review S4). */
     public const REASON_INTERNAL = 'internal';
+
+    /** How many times a question is read again after a branch or product name is taken out. */
+    private const REREAD_MAX = 3;
 
     public function __construct(
         private readonly LindaAnswerer $answerer,
@@ -106,7 +113,7 @@ final class LindaAssistant
             return $this->finish($log, $started, $this->answerer->unmatched());
         }
 
-        $named = LindaNameCheck::find($question);
+        $named = $this->nameCheck($log, $started, $question);
 
         if ($named !== null) {
             $log->source = LindaQuestion::SOURCE_LOOKUP;
@@ -129,7 +136,9 @@ final class LindaAssistant
     /**
      * The lookup a question asks for: by the lookup parser, else, right after
      * a lookup turn, as a reply naming its target. A "name" that is one of the
-     * user's own branches is no lookup.
+     * user's own branches or a loan product is no lookup: its words are taken
+     * out and the rest of the question is read again ("collections from Main
+     * and balance of Juan").
      */
     private function lookupIn(User $user, #[\SensitiveParameter] string $question, LindaHistory $history): ?LindaLookupRequest
     {
@@ -139,47 +148,99 @@ final class LindaAssistant
             $lookup = LindaLookup::reply($question, $history->pendingLookup);
         }
 
-        return $lookup !== null && $this->namesABranch($user, $lookup) ? null : $lookup;
+        for ($tries = 0; $lookup !== null && $this->namesAPlaceOrProduct($user, $lookup); $tries++) {
+            $rest = $tries < self::REREAD_MAX ? self::without((string) $lookup->name, $question) : null;
+
+            if ($rest === null) {
+                return null;
+            }
+
+            $question = $rest;
+            $lookup = LindaLookup::parse($question);
+
+            // A lookup with no target now only lacks the words taken out.
+            if ($lookup !== null && $lookup->code === null && $lookup->name === null) {
+                return null;
+            }
+        }
+
+        return $lookup;
     }
 
-    /** Whether a name lookup's name is one of the user's own branch names (case, spaces and "Branch" ignored). */
-    private function namesABranch(User $user, LindaLookupRequest $lookup): bool
+    /**
+     * Whether a name lookup's name is one of the user's own branch names or a
+     * loan product's name (case, spaces and a trailing "Branch" or "Loan"
+     * ignored).
+     */
+    private function namesAPlaceOrProduct(User $user, LindaLookupRequest $lookup): bool
     {
         if ($lookup->code !== null || $lookup->name === null) {
             return false;
         }
 
-        $branchIds = $this->branchAccess->for($user);
+        $wanted = self::nameKey($lookup->name);
 
-        if ($branchIds === []) {
+        if ($wanted === '') {
             return false;
         }
 
-        $wanted = self::branchKey($lookup->name);
-
-        return $wanted !== '' && Branch::query()
+        $branchIds = $this->branchAccess->for($user);
+        $names = $branchIds === [] ? collect() : Branch::query()
             ->when($branchIds !== null, fn ($query) => $query->whereIn('id', $branchIds))
-            ->pluck('name')
-            ->contains(fn ($name) => self::branchKey((string) $name) === $wanted);
+            ->pluck('name');
+
+        return $names->merge(LoanProduct::query()->pluck('name'))
+            ->contains(fn ($name) => self::nameKey((string) $name) === $wanted);
     }
 
-    /** "  Main   Branch " → "main" */
-    private static function branchKey(#[\SensitiveParameter] string $name): string
+    /** "  Main   Branch " → "main", "Salary Loan" → "salary" */
+    private static function nameKey(#[\SensitiveParameter] string $name): string
     {
         $words = LindaText::words(LindaText::clean($name));
 
-        if ($words !== [] && end($words) === 'branch') {
+        if ($words !== [] && in_array(end($words), ['branch', 'loan', 'loans'], true)) {
             array_pop($words);
         }
 
         return implode(' ', $words);
     }
 
+    /** The question with a name's words taken out once, or null when they aren't found as typed. */
+    private static function without(#[\SensitiveParameter] string $name, #[\SensitiveParameter] string $question): ?string
+    {
+        $words = preg_split('/\s+/u', trim($name)) ?: [];
+        $pattern = '/(?<![\pL\pN])'.implode('\s+', array_map(fn (string $word) => preg_quote($word, '/'), $words)).'(?![\pL\pN])/iu';
+        $rest = $words === [] ? null : preg_replace($pattern, ' ', $question, 1, $count);
+
+        return $rest === null || $count !== 1 ? null : $rest;
+    }
+
     /**
-     * A question naming a member or a staff user by full name (D2), answered
-     * locally: a member lookup; for a staff user, the officer performance
-     * answer when it has officer or ranking words, for the period it names
-     * (this month by default), else a fixed "not yet".
+     * The full-name check (D2). A failure reading the people (the database)
+     * never lets the question through to the model: it logs a digest only,
+     * writes the question row with data_unavailable and answers 503.
+     *
+     * @throws LindaHttpError data_unavailable
+     */
+    private function nameCheck(LindaQuestion $log, int $started, #[\SensitiveParameter] string $question): ?LindaNameCheck
+    {
+        try {
+            return LindaNameCheck::find($question);
+        } catch (Throwable $e) {
+            Log::warning('Linda name check failed.', ErrorDigest::context($e));
+            $log->fill(['source' => LindaQuestion::SOURCE_LOOKUP, 'outcome' => self::OUTCOME_ERROR, 'error_code' => LindaHttpError::DATA_UNAVAILABLE]);
+            $this->write($log, $started);
+
+            throw LindaHttpError::dataUnavailable();
+        }
+    }
+
+    /**
+     * A question naming someone by full name (D2), answered locally: a member
+     * lookup (with no target when the read was capped); for a staff user, the
+     * officer performance answer when it has officer or ranking words, for the
+     * period it names (this month by default), else a fixed "not yet"; for a
+     * co-maker or a walk-in, a fixed "not yet".
      *
      * @throws LindaHttpError data_unavailable
      */
@@ -189,7 +250,11 @@ final class LindaAssistant
             return $this->lookedUp($log, $started, $user, new LindaLookupRequest(LindaLookupRequest::MEMBER, LindaIntent::BorrowerLookup, null, $named->name));
         }
 
-        if (! $named->performance) {
+        if ($named->kind !== LindaNameCheck::STAFF) {
+            return $this->finish($log, $started, new LindaReply(LindaIntent::UnsupportedQuestion->value, LindaWording::otherPersonNotYet(), 'not_yet', answerFunction: class_basename(LindaNameCheck::class)));
+        }
+
+        if (! $named->performance || $named->name === null) {
             return $this->finish($log, $started, new LindaReply(LindaIntent::UnsupportedQuestion->value, LindaWording::staffNotYet(), 'not_yet', answerFunction: class_basename(LindaNameCheck::class)));
         }
 

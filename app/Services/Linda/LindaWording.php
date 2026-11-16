@@ -292,4 +292,13 @@ final class LindaWording
     {
         return 'I can\'t answer questions about one staff member yet. I can rank account officers and collectors: ask "Who are the top account officers this month?"';
     }
+
+    /**
+     * For a question that names a co-maker or a GCash walk-in: answered
+     * locally, never by the model (D2).
+     */
+    public static function otherPersonNotYet(): string
+    {
+        return 'I can\'t look up co-makers or walk-ins yet. Open the loan or the GCash page to see them.';
+    }
 }

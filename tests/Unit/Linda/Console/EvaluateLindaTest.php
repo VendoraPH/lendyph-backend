@@ -239,10 +239,12 @@ class EvaluateLindaTest extends LindaTestCase
             $match = LindaMatcher::match($case['question'], $previous);
             $request = LindaLookup::parse($case['question']) ?? ($pending === null ? null : LindaLookup::reply($case['question'], $pending));
             $people = $case['people'] ?? [];
-            $named = LindaNameCheck::find($case['question'], fn (array $lastNames): array => array_values(array_filter(
-                array_map(fn (array $person): array => ['kind' => $person[0], 'first_name' => $person[1], 'middle_name' => null, 'last_name' => $person[2]], $people),
-                fn (array $person): bool => in_array(mb_strtolower($person['last_name']), $lastNames, true),
-            )));
+            $named = LindaNameCheck::find($case['question'], fn (): array => array_map(
+                fn (array $person): array => $person[0] === LindaNameCheck::WALK_IN
+                    ? ['kind' => $person[0], 'full_name' => $person[1].' '.$person[2]]
+                    : ['kind' => $person[0], 'first_name' => $person[1], 'middle_name' => null, 'last_name' => $person[2]],
+                $people,
+            ));
 
             if ($people !== []) {
                 $this->assertNull($match, $case['question']);

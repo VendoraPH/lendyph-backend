@@ -8,8 +8,10 @@
  * The deployments are already separate (their own API, database, cache and
  * files, chosen by each box's .env). This keeps Linda's code from stepping
  * around that: it never names a database connection, another schema or a
- * cache store, never builds its own connection, never touches Redis, files or
- * a disk, never reads the environment directly, never runs a process, and
+ * cache store, never switches or purges connections, never builds its own
+ * connection, never touches Redis, files or a disk, never reads the
+ * environment or $_SERVER directly, never sends mail, never writes to a named
+ * log channel, never rewrites config at runtime, never runs a process, and
  * only the model driver (AnthropicModel and its LindaHttpGuard) may call out,
  * sending the question text and nothing else (LindaPrompt and its tests).
  *
@@ -77,13 +79,16 @@ $stringsOf = function (string $path): string {
 $qualified = '[\'"]\s*`?[A-Za-z_]\w*`?\s*\.\s*`?[A-Za-z_]\w*`?\s*(?:\s+as\s+\w+\s*)?[\'"]';
 
 $forbidden = [
-    'a named database connection' => '/\b\w+::connection\s*\(|->connection\s*\(|::on\s*\(|->setConnection\s*\(|\$connection\s*=|\bgetConnectionName\b|#\[\s*\\\\?(?:[\w\\\\]*\\\\)?Connection\s*\(/i',
+    'a named database connection' => '/\bDB::(?:setDefaultConnection|purge|reconnect|disconnect)\s*\(|\b\w+::connection\s*\(|->connection\s*\(|::on\s*\(|->setConnection\s*\(|\$connection\s*=|\bgetConnectionName\b|#\[\s*\\\\?(?:[\w\\\\]*\\\\)?Connection\s*\(/i',
     'a connection of its own' => '/\bDB::(?:connectUsing|build)\s*\(|\bnew\s+\\\\?PDO\b|\bPDO::connect\s*\(/i',
     'a schema-qualified table' => '/#\[\s*\\\\?(?:[\w\\\\]*\\\\)?Table\s*\(\s*(?:name\s*:\s*)?'.$qualified.'|\$table\s*=\s*'.$qualified.'|\bDB::table\s*\(\s*'.$qualified.'|->(?:from|table|join|leftJoin|rightJoin|crossJoin|joinWhere|leftJoinWhere|rightJoinWhere)\s*\(\s*'.$qualified.'/i',
     'a named cache store' => '/\bCache::(?:store|driver|memo)\s*\(|\bcache\s*\(\s*\)\s*->\s*(?:store|driver|memo)\s*\(|\b(?:app|resolve)\s*\(\s*[\'"]cache(?:\.store)?[\'"]\s*\)/i',
-    'Redis' => '/\bRedis::|Illuminate\\\\Support\\\\Facades\\\\Redis\b|Illuminate\\\\Redis\\\\|\b(?:app|resolve)\s*\(\s*[\'"]redis[\'"]\s*\)|\bnew\s+\\\\?Redis\b/i',
-    'files or a disk' => '/\bStorage::|->disk\s*\(|\bFile::|Illuminate\\\\Support\\\\Facades\\\\(?:Storage|File)\b|\b(?:file_put_contents|fopen|fwrite|tmpfile|tempnam|unlink|mkdir|touch)\s*\(/i',
-    'the environment' => '/(?<![\w>:$\\\\])env\s*\(|\bEnv::|Illuminate\\\\Support\\\\Env\b|\bgetenv\s*\(|\bputenv\s*\(|\$_ENV\b/i',
+    'Redis' => '/\bPredis\\\\|\bRedis::|Illuminate\\\\Support\\\\Facades\\\\Redis\b|Illuminate\\\\Redis\\\\|\b(?:app|resolve)\s*\(\s*[\'"]redis[\'"]\s*\)|\bnew\s+\\\\?Redis\b/i',
+    'files or a disk' => '/(?<![\w>:$\\\\])(?:copy|rename)\s*\(|\bSplFileObject\b|\bStorage::|->disk\s*\(|\bFile::|Illuminate\\\\Support\\\\Facades\\\\(?:Storage|File)\b|\b(?:file_put_contents|fopen|fwrite|tmpfile|tempnam|unlink|mkdir|touch)\s*\(/i',
+    'the environment' => '/(?<![\w>:$\\\\])env\s*\(|\bEnv::|Illuminate\\\\Support\\\\Env\b|\bgetenv\s*\(|\bputenv\s*\(|\$_ENV\b|\$_SERVER\b|\bfilter_input(?:_array)?\s*\(\s*INPUT_(?:ENV|SERVER)\b/i',
+    'mail' => '/\bMail::|Illuminate\\\\Support\\\\Facades\\\\Mail\b|(?<![\w>:$\\\\])mail\s*\(/i',
+    'a named log channel' => '/\bLog::(?:channel|build|stack)\s*\(|\blogger\s*\(\s*\)\s*->\s*channel\s*\(/i',
+    'a runtime config write' => '/(?<![\w>:$\\\\])config\s*\(\s*\[|\bConfig::set\s*\(/i',
     'a process' => '/(?<![\w>:$\\\\])(?<!function\s)(?:exec|shell_exec|proc_open|popen|passthru|system|pcntl_exec)\s*\(|\bProcess::|Illuminate\\\\Support\\\\Facades\\\\Process\b|Symfony\\\\Component\\\\Process\\\\/i',
 ];
 
@@ -91,7 +96,7 @@ $forbidden = [
 $rawQualified = '/\b(?:from|join|into|update|table)\s+`?[A-Za-z_]\w*`?\s*\.\s*`?[A-Za-z_]\w*/i';
 
 /** Calls out of the server: only the model driver may. */
-$outbound = '/\bHttp::|Illuminate\\\\Support\\\\Facades\\\\Http\b|Illuminate\\\\Http\\\\Client\\\\|\bPendingRequest\b|GuzzleHttp\\\\|Symfony\\\\(?:Contracts|Component)\\\\HttpClient\\\\|\bHttpClient::create\s*\(|Psr\\\\Http\\\\Client\\\\|\bcurl_\w+\s*\(|\bfsockopen\s*\(|\bpfsockopen\s*\(|\bstream_socket_client\s*\(|\bstream_context_create\s*\(|\bsocket_\w+\s*\(|(?:file_get_contents|fopen|file|readfile|copy)\s*\(\s*[\'"](?:https?|ftp):|\bAnthropic\\\\/i';
+$outbound = '/\bHttp::|Illuminate\\\\Support\\\\Facades\\\\Http\b|Illuminate\\\\Http\\\\Client\\\\|\bPendingRequest\b|GuzzleHttp\\\\|Symfony\\\\(?:Contracts|Component)\\\\HttpClient\\\\|\bHttpClient::create\s*\(|Psr\\\\Http\\\\Client\\\\|\bcurl_\w+\s*\(|\bfsockopen\s*\(|\bpfsockopen\s*\(|\bstream_socket_client\s*\(|\bstream_context_create\s*\(|\bsocket_\w+\s*\(|(?:file_get_contents|fopen|file|readfile|copy)\s*\(\s*[\'"](?:https?|ftp):|\bSoapClient\b|\bget_headers\s*\(|\bAnthropic\\\\/i';
 
 /**
  * The one environment read Linda makes, and why: AnthropicModel refuses to
@@ -103,6 +108,7 @@ $allowedEnvChecks = [
     'app/Services/Linda/Model/AnthropicModel.php' => [
         'getenv(self::CUSTOM_HEADERS_ENV) !== false',
         'array_key_exists(self::CUSTOM_HEADERS_ENV, $_ENV)',
+        'array_key_exists(self::CUSTOM_HEADERS_ENV, $_SERVER)',
     ],
 ];
 

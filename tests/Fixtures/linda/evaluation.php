@@ -16,9 +16,9 @@
  *    mixed;
  *  - `target`: on a lookup case, optionally the code and name the lookup
  *    parser must pull out (`[]` for a lookup with no target);
- *  - `people`: optionally, the members and staff the full-name check knows
- *    for this case, each [kind, first name, last name] (kind member or
- *    staff), so the check reads no database. A case that lists people must
+ *  - `people`: optionally, the people the full-name check knows for this
+ *    case, each [kind, first name, last name] (kind member, staff, co_maker
+ *    or walk_in), so the check reads no database. A case that lists people must
  *    stay local.
  *
  * A question with no period whose intent defaults to this month expects
@@ -437,4 +437,17 @@ return [
     $tl('Hanapin ang mga atraso', 'overdue_accounts'),
     // A follow-up skips an earlier lookup.
     $tl('sa Main naman?', 'collection_summary', 'last_week', 'main', [['collect last week', 'collection_summary'], ['utang ni Juan', 'borrower_lookup']]),
+
+    // Re-review: ordinary words beside a money word are never names.
+    $case('How many salary loans are active?', 'loan_summary'),
+    $tl('Magkano ang kabuuang koleksyon ngayong buwan?', 'collection_summary', 'this_month'),
+    $case('Who are the best collection agents this month?', 'officer_performance', 'this_month'),
+    $case('What is our loan delinquency rate?', 'portfolio_summary'),
+    $case('average loan size', 'portfolio_summary'),
+    $case('Fully paid loans this month', 'loan_summary'),
+    $ceb('Pila ang bayad karong bulana kay gikinahanglan nako?', 'collection_summary', 'this_month'),
+    // Re-review: co-makers and walk-ins named in full stay local.
+    $named('Is Lito Lapid a reliable co-maker?', 'unsupported_question', [['co_maker', 'Lito', 'Lapid']]),
+    $named('Did Carmen Soriano cash in today?', 'unsupported_question', [['walk_in', 'Carmen', 'Soriano']]),
+    $named('Is Juan A. Dela Cruz overdue?', 'borrower_lookup', $juan),
 ];
