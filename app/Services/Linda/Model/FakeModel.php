@@ -42,7 +42,7 @@ final class FakeModel implements LindaModel
         ['transaction_lookup', ['receipt', 'transaction', 'reference', 'resibo']],
         ['loan_details', ['loan ln', 'loan number', 'schedule of loan']],
         ['borrower_lookup', ['find member', 'find', 'hanapin', 'pangitaa', 'pangita', 'look up', 'contact']],
-        ['borrower_summary', ['new members', 'how many members', 'ilan ang members', 'repeat members', 'bag ong members', 'pila ka members']],
+        ['borrower_summary', ['new members', 'how many members', 'ilan ang members', 'repeat members', 'bag ong members', 'pila ka members', 'active members', 'miyembro', 'repeat borrowers']],
         ['overdue_accounts', ['overdue', 'past due', 'atraso', 'naatraso', 'nalangan', 'lapas', 'delayed', 'late', 'wala pa nakabayad', 'dili pa bayad', 'hindi pa nakakabayad']],
         ['collection_details', ['list of payments', 'who paid', 'nagbayad', 'mibayad', 'nibayad', 'payments list']],
         ['collection_summary', ['collect', 'collected', 'collection', 'collections', 'koleksyon', 'koleksiyon', 'nakolekta', 'nakubra', 'nadawat', 'bayad']],

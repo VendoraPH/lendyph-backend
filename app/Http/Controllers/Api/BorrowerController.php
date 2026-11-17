@@ -187,24 +187,10 @@ DESC,
          * `members_only=1` the tabs do not sum to `meta.total`, because stats
          * still counts the pending and rejected rows the page excludes.
          */
-        $stats = Borrower::visibleTo($viewer)
-            ->when(filled($search), fn ($q) => $q->search($search))
-            ->when(filled($branchId), fn ($q) => $q->forBranch($branchId))
-            ->selectRaw('status, COUNT(*) as count')
-            ->groupBy('status')
-            ->pluck('count', 'status')
-            ->toArray();
+        $stats = Borrower::statusCounts($viewer, filled($branchId) ? (int) $branchId : null, filled($search) ? (string) $search : null);
 
         return BorrowerResource::collection($borrowers)
-            ->additional(['meta' => ['stats' => [
-                'active' => (int) ($stats['active'] ?? 0),
-                'inactive' => (int) ($stats['inactive'] ?? 0),
-                'blacklisted' => (int) ($stats['blacklisted'] ?? 0),
-                'pending' => (int) ($stats['pending'] ?? 0),
-                'rejected' => (int) ($stats['rejected'] ?? 0),
-                'withdrawn' => (int) ($stats['withdrawn'] ?? 0),
-                'deceased' => (int) ($stats['deceased'] ?? 0),
-            ]]]);
+            ->additional(['meta' => ['stats' => $stats]]);
     }
 
     #[OA\Post(

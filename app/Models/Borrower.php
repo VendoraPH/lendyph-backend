@@ -272,6 +272,36 @@ class Borrower extends Model
         return in_array($this->status, self::FORMER_MEMBER_STATUSES, true);
     }
 
+    /**
+     * The Members page's status counts (GET /borrowers `meta.stats`): every
+     * borrower in the branches $viewer may see, by status, narrowed to one
+     * branch and a search when given. Linda's member answer reads the same
+     * counts.
+     *
+     * @return array{active: int, inactive: int, blacklisted: int, pending: int, rejected: int, withdrawn: int, deceased: int}
+     */
+    public static function statusCounts(User $viewer, ?int $branchId = null, ?string $search = null): array
+    {
+        $counts = self::query()
+            ->visibleTo($viewer)
+            ->when($search !== null, fn ($q) => $q->search($search))
+            ->when($branchId !== null, fn ($q) => $q->forBranch($branchId))
+            ->selectRaw('status, COUNT(*) as count')
+            ->groupBy('status')
+            ->pluck('count', 'status')
+            ->toArray();
+
+        return [
+            'active' => (int) ($counts['active'] ?? 0),
+            'inactive' => (int) ($counts['inactive'] ?? 0),
+            'blacklisted' => (int) ($counts['blacklisted'] ?? 0),
+            'pending' => (int) ($counts['pending'] ?? 0),
+            'rejected' => (int) ($counts['rejected'] ?? 0),
+            'withdrawn' => (int) ($counts['withdrawn'] ?? 0),
+            'deceased' => (int) ($counts['deceased'] ?? 0),
+        ];
+    }
+
     public function scopeForBranch($query, int $branchId)
     {
         return $query->where('branch_id', $branchId);

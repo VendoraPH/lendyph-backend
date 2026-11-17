@@ -60,6 +60,15 @@ final class LindaMatcher
             'repayment rate', 'collection percentage', 'percent', 'percentage', 'porsyento sa koleksyon',
             'porsyento ng koleksyon', 'porsyento', 'porsiyento',
         ],
+        'borrower_summary' => [
+            'active members', 'active member', 'inactive members', 'inactive member', 'blacklisted members',
+            'blacklisted member', 'new members', 'new member', 'repeat members', 'repeat member', 'repeat borrowers',
+            'repeat borrower', 'membership', 'member count', 'members count',
+            'aktibong miyembro', 'aktibong members', 'active na miyembro', 'active na members', 'bagong miyembro',
+            'bagong members', 'bagong member',
+            'aktibo nga miyembro', 'aktibo nga members', 'active nga miyembro', 'active nga members',
+            'bag ong miyembro', 'bag ong members', 'bag ong member',
+        ],
     ];
 
     /**
@@ -71,7 +80,16 @@ final class LindaMatcher
      */
     private const WEAK_SUBJECTS = [
         'loan_summary' => ['pila ka loans', 'pila ka loan', 'pila kabuok nga loan', 'pila kabuok loan'],
+        'borrower_summary' => ['members', 'member', 'miyembro', 'myembro', 'kasapi'],
     ];
+
+    /**
+     * Words that keep a bare member word from being a member count: "how many
+     * loans do our members have" is about loans.
+     *
+     * @var list<string>
+     */
+    private const NOT_A_MEMBER_COUNT = ['loan', 'loans'];
 
     /**
      * Officer words: any of them makes the question about officer
@@ -412,6 +430,9 @@ final class LindaMatcher
      *   names ("which branch collected the most"), so it wins over them all;
      * - collection efficiency is about collections ("porsyento sa
      *   koleksyon"), so it wins over collections;
+     * - a bare member word ("members", "miyembro") only says whose figures
+     *   another subject is about ("which members are overdue"), and beside a
+     *   loan word it is a loan question, so it counts only on its own;
      * - "summary" beside another subject only describes it ("collection
      *   summary"), and so do the weak phrases ("pila ka loan").
      *
@@ -459,6 +480,10 @@ final class LindaMatcher
         }
 
         if ($intents === []) {
+            if (array_intersect($words, self::NOT_A_MEMBER_COUNT) !== []) {
+                unset($weakIntents[LindaIntent::BorrowerSummary->value]);
+            }
+
             $intents = $weakIntents;
         }
 

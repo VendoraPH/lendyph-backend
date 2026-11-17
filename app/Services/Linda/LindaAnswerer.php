@@ -17,6 +17,7 @@ use App\Services\Linda\Answers\LoanLookupAnswer;
 use App\Services\Linda\Answers\LoanSummaryAnswer;
 use App\Services\Linda\Answers\LookupAnswer;
 use App\Services\Linda\Answers\MemberLookupAnswer;
+use App\Services\Linda\Answers\MemberSummaryAnswer;
 use App\Services\Linda\Answers\NotYetAnswer;
 use App\Services\Linda\Answers\OfficerPerformanceAnswer;
 use App\Services\Linda\Answers\OverdueAccountsAnswer;
@@ -53,6 +54,7 @@ final class LindaAnswerer
         'collection_efficiency' => CollectionEfficiencyAnswer::class,
         'branch_performance' => BranchPerformanceAnswer::class,
         'officer_performance' => OfficerPerformanceAnswer::class,
+        'borrower_summary' => MemberSummaryAnswer::class,
     ];
 
     /** The record numbers a lookup reads: receipts, loans (LN-, LA-) and members. */
