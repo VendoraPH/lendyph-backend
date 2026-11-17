@@ -14,7 +14,7 @@ use PHPUnit\Framework\TestCase;
  */
 class LindaIntentTest extends TestCase
 {
-    public function test_the_intents_are_exactly_the_frontends_seventeen(): void
+    public function test_the_intents_are_exactly_these(): void
     {
         $this->assertSame([
             'collection_summary',
@@ -48,6 +48,8 @@ class LindaIntentTest extends TestCase
             LindaIntent::CollectionSummary,
             LindaIntent::CollectionDetails,
             LindaIntent::DisbursementSummary,
+            LindaIntent::IncomeSummary,
+            LindaIntent::ExpenseSummary,
             LindaIntent::BranchPerformance,
             LindaIntent::OfficerPerformance,
             LindaIntent::CollectionEfficiency,

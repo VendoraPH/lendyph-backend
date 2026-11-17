@@ -12,7 +12,9 @@ use App\Services\Linda\Answers\BranchPerformanceAnswer;
 use App\Services\Linda\Answers\CollectionEfficiencyAnswer;
 use App\Services\Linda\Answers\CollectionSummaryAnswer;
 use App\Services\Linda\Answers\DisbursementSummaryAnswer;
+use App\Services\Linda\Answers\ExpenseSummaryAnswer;
 use App\Services\Linda\Answers\GeneralLendingSummaryAnswer;
+use App\Services\Linda\Answers\IncomeSummaryAnswer;
 use App\Services\Linda\Answers\LoanLookupAnswer;
 use App\Services\Linda\Answers\LoanSummaryAnswer;
 use App\Services\Linda\Answers\LookupAnswer;
@@ -57,6 +59,8 @@ final class LindaAnswerer
         'officer_performance' => OfficerPerformanceAnswer::class,
         'borrower_summary' => MemberSummaryAnswer::class,
         'portfolio_summary' => PortfolioSummaryAnswer::class,
+        'income_summary' => IncomeSummaryAnswer::class,
+        'expense_summary' => ExpenseSummaryAnswer::class,
     ];
 
     /** The record numbers a lookup reads: receipts, loans (LN-, LA-) and members. */

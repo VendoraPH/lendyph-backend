@@ -34,6 +34,17 @@ class LindaMatcherTopicsTest extends LindaTestCase
             'tl portfolio sa Main' => ['Magkano ang portfolio natin sa Main?', LindaIntent::PortfolioSummary, null, 'main'],
             'ceb PAR nato' => ['Pila ang PAR nato?', LindaIntent::PortfolioSummary, null, null],
             'ceb portfolio nato' => ['Pila ang portfolio nato karon?', LindaIntent::PortfolioSummary, null, null],
+            // Income and expenses.
+            'en income this month' => ['How much income did we earn this month?', LindaIntent::IncomeSummary, 'this_month', null],
+            'en interest income last month' => ['What was our interest income last month?', LindaIntent::IncomeSummary, 'last_month', null],
+            'en revenue in Main' => ['revenue in Main branch this year', LindaIntent::IncomeSummary, 'this_year', 'main'],
+            'en income, no period' => ['Show our income', LindaIntent::IncomeSummary, 'this_month', null],
+            'en expenses' => ['What are our total expenses this month?', LindaIntent::ExpenseSummary, 'this_month', null],
+            'en spend' => ['How much did we spend last month?', LindaIntent::ExpenseSummary, 'last_month', null],
+            'tl kinita' => ['Magkano ang kinita natin noong isang buwan?', LindaIntent::IncomeSummary, 'last_month', null],
+            'tl gastos' => ['Magkano ang gastos natin ngayong buwan?', LindaIntent::ExpenseSummary, 'this_month', null],
+            'ceb ganansya' => ['Pila ang ganansya nato niaging bulan?', LindaIntent::IncomeSummary, 'last_month', null],
+            'ceb gigasto sa Main' => ['Pila ang gigasto karong bulana sa Main?', LindaIntent::ExpenseSummary, 'this_month', 'main'],
         ];
     }
 

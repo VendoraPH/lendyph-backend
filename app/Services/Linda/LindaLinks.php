@@ -29,6 +29,7 @@ final class LindaLinks
         'performance' => ['label' => 'Open Officer / Branch Performance', 'url' => '/reports/performance', 'needs' => ['reports:view']],
         'repayments_list' => ['label' => 'Open Repayments List', 'url' => '/reports/repayments_list', 'needs' => ['reports:view']],
         'members' => ['label' => 'Open Members', 'url' => '/borrowers', 'needs' => ['borrowers:view']],
+        'expenses' => ['label' => 'Open Expenses & Payables', 'url' => '/accounting/expenses', 'needs' => ['accounting:view', 'expenses:view']],
         'member_report' => ['label' => 'Open Member Report', 'url' => '/reports/borrower_report', 'needs' => ['reports:view']],
     ];
 

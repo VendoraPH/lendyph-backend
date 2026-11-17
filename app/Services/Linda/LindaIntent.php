@@ -5,9 +5,9 @@ namespace App\Services\Linda;
 /**
  * What a Linda question is about.
  *
- * Exactly the names of the frontend's `LindaIntent` union
- * (lendyph-frontend src/types/linda.ts), so a reply never carries a name the
- * panel doesn't know. The deterministic matcher answers five of them; the
+ * The names of the frontend's `LindaIntent` union (lendyph-frontend
+ * src/types/linda.ts), plus round 3's own, which the union accepts as plain
+ * strings and the panel treats alike. The deterministic matcher answers five of them; the
  * model may choose any.
  */
 enum LindaIntent: string
@@ -87,7 +87,7 @@ enum LindaIntent: string
         return match ($this) {
             self::CollectionSummary, self::CollectionDetails, self::DisbursementSummary,
             self::BranchPerformance, self::OfficerPerformance, self::CollectionEfficiency,
-            self::GeneralLendingSummary => true,
+            self::GeneralLendingSummary, self::IncomeSummary, self::ExpenseSummary => true,
             default => false,
         };
     }

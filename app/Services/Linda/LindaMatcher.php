@@ -64,6 +64,13 @@ final class LindaMatcher
             'portfolio', 'portfolio summary', 'loan portfolio', 'portfolio at risk', 'par', 'par 1', 'par 30', 'par 90',
             'principal balance', 'outstanding principal', 'portpolyo',
         ],
+        'income_summary' => [
+            'income', 'interest income', 'penalty income', 'fee income', 'income report', 'revenue', 'revenues', 'earn',
+            'earned', 'earnings', 'kita', 'kinita', 'kinitaan', 'ganansya', 'ganansiya',
+        ],
+        'expense_summary' => [
+            'expense', 'expenses', 'spend', 'spent', 'spending', 'gastos', 'gasto', 'gigasto', 'gastu', 'gastohan',
+        ],
         'borrower_summary' => [
             'active members', 'active member', 'inactive members', 'inactive member', 'blacklisted members',
             'blacklisted member', 'new members', 'new member', 'repeat members', 'repeat member', 'repeat borrowers',

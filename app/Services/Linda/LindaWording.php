@@ -34,6 +34,12 @@ final class LindaWording
         return Money::format(Money::toCentavos(is_string($pesos) ? $pesos : (float) $pesos) ?? 0);
     }
 
+    /** Whole centavos as ₱ with two decimals: 150000 → "₱1,500.00". */
+    public static function centavos(int $centavos): string
+    {
+        return Money::format($centavos);
+    }
+
     /** A whole percent, two decimals at most, trailing zeros dropped: 87.5 → "87.5%". */
     public static function percent(int|float $percent): string
     {

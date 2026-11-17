@@ -199,6 +199,42 @@ class AccountingExpense extends Model
     }
 
     /**
+     * Rows in the branches $user may see (BranchAccess). A row with no branch
+     * is visible only to `branches:view_all`.
+     */
+    public function scopeVisibleTo(Builder $query, User $user): Builder
+    {
+        $branchIds = app(BranchAccess::class)->for($user);
+
+        return $branchIds === null ? $query : $query->whereIn('branch_id', $branchIds);
+    }
+
+    /**
+     * The Expenses & Payables list's `meta.totals`: `{count, amount,
+     * amount_paid, amount_due}` over every expense $matching selects, in one
+     * aggregate. Integer centavos; `amount_due` is `amount - amount_paid`
+     * summed in SQL, the same figure as each row's `amount_due`. Linda's
+     * expense answer reads the same totals.
+     *
+     * @param  Builder<AccountingExpense>  $matching
+     * @return array{count: int, amount: int, amount_paid: int, amount_due: int}
+     */
+    public static function listTotals(Builder $matching): array
+    {
+        $row = $matching
+            ->toBase()
+            ->selectRaw('COUNT(*) as row_count, COALESCE(SUM(amount), 0) as amount, COALESCE(SUM(amount_paid), 0) as amount_paid, COALESCE(SUM(amount - amount_paid), 0) as amount_due')
+            ->first();
+
+        return [
+            'count' => (int) $row->row_count,
+            'amount' => (int) $row->amount,
+            'amount_paid' => (int) $row->amount_paid,
+            'amount_due' => (int) $row->amount_due,
+        ];
+    }
+
+    /**
      * Rows whose DERIVED status is `$status`.
      *
      * The SQL twin of {@see self::status()}, and it has to stay a twin: a filter
