@@ -68,6 +68,7 @@ class LindaIntentTest extends TestCase
             LindaIntent::BorrowerLookup,
             LindaIntent::OverdueAccounts,
             LindaIntent::TransactionLookup,
+            LindaIntent::PortfolioSummary,
             LindaIntent::UnsupportedQuestion,
         ], $timeless);
     }

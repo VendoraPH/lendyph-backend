@@ -32,7 +32,7 @@ enum LindaIntent: string
 
     /**
      * Whether a question of this kind is read for a period at all. Overdue
-     * accounts and active loans are as of today, so any period words a
+     * accounts, active loans and the portfolio are as of today, so any period words a
      * question or the model gives them are ignored, never refused or called
      * unclear; an unsupported question has no period either, and nor does a
      * lookup (a member, a loan or a receipt), which is about one record.
@@ -40,7 +40,7 @@ enum LindaIntent: string
     public function takesPeriod(): bool
     {
         return match ($this) {
-            self::OverdueAccounts, self::LoanSummary, self::UnsupportedQuestion,
+            self::OverdueAccounts, self::LoanSummary, self::PortfolioSummary, self::UnsupportedQuestion,
             self::BorrowerLookup, self::LoanDetails, self::TransactionLookup => false,
             default => true,
         };

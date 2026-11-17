@@ -22,6 +22,7 @@ use App\Services\Linda\Answers\NotYetAnswer;
 use App\Services\Linda\Answers\OfficerPerformanceAnswer;
 use App\Services\Linda\Answers\OverdueAccountsAnswer;
 use App\Services\Linda\Answers\PaymentsAnswer;
+use App\Services\Linda\Answers\PortfolioSummaryAnswer;
 use App\Services\Linda\Answers\ReceiptLookupAnswer;
 use App\Services\Linda\Answers\UnsupportedAnswer;
 
@@ -55,6 +56,7 @@ final class LindaAnswerer
         'branch_performance' => BranchPerformanceAnswer::class,
         'officer_performance' => OfficerPerformanceAnswer::class,
         'borrower_summary' => MemberSummaryAnswer::class,
+        'portfolio_summary' => PortfolioSummaryAnswer::class,
     ];
 
     /** The record numbers a lookup reads: receipts, loans (LN-, LA-) and members. */
