@@ -128,6 +128,73 @@ class BranchOnIntakeTest extends TestCase
         $this->assertSame($this->branch->id, Loan::where('borrower_id', $member->id)->sole()->branch_id);
     }
 
+    public function test_another_branchs_former_member_reads_only_as_an_invalid_id(): void
+    {
+        $gone = Borrower::factory()->create([
+            'branch_id' => $this->far->id,
+            'first_name' => 'Zenaida', 'last_name' => 'Quisumbing',
+            'status' => 'withdrawn', 'membership_ended_on' => '2026-10-01',
+        ]);
+        $mine = Borrower::factory()->create(['branch_id' => $this->branch->id]);
+        $source = $this->createReleasedLoan();
+        $this->actingAs($this->branchUser(['loans:create', 'loans:restructure']));
+
+        $responses = [
+            'borrower_id' => $this->postJson('/api/loans', $this->loanPayload($gone)),
+            'co_maker_ids.0' => $this->postJson('/api/loans', [...$this->loanPayload($mine), 'co_maker_ids' => [$gone->id]]),
+            'restructure borrower_id' => $this->postJson("/api/loans/{$source->id}/restructure", ['borrower_id' => $gone->id]),
+        ];
+
+        foreach ($responses as $field => $response) {
+            $key = str_replace('restructure ', '', $field);
+            $response->assertUnprocessable()->assertJsonValidationErrors([$key]);
+            $this->assertCount(1, $response->json('errors')[$key], $field);
+            foreach (['Zenaida', 'Quisumbing', $gone->borrower_code, 'Oct 1, 2026', 'no branch'] as $leak) {
+                $this->assertStringNotContainsString($leak, $response->getContent(), "{$field} leaked {$leak}");
+            }
+        }
+    }
+
+    public function test_a_member_id_written_another_way_answers_422_never_500(): void
+    {
+        $member = Borrower::factory()->create(['branch_id' => null, 'status' => 'pending']);
+
+        foreach (["{$member->id}.0", (float) $member->id, " {$member->id}"] as $id) {
+            $this->postJson('/api/loans', [...$this->loanPayload($member), 'borrower_id' => $id])
+                ->assertUnprocessable()
+                ->assertJsonValidationErrors(['borrower_id']);
+        }
+
+        $this->assertSame(0, Loan::where('borrower_id', $member->id)->count());
+    }
+
+    // Reactivate is not a way round registration review -----------------------
+
+    public function test_reactivate_refuses_a_pending_or_rejected_registration(): void
+    {
+        foreach (['pending', 'rejected'] as $status) {
+            $applicant = Borrower::factory()->create(['branch_id' => null, 'status' => $status]);
+
+            $this->patchJson("/api/borrowers/{$applicant->id}/reactivate")
+                ->assertUnprocessable()
+                ->assertJsonValidationErrors(['status' => 'This registration hasn\'t been approved. Approve it from Registration Review.']);
+
+            $this->assertSame($status, $applicant->fresh()->status);
+            $this->assertNull($applicant->fresh()->approved_at);
+        }
+    }
+
+    public function test_reactivate_still_turns_an_inactive_or_blacklisted_member_active(): void
+    {
+        foreach (['inactive', 'blacklisted'] as $status) {
+            $member = Borrower::factory()->create(['branch_id' => $this->branch->id, 'status' => $status]);
+
+            $this->patchJson("/api/borrowers/{$member->id}/reactivate")->assertOk();
+
+            $this->assertSame('active', $member->fresh()->status);
+        }
+    }
+
     // D8: CSV import branch --------------------------------------------------
 
     public function test_a_csv_import_goes_only_into_one_of_the_callers_branches(): void

@@ -22,7 +22,9 @@ class StoreLoanRequest extends FormRequest
     public function rules(): array
     {
         return [
-            'borrower_id' => ['required', $this->nonRejectedBorrowerRule(), new NotAFormerMember, new MemberHasBranch],
+            // `bail`: once the branch-scoped `exists` fails, the rules after it
+            // must not read the id unscoped and describe another branch's member.
+            'borrower_id' => ['bail', 'required', 'integer', $this->nonRejectedBorrowerRule(), new NotAFormerMember, new MemberHasBranch],
             'co_maker_ids' => ['nullable', 'array'],
             // MEMBER ids only — all the loan form's co-maker picker sends —
             // never a co-maker record id: the two are separate sequences, so a
@@ -30,7 +32,7 @@ class StoreLoanRequest extends FormRequest
             // LoanService::coMakerIdsForMembers(). The same rule as the
             // principal borrower above, because a co-maker is jointly liable:
             // a rejected registration must not become one.
-            'co_maker_ids.*' => ['integer', $this->nonRejectedBorrowerRule(), new NotAFormerMember(NotAFormerMember::AS_CO_MAKER)],
+            'co_maker_ids.*' => ['bail', 'integer', $this->nonRejectedBorrowerRule(), new NotAFormerMember(NotAFormerMember::AS_CO_MAKER)],
             'loan_product_id' => ['required', 'exists:loan_products,id'],
             'principal_amount' => ['required', 'numeric', 'min:1'],
             'purpose' => ['nullable', 'string', 'max:500'],

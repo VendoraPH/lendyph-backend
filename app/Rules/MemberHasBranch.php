@@ -18,11 +18,15 @@ final class MemberHasBranch implements ValidationRule
 
     public function validate(string $attribute, mixed $value, Closure $fail): void
     {
-        if (! is_int($value) && ! (is_string($value) && ctype_digit($value))) {
+        // The same whole numbers the `integer` and `exists` rules accept
+        // (" 5" and 5.0 included), so none of them slips past to the insert.
+        $id = filter_var($value, FILTER_VALIDATE_INT);
+
+        if ($id === false) {
             return;
         }
 
-        $member = Borrower::query()->whereKey((int) $value)->first(['id', 'branch_id']);
+        $member = Borrower::query()->whereKey($id)->first(['id', 'branch_id']);
 
         // A missing member is the `exists` rule's to report.
         if ($member !== null && $member->branch_id === null) {

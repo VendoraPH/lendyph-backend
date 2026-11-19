@@ -570,6 +570,14 @@ DESC,
     {
         $this->authorize('borrowers:update');
 
+        // A registration becomes a member only through Registration Review,
+        // which needs borrowers:approve, a valid ID and a branch (Phase 6 D7).
+        if (in_array($borrower->status, ['pending', 'rejected'], true)) {
+            throw ValidationException::withMessages([
+                'status' => 'This registration hasn\'t been approved. Approve it from Registration Review.',
+            ]);
+        }
+
         if ($borrower->isFormerMember()) {
             throw ValidationException::withMessages(['status' => MembershipStatus::endedMessage($borrower)]);
         }
@@ -595,12 +603,20 @@ DESC,
             new OA\Response(response: 200, description: 'Borrower reactivated'),
             new OA\Response(response: 401, description: 'Unauthenticated'),
             new OA\Response(response: 403, description: 'Forbidden'),
-            new OA\Response(response: 422, description: 'A former member without a reason'),
+            new OA\Response(response: 422, description: 'A former member without a reason, or a pending or rejected registration (approve it from Registration Review)'),
         ],
     )]
     public function reactivate(Request $request, Borrower $borrower, MembershipStatus $membership): JsonResponse
     {
         $this->authorize('borrowers:update');
+
+        // A registration becomes a member only through Registration Review,
+        // which needs borrowers:approve, a valid ID and a branch (Phase 6 D7).
+        if (in_array($borrower->status, ['pending', 'rejected'], true)) {
+            throw ValidationException::withMessages([
+                'status' => 'This registration hasn\'t been approved. Approve it from Registration Review.',
+            ]);
+        }
 
         if ($borrower->isFormerMember()) {
             $membership->reactivate($borrower, (string) $request->validate([
@@ -654,7 +670,6 @@ DESC,
     )]
     public function approveRegistration(ApproveRegistrationRequest $request, Borrower $borrower): BorrowerResource
     {
-
         if ($borrower->status !== 'pending') {
             throw ValidationException::withMessages([
                 'status' => 'Only members with a pending registration can be approved.',

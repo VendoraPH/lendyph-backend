@@ -25,7 +25,9 @@ beforeEach(function () {
 
 /**
  * A borrower approved the way every existing member was: `/reactivate`, which
- * flips `status` and records nothing on the borrower row itself.
+ * flipped `status` and recorded nothing on the borrower row itself. Since
+ * Phase 6 (D7) `/reactivate` refuses a pending registration, so the historical
+ * state is rebuilt with the same audited write that endpoint made.
  */
 function borrowerApprovedViaReactivate(int $branchId, User $admin): Borrower
 {
@@ -34,9 +36,8 @@ function borrowerApprovedViaReactivate(int $branchId, User $admin): Borrower
         'status' => 'pending',
     ]);
 
-    test()->actingAs($admin)
-        ->patchJson("/api/borrowers/{$applicant->id}/reactivate")
-        ->assertSuccessful();
+    test()->actingAs($admin);
+    $applicant->update(['status' => 'active']);
 
     return $applicant->fresh();
 }
