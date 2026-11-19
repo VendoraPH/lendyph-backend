@@ -30,6 +30,7 @@ final class LindaLinks
         'repayments_list' => ['label' => 'Open Repayments List', 'url' => '/reports/repayments_list', 'needs' => ['reports:view']],
         'members' => ['label' => 'Open Members', 'url' => '/borrowers', 'needs' => ['borrowers:view']],
         'expenses' => ['label' => 'Open Expenses & Payables', 'url' => '/accounting/expenses', 'needs' => ['accounting:view', 'expenses:view']],
+        'share_capital' => ['label' => 'Open Share Capital', 'url' => '/share-capital', 'needs' => ['share_capital:view']],
         'savings_dashboard' => ['label' => 'Open Savings Dashboard', 'url' => '/savings/dashboard', 'needs' => ['savings:view']],
         'member_report' => ['label' => 'Open Member Report', 'url' => '/reports/borrower_report', 'needs' => ['reports:view']],
     ];

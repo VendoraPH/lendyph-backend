@@ -39,6 +39,7 @@ final class FakeModel implements LindaModel
         ['officer_performance', ['officer', 'officers', 'collector', 'collectors', 'ao', 'aos', 'kolektor']],
         ['branch_performance', ['branches', 'compare', 'ikumpara', 'itandi', 'best branch', 'top branch', 'which branch', 'unsang branch', 'anong branch', 'asa nga branch', 'by branch', 'per branch', 'kada branch']],
         ['portfolio_summary', ['portfolio', 'par', 'par 30']],
+        ['share_capital_summary', ['share capital', 'capital build up', 'cbu', 'kapital', 'capital']],
         ['savings_summary', ['savings', 'deposits', 'time deposit', 'time deposits', 'ipon', 'impok', 'tinigom', 'tigom']],
         ['transaction_lookup', ['receipt', 'transaction', 'reference', 'resibo']],
         ['loan_details', ['loan ln', 'loan number', 'schedule of loan']],

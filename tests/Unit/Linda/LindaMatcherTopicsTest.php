@@ -45,6 +45,15 @@ class LindaMatcherTopicsTest extends LindaTestCase
             'tl gastos' => ['Magkano ang gastos natin ngayong buwan?', LindaIntent::ExpenseSummary, 'this_month', null],
             'ceb ganansya' => ['Pila ang ganansya nato niaging bulan?', LindaIntent::IncomeSummary, 'last_month', null],
             'ceb gigasto sa Main' => ['Pila ang gigasto karong bulana sa Main?', LindaIntent::ExpenseSummary, 'this_month', 'main'],
+            // Share capital.
+            'en share capital' => ['How much share capital do we have?', LindaIntent::ShareCapitalSummary, null, null],
+            'en share capital in Main' => ['share capital in Main branch', LindaIntent::ShareCapitalSummary, null, 'main'],
+            'en capital build-up' => ['Total capital build-up', LindaIntent::ShareCapitalSummary, null, null],
+            'en CBU now' => ['What is our CBU now?', LindaIntent::ShareCapitalSummary, null, null],
+            'tl share capital' => ['Magkano ang share capital natin?', LindaIntent::ShareCapitalSummary, null, null],
+            'tl ilan ang may share capital' => ['Ilan ang may share capital?', LindaIntent::ShareCapitalSummary, null, null],
+            'ceb kapital' => ['Pila ang kapital sa mga miyembro?', LindaIntent::ShareCapitalSummary, null, null],
+            'ceb share capital sa Main' => ['Pila ang share capital nato sa Main?', LindaIntent::ShareCapitalSummary, null, 'main'],
         ];
     }
 

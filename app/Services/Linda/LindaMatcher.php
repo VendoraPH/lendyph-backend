@@ -75,6 +75,10 @@ final class LindaMatcher
             'savings', 'savings account', 'savings accounts', 'savings deposits', 'deposits', 'total deposits',
             'time deposit', 'time deposits', 'maturing time deposits', 'maturing', 'ipon', 'impok', 'tinipid', 'tinigom', 'tigom',
         ],
+        'share_capital_summary' => [
+            'share capital', 'share capitals', 'capital build up', 'capital buildup', 'cbu', 'capital', 'kapital',
+            'share capital ledger', 'share capital balance',
+        ],
         'borrower_summary' => [
             'active members', 'active member', 'inactive members', 'inactive member', 'blacklisted members',
             'blacklisted member', 'new members', 'new member', 'repeat members', 'repeat member', 'repeat borrowers',

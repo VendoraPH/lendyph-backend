@@ -29,6 +29,7 @@ enum LindaIntent: string
     case PortfolioSummary = 'portfolio_summary';
     case GeneralLendingSummary = 'general_lending_summary';
     case SavingsSummary = 'savings_summary';
+    case ShareCapitalSummary = 'share_capital_summary';
     case UnsupportedQuestion = 'unsupported_question';
 
     /**
@@ -41,7 +42,8 @@ enum LindaIntent: string
     public function takesPeriod(): bool
     {
         return match ($this) {
-            self::OverdueAccounts, self::LoanSummary, self::PortfolioSummary, self::SavingsSummary, self::UnsupportedQuestion,
+            self::OverdueAccounts, self::LoanSummary, self::PortfolioSummary, self::SavingsSummary, self::ShareCapitalSummary,
+            self::UnsupportedQuestion,
             self::BorrowerLookup, self::LoanDetails, self::TransactionLookup => false,
             default => true,
         };
