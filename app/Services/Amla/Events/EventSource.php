@@ -3,6 +3,7 @@
 namespace App\Services\Amla\Events;
 
 use App\Models\AmlaEvent;
+use Illuminate\Contracts\Database\Query\Expression;
 use Illuminate\Database\Query\Builder;
 use stdClass;
 
@@ -23,8 +24,8 @@ abstract class EventSource
     /** The `amla_events.source` this adapter writes ("gcash"). */
     abstract public function eventSource(): string;
 
-    /** The row's recording time, qualified: the cursor column. */
-    abstract public function recordedColumn(): string;
+    /** The row's recording time, qualified (a column or an expression): what the cursor reads. */
+    abstract public function recordedColumn(): string|Expression;
 
     /** The row's id, qualified. */
     abstract public function idColumn(): string;

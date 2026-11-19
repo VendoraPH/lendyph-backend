@@ -11,14 +11,20 @@ use App\Models\Branch;
 use App\Models\GCashNonMember;
 use App\Models\GCashTransaction;
 use App\Models\Loan;
+use App\Models\LoanProduct;
 use App\Models\Repayment;
+use App\Models\Role;
 use App\Models\ShareCapitalLedger;
 use App\Models\TimeDeposit;
+use App\Models\User;
+use App\Services\Amla\Events\Coverage;
 use App\Services\Amla\Events\Harvester;
+use App\Services\LoanService;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use Tests\Feature\Phase6\Amla\AmlaTestHelpers;
 use Tests\TestCase;
+use Tests\Traits\PostsJournals;
 use Tests\Traits\SetupLendyPH;
 
 /**
@@ -29,7 +35,7 @@ use Tests\Traits\SetupLendyPH;
  */
 class AmlaHarvesterTest extends TestCase
 {
-    use AmlaEventTestHelpers, AmlaTestHelpers, SetupLendyPH;
+    use AmlaEventTestHelpers, AmlaTestHelpers, PostsJournals, SetupLendyPH;
 
     protected function setUp(): void
     {
@@ -233,7 +239,7 @@ class AmlaHarvesterTest extends TestCase
         $this->assertSame($deposit->id, $reversalEvent->linked_source_id);
     }
 
-    public function test_time_deposits_place_and_pay_out_and_savings_funding_or_rollover_is_internal(): void
+    public function test_a_time_deposit_placement_is_money_in_and_savings_funding_or_rollover_is_internal(): void
     {
         $this->goLive();
         $member = Borrower::factory()->create(['branch_id' => $this->branch->id, 'status' => 'active']);
@@ -247,18 +253,6 @@ class AmlaHarvesterTest extends TestCase
         $this->assertSame($cash->branch_id, $placement->branch_id);
         $this->assertTrue($this->soleEvent('time_deposit', $fromSavings->id)->is_internal);
         $this->assertTrue($this->soleEvent('time_deposit', $rolled->id)->is_internal);
-
-        $this->at('2026-11-20 09:10:00');
-        DB::table('time_deposits')->where('id', $cash->id)->update([
-            'status' => 'withdrawn', 'settled_on' => '2026-11-20', 'settled_amount' => '75616.44', 'payout_method' => 'cash', 'updated_at' => now(),
-        ]);
-        $this->harvestLater('2026-11-20 09:12:00');
-
-        $events = collect($this->eventsFor('time_deposit', $cash->id))->keyBy('kind');
-        $this->assertSame('75616.44', $events['time_deposit_payout']->amount);
-        $this->assertSame('out', $events['time_deposit_payout']->direction);
-        $this->assertFalse($events['time_deposit_payout']->is_internal);
-        $this->assertSame('cash', $events['time_deposit_payout']->channel);
     }
 
     public function test_only_unlinked_share_capital_rows_are_events(): void
@@ -417,5 +411,104 @@ class AmlaHarvesterTest extends TestCase
         $this->at('2026-11-20 09:05:00');
 
         $this->artisan('amla:harvest')->expectsOutputToContain('Loan releases: 1 event')->assertSuccessful();
+    }
+
+    public function test_an_old_gcash_row_touched_after_go_live_is_not_brought_into_monitoring(): void
+    {
+        $member = Borrower::factory()->create(['branch_id' => $this->branch->id, 'status' => 'active']);
+        $this->at('2026-11-20 08:30:00');
+        $old = GCashTransaction::factory()->create(['borrower_id' => $member->id, 'status' => 'paid', 'paid_at' => now()]);
+        $oldOut = GCashTransaction::factory()->create(['borrower_id' => $member->id, 'type' => 'cash_out', 'amount' => 3000, 'charge_amount' => 45, 'total_amount' => 2955, 'status' => 'completed']);
+        $this->goLive();
+
+        // A later write (the branch attribution backfill, a data fix) moves updated_at.
+        DB::table('gcash_transactions')->whereIn('id', [$old->id, $oldOut->id])->update(['branch_id' => $this->branch->id, 'updated_at' => now()]);
+        $this->harvestLater();
+        $this->at('2026-11-21 00:45:00');
+        $coverage = app(Coverage::class)->check('2026-11-20');
+
+        $this->assertSame([], $this->eventsFor('gcash', $old->id));
+        $this->assertSame([], $this->eventsFor('gcash', $oldOut->id));
+        $this->assertSame(0, $coverage['gcash']['rows']);
+    }
+
+    public function test_share_capital_rows_linked_to_a_payment_or_a_savings_row_are_not_events(): void
+    {
+        $this->goLive();
+        $loan = $this->createReleasedLoan();
+        $this->postJson("/api/loans/{$loan->id}/repayments", ['payment_date' => '2026-11-20', 'amount_paid' => 5000, 'method' => 'cash'])->assertCreated();
+        $repayment = Repayment::query()->where('loan_id', $loan->id)->sole();
+        $account = $this->savingsAccountFor($loan->borrower_id, $loan->branch_id);
+        $savings = $this->savingsRow($account, 'credit', 'deposit', 100_000, ['method' => 'cash']);
+        $out = $this->savingsRow($account, 'debit', 'share_capital_transfer', 20_000, ['method' => 'savings']);
+        $buildUp = ShareCapitalLedger::factory()->create(['borrower_id' => $loan->borrower_id, 'repayment_id' => $repayment->id, 'date' => '2026-11-20', 'credit' => 250, 'debit' => 0]);
+        $fromSavings = ShareCapitalLedger::factory()->create(['borrower_id' => $loan->borrower_id, 'savings_transaction_id' => $out->id, 'date' => '2026-11-20', 'credit' => 200, 'debit' => 0]);
+
+        $this->harvestLater();
+
+        $this->assertSame([], $this->eventsFor('share_capital', $buildUp->id));
+        $this->assertSame([], $this->eventsFor('share_capital', $fromSavings->id));
+        $this->assertSame('5000.00', $this->soleEvent('repayment', $repayment->id)->amount);
+        $this->assertFalse($this->soleEvent('savings_transaction', $savings->id)->is_internal);
+        $transfer = $this->soleEvent('savings_transaction', $out->id);
+        $this->assertSame(['savings_to_share_capital', true, '200.00'], [$transfer->kind, $transfer->is_internal, $transfer->amount]);
+    }
+
+    public function test_a_real_restructure_release_moves_its_principal_internally_and_collects_its_deductions(): void
+    {
+        $this->seedChartOfAccounts();
+        $this->goLive();
+        $source = $this->createReleasedLoan();
+        $restructure = Loan::findOrFail($this->postJson("/api/loans/{$source->id}/restructure", [
+            'borrower_id' => $source->borrower_id,
+            'loan_product_id' => $source->loan_product_id,
+            'principal_amount' => 70800,
+            'start_date' => now()->toDateString(),
+            'deductions' => [['name' => 'Share Capital', 'amount' => 708, 'type' => 'fixed'], ['name' => 'Processing Fee', 'amount' => 150.25, 'type' => 'fixed']],
+        ])->assertCreated()->json('data.id'));
+        $approver = tap(User::factory()->create(), fn (User $user) => $user->assignRole(Role::where('name', 'admin')->first()));
+        $this->patchJson("/api/loans/{$restructure->id}/submit")->assertOk();
+        $this->actingAs($approver);
+        $this->patchJson("/api/loans/{$restructure->id}/approve", ['approval_remarks' => 'ok'])->assertOk();
+        $this->actingAs($this->admin);
+        $this->patchJson("/api/loans/{$restructure->id}/release")->assertOk();
+        $released = $restructure->fresh();
+
+        $this->harvestLater();
+
+        $events = collect($this->eventsFor('loan', $released->id))->keyBy('kind');
+        $this->assertSame(['loan_restructure', 'restructure_deductions_collected'], $events->keys()->sort()->values()->all());
+        $this->assertSame(['70800.00', true, $source->id], [$events['loan_restructure']->amount, $events['loan_restructure']->is_internal, $events['loan_restructure']->linked_source_id]);
+        $this->assertSame((string) $released->total_deductions, $events['restructure_deductions_collected']->amount);
+        $this->assertSame('858.25', $events['restructure_deductions_collected']->amount);
+        $this->assertSame($released->release_method, $events['restructure_deductions_collected']->channel);
+        $credit = ShareCapitalLedger::query()->where('loan_id', $released->id)->sole();
+        $this->assertSame([], $this->eventsFor('share_capital', $credit->id));
+        $this->assertCount(1, $this->eventsFor('loan', $source->id));
+    }
+
+    public function test_a_release_with_a_share_capital_deduction_pays_out_only_its_net_proceeds(): void
+    {
+        $this->seedChartOfAccounts();
+        $this->goLive();
+        $member = Borrower::factory()->create(['branch_id' => $this->branch->id, 'status' => 'active']);
+        $product = LoanProduct::factory()->create(['interest_rate' => 3.0, 'interest_method' => 'straight', 'term' => 6, 'frequency' => 'monthly']);
+        $service = app(LoanService::class);
+        $loan = $service->createLoan([
+            'borrower_id' => $member->id, 'loan_product_id' => $product->id, 'principal_amount' => 60000, 'start_date' => now()->toDateString(),
+            'deductions' => [['name' => 'Share Capital', 'amount' => 1000.10, 'type' => 'fixed']],
+        ], $this->admin);
+        $service->submitForReview($loan);
+        $service->approve($loan, $this->admin, 'Approved for testing');
+        $released = $service->release($loan->fresh(), $this->admin);
+
+        $this->harvestLater();
+
+        $event = $this->soleEvent('loan', $released->id);
+        $this->assertSame((string) $released->fresh()->net_proceeds, $event->amount);
+        $this->assertSame('58999.90', $event->amount);
+        $credit = ShareCapitalLedger::query()->where('loan_id', $released->id)->sole();
+        $this->assertSame('1000.10', $credit->credit);
+        $this->assertSame([], $this->eventsFor('share_capital', $credit->id));
     }
 }

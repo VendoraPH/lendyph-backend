@@ -7,6 +7,7 @@ use App\Services\Amla\Events\EventCannotBeBuilt;
 use App\Services\Amla\Events\EventSource;
 use App\Services\Amla\Events\PesoAmount;
 use App\Services\BranchAttribution;
+use Illuminate\Contracts\Database\Query\Expression;
 use Illuminate\Database\Query\Builder;
 use Illuminate\Support\Facades\DB;
 use stdClass;
@@ -19,8 +20,12 @@ use stdClass;
  * cash. A pending Cash In is tracked, not an event, until it is paid.
  *
  * Dated `paid_at` (Cash In) or `transaction_date` (Cash Out), as the journal
- * is, and recorded at `updated_at`, which marking it paid moves. Its branch is
- * BranchAttribution's: a walk-in done at head office has none.
+ * is. Recorded when the money moved: `paid_at` (set when a Cash In is paid at
+ * the counter or marked paid), else `created_at` (a Cash Out is created
+ * completed). Never `updated_at`, which any later write moves (the branch
+ * attribution backfill, a data fix), so an old row is never pulled into
+ * monitoring. Its branch is BranchAttribution's: a walk-in done at head office
+ * has none.
  *
  * A row whose total doesn't reconcile with its amount and charge, as the books
  * would refuse it, is a failure rather than an event of a guessed amount.
@@ -42,9 +47,12 @@ final class GCash extends EventSource
         return 'gcash';
     }
 
-    public function recordedColumn(): string
+    /** SQL for when a row's money moved; see the class note. */
+    public const RECORDED_SQL = 'COALESCE(gcash_transactions.paid_at, gcash_transactions.created_at)';
+
+    public function recordedColumn(): Expression
     {
-        return 'gcash_transactions.updated_at';
+        return DB::raw(self::RECORDED_SQL);
     }
 
     public function idColumn(): string
@@ -100,7 +108,7 @@ final class GCash extends EventSource
         return DB::table('gcash_transactions')
             ->leftJoin('borrowers', 'borrowers.id', '=', 'gcash_transactions.borrower_id')
             ->select([
-                'gcash_transactions.id', 'gcash_transactions.updated_at as recorded', 'gcash_transactions.reference_no',
+                'gcash_transactions.id', DB::raw(self::RECORDED_SQL.' as recorded'), 'gcash_transactions.reference_no',
                 'gcash_transactions.type', 'gcash_transactions.status', 'gcash_transactions.amount', 'gcash_transactions.charge_amount',
                 'gcash_transactions.total_amount', 'gcash_transactions.borrower_id', 'gcash_transactions.gcash_non_member_id',
                 'gcash_transactions.transaction_date', 'gcash_transactions.paid_at',

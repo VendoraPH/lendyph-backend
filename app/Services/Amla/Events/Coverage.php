@@ -6,6 +6,7 @@ use App\Models\AmlaCoverageCheck;
 use App\Models\AmlaEventFailure;
 use App\Models\AmlaHarvestCursor;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\DB;
 
 /**
  * The nightly AMLA coverage check (AMLA design §4.5): for one Manila day and
@@ -15,17 +16,29 @@ use Illuminate\Support\Carbon;
  * missed. Nothing counts as cleared until it has been screened. Pending rows
  * (a GCash Cash In not yet paid) are counted apart; they aren't money yet.
  *
- * Reads the money tables only; writes one AmlaCoverageCheck per source.
+ * Before counting, it sweeps the day: every monitored row recorded that day
+ * goes through EventWriter, which adds only what is missing. That screens a
+ * row whose transaction committed after the harvester's overlap had passed
+ * (a long auto-credit or bulk share capital run stamps its first rows long
+ * before it commits), as the credit scoring nightly rescore catches what its
+ * scanner missed. The sweep holds the source's cursor lock, so it never runs
+ * beside the minute harvester, and is idempotent.
+ *
+ * Reads the money tables only; writes AMLA events and failures, and one
+ * AmlaCoverageCheck per source.
  */
 final class Coverage
 {
-    public function __construct(private readonly EventSources $sources) {}
+    public function __construct(
+        private readonly EventSources $sources,
+        private readonly EventWriter $writer,
+    ) {}
 
     /**
      * @param  string  $day  Y-m-d, a Manila day
      * @return array<string, array{rows: int, events: int, failed: int, unscreened: int, pending: int}>
      */
-    public function check(string $day, bool $store = true): array
+    public function check(string $day, bool $store = true, bool $sweep = true): array
     {
         $start = Carbon::parse($day.' 00:00:00', config('app.timezone'));
         $end = $start->copy()->addDay();
@@ -34,9 +47,20 @@ final class Coverage
 
         foreach ($this->sources->all() as $source) {
             $startedAt = $cursors[$source->name()] ?? null;
-            $results[$source->name()] = $startedAt === null
-                ? ['rows' => 0, 'events' => 0, 'failed' => 0, 'unscreened' => 0, 'pending' => 0]
-                : $this->count($source, $start->max(Carbon::parse($startedAt)), $end);
+
+            if ($startedAt === null) {
+                $results[$source->name()] = ['rows' => 0, 'events' => 0, 'failed' => 0, 'unscreened' => 0, 'pending' => 0];
+
+                continue;
+            }
+
+            $from = $start->max(Carbon::parse($startedAt));
+
+            if ($sweep) {
+                $this->sweep($source, $from, $end);
+            }
+
+            $results[$source->name()] = $this->count($source, $from, $end);
         }
 
         if ($store) {
@@ -54,6 +78,18 @@ final class Coverage
         }
 
         return $results;
+    }
+
+    /** Pass the window's monitored rows through EventWriter, under the source's cursor lock. */
+    private function sweep(EventSource $source, Carbon $from, Carbon $to): void
+    {
+        DB::transaction(function () use ($source, $from, $to) {
+            AmlaHarvestCursor::query()->where('source', $source->name())->lockForUpdate()->first();
+
+            $this->writer->write($source, $source->rows()
+                ->where($source->recordedColumn(), '>=', $from)
+                ->where($source->recordedColumn(), '<', $to), 'monitor');
+        });
     }
 
     /**

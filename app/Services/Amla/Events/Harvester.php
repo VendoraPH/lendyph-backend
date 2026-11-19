@@ -24,16 +24,13 @@ use Illuminate\Support\Facades\DB;
  * The first run of a source only starts it (go-live): its watermark and
  * `started_at` are set and nothing recorded before is taken, except by
  * `amla:screen-history`. Rows it can't build are failures, tried again on
- * every run; the nightly coverage check lists anything missed as Unscreened.
+ * later runs, least recently tried first; the nightly coverage check lists anything missed as Unscreened.
  */
 final class Harvester
 {
     public const LAG_SECONDS = 5;
 
     public const OVERLAP_SECONDS = 120;
-
-    /** Failures tried again per source per run. */
-    public const RETRIES_PER_RUN = 200;
 
     public function __construct(
         private readonly AmlaMonitoring $monitoring,
@@ -84,18 +81,9 @@ final class Harvester
             ->where($source->recordedColumn(), '<=', $upper);
         $counts = $this->writer->write($source, $rows, 'monitor');
 
-        $retry = $this->openFailures($source);
-
-        if ($retry !== []) {
-            $again = $this->writer->write($source, $source->rows()->whereIn($source->idColumn(), $retry), 'monitor');
-            $counts = [
-                'rows' => $counts['rows'],
-                'added' => $counts['added'] + $again['added'],
-                'existing' => $counts['existing'],
-                'reversed' => $counts['reversed'] + $again['reversed'],
-                'failed' => $counts['failed'],
-            ];
-        }
+        $again = $this->retryFailures($source);
+        $counts['added'] += $again['added'];
+        $counts['reversed'] += $again['reversed'];
 
         $cursor->watermark = $upper;
         $cursor->save();
@@ -104,23 +92,35 @@ final class Harvester
     }
 
     /**
-     * Rows that failed before and still have no event, oldest first, at most
-     * RETRIES_PER_RUN.
+     * Try failed rows again: the least recently tried first, at most
+     * `amla.harvest_retries_per_run`, so no failure starves. Each keeps its
+     * own `harvested_by` (a history failure stays history). A tried row that
+     * no longer reads as a source row still has its try recorded, so it moves
+     * to the back of the queue.
      *
-     * @return list<int>
+     * @return array{added: int, reversed: int}
      */
-    private function openFailures(EventSource $source): array
+    private function retryFailures(EventSource $source): array
     {
-        $open = [];
+        $now = Carbon::now();
+        $failures = AmlaEventFailure::query()
+            ->where('source', $source->name())
+            ->whereNull('resolved_at')
+            ->orderByRaw('last_attempted_at is not null, last_attempted_at, id')
+            ->limit((int) config('amla.harvest_retries_per_run', 200))
+            ->get();
+        $done = ['added' => 0, 'reversed' => 0];
 
-        AmlaEventFailure::query()->where('source', $source->name())->orderBy('id')->select(['id', 'source_id'])
-            ->chunkById(EventWriter::CHUNK, function ($failures) use ($source, &$open) {
-                $ids = $failures->pluck('source_id')->map(fn ($id) => (int) $id)->all();
-                $open = [...$open, ...array_values(array_diff($ids, $source->coveredIds($ids)))];
+        foreach ($failures->groupBy('harvested_by') as $harvestedBy => $group) {
+            $again = $this->writer->write($source, $source->rows()->whereIn($source->idColumn(), $group->pluck('source_id')->all()), (string) $harvestedBy);
+            $done['added'] += $again['added'];
+            $done['reversed'] += $again['reversed'];
+        }
 
-                return count($open) < self::RETRIES_PER_RUN;
-            });
+        foreach ($failures as $failure) {
+            $failure->refresh()->tried($now, resolved: false);
+        }
 
-        return array_slice($open, 0, self::RETRIES_PER_RUN);
+        return $done;
     }
 }

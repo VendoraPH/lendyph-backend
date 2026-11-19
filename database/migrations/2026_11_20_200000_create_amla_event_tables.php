@@ -17,8 +17,9 @@ use Illuminate\Support\Facades\Schema;
  *   recording time. `started_at` is go-live: nothing recorded before it is
  *   harvested except by `amla:screen-history`.
  * - `amla_event_failures`: a source row the harvester couldn't turn into an
- *   event, with why, kept as written. It reads as Unscreened until its event
- *   exists.
+ *   event, with why. It reads as Unscreened until its event exists. Only two
+ *   columns ever change: when it was last tried (forward only) and when it
+ *   was resolved (once).
  * - `amla_coverage_checks`: the nightly check, per source and Manila day.
  *
  * Members, walk-ins and branches referenced here can't be deleted (restrict);
@@ -75,9 +76,12 @@ return new class extends Migration
             $table->unsignedBigInteger('source_id');
             $table->string('reason', 500);
             $table->string('harvested_by', 10);
+            $table->timestamp('last_attempted_at')->nullable();
+            $table->timestamp('resolved_at')->nullable();
             $table->timestamp('created_at')->nullable();
 
             $table->unique(['source', 'source_id']);
+            $table->index(['source', 'resolved_at', 'last_attempted_at']);
         });
 
         Schema::create('amla_coverage_checks', function (Blueprint $table) {

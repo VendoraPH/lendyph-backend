@@ -4,6 +4,7 @@ namespace Tests\Feature\Phase6\Amla\Events;
 
 use App\Models\AmlaCoverageCheck;
 use App\Models\AmlaEvent;
+use App\Models\AmlaEventFailure;
 use App\Models\AmlaLogEntry;
 use App\Models\Borrower;
 use App\Models\GCashTransaction;
@@ -47,19 +48,22 @@ class AmlaCoverageAndHistoryTest extends TestCase
         GCashTransaction::factory()->create(['borrower_id' => $member->id, 'status' => 'pending']);
         $this->harvestLater();
 
-        // A row the cursor passed without seeing (a late commit stamped well before the watermark).
+        // A row the cursor passed without seeing: its transaction committed long after its timestamp.
         $this->at('2026-11-20 09:30:00');
-        $late = GCashTransaction::factory()->create(['borrower_id' => $member->id, 'status' => 'paid', 'paid_at' => now()]);
+        $late = GCashTransaction::factory()->create(['borrower_id' => $member->id, 'status' => 'paid', 'paid_at' => '2026-11-20 09:02:00']);
         DB::table('gcash_transactions')->where('id', $late->id)->update(['updated_at' => '2026-11-20 09:02:00', 'created_at' => '2026-11-20 09:02:00']);
         $this->harvestLater('2026-11-20 09:31:00');
 
         $this->at('2026-11-21 00:45:00');
+        $missed = app(Coverage::class)->check('2026-11-20', store: false, sweep: false);
         $result = app(Coverage::class)->check('2026-11-20');
 
-        $this->assertSame(['rows' => 3, 'events' => 1, 'failed' => 1, 'unscreened' => 2, 'pending' => 1], $result['gcash']);
+        $this->assertSame(['rows' => 3, 'events' => 1, 'failed' => 1, 'unscreened' => 2, 'pending' => 1], $missed['gcash']);
+        $this->assertSame(['rows' => 3, 'events' => 2, 'failed' => 1, 'unscreened' => 1, 'pending' => 1], $result['gcash']);
+        $this->assertSame('monitor', $this->soleEvent('gcash', $late->id)->harvested_by);
         $this->assertSame(['rows' => 0, 'events' => 0, 'failed' => 0, 'unscreened' => 0, 'pending' => 0], $result['repayments']);
         $stored = AmlaCoverageCheck::query()->where('source', 'gcash')->where('day', '2026-11-20')->sole();
-        $this->assertSame(2, $stored->unscreened);
+        $this->assertSame(1, $stored->unscreened);
         $this->assertSame(8, AmlaCoverageCheck::query()->count());
     }
 
@@ -86,7 +90,7 @@ class AmlaCoverageAndHistoryTest extends TestCase
         $this->patchJson("/api/repayments/{$repayment->id}/void", ['void_reason' => 'Duplicate entry'])->assertOk();
 
         $this->at('2026-11-21 00:45:00');
-        $before = app(Coverage::class)->check('2026-11-20', store: false);
+        $before = app(Coverage::class)->check('2026-11-20', store: false, sweep: false);
         $this->harvestLater('2026-11-21 00:46:00');
         $after = app(Coverage::class)->check('2026-11-20', store: false);
 
@@ -153,5 +157,41 @@ class AmlaCoverageAndHistoryTest extends TestCase
         $this->assertSame(['* * * * *', null, true], [$events['amla:harvest'][0], null, $events['amla:harvest'][2]]);
         $this->assertSame('45 0 * * *', $events['amla:coverage-check'][0]);
         $this->assertSame('Asia/Manila', (string) $events['amla:coverage-check'][1]);
+    }
+
+    public function test_a_history_failure_retried_by_the_monitor_stays_a_history_event(): void
+    {
+        $member = Borrower::factory()->create(['branch_id' => $this->branch->id, 'status' => 'active']);
+        $this->at('2026-11-18 14:00:00');
+        $broken = GCashTransaction::factory()->create(['borrower_id' => $member->id, 'amount' => 1000, 'charge_amount' => 20, 'total_amount' => 999, 'status' => 'paid', 'paid_at' => now()]);
+        $this->goLive();
+        $this->artisan('amla:screen-history', ['--from' => '2026-11-15'])->assertSuccessful();
+        $this->assertSame('history', AmlaEventFailure::query()->where('source_id', $broken->id)->sole()->harvested_by);
+
+        DB::table('gcash_transactions')->where('id', $broken->id)->update(['total_amount' => 1020]);
+        $this->harvestLater();
+
+        $this->assertSame('history', $this->soleEvent('gcash', $broken->id)->harvested_by);
+        $this->assertNotNull(AmlaEventFailure::query()->where('source_id', $broken->id)->sole()->resolved_at);
+    }
+
+    public function test_retries_take_the_least_recently_tried_failures_first_so_none_starves(): void
+    {
+        config(['amla.harvest_retries_per_run' => 1]);
+        $this->goLive();
+        $member = Borrower::factory()->create(['branch_id' => $this->branch->id, 'status' => 'active']);
+        $first = GCashTransaction::factory()->create(['borrower_id' => $member->id, 'amount' => 1000, 'charge_amount' => 20, 'total_amount' => 999, 'status' => 'paid', 'paid_at' => now()]);
+        $second = GCashTransaction::factory()->create(['borrower_id' => $member->id, 'amount' => 1000, 'charge_amount' => 20, 'total_amount' => 998, 'status' => 'paid', 'paid_at' => now()]);
+        $this->harvestLater('2026-11-20 09:05:00');
+
+        $tried = fn (GCashTransaction $row) => AmlaEventFailure::query()->where('source_id', $row->id)->sole()->last_attempted_at->format('H:i:s');
+
+        $this->harvestLater('2026-11-20 09:20:00');
+        $this->harvestLater('2026-11-20 09:30:00');
+
+        $this->assertSame(['09:20:00', '09:30:00'], [$tried($first), $tried($second)]);
+
+        $this->harvestLater('2026-11-20 09:40:00');
+        $this->assertSame(['09:40:00', '09:30:00'], [$tried($first), $tried($second)]);
     }
 }
