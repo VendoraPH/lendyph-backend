@@ -102,8 +102,24 @@ it('reads with dashboard analytics only, and says why in words when refused', fu
 })->with([
     'nothing' => [[]],
     'dashboard view only' => [['dashboard:view']],
-    'settings and all branches, without analytics' => [['dashboard:settings', BranchAccess::VIEW_ALL]],
+    'settings without all branches' => [['dashboard:settings']],
+    'all branches without settings' => [['dashboard:view', BranchAccess::VIEW_ALL]],
 ]);
+
+it('lets whoever can save the thresholds read them, without dashboard analytics', function () {
+    $this->actingAs(ebcStaff(['dashboard:settings', BranchAccess::VIEW_ALL]))
+        ->getJson('/api/dashboard/settings')
+        ->assertOk()
+        ->assertJsonPath('data.can_update', true)
+        ->assertJsonPath('data.thresholds.collection_efficiency_below', '90.00');
+});
+
+it('lets a holder of dashboard analytics read them without saving rights', function () {
+    $this->actingAs(ebcStaff(['dashboard:analytics']))
+        ->getJson('/api/dashboard/settings')
+        ->assertOk()
+        ->assertJsonPath('data.can_update', false);
+});
 
 it('answers 401 without a sign-in', function () {
     $this->getJson('/api/dashboard/settings')->assertUnauthorized();
