@@ -3,6 +3,7 @@
 namespace App\Rules;
 
 use App\Models\Borrower;
+use App\Support\WholeNumberId;
 use Closure;
 use Illuminate\Contracts\Validation\ValidationRule;
 
@@ -18,11 +19,9 @@ final class MemberHasBranch implements ValidationRule
 
     public function validate(string $attribute, mixed $value, Closure $fail): void
     {
-        // The same whole numbers the `integer` and `exists` rules accept
-        // (" 5" and 5.0 included), so none of them slips past to the insert.
-        $id = filter_var($value, FILTER_VALIDATE_INT);
+        $id = WholeNumberId::from($value);
 
-        if ($id === false) {
+        if ($id === null) {
             return;
         }
 

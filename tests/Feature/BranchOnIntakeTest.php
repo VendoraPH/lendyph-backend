@@ -9,7 +9,10 @@ use App\Models\Loan;
 use App\Models\LoanProduct;
 use App\Models\Role;
 use App\Models\User;
+use App\Rules\MemberHasBranch;
+use App\Rules\NotAFormerMember;
 use App\Services\BranchAccess;
+use Illuminate\Support\Facades\Validator;
 use Tests\TestCase;
 use Tests\Traits\SetupLendyPH;
 
@@ -166,6 +169,50 @@ class BranchOnIntakeTest extends TestCase
         }
 
         $this->assertSame(0, Loan::where('borrower_id', $member->id)->count());
+    }
+
+    public function test_a_former_members_id_written_another_way_is_still_refused(): void
+    {
+        $gone = Borrower::factory()->create([
+            'branch_id' => $this->branch->id,
+            'status' => 'withdrawn', 'membership_ended_on' => '2026-10-01',
+        ]);
+        $mine = Borrower::factory()->create(['branch_id' => $this->branch->id]);
+        $source = $this->createReleasedLoan();
+
+        foreach ([" {$gone->id}", (float) $gone->id] as $id) {
+            $this->postJson('/api/loans', [...$this->loanPayload($mine), 'borrower_id' => $id])
+                ->assertUnprocessable()
+                ->assertJsonValidationErrors(['borrower_id' => NotAFormerMember::messageFor($gone)]);
+
+            $coMaker = $this->postJson('/api/loans', [...$this->loanPayload($mine), 'co_maker_ids' => [$id]])
+                ->assertUnprocessable();
+            $this->assertSame([NotAFormerMember::messageFor($gone, NotAFormerMember::AS_CO_MAKER)], $coMaker->json('errors')['co_maker_ids.0']);
+
+            $this->postJson("/api/loans/{$source->id}/restructure", ['borrower_id' => $id])
+                ->assertUnprocessable()
+                ->assertJsonValidationErrors(['borrower_id' => NotAFormerMember::messageFor($gone)]);
+        }
+
+        $this->assertSame(0, Loan::where('borrower_id', $gone->id)->count());
+    }
+
+    public function test_both_member_rules_read_every_whole_number_form_of_an_id(): void
+    {
+        $gone = Borrower::factory()->create([
+            'branch_id' => null,
+            'status' => 'withdrawn', 'membership_ended_on' => '2026-10-01',
+        ]);
+
+        foreach ([$gone->id, (string) $gone->id, " {$gone->id}", "{$gone->id} ", (float) $gone->id] as $id) {
+            $errors = Validator::make(['id' => $id], ['id' => [new NotAFormerMember, new MemberHasBranch]])->errors()->get('id');
+
+            $this->assertSame([NotAFormerMember::messageFor($gone), MemberHasBranch::MESSAGE], $errors, var_export($id, true));
+        }
+
+        foreach (['', 'abc', "{$gone->id}.5", null, []] as $notAnId) {
+            $this->assertTrue(Validator::make(['id' => $notAnId], ['id' => [new NotAFormerMember, new MemberHasBranch]])->passes(), var_export($notAnId, true));
+        }
     }
 
     // Reactivate is not a way round registration review -----------------------
