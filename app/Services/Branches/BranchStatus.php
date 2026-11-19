@@ -5,6 +5,7 @@ namespace App\Services\Branches;
 use App\Models\AccountingAccount;
 use App\Models\Branch;
 use App\Models\BranchClosure;
+use App\Models\InterbranchTransfer;
 use App\Models\Loan;
 use App\Models\LoanAdjustment;
 use App\Models\PortalRequest;
@@ -33,7 +34,9 @@ use Symfony\Component\HttpKernel\Exception\HttpException;
  * - Each step writes one audit row on the branch, in words.
  *
  * Enforcing a suspended or closed status on new records is MB-BE2's
- * (wave 2). Transfers in transit join the checklist with MB-BE5.
+ * (wave 2). Interbranch transfers (MB-BE5) count both ways: one waiting for
+ * approval is a pending approval, and one approved and not yet received
+ * keeps both its branches open, since 1190 is still open on each.
  */
 class BranchStatus
 {
@@ -144,7 +147,8 @@ class BranchStatus
                     ->whereIn('account_id', (clone $accounts)->select('id'))
                     ->orWhereIn('time_deposit_id', (clone $deposits)->select('id')))
                 ->count()
-            + PortalRequest::query()->where('branch_id', $id)->whereIn('status', PortalRequest::OPEN_STATUSES)->count();
+            + PortalRequest::query()->where('branch_id', $id)->whereIn('status', PortalRequest::OPEN_STATUSES)->count()
+            + $this->transfers($id, InterbranchTransfer::STATUS_PENDING);
 
         return [
             $item('open_loans', 'Open loans', Loan::query()->where('branch_id', $id)->whereIn('status', self::OPEN_LOAN_STATUSES)->count()),
@@ -152,6 +156,7 @@ class BranchStatus
             $item('open_time_deposits', 'Open time deposits', (clone $deposits)->whereIn('status', self::OPEN_TIME_DEPOSIT_STATUSES)->count()),
             $item('money_in_accounts', 'Money in its cash and bank accounts', $moneyAccounts, $moneyAccounts === 0 ? null : self::pesos($moneyCentavos)),
             $item('pending_approvals', 'Pending approvals and requests', $pending),
+            $item('transfers_in_transit', 'Transfers in transit', $this->transfers($id, InterbranchTransfer::STATUS_IN_TRANSIT)),
             $item('assigned_users', 'Assigned users', DB::table('branch_user')->where('branch_id', $id)->count()),
         ];
     }
@@ -329,6 +334,7 @@ class BranchStatus
             'open_time_deposits' => self::counted($item['count'], 'open time deposit'),
             'money_in_accounts' => self::pesosWords((string) $item['amount']).' in its cash and bank accounts',
             'pending_approvals' => $item['count'] === 1 ? '1 pending approval or request' : "{$item['count']} pending approvals or requests",
+            'transfers_in_transit' => self::counted($item['count'], 'transfer').' in transit',
             'assigned_users' => self::counted($item['count'], 'assigned user'),
         }, $open);
 
@@ -353,6 +359,15 @@ class BranchStatus
         $balances = array_filter($this->trialBalance->signedBalances(null, $branchId, $ids), fn (int $centavos): bool => $centavos !== 0);
 
         return [count($balances), array_sum($balances)];
+    }
+
+    /** Interbranch transfers in `$status` with the branch as their source or destination. */
+    private function transfers(int $branchId, string $status): int
+    {
+        return InterbranchTransfer::query()
+            ->where('status', $status)
+            ->where(fn ($q) => $q->where('source_branch_id', $branchId)->orWhere('destination_branch_id', $branchId))
+            ->count();
     }
 
     private function alreadyWaiting(): never

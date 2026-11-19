@@ -218,7 +218,7 @@ class CashFlowLoansOperatingTest extends TestCase
         $this->assertSame([$this->account('1170')], LoanReceivableAccounts::ids());
 
         // Mapped to an account with no heading above it: that account alone.
-        $alone = AccountingAccount::create(['code' => '1190', 'name' => 'Microloans', 'type' => 'asset']);
+        $alone = AccountingAccount::create(['code' => '1195', 'name' => 'Microloans', 'type' => 'asset']);
         DB::table('accounting_account_mappings')->where('role', 'loans_receivable')->update(['accounting_account_id' => $alone->id]);
         $this->assertSame([$alone->id], LoanReceivableAccounts::ids());
     }

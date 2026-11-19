@@ -338,6 +338,9 @@ class TimezoneShift
         // Phase 6 MB-BE1 (2026-11-19): closure requests, well after the
         // cutover. `effective_on` is a DATE.
         'branch_closures' => ['created_at', 'decided_at', 'updated_at'],
+        // Phase 6 MB-BE5 (2026-11-20): interbranch transfers, well after the
+        // cutover.
+        'interbranch_transfers' => ['approved_at', 'cancelled_at', 'created_at', 'received_at', 'rejected_at', 'reversed_at', 'updated_at'],
         // The shift's own bookkeeping, written after the cutover by definition.
         'timezone_shifts' => ['completed_at', 'cutover_at', 'started_at'],
     ];

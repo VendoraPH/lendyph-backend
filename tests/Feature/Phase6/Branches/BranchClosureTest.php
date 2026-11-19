@@ -144,6 +144,7 @@ class BranchClosureTest extends TestCase
             ['key' => 'open_time_deposits', 'label' => 'Open time deposits', 'count' => 1, 'amount' => null, 'clear' => false],
             ['key' => 'money_in_accounts', 'label' => 'Money in its cash and bank accounts', 'count' => 1, 'amount' => '1500.00', 'clear' => false],
             ['key' => 'pending_approvals', 'label' => 'Pending approvals and requests', 'count' => 3, 'amount' => null, 'clear' => false],
+            ['key' => 'transfers_in_transit', 'label' => 'Transfers in transit', 'count' => 0, 'amount' => null, 'clear' => true],
             ['key' => 'assigned_users', 'label' => 'Assigned users', 'count' => 1, 'amount' => null, 'clear' => false],
         ], $data['checklist']);
 

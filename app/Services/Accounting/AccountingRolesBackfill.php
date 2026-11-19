@@ -19,7 +19,10 @@ use Illuminate\Support\Facades\DB;
  *   under the 1100 heading (decision 2);
  * - `net_surplus` → the existing 3030 Retained Earnings (code and name), for
  *   the year-end close; the cooperative template brings its own later;
- * - `suspense` → 2390 Suspense Account, a new liability under 2000.
+ * - `suspense` → 2390 Suspense Account, a new liability under 2000;
+ * - `interbranch_clearing` → 1190 Interbranch Clearing, a new asset under
+ *   1000 (Phase 6, multi-branch decision 9, approved 2026-11-19; run once on
+ *   deploy by the 2026_11_20_300100 migration).
  *
  * ChartOfAccountsSeeder runs once and never over an existing chart, so a
  * deployment that already keeps books gets these from here. Without them the
@@ -63,13 +66,14 @@ class AccountingRolesBackfill
         'loan_adjustments' => ['code' => '1180', 'name' => 'Loan Adjustments Clearing', 'type' => 'asset', 'parent' => '1000', 'is_contra' => false, 'normal_balance' => 'debit', 'cash_flow_category' => 'investing'],
         'unearned_restructure_income' => ['code' => '1210', 'name' => 'Unearned Interest and Penalty – Restructured Loans', 'type' => 'asset', 'parent' => '1000', 'is_contra' => true, 'normal_balance' => 'credit', 'cash_flow_category' => 'investing'],
         'suspense' => ['code' => '2390', 'name' => 'Suspense Account', 'type' => 'liability', 'parent' => '2000', 'is_contra' => false, 'normal_balance' => 'credit', 'cash_flow_category' => 'financing'],
+        'interbranch_clearing' => ['code' => '1190', 'name' => 'Interbranch Clearing', 'type' => 'asset', 'parent' => '1000', 'is_contra' => false, 'normal_balance' => 'debit', 'cash_flow_category' => 'investing'],
     ];
 
     /** The existing account `net_surplus` points at: [code, name, type]. */
     public const NET_SURPLUS = ['3030', 'Retained Earnings', 'equity'];
 
     /** The roles, in the order they are handled. */
-    public const ROLES = ['gcash_service_income', 'loan_adjustments', 'unearned_restructure_income', 'net_surplus', 'suspense'];
+    public const ROLES = ['gcash_service_income', 'loan_adjustments', 'unearned_restructure_income', 'net_surplus', 'suspense', 'interbranch_clearing'];
 
     private const PURPOSES = [
         'gcash_service_income' => 'GCash service charges',
@@ -77,9 +81,15 @@ class AccountingRolesBackfill
         'unearned_restructure_income' => 'interest and penalty capitalised by restructures',
         'net_surplus' => 'the year-end close',
         'suspense' => 'receipts not yet identified',
+        'interbranch_clearing' => 'money moved between branches',
     ];
 
     private const DECIDED = 'as approved in the Phase 2 plan on 2026-11-08';
+
+    /** Roles a later plan approved, with their own wording; the rest read self::DECIDED. */
+    private const DECIDED_BY_ROLE = [
+        'interbranch_clearing' => 'as approved in the Phase 6 plan on 2026-11-19',
+    ];
 
     /**
      * Add and map everything that can be, or with `$dryRun` only say what.
@@ -235,6 +245,11 @@ class AccountingRolesBackfill
         return [null, null];
     }
 
+    private static function decided(string $role): string
+    {
+        return self::DECIDED_BY_ROLE[$role] ?? self::DECIDED;
+    }
+
     /** Whether an account can serve a role of this type and contra flag. */
     private function serves(object $account, string $type, bool $contra): bool
     {
@@ -288,7 +303,7 @@ class AccountingRolesBackfill
             'new_values' => json_encode(['code' => $spec['code'], 'name' => $spec['name'], 'type' => $spec['type'], 'is_contra' => $spec['is_contra'], 'parent_code' => $parent === null ? null : $spec['parent']]),
             'ip_address' => null,
             'user_agent' => null,
-            'description' => "System change: added account {$spec['code']} {$spec['name']} ({$spec['type']}) for ".self::PURPOSES[$role].', '.self::DECIDED.'.',
+            'description' => "System change: added account {$spec['code']} {$spec['name']} ({$spec['type']}) for ".self::PURPOSES[$role].', '.self::decided($role).'.',
             'created_at' => $now,
         ]);
 
@@ -315,7 +330,7 @@ class AccountingRolesBackfill
             'new_values' => json_encode(['role' => $role, 'account_code' => $account->code, 'account_name' => $account->name]),
             'ip_address' => null,
             'user_agent' => null,
-            'description' => "System change: role {$role} (".self::PURPOSES[$role].") now posts to {$account->code} {$account->name}, ".self::DECIDED.'.',
+            'description' => "System change: role {$role} (".self::PURPOSES[$role].") now posts to {$account->code} {$account->name}, ".self::decided($role).'.',
             'created_at' => $now,
         ]);
     }

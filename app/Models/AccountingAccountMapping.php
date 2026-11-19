@@ -87,6 +87,7 @@ class AccountingAccountMapping extends Model
         'unearned_restructure_income',
         'net_surplus',
         'suspense',
+        'interbranch_clearing',
         'savings_deposits',
         'time_deposits',
         'interest_expense_deposits',
@@ -128,6 +129,7 @@ class AccountingAccountMapping extends Model
         'unearned_restructure_income' => 'Unearned restructure interest and penalty',
         'net_surplus' => 'Retained earnings or net surplus',
         'suspense' => 'Suspense',
+        'interbranch_clearing' => 'Interbranch clearing',
         'savings_deposits' => 'Savings deposits',
         'time_deposits' => 'Time deposits',
         'interest_expense_deposits' => 'Interest expense on deposits',
@@ -258,6 +260,15 @@ class AccountingAccountMapping extends Model
         'unearned_restructure_income' => ['type' => 'asset', 'is_contra' => true],
         'net_surplus' => ['type' => 'equity'],
         'suspense' => ['type' => 'liability'],
+
+        /*
+         * Phase 6 (approved 2026-11-19, multi-branch decision 9): money moved
+         * between branches waits here, debited by the source branch on
+         * approval and credited by the destination on receipt. An asset, and
+         * never a money account: its balance is money on its way, not money
+         * on hand, so it must stay out of the dashboard cash figures.
+         */
+        'interbranch_clearing' => ['type' => 'asset'],
 
         /*
          * Savings & Deposits (Phase 3, approved 2026-11-10). Members' savings

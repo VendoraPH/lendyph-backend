@@ -5,6 +5,7 @@ namespace App\Models;
 use App\Exceptions\PostedJournalIsImmutableException;
 use App\Http\Resources\JournalEntryResource;
 use App\Services\BranchAccess;
+use App\Services\Branches\InterbranchTransferJournalGuard;
 use App\Services\Savings\SavingsJournalGuard;
 use App\Support\StaffRouteBinding;
 use App\Traits\Auditable;
@@ -451,6 +452,7 @@ class AccountingJournal extends Model
             ->afterQuery(static function (EloquentCollection $journals): EloquentCollection {
                 self::attachPostables($journals);
                 SavingsJournalGuard::preload($journals);
+                InterbranchTransferJournalGuard::preload($journals);
 
                 return $journals;
             });

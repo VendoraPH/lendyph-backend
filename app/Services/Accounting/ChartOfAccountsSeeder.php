@@ -120,6 +120,13 @@ final class ChartOfAccountsSeeder
         // once each adjustment is reviewed; any balance here is flagged.
         ['code' => '1180', 'name' => 'Loan Adjustments Clearing', 'type' => 'asset', 'parent' => '1000'],
 
+        // Money moved between branches (Phase 6, multi-branch decision 9): the
+        // source branch debits it when a transfer is approved and the
+        // destination credits it on receipt, so each branch's balance here is
+        // what it has sent and not yet seen received, and the branches add up
+        // to the transfers still in transit.
+        ['code' => '1190', 'name' => 'Interbranch Clearing', 'type' => 'asset', 'parent' => '1000'],
+
         // Credit-balanced asset: it REDUCES loans receivable. Net Loans
         // Receivable is gross minus this, which is why `is_contra` has to be set.
         ['code' => '1200', 'name' => 'Allowance for Credit Losses', 'type' => 'asset', 'parent' => '1000', 'is_contra' => true],
@@ -323,6 +330,9 @@ final class ChartOfAccountsSeeder
         'unearned_restructure_income' => '1210',
         'net_surplus' => '3030',
         'suspense' => '2390',
+        // Phase 6 (approved 2026-11-19). Charts seeded before it get it from
+        // the 2026_11_20_300100 migration (AccountingRolesBackfill).
+        'interbranch_clearing' => '1190',
     ];
 
     /**
