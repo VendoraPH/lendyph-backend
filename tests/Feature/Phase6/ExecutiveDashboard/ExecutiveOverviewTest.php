@@ -151,6 +151,8 @@ class ExecutiveOverviewTest extends TestCase
         $posting = app(AllowanceCalculator::class)->forDate('2026-11-19', [$other->id])['totals']['required'];
         $this->assertGreaterThan(0, $posting);
         $this->assertEquals($posting / 100, $card['value']);
+        $whole = app(AllowanceCalculator::class)->forDate('2026-11-19')['totals']['required'];
+        $this->assertNotEquals($whole / 100, $card['value'], 'Their branch only, not the whole book.');
     }
 
     public function test_previous_state_says_why_a_card_has_no_previous_value(): void
@@ -273,6 +275,7 @@ class ExecutiveOverviewTest extends TestCase
             $this->assertNull($card['change'], $key);
             $this->assertSame([], $card['details'], $key);
             $this->assertNull($card['previous_as_of'], "{$key}: nothing about what lies behind it.");
+            $this->assertNull($card['previous_state'], "{$key}: nor why it has no previous value.");
         }
 
         $this->actingAs($this->userWith(['dashboard:analytics', 'reports:view']));

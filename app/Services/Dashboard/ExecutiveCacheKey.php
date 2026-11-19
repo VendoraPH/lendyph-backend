@@ -8,7 +8,9 @@ namespace App\Services\Dashboard;
  * integers and sorted, as DashboardService::scopeKey() does, so the same
  * branches in another order or form ("+5") read one entry, and different
  * scopes never share one. Callers' permissions are never in the key: they
- * are applied after the cache.
+ * are applied after the cache. v2: Required Allowance reads the allowance
+ * posting's figure and cards carry `previous_state`, so cards cached before
+ * that change are never served after it.
  */
 final class ExecutiveCacheKey
 {
@@ -25,7 +27,7 @@ final class ExecutiveCacheKey
 
         $id = fn (string $filter): ?int => filled($filters[$filter] ?? null) ? (int) $filters[$filter] : null;
 
-        return "dashboard:executive:{$endpoint}:v1:".sha1((string) json_encode([
+        return "dashboard:executive:{$endpoint}:v2:".sha1((string) json_encode([
             DashboardPeriod::today()->toDateString(),
             $period->toArray(),
             $scope,
