@@ -71,6 +71,10 @@ final class LindaMatcher
         'expense_summary' => [
             'expense', 'expenses', 'spend', 'spent', 'spending', 'gastos', 'gasto', 'gigasto', 'gastu', 'gastohan',
         ],
+        'savings_summary' => [
+            'savings', 'savings account', 'savings accounts', 'savings deposits', 'deposits', 'total deposits',
+            'time deposit', 'time deposits', 'maturing time deposits', 'maturing', 'ipon', 'impok', 'tinipid', 'tinigom', 'tigom',
+        ],
         'borrower_summary' => [
             'active members', 'active member', 'inactive members', 'inactive member', 'blacklisted members',
             'blacklisted member', 'new members', 'new member', 'repeat members', 'repeat member', 'repeat borrowers',
@@ -189,7 +193,7 @@ final class LindaMatcher
         'list', 'many', 'me', 'much', 'my', 'need', 'now', 'number', 'of', 'on', 'operation',
         'operations', 'our', 'payment', 'payments', 'please', 'pls', 'right', 'see', 'show', 'so',
         'tell', 'the', 'there', 'this', 'to', 'total', 'totals', 'us', 'was', 'we', 'were', 'what',
-        'whats', 'which', 'who', 'whos', 'with', 'would', 'you', 'big', 'size',
+        'whats', 'which', 'who', 'whos', 'with', 'would', 'you', 'big', 'size', 'soon',
         'account', 'accounts', 'amount', 'amounts', 'loan', 'loans', 'member', 'members', 'report', 'dues',
         // "Find overdue members", "Search past-due loans": aggregate questions. A
         // name or a record number after them is no filler, so a lookup still

@@ -155,6 +155,11 @@ final class LindaWording
         return self::notYet().' The report linked below may help.';
     }
 
+    public static function savingsNotSetUp(): string
+    {
+        return 'Savings isn\'t set up in this deployment yet, so there are no savings figures to show.';
+    }
+
     public static function branchNotFound(string $name): string
     {
         return '"'.self::echoed($name).'" is not among your branches. Please check the branch name and ask again.';

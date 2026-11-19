@@ -105,7 +105,7 @@ class LindaLookupRoutingTest extends LindaAnswersTestCase
 
     public function test_a_question_naming_no_one_still_reaches_the_model(): void
     {
-        $this->actingAs($this->asker)->postJson(self::URL, ['message' => 'How much interest income did we earn this month?'])->assertOk();
+        $this->actingAs($this->asker)->postJson(self::URL, ['message' => 'How much interest did we earn this month?'])->assertOk();
 
         $this->assertCount(1, $this->fake->requests);
     }
@@ -114,7 +114,7 @@ class LindaLookupRoutingTest extends LindaAnswersTestCase
     {
         $this->member($this->branch, 'May', 'Bituin');
 
-        $this->actingAs($this->asker)->postJson(self::URL, ['message' => 'How much interest income did we earn in May?'])->assertOk();
+        $this->actingAs($this->asker)->postJson(self::URL, ['message' => 'How much interest did we earn in May?'])->assertOk();
 
         $this->assertCount(1, $this->fake->requests);
     }
@@ -292,7 +292,7 @@ class LindaLookupRoutingTest extends LindaAnswersTestCase
     public function test_the_model_never_sees_an_earlier_questions_text(): void
     {
         $this->actingAs($this->asker)->postJson(self::URL, [
-            'message' => 'How much interest income did we earn this month?',
+            'message' => 'How much interest did we earn this month?',
             'history' => [
                 ['role' => 'user', 'content' => 'Which members currently have overdue payments?'],
                 ['role' => 'assistant', 'content' => '', 'intent' => 'overdue_accounts'],
@@ -317,7 +317,7 @@ class LindaLookupRoutingTest extends LindaAnswersTestCase
         $response = $this->actingAs($this->asker)->postJson(self::URL, [
             'message' => 'and how about last month po talaga?',
             'history' => [
-                ['role' => 'user', 'content' => 'How much interest income did we earn this month?'],
+                ['role' => 'user', 'content' => 'How much interest did we earn this month?'],
                 ['role' => 'assistant', 'content' => '', 'intent' => 'income_summary'],
             ],
         ])->assertOk();

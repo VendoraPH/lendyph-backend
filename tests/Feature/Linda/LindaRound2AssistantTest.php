@@ -149,7 +149,7 @@ class LindaRound2AssistantTest extends LindaAnswersTestCase
     public function test_an_earlier_lookup_is_never_sent_to_the_model_later(): void
     {
         $this->actingAs($this->asker)->postJson(self::URL, [
-            'message' => 'How much interest income did we earn this month?',
+            'message' => 'How much interest did we earn this month?',
             'history' => [
                 ['role' => 'user', 'content' => 'Pila ang utang ni Juan Dela Cruz?', 'intent' => 'borrower_lookup'],
                 ['role' => 'assistant', 'content' => ''],

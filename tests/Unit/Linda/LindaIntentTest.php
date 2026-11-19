@@ -33,6 +33,7 @@ class LindaIntentTest extends TestCase
             'collection_efficiency',
             'portfolio_summary',
             'general_lending_summary',
+            'savings_summary',
             'unsupported_question',
         ], array_map(fn (LindaIntent $intent) => $intent->value, LindaIntent::cases()));
     }
@@ -71,6 +72,7 @@ class LindaIntentTest extends TestCase
             LindaIntent::OverdueAccounts,
             LindaIntent::TransactionLookup,
             LindaIntent::PortfolioSummary,
+            LindaIntent::SavingsSummary,
             LindaIntent::UnsupportedQuestion,
         ], $timeless);
     }

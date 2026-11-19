@@ -118,7 +118,7 @@ class LindaNameCheckDatabaseTest extends LindaAnswersTestCase
 
     public function test_a_question_naming_no_one_still_reaches_the_model(): void
     {
-        $this->actingAs($this->asker)->postJson(self::URL, ['message' => 'How much interest income did we earn in May?'])->assertOk();
+        $this->actingAs($this->asker)->postJson(self::URL, ['message' => 'How much interest did we earn in May?'])->assertOk();
 
         $this->assertCount(1, $this->fake->requests);
     }
@@ -260,7 +260,7 @@ class LindaNameCheckDatabaseTest extends LindaAnswersTestCase
         GCashNonMember::factory()->create(['full_name' => 'May Lucero']);
         GCashNonMember::factory()->create(['full_name' => 'Earn Interest']);
 
-        $this->actingAs($this->asker)->postJson(self::URL, ['message' => 'How much interest income did we earn in May?'])->assertOk();
+        $this->actingAs($this->asker)->postJson(self::URL, ['message' => 'How much interest did we earn in May?'])->assertOk();
 
         $this->assertCount(1, $this->fake->requests);
     }
