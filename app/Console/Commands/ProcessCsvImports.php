@@ -143,11 +143,22 @@ class ProcessCsvImports extends Command
 
     private const STORAGE_SWEEP = 'releaseAbandonedStorage';
 
+    /**
+     * The MySQL session (CONNECTION_ID()) that took the named lock this tick.
+     */
+    private ?int $lockSession = null;
+
+    /**
+     * Set once the lock is found gone mid-tick; the tick then stops working.
+     */
+    private bool $lockLost = false;
+
     public function handle(CsvImportProcessor $processor): int
     {
         $lock = self::lockName();
+        $taken = DB::selectOne('SELECT GET_LOCK(?, 0) AS acquired, CONNECTION_ID() AS session', [$lock]);
 
-        if ((int) DB::selectOne('SELECT GET_LOCK(?, 0) AS acquired', [$lock])->acquired !== 1) {
+        if ((int) $taken->acquired !== 1) {
             // A normal outcome: the tick that holds it is still working.
             Log::info('imports:process stood down: another tick is still importing', ['lock' => $lock]);
 
@@ -156,10 +167,13 @@ class ProcessCsvImports extends Command
             return self::SUCCESS;
         }
 
+        $this->lockSession = (int) $taken->session;
+        $this->lockLost = false;
+
         try {
             return $this->tick($processor);
         } finally {
-            DB::selectOne('SELECT RELEASE_LOCK(?) AS released', [$lock]);
+            $this->releaseLock($lock);
         }
     }
 
@@ -168,12 +182,61 @@ class ProcessCsvImports extends Command
      *
      * Per database: every deployment on the shared VPS talks to one MySQL
      * server, and MySQL lock names are server-wide, so a bare name would let
-     * one cooperative's import block another's. MySQL caps a name at 64
-     * characters.
+     * one cooperative's import block another's. Hashed, because MySQL caps a
+     * name at 64 characters and a cut name could collide.
      */
     public static function lockName(): string
     {
-        return mb_substr('imports:process:'.DB::connection()->getDatabaseName(), 0, 64);
+        return 'imports:process:'.sha1((string) DB::connection()->getDatabaseName());
+    }
+
+    /**
+     * Whether this tick's session still holds the lock.
+     *
+     * A dropped connection that Laravel reconnects is a NEW session: MySQL has
+     * freed the lock, and another tick may already hold it. Carrying on would be
+     * two importers on the same rows, so the tick stops at the next window. A
+     * failed check counts as lost.
+     */
+    private function stillHoldsLock(): bool
+    {
+        if ($this->lockLost) {
+            return false;
+        }
+
+        try {
+            $holder = DB::selectOne('SELECT IS_USED_LOCK(?) AS holder', [self::lockName()])->holder;
+            $held = $holder !== null && (int) $holder === $this->lockSession;
+        } catch (Throwable $e) {
+            $held = false;
+        }
+
+        if (! $held) {
+            $this->lockLost = true;
+
+            Log::warning('imports:process lost its lock mid-tick and stopped; the next tick carries on', [
+                'lock' => self::lockName(),
+            ]);
+        }
+
+        return $held;
+    }
+
+    /**
+     * Release the lock without ever hiding the error that ended the tick.
+     *
+     * Releasing from a session that no longer holds it (after a reconnect)
+     * releases nothing, so another tick's lock is never touched.
+     */
+    private function releaseLock(string $lock): void
+    {
+        try {
+            DB::selectOne('SELECT RELEASE_LOCK(?) AS released', [$lock]);
+        } catch (Throwable $e) {
+            Log::error('imports:process could not release its lock; MySQL frees it when the session ends', [
+                'lock' => $lock,
+            ] + ImportErrorDigest::context($e));
+        }
     }
 
     private function tick(CsvImportProcessor $processor): int
@@ -200,6 +263,10 @@ class ProcessCsvImports extends Command
             }
 
             $rows += $this->advanceRun($processor, $run, $startedAt, $maxSeconds, $maxRows, $rows, $budgetExhausted);
+
+            if ($this->lockLost) {
+                break;
+            }
         }
 
         $elapsed = round(microtime(true) - $startedAt, 2);
@@ -215,7 +282,7 @@ class ProcessCsvImports extends Command
 
         $this->info("Advanced {$runs->count()} run(s), {$rows} row(s), in {$elapsed}s.");
 
-        if (! $this->option('no-prune')) {
+        if (! $this->option('no-prune') && ! $this->lockLost) {
             $this->pruneAbandonedRuns($processor, (int) $this->option('prune-days'));
             $this->releaseOrphanedStorage();
         }
@@ -253,6 +320,10 @@ class ProcessCsvImports extends Command
                         'cursor_row_id' => $run->cursor_row_id,
                     ]);
 
+                    break;
+                }
+
+                if (! $this->stillHoldsLock()) {
                     break;
                 }
 
