@@ -62,18 +62,25 @@ class BranchIntegrityTest extends TestCase
         $this->assertSame('Butuan City Branch', $row->new_values['name']);
     }
 
+    /**
+     * Phase 6 MB-BE1: deactivating is suspending (decision 2), through the
+     * Status action with a reason; the profile edit refuses a changed
+     * `is_active` (BranchCoreTest).
+     */
     public function test_deactivating_and_reactivating_a_branch_are_audited_in_words(): void
     {
         $branch = Branch::factory()->create(['name' => 'Butuan Branch', 'code' => 'BTN', 'is_active' => true]);
 
-        $this->putJson("/api/branches/{$branch->id}", ['is_active' => false])->assertOk();
-        $this->putJson("/api/branches/{$branch->id}", ['is_active' => true, 'code' => 'BTN2'])->assertOk();
+        $this->patchJson("/api/branches/{$branch->id}/status", ['status' => 'suspended', 'reason' => 'Typhoon damage'])->assertOk();
+        $this->putJson("/api/branches/{$branch->id}", ['code' => 'BTN2'])->assertOk();
+        $this->patchJson("/api/branches/{$branch->id}/status", ['status' => 'active', 'reason' => 'Repaired'])->assertOk();
 
         $rows = $this->auditRows($branch->id)->where('action', 'updated')->values();
 
         $this->assertSame([
-            'Branch "Butuan Branch" (BTN) deactivated.',
-            'Branch "Butuan Branch" (BTN2) reactivated and updated: code.',
+            'Branch "Butuan Branch" (BTN) suspended. Reason: Typhoon damage',
+            'Branch "Butuan Branch" (BTN2) updated: code.',
+            'Branch "Butuan Branch" (BTN2) reactivated. Reason: Repaired',
         ], $rows->pluck('description')->all());
     }
 
@@ -132,12 +139,13 @@ class BranchIntegrityTest extends TestCase
         $this->putJson("/api/branches/{$this->second->id}", ['is_active' => false])->assertNotFound();
     }
 
+    /** Switching `is_active` also needs `branches:manage` since Phase 6 MB-BE1 (BranchCoreTest). */
     public function test_view_all_with_the_settings_permission_still_edits_a_branch(): void
     {
         $this->actingAs($this->branchSettingsUser([BranchAccess::VIEW_ALL]));
 
-        $this->putJson("/api/branches/{$this->second->id}", ['is_active' => false])->assertOk();
-        $this->assertFalse($this->second->fresh()->is_active);
+        $this->putJson("/api/branches/{$this->second->id}", ['name' => 'Renamed'])->assertOk();
+        $this->assertSame('Renamed', $this->second->fresh()->name);
     }
 
     public function test_view_all_without_the_settings_permission_still_cannot_edit(): void

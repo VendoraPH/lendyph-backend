@@ -44,7 +44,7 @@ class BranchAccessRouteSweepTest extends TestCase
     private const BOUND_PARAMETERS = [
         'loan', 'borrower', 'repayment', 'loanAdjustment', 'coMaker', 'document',
         'collateral', 'pledge', 'journal', 'expense', 'user', 'transaction',
-        'reconciliation',
+        'reconciliation', 'branch',
     ];
 
     public function test_every_route_bound_to_a_branch_owned_record_answers_404_to_another_branch(): void
@@ -215,6 +215,7 @@ class BranchAccessRouteSweepTest extends TestCase
             ])->id,
             'reconciliation' => $reconciliation->id,
             'line' => $statementLine->id,
+            'branch' => $far->id,
         ];
     }
 

@@ -9,7 +9,9 @@ use App\Models\Repayment;
 use App\Models\User;
 use App\Services\Cda\CdaAccess;
 use App\Services\Cda\PeriodOpener;
+use App\Services\Linda\LindaAnswerer;
 use App\Services\Linda\LindaFacts;
+use App\Services\Linda\LindaPeriod;
 use App\Services\Linda\LindaWording;
 use App\Services\Linda\Model\FakeModel;
 use App\Services\Linda\Model\LindaPrices;
@@ -202,7 +204,7 @@ class LindaOpenQuestionsTest extends LindaAnswersTestCase
 
         // None picked: the lending summary alone, never every topic.
         $this->chat($this->asker(), self::OPEN);
-        $this->assertSame(['general_lending_summary'], array_column($this->fake->writeRequests[1]->facts['topics'], 'topic'));
+        $this->assertSame(['general_lending_summary'], array_values(array_unique(array_column($this->fake->writeRequests[1]->facts['topics'], 'topic'))));
     }
 
     public function test_cda_is_left_out_when_a_branch_is_named(): void
@@ -254,5 +256,50 @@ class LindaOpenQuestionsTest extends LindaAnswersTestCase
         $this->assertTrue(BigDecimal::of($write)->isGreaterThan(LindaPrices::worstCaseEstimate('claude-haiku-5-5')));
         $this->assertSame('fell_back', $log->open_answer);
         $this->assertSame((string) BigDecimal::of($classifier)->plus($write)->toScale(6), (string) BigDecimal::of((string) $log->cost)->toScale(6));
+    }
+
+    // -----------------------------------------------------------------
+    // Re-review of #327
+    // -----------------------------------------------------------------
+
+    public function test_each_stats_block_keeps_its_own_title_in_the_pack(): void
+    {
+        $this->chat($this->asker(), 'Why does our lending look like this overall last month?');
+
+        $entries = $this->fake->writeRequests[0]->facts['topics'];
+        $titleOf = fn (string $label): ?string => collect($entries)->first(fn (array $entry) => in_array($label, array_column($entry['figures'], 'label'), true))['title'] ?? null;
+        $lastMonth = 'From '.LindaPeriod::named('last_month')->label;
+
+        $this->assertSame(['general_lending_summary', 'general_lending_summary'], array_column($entries, 'topic'));
+        $this->assertSame($lastMonth, $titleOf('Total Received'));
+        $this->assertSame($lastMonth, $titleOf('Net Disbursed'));
+        $this->assertSame(LindaWording::asOfToday(), $titleOf('Active Loans'));
+        $this->assertSame(LindaWording::asOfToday(), $titleOf('Outstanding'));
+        $this->assertSame(LindaWording::asOfToday(), $titleOf('Total Past Due'));
+    }
+
+    public function test_a_pack_that_cannot_be_encoded_falls_back_and_books_the_classifier(): void
+    {
+        $this->app->instance(LindaFacts::class, new class(app(LindaAnswerer::class)) extends LindaFacts
+        {
+            public function build(User $user, LindaPeriod $period, ?string $branchName, array $picked = []): array
+            {
+                $pack = parent::build($user, $period, $branchName, $picked);
+                $pack['facts']['branches'] = "Main \xB1\x31";
+
+                return $pack;
+            }
+        });
+
+        $reply = $this->chat($this->asker(), self::COLLECTIONS);
+
+        $log = LindaQuestion::query()->latest('id')->firstOrFail();
+        $classifier = LindaPrices::cost(new LindaUsage('claude-haiku-5-5', FakeModel::INPUT_TOKENS, FakeModel::OUTPUT_TOKENS));
+
+        $this->assertSame(LindaWording::notYet(), $reply['answer']);
+        $this->assertSame([], $this->fake->writeRequests);
+        $this->assertSame('fell_back', $log->open_answer);
+        $this->assertSame(FakeModel::INPUT_TOKENS, $log->input_tokens);
+        $this->assertSame((string) BigDecimal::of($classifier)->toScale(6), (string) BigDecimal::of((string) $log->cost)->toScale(6));
     }
 }
