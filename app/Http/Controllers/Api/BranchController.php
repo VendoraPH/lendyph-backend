@@ -40,6 +40,7 @@ class BranchController extends Controller
         $branchIds = app(BranchAccess::class)->for(request()->user());
 
         $branches = Branch::withCount('users')
+            ->withClosurePending()
             ->with('manager:id,first_name,last_name')
             ->when($branchIds !== null, fn ($q) => $q->whereIn('branches.id', $branchIds))
             ->when(request()->boolean('active_only'), fn ($q) => $q->where('is_active', true))
@@ -112,7 +113,7 @@ class BranchController extends Controller
     {
         $this->denyHiddenBranch($branch);
 
-        $branch->loadCount('users')->load('manager:id,first_name,last_name');
+        $branch->loadCount('users')->loadClosurePending()->load('manager:id,first_name,last_name');
 
         return (new BranchResource($branch))->withFigures(
             request()->user()->can('loans:view') ? $figures->for([$branch->id])[$branch->id] : null,
@@ -159,7 +160,7 @@ class BranchController extends Controller
 
         $branch->fill($data)->save();
 
-        return new BranchResource($branch->load('manager:id,first_name,last_name'));
+        return new BranchResource($branch->loadClosurePending()->load('manager:id,first_name,last_name'));
     }
 
     #[OA\Get(

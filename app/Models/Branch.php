@@ -3,6 +3,7 @@
 namespace App\Models;
 
 use App\Traits\Auditable;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Casts\Attribute;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
@@ -211,6 +212,25 @@ class Branch extends Model
     public function closures(): HasMany
     {
         return $this->hasMany(BranchClosure::class);
+    }
+
+    /**
+     * Adds `closure_pending` (a request to close the branch is waiting) as one
+     * EXISTS subquery in the same select, so a list reads it without a query
+     * per branch. BranchResource shows it to status managers only.
+     *
+     * @param  Builder<Branch>  $query
+     * @return Builder<Branch>
+     */
+    public function scopeWithClosurePending(Builder $query): Builder
+    {
+        return $query->withExists(['closures as closure_pending' => fn ($closures) => $closures->where('status', BranchClosure::STATUS_PENDING)]);
+    }
+
+    /** The same `closure_pending`, for one loaded branch. */
+    public function loadClosurePending(): static
+    {
+        return $this->loadExists(['closures as closure_pending' => fn ($closures) => $closures->where('status', BranchClosure::STATUS_PENDING)]);
     }
 
     public function borrowers(): HasMany

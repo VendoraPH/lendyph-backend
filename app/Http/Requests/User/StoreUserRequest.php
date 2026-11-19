@@ -4,6 +4,7 @@ namespace App\Http\Requests\User;
 
 use App\Http\Requests\Concerns\ResolvesBranchAssignment;
 use App\Rules\AssignableRole;
+use App\Rules\BranchTakesNew;
 use Illuminate\Foundation\Http\FormRequest;
 
 class StoreUserRequest extends FormRequest
@@ -44,9 +45,9 @@ class StoreUserRequest extends FormRequest
              */
             // Within the caller's own branches unless they hold
             // `branches:view_all` (BranchAccess).
-            'branch_id' => ['required_without:branch_ids', 'nullable', $this->assignableBranchRule()],
+            'branch_id' => ['required_without:branch_ids', 'nullable', $this->assignableBranchRule(), BranchTakesNew::openOnly()],
             'branch_ids' => ['required_without:branch_id', 'array', 'min:1'],
-            'branch_ids.*' => ['integer', $this->assignableBranchRule()],
+            'branch_ids.*' => ['integer', $this->assignableBranchRule(), BranchTakesNew::openOnly()],
             'role' => ['required', 'string', 'exists:roles,name', new AssignableRole($this->user())],
         ];
     }

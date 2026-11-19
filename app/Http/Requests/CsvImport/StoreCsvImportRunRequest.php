@@ -2,7 +2,9 @@
 
 namespace App\Http\Requests\CsvImport;
 
+use App\Rules\BranchTakesNew;
 use App\Services\BranchAccess;
+use App\Services\Branches\BranchWriteGuard;
 use App\Services\CsvImport\CsvImportUploadService;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Rule;
@@ -73,9 +75,11 @@ class StoreCsvImportRunRequest extends FormRequest
              * with `branches:view_all`.
              */
             'branch_id' => [
+                'bail',
                 'required',
                 'integer',
                 app(BranchAccess::class)->constrainBranchExists(Rule::exists('branches', 'id'), $this->user()),
+                BranchTakesNew::activeOnly(BranchWriteGuard::IMPORTS),
             ],
 
             /**

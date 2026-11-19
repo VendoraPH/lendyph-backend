@@ -11,9 +11,11 @@ use Illuminate\Foundation\Http\FormRequest;
  */
 class PreterminateTimeDepositRequest extends FormRequest
 {
+    use FindsTheTimeDepositFirst;
+
     public function authorize(): bool
     {
-        return (bool) $this->user()?->can('savings:close');
+        return $this->mayActOnTheTimeDeposit('savings:close');
     }
 
     /** @return array<string, mixed> */

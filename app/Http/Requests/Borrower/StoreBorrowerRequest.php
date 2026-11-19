@@ -4,9 +4,11 @@ namespace App\Http\Requests\Borrower;
 
 use App\Http\Requests\Borrower\Concerns\HasBorrowerRules;
 use App\Models\Borrower;
+use App\Rules\BranchTakesNew;
 use App\Rules\NoDuplicateBorrower;
 use App\Services\BorrowerSubmissionTokenService;
 use App\Services\BranchAccess;
+use App\Services\Branches\BranchWriteGuard;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Support\Carbon;
 use Illuminate\Validation\Rule;
@@ -115,8 +117,8 @@ class StoreBorrowerRequest extends FormRequest
         // An operator may only place a member in one of their own branches
         // (BranchAccess; any branch with `branches:view_all`).
         $branchRules = $this->user()
-            ? ['required', app(BranchAccess::class)->constrainBranchExists(Rule::exists('branches', 'id'), $this->user())]
-            : ['nullable', 'exists:branches,id'];
+            ? ['bail', 'required', app(BranchAccess::class)->constrainBranchExists(Rule::exists('branches', 'id'), $this->user()), BranchTakesNew::activeOnly(BranchWriteGuard::MEMBERS)]
+            : ['bail', 'nullable', 'exists:branches,id', BranchTakesNew::activeOnly(BranchWriteGuard::MEMBERS)];
 
         $rules = array_merge(
             $this->requireMemberFields($this->sharedBorrowerRules($ignoreId), creating: true),

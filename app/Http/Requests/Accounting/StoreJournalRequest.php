@@ -3,6 +3,7 @@
 namespace App\Http\Requests\Accounting;
 
 use App\Http\Requests\Concerns\AssignsCallerBranch;
+use App\Rules\BranchTakesNew;
 use Illuminate\Contracts\Validation\Validator;
 use Illuminate\Foundation\Http\FormRequest;
 
@@ -52,7 +53,7 @@ class StoreJournalRequest extends FormRequest
             'date' => ['required', 'date_format:Y-m-d'],
             'reference' => ['nullable', 'string', 'max:64'],
             'description' => ['required', 'string', 'max:500'],
-            'branch_id' => ['nullable', 'integer', $this->callerBranchRule()],
+            'branch_id' => ['nullable', 'integer', $this->callerBranchRule(), BranchTakesNew::openOnly()],
             // Accepted so a complete payload is not refused; never read.
             'total_debit' => ['sometimes', 'nullable', 'integer', 'min:0'],
             'total_credit' => ['sometimes', 'nullable', 'integer', 'min:0'],

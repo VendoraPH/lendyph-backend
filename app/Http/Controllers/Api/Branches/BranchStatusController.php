@@ -44,7 +44,7 @@ class BranchStatusController extends Controller
     {
         $changed = $this->status->change($branch, $request->validated('status'), $request->validated('reason'));
 
-        return new BranchResource($changed->load('manager:id,first_name,last_name'));
+        return new BranchResource($changed->loadClosurePending()->load('manager:id,first_name,last_name'));
     }
 
     #[OA\Put(
@@ -67,6 +67,6 @@ class BranchStatusController extends Controller
     )]
     public function mainOffice(MoveMainOfficeRequest $request, Branch $branch): BranchResource
     {
-        return new BranchResource($this->status->makeMainOffice($branch, $request->validated('reason'))->load('manager:id,first_name,last_name'));
+        return new BranchResource($this->status->makeMainOffice($branch, $request->validated('reason'))->loadClosurePending()->load('manager:id,first_name,last_name'));
     }
 }

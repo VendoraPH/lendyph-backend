@@ -4,6 +4,7 @@ namespace App\Http\Requests\GCash;
 
 use App\Http\Requests\Concerns\ExcludesRejectedBorrowers;
 use App\Http\Requests\GCash\Concerns\HasGCashQuoteRules;
+use App\Rules\BranchTakesNew;
 use App\Services\BranchAccess;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Rule;
@@ -48,6 +49,7 @@ class StoreGCashTransactionRequest extends FormRequest
             'branch_id' => [
                 'nullable', 'integer',
                 app(BranchAccess::class)->constrainBranchExists(Rule::exists('branches', 'id'), $this->user()),
+                BranchTakesNew::openOnly(),
             ],
             'is_pending' => ['nullable', 'boolean'],
             'remarks' => ['nullable', 'string', 'max:2000'],

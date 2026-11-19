@@ -14,9 +14,13 @@ use App\Models\GCashTransaction;
 use App\Models\Loan;
 use App\Models\LoanAdjustment;
 use App\Models\LoanProduct;
+use App\Models\PortalRequest;
+use App\Models\PortalUser;
 use App\Models\Repayment;
 use App\Models\Role;
+use App\Models\SavingsAccount;
 use App\Models\ShareCapitalPledge;
+use App\Models\TimeDeposit;
 use App\Models\User;
 use App\Services\BranchAccess;
 use Illuminate\Routing\Middleware\ThrottleRequests;
@@ -44,7 +48,17 @@ class BranchAccessRouteSweepTest extends TestCase
     private const BOUND_PARAMETERS = [
         'loan', 'borrower', 'repayment', 'loanAdjustment', 'coMaker', 'document',
         'collateral', 'pledge', 'journal', 'expense', 'user', 'transaction',
-        'reconciliation', 'branch',
+        'reconciliation', 'branch', 'account', 'timeDeposit', 'request',
+    ];
+
+    /**
+     * Parameters whose name another module reuses for a record that belongs
+     * to no branch: only routes under the given prefix are swept for them.
+     * `{account}` is a savings account under `api/savings/`, but a chart of
+     * accounts row under `api/accounting/` (organisation-wide).
+     */
+    private const PARAMETER_PREFIXES = [
+        'account' => 'api/savings/',
     ];
 
     public function test_every_route_bound_to_a_branch_owned_record_answers_404_to_another_branch(): void
@@ -144,7 +158,10 @@ class BranchAccessRouteSweepTest extends TestCase
         return array_values(array_filter(
             Router::getRoutes()->getRoutes(),
             fn (Route $route) => str_starts_with($route->uri(), 'api/')
-                && array_intersect($route->parameterNames(), self::BOUND_PARAMETERS) !== []
+                && array_filter(
+                    array_intersect($route->parameterNames(), self::BOUND_PARAMETERS),
+                    fn (string $name): bool => str_starts_with($route->uri(), self::PARAMETER_PREFIXES[$name] ?? 'api/'),
+                ) !== []
                 && ! in_array('signed', $route->gatherMiddleware(), true),
         ));
     }
@@ -216,6 +233,11 @@ class BranchAccessRouteSweepTest extends TestCase
             'reconciliation' => $reconciliation->id,
             'line' => $statementLine->id,
             'branch' => $far->id,
+            'account' => SavingsAccount::factory()->create(['borrower_id' => $borrower->id])->id,
+            'timeDeposit' => TimeDeposit::factory()->create(['borrower_id' => $borrower->id])->id,
+            'request' => PortalRequest::factory()->create([
+                'portal_user_id' => PortalUser::factory()->create(['borrower_id' => $borrower->id])->id,
+            ])->id,
         ];
     }
 
