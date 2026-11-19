@@ -222,5 +222,8 @@ class AmlaCoverageAndHistoryTest extends TestCase
         $this->monitoringOn();
         $this->artisan('amla:coverage-check')->assertSuccessful();
         $this->assertCount(1, $this->eventsFor('gcash', $late->id));
+
+        // The command screens what its sweep added before it counts, so the stored day isn't left Unscreened.
+        $this->assertSame(0, AmlaCoverageCheck::query()->where('source', 'gcash')->where('day', '2026-11-20')->latest('id')->firstOrFail()->unscreened);
     }
 }

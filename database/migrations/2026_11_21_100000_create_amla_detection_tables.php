@@ -25,7 +25,8 @@ use Illuminate\Support\Facades\Schema;
  *   row is unscreened, whatever its id, so an event saved late below others is
  *   still screened. Kept as written.
  * - `amla_detection_locks`: the row the detector locks, so two runs never
- *   write at once.
+ *   write at once. Written here, so the detector only ever locks it and
+ *   never reads it before the lock.
  *
  * Members, walk-ins, branches, events and users referenced here can't be
  * deleted (restrict). No money table changes, and nothing outside these
@@ -124,6 +125,8 @@ return new class extends Migration
         });
 
         $now = now();
+
+        DB::table('amla_detection_locks')->insert(['name' => 'detector', 'created_at' => $now]);
 
         DB::table('amla_rule_versions')->insert([
             'version' => 1,

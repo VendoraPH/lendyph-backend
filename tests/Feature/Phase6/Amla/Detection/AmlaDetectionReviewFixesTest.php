@@ -5,6 +5,7 @@ namespace Tests\Feature\Phase6\Amla\Detection;
 use App\Models\AmlaAlert;
 use App\Models\AmlaChangeRequest;
 use App\Models\AmlaCtrCandidate;
+use App\Models\AmlaDetectionLock;
 use App\Models\AmlaEvent;
 use App\Models\AmlaEventScreening;
 use App\Models\Branch;
@@ -226,5 +227,17 @@ class AmlaDetectionReviewFixesTest extends TestCase
         $this->assertSame(0, AmlaAlert::query()->where('rule_code', 'H')->where('borrower_id', $payer->id)->count());
         $this->assertTrue(AmlaCtrCandidate::query()->where('event_id', $bigCounter->id)->exists());
         $this->assertFalse(AmlaCtrCandidate::query()->where('event_id', $bigPayment->id)->exists());
+    }
+
+    public function test_the_detector_locks_the_row_the_migration_wrote_and_never_creates_one(): void
+    {
+        $this->assertSame(['detector'], AmlaDetectionLock::query()->pluck('name')->all());
+
+        $this->event($this->member(), '800000.00');
+        $this->detect();
+        $this->detect();
+
+        $this->assertSame(1, AmlaDetectionLock::query()->count());
+        $this->assertSame(1, AmlaCtrCandidate::query()->count());
     }
 }

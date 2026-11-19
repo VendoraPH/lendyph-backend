@@ -266,9 +266,13 @@ final class Detector
         return new DetectionContext($params, (string) $settings->values['ctr_threshold'], (array) $settings->values['ctr_cash_channels'], $settings->version);
     }
 
+    /**
+     * Lock the detector row (written by the detection migration) as the
+     * batch's first read, so every later read sees what a run before it
+     * committed, never an older view.
+     */
     private function lock(): void
     {
-        AmlaDetectionLock::query()->firstOrCreate(['name' => 'detector']);
         AmlaDetectionLock::query()->where('name', 'detector')->lockForUpdate()->firstOrFail();
     }
 
