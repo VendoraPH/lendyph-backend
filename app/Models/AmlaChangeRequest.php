@@ -40,8 +40,10 @@ class AmlaChangeRequest extends Model
 
     public const RISK_RULES = 'risk_rules';
 
+    public const DETECTION_RULES = 'detection_rules';
+
     /** @var list<string> */
-    public const TYPES = [self::SETTINGS, self::CALENDAR_ADD, self::CALENDAR_REMOVE, self::CALENDAR_CONFIRM_YEAR, self::RISK_RULES];
+    public const TYPES = [self::SETTINGS, self::CALENDAR_ADD, self::CALENDAR_REMOVE, self::CALENDAR_CONFIRM_YEAR, self::RISK_RULES, self::DETECTION_RULES];
 
     public const PENDING = 'pending';
 

@@ -339,6 +339,14 @@ class TimezoneShift
         'amla_event_failures' => ['created_at', 'last_attempted_at', 'resolved_at'],
         'amla_events' => ['created_at', 'recorded_at', 'reversed_at'],
         'amla_harvest_cursors' => ['created_at', 'started_at', 'updated_at', 'watermark'],
+        // Phase 6 AMLA-B3 (2026-11-21): detection rules, CTR candidates, alerts
+        // and the detection cursor, well after the cutover. `occurred_on`,
+        // `window_start` and `window_end` are DATEs.
+        'amla_alert_events' => ['created_at', 'reversal_rerun_at'],
+        'amla_alerts' => ['cleared_at', 'created_at'],
+        'amla_ctr_candidates' => ['created_at', 'event_reversed_at'],
+        'amla_detection_cursors' => ['created_at', 'updated_at'],
+        'amla_rule_versions' => ['created_at', 'effective_at'],
         // Added 2026-11-19 with the executive dashboard's alert thresholds
         // (Phase 6 EB-C), well after the cutover, for the same reason.
         'dashboard_settings' => ['created_at', 'updated_at'],

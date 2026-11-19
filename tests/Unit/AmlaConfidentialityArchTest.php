@@ -72,7 +72,11 @@ it('finds the AMLA files it guards', function () use ($amlaFiles, $relative) {
         ->and($files)->toContain('routes/api/amla/foundation.php')
         ->and($files)->toContain('app/Services/Amla/Events/Harvester.php')
         ->and($files)->toContain('app/Models/AmlaEvent.php')
-        ->and($files)->toContain('routes/console/amla/events.php');
+        ->and($files)->toContain('routes/console/amla/events.php')
+        ->and($files)->toContain('app/Services/Amla/Detection/Detector.php')
+        ->and($files)->toContain('app/Models/AmlaAlert.php')
+        ->and($files)->toContain('routes/api/amla/detection.php')
+        ->and($files)->toContain('routes/console/amla/detection.php');
 });
 
 /** @var array<string, string> what AMLA code must never reach, by pattern on its code */
@@ -203,6 +207,7 @@ const AMLA_TABLE_MIGRATIONS = [
     'database/migrations/2026_11_19_210000_create_amla_foundation_tables.php',
     'database/migrations/2026_11_20_100000_create_amla_cdd_tables.php',
     'database/migrations/2026_11_20_200000_create_amla_event_tables.php',
+    'database/migrations/2026_11_21_100000_create_amla_detection_tables.php',
 ];
 
 it('keeps AMLA out of the main audit trail, outbound channels, notices, logs and the environment', function () use ($amlaFiles, $codeOf, $relative, $channelOffences) {
@@ -353,6 +358,11 @@ it('catches every bulk-write pattern', function (string $code, bool $isAmlaFile)
     'cursor rewind' => ["DB::table('amla_harvest_cursors')->update(['watermark' => null]);", false],
     'failure delete' => ['AmlaEventFailure::query()->delete();', false],
     'coverage drop' => ["Schema::dropIfExists('amla_coverage_checks');", false],
+    'alert update' => ["AmlaAlert::query()->where('rule_code', 'A')->update(['status' => 'cleared']);", false],
+    'alert event delete' => ["DB::table('amla_alert_events')->where('alert_id', 1)->delete();", false],
+    'ctr candidate update' => ["DB::table('amla_ctr_candidates')->update(['amount' => '0.00']);", false],
+    'rule version delete' => ['AmlaRuleVersion::query()->whereKey(2)->delete();', false],
+    'detection cursor rewind' => ["DB::update('update amla_detection_cursors set last_event_id = 0');", false],
 ]);
 
 it('lets an added column through', function () use ($bulkWriteOffences) {
