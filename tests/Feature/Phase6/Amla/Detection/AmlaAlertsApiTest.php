@@ -128,7 +128,7 @@ class AmlaAlertsApiTest extends TestCase
         $this->actingAs($this->amlaUser(['amla:cdd']));
         $this->getJson('/api/amla/detection-rules')->assertForbidden();
 
-        $this->actingAs($this->amlaUser(['amla:alerts']));
+        $this->actingAs($this->amlaUser(['amla:alerts', 'branches:view_all']));
         $data = $this->getJson('/api/amla/detection-rules')->assertOk()->json('data');
         $this->assertSame(1, $data['version']);
         $this->assertTrue($data['to_verify']);

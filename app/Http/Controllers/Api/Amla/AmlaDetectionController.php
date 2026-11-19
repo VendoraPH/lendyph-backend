@@ -25,8 +25,9 @@ use OpenApi\Attributes as OA;
  * AMLA detection (AMLA-B3; AMLA design §4.6–4.7, §4.12; task §8, §12).
  * Alerts need `amla:alerts`, CTR candidates `amla:ctr`, both checked before
  * any record is looked up; branch users see only their branches' member
- * records, and anything else answers 404 like a missing one. The rules read
- * with any of `amla:view`, `amla:alerts` or `amla:settings`; their history
+ * records (an alert only when all its transactions are theirs), and anything
+ * else answers 404 like a missing one. The rules read with any of
+ * `amla:view`, `amla:alerts` or `amla:settings` plus head-office access; their history
  * with `amla:settings` and head-office access; a change goes through
  * POST /amla/change-requests (`detection_rules`). Every view is written to
  * the AMLA log, never the main audit trail.
@@ -58,7 +59,7 @@ class AmlaDetectionController extends Controller
             'searched' => filled($filters['search'] ?? null),
         ]);
 
-        $page = $this->scope->constrain(AmlaAlert::query(), $request->user())
+        $page = $this->scope->constrainAlerts(AmlaAlert::query(), $request->user())
             ->with(['events', 'borrower', 'walkIn', 'branch'])
             ->when(isset($filters['status']), fn (Builder $q) => $q->where('status', $filters['status']))
             ->when(isset($filters['rule']), fn (Builder $q) => $q->where('rule_code', $filters['rule']))
@@ -85,7 +86,7 @@ class AmlaDetectionController extends Controller
     {
         $this->access->authorize($request->user(), AmlaAccess::ALERTS);
 
-        $alert = $this->scope->constrain(AmlaAlert::query(), $request->user())->with(['events', 'borrower', 'walkIn', 'branch'])->whereKey($id)->first() ?? abort(404);
+        $alert = $this->scope->constrainAlerts(AmlaAlert::query(), $request->user())->with(['events', 'borrower', 'walkIn', 'branch'])->whereKey($id)->first() ?? abort(404);
         $this->log->record('alert_viewed', $request->user(), 'alert', $alert->id, ['reference' => $alert->reference]);
 
         return response()->json(['success' => true, 'data' => $this->presenter->alertDetail($alert)]);
@@ -142,14 +143,14 @@ class AmlaDetectionController extends Controller
     #[OA\Get(
         path: '/api/amla/detection-rules',
         summary: 'AMLA detection rules in force',
-        description: 'Needs `amla:view`, `amla:alerts` or `amla:settings`. Rules A–L of the current version: what each looks for, whether it is active and available, its priority and parameters, all starting points "to verify". Logged to the AMLA log.',
+        description: 'Needs `amla:view`, `amla:alerts` or `amla:settings`, and `branches:view_all`. Rules A–L of the current version: what each looks for, whether it is active and available, its priority and parameters, all starting points "to verify". Logged to the AMLA log.',
         tags: ['AMLA'],
         security: [['sanctum' => []]],
         responses: [new OA\Response(response: 200, description: 'The rules')],
     )]
     public function rules(Request $request, DetectionRules $rules): JsonResponse
     {
-        $this->access->authorize($request->user(), [AmlaAccess::VIEW, AmlaAccess::ALERTS, AmlaAccess::SETTINGS]);
+        $this->access->authorizeHeadOffice($request->user(), [AmlaAccess::VIEW, AmlaAccess::ALERTS, AmlaAccess::SETTINGS]);
 
         $current = $rules->current();
         $this->log->record('detection_rules_viewed', $request->user(), details: ['version' => $current->version]);

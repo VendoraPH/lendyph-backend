@@ -362,7 +362,7 @@ it('catches every bulk-write pattern', function (string $code, bool $isAmlaFile)
     'alert event delete' => ["DB::table('amla_alert_events')->where('alert_id', 1)->delete();", false],
     'ctr candidate update' => ["DB::table('amla_ctr_candidates')->update(['amount' => '0.00']);", false],
     'rule version delete' => ['AmlaRuleVersion::query()->whereKey(2)->delete();', false],
-    'detection cursor rewind' => ["DB::update('update amla_detection_cursors set last_event_id = 0');", false],
+    'screening delete' => ["DB::delete('delete from amla_event_screenings where event_id = 1');", false],
 ]);
 
 it('lets an added column through', function () use ($bulkWriteOffences) {

@@ -9,6 +9,7 @@ use App\Models\AmlaLogEntry;
 use App\Models\Borrower;
 use App\Models\GCashTransaction;
 use App\Models\Repayment;
+use App\Services\Amla\Detection\Detector;
 use App\Services\Amla\Events\Coverage;
 use Illuminate\Console\Scheduling\Schedule;
 use Illuminate\Support\Carbon;
@@ -56,9 +57,12 @@ class AmlaCoverageAndHistoryTest extends TestCase
 
         $this->at('2026-11-21 00:45:00');
         $missed = app(Coverage::class)->check('2026-11-20', store: false, sweep: false);
-        $result = app(Coverage::class)->check('2026-11-20', sweep: true);
+        app(Coverage::class)->check('2026-11-20', store: false, sweep: true);
+        app(Detector::class)->run();
+        $result = app(Coverage::class)->check('2026-11-20');
 
-        $this->assertSame(['rows' => 3, 'events' => 1, 'failed' => 1, 'unscreened' => 2, 'pending' => 1], $missed['gcash']);
+        // Nothing is screened before the detector runs, so every row reads Unscreened.
+        $this->assertSame(['rows' => 3, 'events' => 1, 'failed' => 1, 'unscreened' => 3, 'pending' => 1], $missed['gcash']);
         $this->assertSame(['rows' => 3, 'events' => 2, 'failed' => 1, 'unscreened' => 1, 'pending' => 1], $result['gcash']);
         $this->assertSame('monitor', $this->soleEvent('gcash', $late->id)->harvested_by);
         $this->assertSame(['rows' => 0, 'events' => 0, 'failed' => 0, 'unscreened' => 0, 'pending' => 0], $result['repayments']);
@@ -92,6 +96,7 @@ class AmlaCoverageAndHistoryTest extends TestCase
         $this->at('2026-11-21 00:45:00');
         $before = app(Coverage::class)->check('2026-11-20', store: false, sweep: false);
         $this->harvestLater('2026-11-21 00:46:00');
+        app(Detector::class)->run();
         $after = app(Coverage::class)->check('2026-11-20', store: false);
 
         $this->assertSame(1, $before['repayment_voids']['unscreened']);

@@ -13,8 +13,9 @@ use Illuminate\Support\Facades\DB;
  * The nightly AMLA coverage check (AMLA design §4.5): for one Manila day and
  * each source, the monitored rows recorded that day (from the source's
  * go-live), how many have their events, how many failed, and how many are
- * Unscreened: every row without its event, a failure or a gap the cursor
- * missed. Nothing counts as cleared until it has been screened. Pending rows
+ * Unscreened: every row without its event (a failure or a gap the cursor
+ * missed) and every row whose event the AMLA detector hasn't screened yet.
+ * Nothing counts as cleared until it has been screened. Pending rows
  * (a GCash Cash In not yet paid) are counted apart; they aren't money yet.
  *
  * When asked (the nightly command does) and only while monitoring is on,
@@ -103,23 +104,25 @@ final class Coverage
     {
         $rows = 0;
         $events = 0;
+        $screened = 0;
         $failed = 0;
 
         $source->rows()
             ->where($source->recordedColumn(), '>=', $from)
             ->where($source->recordedColumn(), '<', $to)
-            ->chunkById(EventWriter::CHUNK, function ($chunk) use ($source, &$rows, &$events, &$failed) {
+            ->chunkById(EventWriter::CHUNK, function ($chunk) use ($source, &$rows, &$events, &$screened, &$failed) {
                 $ids = $chunk->pluck('id')->map(fn ($id) => (int) $id)->unique()->values()->all();
                 $covered = $source->coveredIds($ids);
                 $missing = array_values(array_diff($ids, $covered));
 
                 $rows += count($ids);
                 $events += count($covered);
+                $screened += count($source->screenedIds($covered));
                 $failed += $missing === [] ? 0 : AmlaEventFailure::query()->where('source', $source->name())->whereIn('source_id', $missing)->count();
             }, $source->idColumn(), 'id');
 
         $pending = $source->pendingRows()?->where($source->recordedColumn(), '>=', $from)->where($source->recordedColumn(), '<', $to)->count() ?? 0;
 
-        return ['rows' => $rows, 'events' => $events, 'failed' => $failed, 'unscreened' => $rows - $events, 'pending' => $pending];
+        return ['rows' => $rows, 'events' => $events, 'failed' => $failed, 'unscreened' => $rows - $screened, 'pending' => $pending];
     }
 }

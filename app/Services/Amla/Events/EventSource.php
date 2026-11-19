@@ -64,6 +64,27 @@ abstract class EventSource
     }
 
     /**
+     * Of these harvested row ids, those whose every event has been screened
+     * by the AMLA detector: what coverage counts as no longer Unscreened.
+     *
+     * @param  list<int>  $ids
+     * @return list<int>
+     */
+    public function screenedIds(array $ids): array
+    {
+        if ($ids === []) {
+            return [];
+        }
+
+        $unscreened = AmlaEvent::query()->where('source', $this->eventSource())->whereIn('source_id', $ids)
+            ->when($this->coverageKinds() !== null, fn ($events) => $events->whereIn('kind', $this->coverageKinds()))
+            ->whereNotExists(fn ($screened) => $screened->selectRaw('1')->from('amla_event_screenings')->whereColumn('amla_event_screenings.event_id', 'amla_events.id'))
+            ->distinct()->pluck('source_id')->map(fn ($id) => (int) $id)->all();
+
+        return array_values(array_diff($ids, $unscreened));
+    }
+
+    /**
      * The kinds whose event counts a row as harvested, when the source shares
      * its `amla_events.source` with another adapter; null for any kind.
      *

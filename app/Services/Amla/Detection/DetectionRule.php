@@ -36,6 +36,20 @@ abstract class DetectionRule
 
     abstract public function evaluate(AmlaEvent $trigger, DetectionContext $context): ?Finding;
 
+    /**
+     * Every finding for the trigger. One for most rules; a rule anchored on
+     * an earlier transaction (E's receipt, I's release) returns one per
+     * anchor that still matches, so a rerun checks an alert against its own.
+     *
+     * @return list<Finding>
+     */
+    public function evaluateAll(AmlaEvent $trigger, DetectionContext $context): array
+    {
+        $finding = $this->evaluate($trigger, $context);
+
+        return $finding === null ? [] : [$finding];
+    }
+
     /** Null while the rule's data exists; otherwise why it can't run, in words. */
     public function unavailable(): ?string
     {

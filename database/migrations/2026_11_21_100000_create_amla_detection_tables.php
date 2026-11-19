@@ -19,8 +19,13 @@ use Illuminate\Support\Facades\Schema;
  *   it once, with a note.
  * - `amla_alert_events`: the transactions behind each alert; each records
  *   once that its event's reversal was rerun.
- * - `amla_detection_cursors`: the detector's place in the events, forward
- *   only.
+ * - `amla_event_screenings`: one row per event the detector has screened,
+ *   written in the same transaction as that event's CTR candidate and alerts,
+ *   naming the rule and settings versions it was judged by. An event with no
+ *   row is unscreened, whatever its id, so an event saved late below others is
+ *   still screened. Kept as written.
+ * - `amla_detection_locks`: the row the detector locks, so two runs never
+ *   write at once.
  *
  * Members, walk-ins, branches, events and users referenced here can't be
  * deleted (restrict). No money table changes, and nothing outside these
@@ -104,11 +109,18 @@ return new class extends Migration
             $table->index(['event_id', 'reversal_rerun_at']);
         });
 
-        Schema::create('amla_detection_cursors', function (Blueprint $table) {
+        Schema::create('amla_event_screenings', function (Blueprint $table) {
+            $table->id();
+            $table->foreignId('event_id')->unique()->constrained('amla_events')->restrictOnDelete();
+            $table->unsignedInteger('rule_version');
+            $table->unsignedInteger('settings_version');
+            $table->timestamp('created_at')->nullable();
+        });
+
+        Schema::create('amla_detection_locks', function (Blueprint $table) {
             $table->id();
             $table->string('name', 32)->unique();
-            $table->unsignedBigInteger('last_event_id')->default(0);
-            $table->timestamps();
+            $table->timestamp('created_at')->nullable();
         });
 
         $now = now();
@@ -116,7 +128,7 @@ return new class extends Migration
         DB::table('amla_rule_versions')->insert([
             'version' => 1,
             'definition' => json_encode([
-                'A' => ['active' => true, 'priority' => 'high', 'params' => ['min_transactions' => 2, 'channels' => ['cash']]],
+                'A' => ['active' => true, 'priority' => 'high', 'params' => ['min_transactions' => 2]],
                 'B' => ['active' => true, 'priority' => 'medium', 'params' => ['min_transactions' => 10, 'multiplier' => 3, 'baseline_days' => 90]],
                 'C' => ['active' => true, 'priority' => 'medium', 'params' => ['min_amount' => '50000.00', 'multiplier' => 5, 'baseline_days' => 90, 'min_baseline_transactions' => 3]],
                 'D' => ['active' => true, 'priority' => 'medium', 'params' => ['min_amount' => '100000.00', 'multiplier' => 3]],
@@ -142,7 +154,8 @@ return new class extends Migration
             throw new RuntimeException('AMLA alerts and CTR candidates are kept forever, so the AMLA detection tables are not dropped.');
         }
 
-        Schema::dropIfExists('amla_detection_cursors');
+        Schema::dropIfExists('amla_detection_locks');
+        Schema::dropIfExists('amla_event_screenings');
         Schema::dropIfExists('amla_alert_events');
         Schema::dropIfExists('amla_alerts');
         Schema::dropIfExists('amla_ctr_candidates');

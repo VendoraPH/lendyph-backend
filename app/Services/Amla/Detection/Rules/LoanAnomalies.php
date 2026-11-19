@@ -37,9 +37,17 @@ final class LoanAnomalies extends DetectionRule
 
     public function evaluate(AmlaEvent $trigger, DetectionContext $context): ?Finding
     {
+        return $this->evaluateAll($trigger, $context)[0] ?? null;
+    }
+
+    /** One finding per release in reach that the payment still matches. */
+    public function evaluateAll(AmlaEvent $trigger, DetectionContext $context): array
+    {
         if (! $this->counts($trigger) || $trigger->kind !== 'loan_payment' || ! in_array($trigger->channel, $context->channels(), true)) {
-            return null;
+            return [];
         }
+
+        $findings = [];
 
         $within = $context->int('within_days');
         $day = self::day($trigger);
@@ -60,7 +68,7 @@ final class LoanAnomalies extends DetectionRule
                 ->whereBetween('occurred_on', [$from->toDateString(), $from->addDays($within)->toDateString()])->orderBy('id')->get()
                 ->filter($qualifies)->values();
 
-            return new Finding(
+            $findings[] = new Finding(
                 key: 'release:'.$release->id,
                 windowStart: $from->toDateString(),
                 windowEnd: $from->addDays($within)->toDateString(),
@@ -77,6 +85,6 @@ final class LoanAnomalies extends DetectionRule
             );
         }
 
-        return null;
+        return $findings;
     }
 }

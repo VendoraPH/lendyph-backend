@@ -9,8 +9,10 @@ use App\Services\Amla\Detection\Finding;
 
 /**
  * A. Structuring (task §7–8): on one day, one subject's transactions in the
- * rule's channels, each at or below the CTR threshold, that together exceed
- * it. A review alert, never a CTR: a same-day sum is never a covered
+ * channels the AMLA settings count as cash for a CTR, each at or below the
+ * CTR threshold, that together exceed it. It watches the same channels and
+ * threshold as the CTR rule, from the settings version in force when the
+ * trigger was recorded. A review alert, never a CTR: a same-day sum is never a covered
  * transaction. Money in and money out are counted apart.
  */
 final class Structuring extends DetectionRule
@@ -27,18 +29,18 @@ final class Structuring extends DetectionRule
 
     public function description(): string
     {
-        return 'On one day, several transactions in the listed channels, each at or below the CTR threshold, that together exceed it.';
+        return 'On one day, several transactions in the CTR cash channels, each at or below the CTR threshold, that together exceed it.';
     }
 
     public function parameters(): array
     {
-        return ['min_transactions' => 'count', 'channels' => 'channels'];
+        return ['min_transactions' => 'count'];
     }
 
     public function evaluate(AmlaEvent $trigger, DetectionContext $context): ?Finding
     {
         $threshold = $context->thresholdCentavos();
-        $channels = $context->channels();
+        $channels = $context->ctrChannels;
 
         if (! $this->counts($trigger) || ! in_array($trigger->channel, $channels, true) || self::cents($trigger) > $threshold) {
             return null;

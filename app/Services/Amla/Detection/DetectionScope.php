@@ -2,6 +2,7 @@
 
 namespace App\Services\Amla\Detection;
 
+use App\Models\AmlaAlert;
 use App\Models\User;
 use App\Services\BranchAccess;
 use Illuminate\Database\Eloquent\Builder;
@@ -11,7 +12,9 @@ use Illuminate\Database\Eloquent\Builder;
  * office (`branches:view_all`) sees all; a branch user sees only their
  * branches' records about members. A record with no branch (head office's,
  * such as a cross-branch alert) and every walk-in record need head-office
- * access, as walk-ins' CDD does. A hidden record answers 404 like a missing
+ * access, as walk-ins' CDD does. A member alert's transactions can span
+ * branches, so a branch user sees an alert only when every transaction behind
+ * it is in one of their branches. A hidden record answers 404 like a missing
  * one.
  */
 final class DetectionScope
@@ -31,5 +34,22 @@ final class DetectionScope
         return $ids === null
             ? $query
             : $query->whereIn($query->getModel()->qualifyColumn('branch_id'), $ids)->whereNull($query->getModel()->qualifyColumn('gcash_non_member_id'));
+    }
+
+    /**
+     * Alerts the user sees: constrain(), and for a branch user no transaction
+     * behind the alert outside their branches or with no branch.
+     *
+     * @param  Builder<AmlaAlert>  $query
+     * @return Builder<AmlaAlert>
+     */
+    public function constrainAlerts(Builder $query, User $user): Builder
+    {
+        $ids = $this->branches->for($user);
+
+        return $ids === null
+            ? $query
+            : $this->constrain($query, $user)->whereDoesntHave('events', fn (Builder $events) => $events
+                ->where(fn (Builder $outside) => $outside->whereNull('amla_events.branch_id')->orWhereNotIn('amla_events.branch_id', $ids)));
     }
 }

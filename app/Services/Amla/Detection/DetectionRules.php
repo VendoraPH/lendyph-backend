@@ -16,6 +16,7 @@ use App\Services\Amla\Detection\Rules\UnusualFrequency;
 use App\Services\Amla\Detection\Rules\UnusualVolume;
 use App\Services\Amla\Detection\Rules\WatchlistMatch;
 use App\Services\Amla\Foundation\AmlaSettings;
+use Carbon\CarbonInterface;
 use RuntimeException;
 
 /**
@@ -65,6 +66,18 @@ final class DetectionRules
     public function current(): AmlaRuleVersion
     {
         return AmlaRuleVersion::query()->orderByDesc('version')->first()
+            ?? throw new RuntimeException('The AMLA detection rules have no version. The AMLA detection migration writes version 1.');
+    }
+
+    /**
+     * The version in force at a moment: the newest one effective by then, else
+     * version 1 (the starting points were in force from the start). An event
+     * is judged by the rules in force when it was recorded.
+     */
+    public function at(CarbonInterface $moment): AmlaRuleVersion
+    {
+        return AmlaRuleVersion::query()->where('effective_at', '<=', $moment)->orderByDesc('version')->first()
+            ?? AmlaRuleVersion::query()->orderBy('version')->first()
             ?? throw new RuntimeException('The AMLA detection rules have no version. The AMLA detection migration writes version 1.');
     }
 

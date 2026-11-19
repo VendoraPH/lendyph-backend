@@ -51,7 +51,7 @@ class AmlaAccessTest extends TestCase
             'risk rules' => ['GET', '/api/amla/risk-rules', ['amla:cdd', 'amla:settings', 'amla:audit'], true],
             'alerts' => ['GET', '/api/amla/alerts', ['amla:alerts'], false],
             'ctr candidates' => ['GET', '/api/amla/ctr-candidates', ['amla:ctr'], false],
-            'detection rules' => ['GET', '/api/amla/detection-rules', ['amla:view', 'amla:alerts', 'amla:settings'], false],
+            'detection rules' => ['GET', '/api/amla/detection-rules', ['amla:view', 'amla:alerts', 'amla:settings'], true],
             'detection rule versions' => ['GET', '/api/amla/detection-rules/versions', ['amla:settings'], true],
         ];
     }

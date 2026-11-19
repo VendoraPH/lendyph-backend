@@ -345,7 +345,8 @@ class TimezoneShift
         'amla_alert_events' => ['created_at', 'reversal_rerun_at'],
         'amla_alerts' => ['cleared_at', 'created_at'],
         'amla_ctr_candidates' => ['created_at', 'event_reversed_at'],
-        'amla_detection_cursors' => ['created_at', 'updated_at'],
+        'amla_detection_locks' => ['created_at'],
+        'amla_event_screenings' => ['created_at'],
         'amla_rule_versions' => ['created_at', 'effective_at'],
         // Added 2026-11-19 with the executive dashboard's alert thresholds
         // (Phase 6 EB-C), well after the cutover, for the same reason.

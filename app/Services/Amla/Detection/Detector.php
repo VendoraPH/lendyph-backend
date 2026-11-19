@@ -6,12 +6,14 @@ use App\Enums\PaymentMethod;
 use App\Models\AmlaAlert;
 use App\Models\AmlaAlertEvent;
 use App\Models\AmlaCtrCandidate;
-use App\Models\AmlaDetectionCursor;
+use App\Models\AmlaDetectionLock;
 use App\Models\AmlaEvent;
+use App\Models\AmlaEventScreening;
 use App\Models\AmlaRuleVersion;
 use App\Services\Amla\Events\PesoAmount;
 use App\Services\Amla\Foundation\AmlaMonitoring;
 use App\Services\Amla\Foundation\AmlaSettings;
+use Carbon\CarbonInterface;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 
@@ -20,20 +22,25 @@ use Illuminate\Support\Facades\DB;
  * monitoring is on, after the harvester. It reads AMLA events (and, for a few
  * rules, the member's own record) and writes only AMLA tables:
  *
- * - **Screening.** Each new event, in id order from its cursor, is checked
- *   once for a CTR candidate and against every active rule of the current
- *   rule version. A finding opens an alert citing that version, or joins
- *   the open alert for the same rule, subject and window.
+ * - **Screening.** Each event not yet screened (no AmlaEventScreening row),
+ *   lowest id first, is checked once for a CTR candidate and against every
+ *   active rule of the rule version in force when it was recorded. A finding
+ *   opens an alert citing that version, or joins the open alert for the same
+ *   rule, subject and window. Its screening row is written in the same
+ *   transaction, so an event saved late below others is still screened, and
+ *   an event is never screened twice.
  * - **CTR.** One customer event in a channel counted as cash, above the CTR
  *   threshold of the AMLA settings version in force when it was recorded.
  *   Exactly the threshold isn't one; same-day sums are structuring (rule A).
+ *   An event already voided when screened still gets its candidate, marked
+ *   reversed.
  * - **Reruns.** When the harvester marks an event voided or reversed, its
  *   CTR candidate records that, and each open alert it belongs to runs its
  *   rule again (the version it cites) on what still stands. An alert that no
  *   longer holds is cleared with a note; one that still holds stays open.
  *
- * Everything runs under a lock on the cursor row, so two runs never write at
- * once, and reference numbers are taken under it. Nothing files, blocks,
+ * Everything runs under a lock on one AmlaDetectionLock row, so two runs
+ * never write at once, and reference numbers are taken under it. Nothing files, blocks,
  * notifies or freezes.
  */
 final class Detector
@@ -42,6 +49,9 @@ final class Detector
 
     /** Batches screened per run, so one run stays short after a long pause. */
     public const BATCHES_PER_RUN = 20;
+
+    /** @var array<int, AmlaRuleVersion> rule versions read this run */
+    private array $versions = [];
 
     public function __construct(
         private readonly AmlaMonitoring $monitoring,
@@ -75,31 +85,26 @@ final class Detector
     /** @param  array<string, int>  $counts */
     private function screenBatch(array &$counts): int
     {
-        $cursor = $this->lockedCursor();
-        $events = AmlaEvent::query()->where('id', '>', $cursor->last_event_id)->orderBy('id')->limit(self::BATCH)->get();
-
-        if ($events->isEmpty()) {
-            return 0;
-        }
-
-        $version = $this->rules->current();
+        $this->lock();
+        $events = AmlaEvent::query()
+            ->whereNotExists(fn ($screened) => $screened->selectRaw('1')->from('amla_event_screenings')->whereColumn('amla_event_screenings.event_id', 'amla_events.id'))
+            ->orderBy('id')->limit(self::BATCH)->get();
 
         foreach ($events as $event) {
+            $moment = $event->recorded_at ?? $event->created_at ?? Carbon::now();
+            $version = $this->ruleVersionAt($moment);
+            $settings = $this->settings->at($moment);
             $counts['ctr_candidates'] += $this->ctr($event);
 
             foreach ($this->activeRules($version) as $code => [$rule, $params]) {
-                $finding = $rule->evaluate($event, $this->context($event, $params));
-
-                if ($finding !== null) {
+                foreach ($rule->evaluateAll($event, $this->context($event, $params)) as $finding) {
                     $counts[$this->record($code, $version->version, $version->definition[$code]['priority'], $event, $finding) ? 'alerts_opened' : 'alerts_joined']++;
                 }
             }
 
+            AmlaEventScreening::query()->create(['event_id' => $event->id, 'rule_version' => $version->version, 'settings_version' => $settings->version]);
             $counts['screened']++;
         }
-
-        $cursor->last_event_id = (int) $events->last()->id;
-        $cursor->save();
 
         return $events->count();
     }
@@ -107,7 +112,7 @@ final class Detector
     /** @param  array<string, int>  $counts */
     private function rerunReversals(array &$counts): void
     {
-        $this->lockedCursor();
+        $this->lock();
         $now = Carbon::now();
 
         $candidates = AmlaCtrCandidate::query()->whereNull('event_reversed_at')
@@ -151,10 +156,10 @@ final class Detector
         $standing = $alert->events()->whereNull('amla_events.reversed_at')->orderByDesc('amla_events.id')->get();
 
         foreach ($standing as $event) {
-            $finding = $rule->evaluate($event, $this->context($event, $params));
-
-            if ($finding !== null && self::openKey($alert->rule_code, $finding) === $alert->open_key) {
-                return true;
+            foreach ($rule->evaluateAll($event, $this->context($event, $params)) as $finding) {
+                if (self::openKey($alert->rule_code, $finding) === $alert->open_key) {
+                    return true;
+                }
             }
         }
 
@@ -164,7 +169,7 @@ final class Detector
     /** A CTR candidate for the event, when it is one. @return int 1 when one was added */
     private function ctr(AmlaEvent $event): int
     {
-        if ($event->is_internal || $event->reversed_at !== null) {
+        if ($event->is_internal) {
             return 0;
         }
 
@@ -191,6 +196,7 @@ final class Detector
             'occurred_on' => $event->occurred_on->toDateString(),
             'status' => AmlaCtrCandidate::DETECTED,
             'from_history' => $event->harvested_by === 'history',
+            'event_reversed_at' => $event->reversed_at,
             'explanation' => sprintf('One %s transaction (%s) of %s on %s, above the CTR threshold of %s (AMLA settings version %d, to verify). Same-day sums are reviewed as structuring, never as a CTR.',
                 strtolower((string) PaymentMethod::labelFor($event->channel)), $event->direction === 'in' ? 'money in' : 'money out',
                 PesoAmount::words((string) $event->amount), $event->occurred_on->format('M j, Y'), PesoAmount::words($threshold), $settings->version),
@@ -260,11 +266,18 @@ final class Detector
         return new DetectionContext($params, (string) $settings->values['ctr_threshold'], (array) $settings->values['ctr_cash_channels'], $settings->version);
     }
 
-    private function lockedCursor(): AmlaDetectionCursor
+    private function lock(): void
     {
-        AmlaDetectionCursor::query()->firstOrCreate(['name' => 'events'], ['last_event_id' => 0]);
+        AmlaDetectionLock::query()->firstOrCreate(['name' => 'detector']);
+        AmlaDetectionLock::query()->where('name', 'detector')->lockForUpdate()->firstOrFail();
+    }
 
-        return AmlaDetectionCursor::query()->where('name', 'events')->lockForUpdate()->firstOrFail();
+    /** The rule version in force when the event was recorded, read once per version per run. */
+    private function ruleVersionAt(CarbonInterface $moment): AmlaRuleVersion
+    {
+        $version = $this->rules->at($moment);
+
+        return $this->versions[$version->version] ??= $version;
     }
 
     private static function openKey(string $code, Finding $finding): string

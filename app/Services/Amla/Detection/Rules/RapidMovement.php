@@ -36,9 +36,17 @@ final class RapidMovement extends DetectionRule
 
     public function evaluate(AmlaEvent $trigger, DetectionContext $context): ?Finding
     {
+        return $this->evaluateAll($trigger, $context)[0] ?? null;
+    }
+
+    /** One finding per receipt in reach that the money out still matches. */
+    public function evaluateAll(AmlaEvent $trigger, DetectionContext $context): array
+    {
         if (! $this->counts($trigger) || $trigger->direction !== 'out') {
-            return null;
+            return [];
         }
+
+        $findings = [];
 
         $within = $context->int('within_days');
         $day = self::day($trigger);
@@ -57,7 +65,7 @@ final class RapidMovement extends DetectionRule
                 continue;
             }
 
-            return new Finding(
+            $findings[] = new Finding(
                 key: 'receipt:'.$receipt->id,
                 windowStart: $from->toDateString(),
                 windowEnd: $from->addDays($within)->toDateString(),
@@ -71,6 +79,6 @@ final class RapidMovement extends DetectionRule
             );
         }
 
-        return null;
+        return $findings;
     }
 }
