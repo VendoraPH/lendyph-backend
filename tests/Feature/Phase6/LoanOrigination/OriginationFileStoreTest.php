@@ -8,11 +8,15 @@ use App\Services\LoanOrigination\Files\FileScanner;
 use App\Services\LoanOrigination\Files\MisconfiguredScanner;
 use App\Services\LoanOrigination\Files\NoScanner;
 use App\Services\LoanOrigination\Files\OriginationFileStore;
+use App\Services\LoanOrigination\Files\QpdfNormaliser;
 use App\Services\LoanOrigination\Files\ScannerUnavailableException;
 use App\Services\LoanOrigination\Files\ScanResult;
 use App\Services\LoanOrigination\Files\UploadRefusedException;
 use Illuminate\Http\UploadedFile;
+use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Storage;
+use Symfony\Component\Process\ExecutableFinder;
+use Symfony\Component\Process\Process;
 use Tests\TestCase;
 
 /*
@@ -39,9 +43,173 @@ function loPng(string $name = 'id.png', int $seed = 1): UploadedFile
     return UploadedFile::fake()->createWithContent($name, (string) ob_get_clean());
 }
 
-function loPdf(string $body = 'BT /F1 12 Tf (Payslip) Tj ET', string $name = 'payslip.pdf'): UploadedFile
+/** A stream object's body: its dictionary with the length, then the data. */
+function loStreamBody(string $dictionary, string $data, string $eol = "\n"): string
 {
-    return UploadedFile::fake()->createWithContent($name, "%PDF-1.4\n1 0 obj << /Type /Catalog >> endobj\n{$body}\n%%EOF\n");
+    return "<< {$dictionary} /Length ".strlen($data)." >>\nstream{$eol}{$data}\nendstream";
+}
+
+/**
+ * A real PDF: the objects as written, the compressed ones (number => [object
+ * stream, index]) and a cross-reference stream that finds them all, as a
+ * PDF reader does.
+ *
+ * @param  array<int, string>  $objects
+ * @param  array<int, array{0: int, 1: int}>  $compressed
+ */
+function loBuildPdf(array $objects, array $compressed = [], string $trailer = ''): string
+{
+    ksort($objects);
+    $pdf = "%PDF-1.5\n%\xE2\xE3\xCF\xD3\n";
+    $offsets = [];
+
+    foreach ($objects as $number => $body) {
+        $offsets[$number] = strlen($pdf);
+        $pdf .= "{$number} 0 obj\n{$body}\nendobj\n";
+    }
+
+    $xref = max([...array_keys($objects), ...array_keys($compressed)]) + 1;
+    $offsets[$xref] = strlen($pdf);
+    $entries = pack('CNn', 0, 0, 65535);
+
+    for ($number = 1; $number <= $xref; $number++) {
+        $entries .= match (true) {
+            isset($offsets[$number]) => pack('CNn', 1, $offsets[$number], 0),
+            isset($compressed[$number]) => pack('CNn', 2, $compressed[$number][0], $compressed[$number][1]),
+            default => pack('CNn', 0, 0, 0),
+        };
+    }
+
+    $size = $xref + 1;
+
+    return $pdf."{$xref} 0 obj\n".loStreamBody("/Type /XRef /Size {$size} /W [1 4 2] /Root 1 0 R {$trailer}", $entries)
+        ."\nendobj\nstartxref\n{$offsets[$xref]}\n%%EOF\n";
+}
+
+/** @return array<int, string> a one-page document */
+function loPageObjects(string $catalog = '', string $contents = 'BT /F1 12 Tf (Payslip) Tj ET', string $page = ''): array
+{
+    return [
+        1 => "<< /Type /Catalog /Pages 2 0 R {$catalog} >>",
+        2 => '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+        3 => "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R {$page} >>",
+        4 => loStreamBody('', $contents),
+    ];
+}
+
+/** A one-page PDF, with $active (if any) reachable from the catalog. */
+function loPdf(?string $active = null, string $name = 'payslip.pdf'): UploadedFile
+{
+    $objects = loPageObjects($active === null ? '' : '/Extra 5 0 R');
+
+    if ($active !== null) {
+        $objects[5] = $active;
+    }
+
+    return UploadedFile::fake()->createWithContent($name, loBuildPdf($objects));
+}
+
+/**
+ * A PDF whose document JavaScript sits in an object stream: the catalog's
+ * /Names points at objects 8 and 9, which live only inside object 10, the
+ * way a real attacker hides them.
+ *
+ * @param  (Closure(string): string)|null  $encode  the object stream's encoding (deflate by default)
+ * @param  array<int, string>  $extra
+ */
+function loHiddenJavaScript(string $dictionary, ?Closure $encode = null, string $eol = "\n", array $extra = []): UploadedFile
+{
+    $names = '<< /JavaScript << /Names [(a) 9 0 R] >> >>';
+    $action = '<< /S /JavaScript /JS (app.alert\\(1\\)) >>';
+    $header = '8 0 9 '.(strlen($names) + 1).' ';
+    $data = ($encode ?? fn (string $plain) => (string) gzcompress($plain))($header.$names.' '.$action);
+
+    $objects = loPageObjects('/Names 8 0 R') + $extra;
+    $objects[10] = loStreamBody('/Type /ObjStm /N 2 /First '.strlen($header).' '.$dictionary, $data, $eol);
+
+    return UploadedFile::fake()->createWithContent('statement.pdf', loBuildPdf($objects, [8 => [10, 0], 9 => [10, 1]]));
+}
+
+/** The active names in a PDF's text, `#xx` escapes decoded. */
+function loActiveNames(string $pdf): array
+{
+    $decoded = (string) preg_replace_callback('/#([0-9A-Fa-f]{2})/', fn (array $m) => chr((int) hexdec($m[1])), $pdf);
+    preg_match_all('~/(JavaScript|JS|OpenAction|AA|Launch|EmbeddedFiles?|XFA)(?![A-Za-z0-9])~', $decoded, $m);
+
+    return array_values(array_unique($m[1]));
+}
+
+/** The PDF as qpdf reads it, every stream it can decode uncompressed. */
+function loQpdfReading(string $pdf): string
+{
+    $dir = sys_get_temp_dir().'/lo-probe-'.bin2hex(random_bytes(8));
+    mkdir($dir, 0700);
+    file_put_contents("{$dir}/in.pdf", $pdf);
+
+    try {
+        (new Process(['qpdf', '--object-streams=disable', '--stream-data=uncompress', '--decode-level=all', "{$dir}/in.pdf", "{$dir}/out.pdf"]))->run();
+
+        return is_file("{$dir}/out.pdf") ? (string) file_get_contents("{$dir}/out.pdf") : '';
+    } finally {
+        @unlink("{$dir}/in.pdf");
+        @unlink("{$dir}/out.pdf");
+        @rmdir($dir);
+    }
+}
+
+/** These tests run the real qpdf; without it they say so and skip. */
+function loNeedsQpdf(): void
+{
+    if ((new ExecutableFinder)->find('qpdf') === null) {
+        test()->markTestSkipped('qpdf is not installed in this test run (apt-get install qpdf); the PDF checks need it.');
+    }
+}
+
+/** Either the file is refused, or what was stored carries no active content, as qpdf reads it too. */
+function loNeverStoresActiveContent(UploadedFile $file): void
+{
+    $application = OriginationApplication::query()->create();
+
+    try {
+        $version = loStore()->store($application, 'payslip', $file);
+    } catch (UploadRefusedException) {
+        expect(Storage::disk('private')->allFiles())->toBe([]);
+
+        return;
+    }
+
+    $stored = Storage::disk('private')->get($version->path);
+
+    expect(loActiveNames($stored))->toBe([])
+        ->and(loActiveNames(loQpdfReading($stored)))->toBe([])
+        ->and($stored)->not->toBe($file->getContent());
+}
+
+/** ASCII85, as PDF's ASCII85Decode reads it. */
+function loAscii85(string $bytes): string
+{
+    $pad = (4 - strlen($bytes) % 4) % 4;
+    $groups = str_split($bytes.str_repeat("\0", $pad), 4);
+    $out = '';
+
+    foreach ($groups as $i => $group) {
+        $n = unpack('N', $group)[1];
+
+        if ($n === 0 && $i < count($groups) - 1) {
+            $out .= 'z';
+
+            continue;
+        }
+
+        $chars = '';
+        for ($k = 0; $k < 5; $k++) {
+            $chars = chr($n % 85 + 33).$chars;
+            $n = intdiv($n, 85);
+        }
+        $out .= $chars;
+    }
+
+    return ($pad > 0 ? substr($out, 0, -$pad) : $out).'~>';
 }
 
 function loStore(): OriginationFileStore
@@ -99,6 +267,7 @@ it('chooses the ClamAV driver from the config', function () {
 });
 
 it('keeps a file a scanner passed as clean', function () {
+    loNeedsQpdf();
     loScanner(ScanResult::Clean);
     $application = OriginationApplication::query()->create();
 
@@ -151,6 +320,7 @@ it('adds a new version for a new file of the same type, and returns the same ver
 });
 
 it('refuses a PDF carrying JavaScript, a launch action or an embedded file', function (string $body) {
+    loNeedsQpdf();
     $application = OriginationApplication::query()->create();
 
     expect(fn () => loStore()->store($application, 'payslip', loPdf($body)))
@@ -197,6 +367,7 @@ it('re-encodes images, so nothing but the picture is kept', function () {
 });
 
 it('keeps a clean file name: no path, no control characters', function () {
+    loNeedsQpdf();
     $application = OriginationApplication::query()->create();
 
     $version = loStore()->store($application, 'payslip', loPdf(name: "../../etc/pay\x07slip.pdf"));
@@ -233,99 +404,112 @@ it('reads an unreachable clamd as a failed scan, never as clean', function () {
     unlink($path);
 });
 
-/** A PDF whose one object is a stream with this dictionary and data. */
-function loPdfStream(string $dictionary, string $data, string $tail = ''): UploadedFile
-{
-    return UploadedFile::fake()->createWithContent(
-        'statement.pdf',
-        "%PDF-1.5\n1 0 obj\n<< {$dictionary} /Length ".strlen($data)." >>\nstream\n{$data}\nendstream\nendobj\n{$tail}%%EOF\n",
-    );
-}
+it('never stores JavaScript hidden in an object stream, however its stream is dressed up', function (string $dictionary, ?Closure $encode, string $eol, array $extra) {
+    loNeedsQpdf();
 
-it('reads compressed streams and refuses active content inside them', function () {
+    loNeverStoresActiveContent(loHiddenJavaScript($dictionary, $encode, $eol, $extra));
+})->with([
+    'plain deflate' => ['/Filter /FlateDecode', null, "\n", []],
+    'an image marker in a nested dictionary' => ['/X << /Filter /DCTDecode /Subtype /Image >> /Filter /FlateDecode', null, "\n", []],
+    'a cross-reference type in a nested dictionary' => ['/X << /Type /XRef >> /Filter /FlateDecode', null, "\n", []],
+    'a comment after /Filter' => ["/Filter %not the filter\n/FlateDecode", null, "\n", []],
+    'an indirect filter' => ['/Filter 11 0 R', null, "\n", [11 => '/FlateDecode']],
+    'stream then a space' => ['/Filter /FlateDecode', null, ' ', []],
+    'stream then a lone CR' => ['/Filter /FlateDecode', null, "\r", []],
+    'ASCIIHex' => ['/Filter /ASCIIHexDecode', fn (string $plain) => bin2hex($plain).'>', "\n", []],
+    'ASCII85' => ['/Filter /ASCII85Decode', fn (string $plain) => loAscii85($plain), "\n", []],
+    'a chain of filters' => ['/Filter [/ASCIIHexDecode /FlateDecode]', fn (string $plain) => bin2hex((string) gzcompress($plain)).'>', "\n", []],
+    'a hex-escaped filter name' => ['/Filter /Fl#61teDecode', null, "\n", []],
+    'a bad checksum' => ['/Filter /FlateDecode', fn (string $plain) => substr((string) gzcompress($plain), 0, -1)."\x00", "\n", []],
+]);
+
+it('refuses JavaScript once qpdf has opened up the object streams', function () {
+    loNeedsQpdf();
     $application = OriginationApplication::query()->create();
 
-    expect(fn () => loStore()->store($application, 'payslip', loPdfStream('/Type /ObjStm /Filter /FlateDecode', (string) gzcompress('<< /S /JavaScript /JS (app.alert(1)) >>'))))
+    expect(fn () => loStore()->store($application, 'payslip', loHiddenJavaScript('/Filter /FlateDecode')))
         ->toThrow(UploadRefusedException::class, OriginationFileStore::ACTIVE_PDF);
 });
 
-it('keeps a plain compressed PDF and a photo inside one', function () {
+it('stores qpdf\'s own copy of a plain PDF, never the file as sent, pictures inside included', function () {
+    loNeedsQpdf();
     $application = OriginationApplication::query()->create();
+    $image = imagecreatetruecolor(2, 2);
+    ob_start();
+    imagejpeg($image);
+    $jpeg = (string) ob_get_clean();
 
-    $page = loStore()->store($application, 'payslip', loPdfStream('/Filter /FlateDecode', (string) gzcompress('BT (Net pay 21,000) Tj ET')));
-    $photo = loStore()->store($application, 'proof_of_income', loPdfStream('/Type /XObject /Subtype /Image /Filter /DCTDecode', "\xFF\xD8\xFF\xE0 not really a jpeg"));
+    $objects = loPageObjects(contents: '', page: '/Resources << /XObject << /Im1 5 0 R >> >>');
+    $objects[4] = loStreamBody('/Filter /FlateDecode', (string) gzcompress('q 100 0 0 100 0 0 cm /Im1 Do Q BT (Net pay 21,000) Tj ET'));
+    $objects[5] = loStreamBody('/Type /XObject /Subtype /Image /Width 2 /Height 2 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode', $jpeg);
+    $file = UploadedFile::fake()->createWithContent('payslip.pdf', loBuildPdf($objects));
 
-    expect($page->exists)->toBeTrue()->and($photo->exists)->toBeTrue();
+    $version = loStore()->store($application, 'payslip', $file);
+    $stored = Storage::disk('private')->get($version->path);
+
+    expect($stored)->toStartWith('%PDF-')
+        ->and($stored)->not->toBe($file->getContent())
+        ->and(loQpdfReading($stored))->toContain('Net pay 21,000')
+        ->and($version->sha256)->toBe(hash('sha256', $file->getContent()));
 });
 
-it('refuses a stream it can\'t decode, failing closed', function (string $dictionary, string $data) {
+it('refuses a PDF that would open up past the size it can check', function () {
+    loNeedsQpdf();
     $application = OriginationApplication::query()->create();
+    $objects = loPageObjects();
+    $objects[4] = loStreamBody('/Filter /FlateDecode', (string) gzcompress(str_repeat(' ', OriginationFileStore::MAX_NORMALISED_BYTES + 1024)));
 
-    expect(fn () => loStore()->store($application, 'payslip', loPdfStream($dictionary, $data)))
-        ->toThrow(UploadRefusedException::class, OriginationFileStore::UNCHECKABLE_PDF);
+    expect(fn () => loStore()->store($application, 'payslip', UploadedFile::fake()->createWithContent('big.pdf', loBuildPdf($objects))))
+        ->toThrow(UploadRefusedException::class, OriginationFileStore::PDF_TOO_LARGE);
 
     expect(Storage::disk('private')->allFiles())->toBe([]);
-})->with([
-    'ASCIIHex' => ['/Filter /ASCIIHexDecode', '3C3C202F4A53202878292029203E3E>'],
-    'ASCII85' => ['/Filter /ASCII85Decode', '<~6W-?:+DGm>~>'],
-    'LZW' => ['/Filter /LZWDecode', "\x80\x0B\x60\x50\x22\x0C\x0C\x85\x01"],
-    'a chain of filters' => ['/Filter [/ASCII85Decode /FlateDecode]', '<~Gar~>'],
-    'a hex-escaped filter name' => ['/Filter /ASCIIHex#44ecode', '2F4A53>'],
-    'an image filter outside an image' => ['/Type /ObjStm /Filter /JPXDecode', "\x00\x00\x00\x0CjP  "],
-    'a predictor on an object stream' => ['/Type /ObjStm /Filter /FlateDecode /DecodeParms << /Predictor 12 /Columns 4 >>', (string) gzcompress("\x02/JS ")],
-    'a bad checksum' => ['/Type /ObjStm /Filter /FlateDecode', substr((string) gzcompress('<< /JS (app.alert(1)) >>'), 0, -1)."\x00"],
-    'not compressed at all' => ['/Filter /FlateDecode', 'plain text, not deflate'],
-]);
-
-it('refuses a PDF whose streams would inflate past the budget, counting every attempt', function () {
-    $application = OriginationApplication::query()->create();
-    $bomb = (string) gzcompress(str_repeat("\0", OriginationFileStore::MAX_INFLATED_BYTES + 1024));
-
-    expect(fn () => loStore()->store($application, 'payslip', loPdfStream('/Filter /FlateDecode', $bomb)))
-        ->toThrow(UploadRefusedException::class, OriginationFileStore::PDF_TOO_LARGE);
 });
 
-it('refuses an encrypted PDF and one carrying an XFA form', function (string $tail, string $message) {
+it('refuses an encrypted PDF, an XFA form and actions that run on opening', function (string $catalog, string $trailer, array $extra, string $message) {
+    loNeedsQpdf();
     $application = OriginationApplication::query()->create();
+    $file = UploadedFile::fake()->createWithContent('form.pdf', loBuildPdf(loPageObjects($catalog) + $extra, [], $trailer));
 
-    expect(fn () => loStore()->store($application, 'payslip', loPdfStream('/Filter /FlateDecode', (string) gzcompress('BT ET'), $tail)))
-        ->toThrow(UploadRefusedException::class, $message);
+    expect(fn () => loStore()->store($application, 'payslip', $file))->toThrow(UploadRefusedException::class, $message);
 })->with([
-    'encrypted' => ["trailer\n<< /Root 1 0 R /Encrypt 5 0 R >>\n", OriginationFileStore::ENCRYPTED_PDF],
-    'xfa' => ["2 0 obj << /AcroForm << /XFA 7 0 R >> >> endobj\n", OriginationFileStore::ACTIVE_PDF],
+    'encrypted' => ['', '/Encrypt 6 0 R /ID [<00> <00>]', [6 => '<< /Filter /Standard /V 1 /R 2 /O <00> /U <00> /P -4 >>'], OriginationFileStore::ENCRYPTED_PDF],
+    'xfa' => ['/AcroForm << /Fields [] /XFA 7 0 R >>', '', [7 => '<< >>'], OriginationFileStore::ACTIVE_PDF],
+    'open action' => ['/OpenAction 7 0 R', '', [7 => '<< /S /GoTo /D [3 0 R /Fit] >>'], OriginationFileStore::ACTIVE_PDF],
+    'additional actions' => ['/AA << /WC 7 0 R >>', '', [7 => '<< /S /GoTo /D [3 0 R /Fit] >>'], OriginationFileStore::ACTIVE_PDF],
 ]);
+
+it('refuses PDFs while qpdf is missing or failing, in words, and keeps nothing', function () {
+    $application = OriginationApplication::query()->create();
+    $missing = new OriginationFileStore(new NoScanner, pdf: new QpdfNormaliser('/nonexistent/qpdf'));
+    $failing = new OriginationFileStore(new NoScanner, pdf: new QpdfNormaliser('/bin/false'));
+
+    expect(fn () => $missing->store($application, 'payslip', loPdf()))->toThrow(UploadRefusedException::class, OriginationFileStore::PDFS_UNAVAILABLE)
+        ->and(fn () => $failing->store($application, 'payslip', loPdf()))->toThrow(UploadRefusedException::class, OriginationFileStore::UNCHECKABLE_PDF)
+        ->and(Storage::disk('private')->allFiles())->toBe([])
+        ->and($missing->store($application, 'government_id', loPng())->exists)->toBeTrue();
+});
+
+it('reads the qpdf path from the config, with plain qpdf by default', function () {
+    expect(File::get(config_path('loan_origination.php')))->toContain("'binary' => env('LOAN_ORIGINATION_QPDF_BINARY', 'qpdf')");
+
+    config(['loan_origination.qpdf.binary' => '/opt/qpdf/bin/qpdf']);
+    expect((new QpdfNormaliser)->binary())->toBe('/opt/qpdf/bin/qpdf');
+});
 
 it('refuses the PDF when a pattern check itself fails, never reading it as clean', function () {
     $store = loStore();
-    // A run of spaces after /Predictor makes the pattern backtrack once per
-    // space, so a backtracking limit of 1 makes the check itself fail.
-    $pdf = loPdfStream('/Filter /FlateDecode /DecodeParms << /Predictor'.str_repeat(' ', 2000).'/Columns 4 >>', (string) gzcompress('BT ET'))->getContent();
+    $store->assertNothingActive(str_repeat('/JSa ', 2000));
 
-    expect($store->checkedPdf($pdf))->toBe($pdf);
+    // The store's matcher, given a pattern that runs out of backtracking at
+    // the default limit: a failed check refuses, never passes.
+    $matches = new ReflectionMethod(OriginationFileStore::class, 'matches');
 
-    $limit = ini_get('pcre.backtrack_limit');
-    $jit = ini_get('pcre.jit');
-    $refusal = null;
-
-    // The limit is lowered around the PDF check alone: the rest of the
-    // framework uses the same pattern engine.
-    ini_set('pcre.jit', '0');
-    ini_set('pcre.backtrack_limit', '1');
-
-    try {
-        $store->checkedPdf($pdf);
-    } catch (UploadRefusedException $e) {
-        $refusal = $e;
-    } finally {
-        ini_set('pcre.backtrack_limit', (string) $limit);
-        ini_set('pcre.jit', (string) $jit);
-    }
-
-    expect($refusal)->toBeInstanceOf(UploadRefusedException::class)
-        ->and($refusal?->getMessage())->toBe(OriginationFileStore::UNCHECKABLE_PDF);
+    expect(fn () => $matches->invoke($store, '/(a+)+$/', str_repeat('a', 40).'b'))
+        ->toThrow(UploadRefusedException::class, OriginationFileStore::UNCHECKABLE_PDF);
 });
 
 it('refuses pictures while the server can\'t re-encode them, and still takes PDFs', function () {
+    loNeedsQpdf();
     $store = new OriginationFileStore(new NoScanner, gdAvailable: false);
     $application = OriginationApplication::query()->create();
 

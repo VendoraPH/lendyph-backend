@@ -26,11 +26,13 @@ use Throwable;
  * - scanned by the FileScanner seam: an infected file is refused; while a
  *   configured scanner can't be reached every file is refused (503); with no
  *   scanner a file is kept as "Not scanned";
- * - a PDF is checked failing closed: one carrying JavaScript, a launch
- *   action, embedded files or an XFA form is refused, its compressed streams
- *   included, and so is one it can't fully read (an encrypted PDF, a stream
- *   in a format it doesn't decode, a damaged stream, more than 50 MB of
- *   stream data, or a pattern check that fails);
+ * - a PDF is rewritten by qpdf (object streams opened up, streams
+ *   uncompressed) and checked on qpdf's copy, failing closed: one carrying
+ *   JavaScript, an action run on opening (/OpenAction, /AA), a launch action,
+ *   embedded files or an XFA form is refused, and so is an encrypted one, one
+ *   qpdf can't read or that opens up past 50 MB, and any check that fails.
+ *   qpdf's compressed copy of the checked file is stored, never the PDF as
+ *   sent. Without a working qpdf, PDFs are refused;
  * - an image is decoded and re-encoded (GD), so only the picture is kept;
  *   while GD is missing pictures are refused, never kept as sent;
  * - stored on the private disk under a random name, opened only through
@@ -76,30 +78,31 @@ final class OriginationFileStore
 
     public const PDF_TOO_LARGE = 'This PDF holds too much to check. Upload a smaller copy, or fewer pages.';
 
+    public const PDFS_UNAVAILABLE = 'PDFs can\'t be accepted on this server right now. Upload clear photos of the document instead.';
+
     public const PICTURES_UNAVAILABLE = 'Pictures can\'t be accepted on this server right now. Upload the document as a PDF instead.';
 
     /** PDF names that run something or carry other files (decoded from `#xx` escapes first). */
-    private const ACTIVE_PDF_NAMES = '~/(?:JavaScript|JS|Launch|EmbeddedFiles?|XFA)(?![A-Za-z0-9])~';
+    private const ACTIVE_PDF_NAMES = '~/(?:JavaScript|JS|OpenAction|AA|Launch|EmbeddedFiles?|XFA)(?![A-Za-z0-9])~';
 
     private const ENCRYPT_NAME = '~/Encrypt(?![A-Za-z0-9])~';
 
-    /** Filters that hold picture data only, allowed on an image XObject's own stream. */
-    private const IMAGE_FILTERS = ['DCTDecode', 'JPXDecode', 'CCITTFaxDecode', 'JBIG2Decode'];
-
     /** The most decompressed PDF stream bytes read while looking for active content. */
-    public const MAX_INFLATED_BYTES = 50 * 1024 * 1024;
-
-    /** Compressed bytes inflated per step (at most about 1 MB of output each). */
-    private const INFLATE_STEP = 1024;
+    /** The most a PDF may open up to once qpdf has uncompressed it. */
+    public const MAX_NORMALISED_BYTES = 50 * 1024 * 1024;
 
     private readonly bool $gdAvailable;
 
+    private readonly QpdfNormaliser $pdf;
+
     /**
      * @param  bool|null  $gdAvailable  whether pictures can be re-encoded; read from the server by default
+     * @param  QpdfNormaliser|null  $pdf  the qpdf runner; from the config by default
      */
-    public function __construct(private readonly FileScanner $scanner, ?bool $gdAvailable = null)
+    public function __construct(private readonly FileScanner $scanner, ?bool $gdAvailable = null, ?QpdfNormaliser $pdf = null)
     {
         $this->gdAvailable = $gdAvailable ?? function_exists('imagecreatefromstring');
+        $this->pdf = $pdf ?? new QpdfNormaliser;
     }
 
     /**
@@ -178,7 +181,7 @@ final class OriginationFileStore
      */
     private function persist(OriginationApplication $application, string $type, array $attributes, string $bytes, string $extension): OriginationDocumentVersion
     {
-        $path = sprintf('loan-origination/%d/%s.%s', $application->id, Str::lower((string) Str::ulid()), $extension);
+        $path = sprintf('%s/%s.%s', OriginationApplication::filesFolder($application->id), Str::lower((string) Str::ulid()), $extension);
         Storage::disk(self::DISK)->put($path, $bytes);
 
         try {
@@ -204,6 +207,11 @@ final class OriginationFileStore
                 ]);
 
                 $document->forceFill(['current_version_id' => $version->id, 'status' => 'uploaded'])->save();
+
+                // A new file changes the application: its version moves on,
+                // so a staff decision taken on what was there before is
+                // caught (ApplicationTransitions::move()).
+                OriginationApplication::query()->whereKey($application->id)->update(['updated_at' => now()]);
 
                 return $version;
             });
@@ -234,206 +242,37 @@ final class OriginationFileStore
     }
 
     /**
-     * The PDF as sent, once nothing in it is active and every stream was read.
+     * qpdf's copy of the PDF, once its fully opened-up form holds nothing
+     * active. An encrypted PDF is refused before qpdf sees it.
      *
-     * It fails closed: anything it can't read is refused, never skipped.
-     * Each stream object is found by its `stream` keyword, with its
-     * dictionary between the object header and the keyword:
-     * - no filter: its bytes are checked as they are;
-     * - FlateDecode alone: inflated (the Adler-32 checksum is checked) and
-     *   checked; a predictor is allowed only on a cross-reference stream,
-     *   whose bytes are numbers, not objects;
-     * - a picture filter (DCT, JPX, CCITT, JBIG2) alone, on an image
-     *   XObject: picture data, not objects, so left as it is;
-     * - anything else (ASCIIHex, ASCII85, LZW, run length, a chain of
-     *   filters, a damaged or non-deflate stream) is refused.
-     * Every byte it tries to inflate, and every byte inflated, counts toward
-     * MAX_INFLATED_BYTES.
+     * @throws UploadRefusedException
      */
     public function checkedPdf(string $bytes): string
     {
-        $this->assertNothingActive($bytes);
-
-        $budget = self::MAX_INFLATED_BYTES;
-        $offset = 0;
-        $length = strlen($bytes);
-
-        while ($offset < $length) {
-            $found = preg_match('/(?<![A-Za-z])stream\r?\n/', $bytes, $match, PREG_OFFSET_CAPTURE, $offset);
-
-            if ($found === false) {
-                throw UploadRefusedException::because(self::UNCHECKABLE_PDF);
-            }
-
-            if ($found === 0) {
-                break;
-            }
-
-            $keyword = (int) $match[0][1];
-            $dataStart = $keyword + strlen($match[0][0]);
-            $dataEnd = strpos($bytes, 'endstream', $dataStart);
-
-            if ($dataEnd === false) {
-                throw UploadRefusedException::because(self::UNCHECKABLE_PDF);
-            }
-
-            $data = substr($bytes, $dataStart, $dataEnd - $dataStart);
-            $data = str_ends_with($data, "\r\n") ? substr($data, 0, -2) : (str_ends_with($data, "\n") || str_ends_with($data, "\r") ? substr($data, 0, -1) : $data);
-            $dictionary = $this->decodedNames($this->streamDictionary($bytes, $keyword));
-
-            $budget -= strlen($data);
-
-            if ($budget < 0) {
-                throw UploadRefusedException::because(self::PDF_TOO_LARGE);
-            }
-
-            $plain = $this->readStream($dictionary, $data, $budget);
-
-            if ($plain !== null) {
-                $budget -= strlen($plain);
-                $this->assertNothingActive($plain);
-            }
-
-            $offset = $dataEnd + strlen('endstream');
+        if (! $this->pdf->available()) {
+            throw UploadRefusedException::because(self::PDFS_UNAVAILABLE);
         }
 
-        return $bytes;
+        if ($this->matches(self::ENCRYPT_NAME, $this->decodedNames($bytes))) {
+            throw UploadRefusedException::because(self::ENCRYPTED_PDF);
+        }
+
+        try {
+            $plain = $this->pdf->uncompressed($bytes, self::MAX_NORMALISED_BYTES);
+            $this->assertNothingActive($plain);
+
+            return $this->pdf->compressed($plain, self::MAX_NORMALISED_BYTES);
+        } catch (PdfNormaliseException $e) {
+            throw UploadRefusedException::because($e->tooLarge ? self::PDF_TOO_LARGE : self::UNCHECKABLE_PDF);
+        }
     }
 
     /**
-     * A stream's readable content, or null for picture data and a
-     * cross-reference stream, which hold no objects.
+     * Refuse text holding an encryption dictionary or an active name.
      *
      * @throws UploadRefusedException
      */
-    private function readStream(string $dictionary, string $data, int $budget): ?string
-    {
-        $filters = $this->filters($dictionary);
-
-        if ($filters === []) {
-            return $data;
-        }
-
-        if (count($filters) !== 1) {
-            throw UploadRefusedException::because(self::UNCHECKABLE_PDF);
-        }
-
-        $filter = $filters[0];
-
-        if (in_array($filter, self::IMAGE_FILTERS, true)) {
-            if ($this->matches('~/Subtype\s*/Image(?![A-Za-z0-9])~', $dictionary)) {
-                return null;
-            }
-
-            throw UploadRefusedException::because(self::UNCHECKABLE_PDF);
-        }
-
-        if ($filter !== 'FlateDecode') {
-            throw UploadRefusedException::because(self::UNCHECKABLE_PDF);
-        }
-
-        $predictor = preg_match('~/Predictor\s+(\d+)~', $dictionary, $m);
-
-        if ($predictor === false) {
-            throw UploadRefusedException::because(self::UNCHECKABLE_PDF);
-        }
-
-        $crossReference = $this->matches('~/Type\s*/XRef(?![A-Za-z0-9])~', $dictionary);
-
-        if ($predictor === 1 && (int) $m[1] > 1 && ! $crossReference) {
-            throw UploadRefusedException::because(self::UNCHECKABLE_PDF);
-        }
-
-        if ($budget <= 0) {
-            throw UploadRefusedException::because(self::PDF_TOO_LARGE);
-        }
-
-        $plain = $this->inflate($data, $budget);
-
-        return $crossReference ? null : $plain;
-    }
-
-    /**
-     * A zlib (FlateDecode) stream inflated a kilobyte of input at a time, so
-     * the output never runs far past the budget. A damaged stream, a bad
-     * checksum or a stream that doesn't end is refused.
-     *
-     * @throws UploadRefusedException
-     */
-    private function inflate(string $data, int $budget): string
-    {
-        $context = @inflate_init(ZLIB_ENCODING_DEFLATE);
-        $length = strlen($data);
-
-        if ($context === false || $length === 0) {
-            throw UploadRefusedException::because(self::UNCHECKABLE_PDF);
-        }
-
-        $plain = '';
-
-        for ($at = 0; $at < $length; $at += self::INFLATE_STEP) {
-            $last = $at + self::INFLATE_STEP >= $length;
-            $piece = @inflate_add($context, substr($data, $at, self::INFLATE_STEP), $last ? ZLIB_FINISH : ZLIB_SYNC_FLUSH);
-
-            if ($piece === false) {
-                throw UploadRefusedException::because(self::UNCHECKABLE_PDF);
-            }
-
-            $plain .= $piece;
-
-            if (strlen($plain) > $budget) {
-                throw UploadRefusedException::because(self::PDF_TOO_LARGE);
-            }
-        }
-
-        if (inflate_get_status($context) !== ZLIB_STREAM_END) {
-            throw UploadRefusedException::because(self::UNCHECKABLE_PDF);
-        }
-
-        return $plain;
-    }
-
-    /**
-     * The filter names of a stream's dictionary.
-     *
-     * @return list<string>
-     */
-    private function filters(string $dictionary): array
-    {
-        $found = preg_match('~/Filter\s*(\[[^\]]*\]|/[A-Za-z0-9]+)~', $dictionary, $m);
-
-        if ($found === false) {
-            throw UploadRefusedException::because(self::UNCHECKABLE_PDF);
-        }
-
-        if ($found === 0) {
-            return [];
-        }
-
-        if (preg_match_all('~/([A-Za-z0-9]+)~', $m[1], $names) === false) {
-            throw UploadRefusedException::because(self::UNCHECKABLE_PDF);
-        }
-
-        return $names[1];
-    }
-
-    /** The dictionary of the stream whose `stream` keyword is at $keyword. */
-    private function streamDictionary(string $bytes, int $keyword): string
-    {
-        $window = substr($bytes, max(0, $keyword - 8192), min($keyword, 8192));
-        $found = preg_match_all('/\d+\s+\d+\s+obj\b/', $window, $headers, PREG_OFFSET_CAPTURE);
-
-        if ($found === false || $found === 0) {
-            throw UploadRefusedException::because(self::UNCHECKABLE_PDF);
-        }
-
-        $last = end($headers[0]);
-
-        return substr($window, (int) $last[1] + strlen($last[0]));
-    }
-
-    /** @throws UploadRefusedException */
-    private function assertNothingActive(string $content): void
+    public function assertNothingActive(string $content): void
     {
         $decoded = $this->decodedNames($content);
 

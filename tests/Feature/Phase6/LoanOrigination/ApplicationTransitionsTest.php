@@ -204,3 +204,15 @@ it('refuses a status written outside the transition table, by any model path', f
         ->and($application->fresh()->status)->toBe('submitted')
         ->and((new OriginationApplication)->isFillable('status'))->toBeFalse();
 });
+
+it('refuses a staff or hand-off move made without the version the client read', function (string $actor, string $from, string $to) {
+    $application = loApplication($from);
+
+    expect(fn () => loTransitions()->move($application, $to, $actor, loStaff('loan_origination:update', 'loan_origination:convert', 'loans:create')))
+        ->toThrow(InvalidArgumentException::class);
+
+    expect($application->fresh()->status)->toBe($from);
+})->with([
+    'staff' => [ApplicationTransitions::ACTOR_STAFF, 'submitted', 'document_verification'],
+    'hand-off' => [ApplicationTransitions::ACTOR_HANDOFF, 'under_assessment', 'pending_approval'],
+]);

@@ -10,6 +10,7 @@ use App\Models\User;
 use App\Services\LoanOrigination\Files\FileScanner;
 use App\Services\LoanOrigination\Files\MisconfiguredScanner;
 use App\Services\LoanOrigination\Files\NoScanner;
+use App\Services\LoanOrigination\Files\QpdfNormaliser;
 use Brick\Math\BigDecimal;
 use Brick\Math\RoundingMode;
 use Illuminate\Support\Facades\DB;
@@ -89,6 +90,9 @@ final class OriginationSettings
                 'enabled' => $this->switch->enabled(),
                 'public_url' => $this->switch->publicUrl(),
                 'public_url_problem' => $this->switch->publicUrlProblem(),
+                'pdf_check' => (new QpdfNormaliser)->available()
+                    ? 'PDFs are opened up with qpdf and checked'
+                    : 'PDFs are refused: the PDF checking tool (qpdf) isn\'t installed on the server',
                 'scanner' => match (true) {
                     $this->scanner instanceof NoScanner => self::SCANNER_NONE,
                     $this->scanner instanceof MisconfiguredScanner => self::SCANNER_MISCONFIGURED,

@@ -17,12 +17,21 @@
 | marks every file "Not scanned"; `clamav` sends it to clamd over a unix
 | socket or TCP and refuses an infected file, or any file while clamd can't
 | be reached.
+|
+| Every PDF is rewritten by qpdf (`LOAN_ORIGINATION_QPDF_BINARY`, `qpdf` on the
+| PATH by default) before it is checked, and qpdf's copy is what is stored.
+| Without a working qpdf, PDFs are refused.
 */
 
 return [
     'enabled' => filter_var(env('LOAN_ORIGINATION_ENABLED', false), FILTER_VALIDATE_BOOL),
 
     'public_url' => env('LOAN_ORIGINATION_PUBLIC_URL'),
+
+    'qpdf' => [
+        'binary' => env('LOAN_ORIGINATION_QPDF_BINARY', 'qpdf'),
+        'timeout' => (float) env('LOAN_ORIGINATION_QPDF_TIMEOUT', 15),
+    ],
 
     'scanner' => [
         'driver' => env('LOAN_ORIGINATION_SCANNER', 'none'),

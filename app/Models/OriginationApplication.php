@@ -6,6 +6,7 @@ use App\Exceptions\OriginationErasureRefusedException;
 use App\Exceptions\OriginationStatusWriteException;
 use App\Models\Builders\OriginationApplicationBuilder;
 use App\Services\BranchAccess;
+use App\Services\LoanOrigination\Files\OriginationFileStore;
 use App\Support\PhilippineMobile;
 use App\Support\StaffRouteBinding;
 use Closure;
@@ -14,6 +15,7 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Storage;
 
 /**
  * An online loan application (origination audit §4). It stays an
@@ -67,7 +69,7 @@ class OriginationApplication extends Model
     protected $fillable = [
         'reference_number', 'link_id', 'branch_id', 'loan_product_id', 'requested_amount', 'requested_term',
         'applicant_name', 'mobile', 'mobile_hash', 'email', 'draft', 'last_completed_step', 'completion_percent', 'is_test',
-        'assigned_officer_id', 'borrower_id', 'loan_id', 'applicant_message', 'legal_hold',
+        'assigned_officer_id', 'borrower_id', 'loan_id', 'applicant_message',
         'started_at', 'last_saved_at', 'submitted_at', 'decided_at', 'erased_at',
     ];
 
@@ -167,7 +169,8 @@ class OriginationApplication extends Model
     /**
      * Erase this application with its consents, notes, history and documents
      * (the retention erasure, origination decision 10), re-reading its legal
-     * hold under a lock first.
+     * hold under a lock first, then its uploaded files once the rows are gone.
+     * The legal hold isn't mass-assignable; it is set deliberately.
      *
      * @throws OriginationErasureRefusedException while it is under a legal hold
      */
@@ -190,7 +193,14 @@ class OriginationApplication extends Model
             }
         });
 
+        Storage::disk(OriginationFileStore::DISK)->deleteDirectory(self::filesFolder((int) $this->getKey()));
         $this->exists = false;
+    }
+
+    /** Where the file store keeps an application's uploaded files. */
+    public static function filesFolder(int $id): string
+    {
+        return "loan-origination/{$id}";
     }
 
     /**

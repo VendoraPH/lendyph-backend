@@ -12,10 +12,13 @@ use App\Models\OriginationSetting;
 use App\Models\OriginationStatusHistory;
 use App\Models\User;
 use App\Services\AuditLogModules;
+use App\Services\LoanOrigination\Files\OriginationFileStore;
 use App\Services\TimezoneShift;
 use Illuminate\Database\UniqueConstraintViolationException;
+use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
+use Illuminate\Support\Facades\Storage;
 use Tests\TestCase;
 
 /*
@@ -179,4 +182,46 @@ it('refuses to delete an application except through the retention erasure, which
 
     expect(OriginationApplication::query()->whereKey($application->id)->exists())->toBeFalse()
         ->and(OriginationNote::query()->where('application_id', $application->id)->exists())->toBeFalse();
+});
+
+it('moves the version on bulk updates and counter changes too', function () {
+    $application = OriginationApplication::query()->create();
+
+    OriginationApplication::query()->whereKey($application->id)->update(['completion_percent' => 10]);
+    expect($application->fresh()->version)->toBe(1);
+
+    OriginationApplication::query()->whereKey($application->id)->increment('completion_percent', 5);
+    expect($application->fresh()->version)->toBe(2);
+});
+
+it('moves the version when a document is uploaded', function () {
+    Storage::fake('private');
+    $application = OriginationApplication::query()->create();
+    $image = imagecreatetruecolor(2, 2);
+    ob_start();
+    imagepng($image);
+
+    app(OriginationFileStore::class)->store($application, 'government_id', UploadedFile::fake()->createWithContent('id.png', (string) ob_get_clean()));
+
+    expect($application->fresh()->version)->toBe($application->version + 1);
+});
+
+it('keeps the legal hold out of mass assignment', function () {
+    $application = OriginationApplication::query()->create(['legal_hold' => true]);
+
+    expect((new OriginationApplication)->isFillable('legal_hold'))->toBeFalse()
+        ->and($application->fresh()->legal_hold)->toBeFalse();
+});
+
+it('erases the application\'s uploaded files with it, and only its own', function () {
+    Storage::fake('private');
+    $application = OriginationApplication::query()->create();
+    $other = OriginationApplication::query()->create();
+    Storage::disk('private')->put("loan-origination/{$application->id}/a.pdf", 'a');
+    Storage::disk('private')->put("loan-origination/{$other->id}/b.pdf", 'b');
+
+    $application->eraseForRetention();
+
+    Storage::disk('private')->assertMissing("loan-origination/{$application->id}/a.pdf");
+    Storage::disk('private')->assertExists("loan-origination/{$other->id}/b.pdf");
 });
