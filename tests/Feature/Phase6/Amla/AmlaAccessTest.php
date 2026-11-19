@@ -53,6 +53,12 @@ class AmlaAccessTest extends TestCase
             'ctr candidates' => ['GET', '/api/amla/ctr-candidates', ['amla:ctr'], false],
             'detection rules' => ['GET', '/api/amla/detection-rules', ['amla:view', 'amla:alerts', 'amla:settings'], true],
             'detection rule versions' => ['GET', '/api/amla/detection-rules/versions', ['amla:settings'], true],
+            'cases' => ['GET', '/api/amla/cases', ['amla:cases'], true],
+            'open a case' => ['POST', '/api/amla/cases', ['amla:cases'], true],
+            'reports' => ['GET', '/api/amla/reports', ['amla:ctr', 'amla:str', 'amla:approve', 'amla:submit', 'amla:export'], false],
+            'report formats' => ['GET', '/api/amla/report-formats', ['amla:ctr', 'amla:str', 'amla:approve', 'amla:submit', 'amla:export'], false],
+            'filing deadlines' => ['GET', '/api/amla/filing-deadlines', ['amla:ctr', 'amla:str', 'amla:approve', 'amla:submit', 'amla:export'], false],
+            'risk downgrades' => ['GET', '/api/amla/risk-downgrades', ['amla:cdd'], false],
         ];
     }
 
@@ -100,6 +106,29 @@ class AmlaAccessTest extends TestCase
             'POST api/amla/cdd/{subjectType}/{id}/reviews',
             'GET api/amla/alerts/{id}',
             'GET api/amla/ctr-candidates/{id}',
+            'POST api/amla/alerts/{id}/assign',
+            'POST api/amla/alerts/{id}/review',
+            'POST api/amla/alerts/{id}/escalate',
+            'POST api/amla/alerts/{id}/close',
+            'GET api/amla/alerts/{id}/history',
+            'GET api/amla/cases/{id}',
+            'POST api/amla/cases/{id}/assign',
+            'POST api/amla/cases/{id}/notes',
+            'POST api/amla/cases/{id}/evidence',
+            'GET api/amla/cases/{id}/evidence/{evidenceId}',
+            'POST api/amla/cases/{id}/decision',
+            'POST api/amla/cases/{id}/str',
+            'POST api/amla/ctr-candidates/{id}/report',
+            'POST api/amla/ctr-candidates/{id}/not-reportable',
+            'GET api/amla/reports/{id}',
+            'POST api/amla/reports/{id}/approve',
+            'POST api/amla/reports/{id}/return',
+            'POST api/amla/reports/{id}/submissions',
+            'GET api/amla/reports/{id}/export',
+            'GET api/amla/inbox',
+            'POST api/amla/inbox/{id}/read',
+            'POST api/amla/risk-downgrades/{id}/approve',
+            'POST api/amla/risk-downgrades/{id}/reject',
         ];
 
         $routes = collect(Route::getRoutes()->getRoutes())

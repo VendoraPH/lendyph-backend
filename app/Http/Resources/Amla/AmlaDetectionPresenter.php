@@ -47,6 +47,9 @@ final class AmlaDetectionPresenter
             'amount' => self::pesos($standing),
             'transactions_count' => $alert->events->count(),
             'from_history' => (bool) $alert->from_history,
+            'assigned_to' => AmlaPresenter::user($alert->assignee),
+            'case' => $alert->amlaCase === null ? null : ['id' => (int) $alert->amlaCase->id, 'reference' => $alert->amlaCase->reference],
+            'closed_at' => $alert->closed_at?->toIso8601String(),
             'detected_at' => $alert->created_at?->toIso8601String(),
         ];
     }

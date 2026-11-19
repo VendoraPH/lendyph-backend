@@ -343,11 +343,26 @@ class TimezoneShift
         // and the detection cursor, well after the cutover. `occurred_on`,
         // `window_start` and `window_end` are DATEs.
         'amla_alert_events' => ['created_at', 'reversal_rerun_at'],
-        'amla_alerts' => ['cleared_at', 'created_at'],
+        'amla_alerts' => ['cleared_at', 'closed_at', 'created_at'],
         'amla_ctr_candidates' => ['created_at', 'event_reversed_at'],
         'amla_detection_locks' => ['created_at'],
         'amla_event_screenings' => ['created_at'],
         'amla_rule_versions' => ['created_at', 'effective_at'],
+        // Phase 6 AMLA-B6 (2026-11-22): cases, filings, the AMLA inbox and
+        // High-risk downgrades, well after the cutover. Determination,
+        // deadline, submission and occurred-on dates are DATEs. Alerts gain
+        // `closed_at` here too.
+        'amla_alert_actions' => ['created_at'],
+        'amla_case_actions' => ['created_at'],
+        'amla_case_alerts' => ['created_at'],
+        'amla_case_evidence' => ['created_at'],
+        'amla_case_notes' => ['created_at'],
+        'amla_cases' => ['closed_at', 'created_at', 'decided_at', 'updated_at'],
+        'amla_inbox_items' => ['created_at', 'read_at'],
+        'amla_report_formats' => ['created_at'],
+        'amla_report_submissions' => ['created_at'],
+        'amla_reports' => ['approved_at', 'created_at', 'updated_at'],
+        'amla_risk_downgrades' => ['created_at', 'decided_at', 'updated_at'],
         // Added 2026-11-19 with the executive dashboard's alert thresholds
         // (Phase 6 EB-C), well after the cutover, for the same reason.
         'dashboard_settings' => ['created_at', 'updated_at'],

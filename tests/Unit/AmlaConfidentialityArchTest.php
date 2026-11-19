@@ -76,7 +76,11 @@ it('finds the AMLA files it guards', function () use ($amlaFiles, $relative) {
         ->and($files)->toContain('app/Services/Amla/Detection/Detector.php')
         ->and($files)->toContain('app/Models/AmlaAlert.php')
         ->and($files)->toContain('routes/api/amla/detection.php')
-        ->and($files)->toContain('routes/console/amla/detection.php');
+        ->and($files)->toContain('routes/console/amla/detection.php')
+        ->and($files)->toContain('app/Services/Amla/Cases/CaseRecords.php')
+        ->and($files)->toContain('app/Models/AmlaCase.php')
+        ->and($files)->toContain('routes/api/amla/cases.php')
+        ->and($files)->toContain('routes/console/amla/deadlines.php');
 });
 
 /** @var array<string, string> what AMLA code must never reach, by pattern on its code */
@@ -208,6 +212,7 @@ const AMLA_TABLE_MIGRATIONS = [
     'database/migrations/2026_11_20_100000_create_amla_cdd_tables.php',
     'database/migrations/2026_11_20_200000_create_amla_event_tables.php',
     'database/migrations/2026_11_21_100000_create_amla_detection_tables.php',
+    'database/migrations/2026_11_22_100000_create_amla_case_tables.php',
 ];
 
 it('keeps AMLA out of the main audit trail, outbound channels, notices, logs and the environment', function () use ($amlaFiles, $codeOf, $relative, $channelOffences) {
@@ -363,6 +368,11 @@ it('catches every bulk-write pattern', function (string $code, bool $isAmlaFile)
     'ctr candidate update' => ["DB::table('amla_ctr_candidates')->update(['amount' => '0.00']);", false],
     'rule version delete' => ['AmlaRuleVersion::query()->whereKey(2)->delete();', false],
     'screening delete' => ["DB::delete('delete from amla_event_screenings where event_id = 1');", false],
+    'case note update' => ["AmlaCaseNote::query()->where('case_id', 1)->update(['body' => 'x']);", false],
+    'report update' => ["DB::table('amla_reports')->where('id', 1)->update(['status' => 'accepted']);", false],
+    'submission delete' => ["DB::table('amla_report_submissions')->delete();", false],
+    'inbox delete' => ['AmlaInboxItem::query()->delete();', false],
+    'evidence drop' => ["Schema::dropIfExists('amla_case_evidence');", false],
 ]);
 
 it('lets an added column through', function () use ($bulkWriteOffences) {

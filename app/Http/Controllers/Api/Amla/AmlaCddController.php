@@ -8,7 +8,9 @@ use App\Http\Requests\Amla\StoreAmlaIdVerificationRequest;
 use App\Http\Requests\Amla\StoreAmlaReviewRequest;
 use App\Http\Requests\Amla\StoreAmlaRiskAssessmentRequest;
 use App\Http\Requests\Amla\UpdateAmlaProfileRequest;
+use App\Http\Resources\Amla\AmlaCasePresenter;
 use App\Http\Resources\Amla\AmlaCddPresenter;
+use App\Models\AmlaRiskDowngrade;
 use App\Models\Borrower;
 use App\Models\GCashNonMember;
 use App\Services\Amla\Cdd\CddRecords;
@@ -136,7 +138,7 @@ class AmlaCddController extends Controller
     #[OA\Post(
         path: '/api/amla/cdd/{subjectType}/{id}/risk-assessments',
         summary: 'Assess AML risk now',
-        description: 'Needs `amla:cdd` (and `branches:view_all` for a walk-in). Scores under the current rules (versioned, "to verify"); optional `override_level` (low, medium, high) with a required `override_reason`. An override stands until the computed level changes. 422 before the profile is started. Kept as written.',
+        description: 'Needs `amla:cdd` (and `branches:view_all` for a walk-in). Scores under the current rules (versioned, "to verify"); optional `override_level` (low, medium, high) with a required `override_reason`. An override stands until the computed level changes. An override down from High answers 202 with a request that waits for a second `amla:cdd` holder; while one waits, another override is 409. 422 before the profile is started. Kept as written.',
         tags: ['AMLA'],
         security: [['sanctum' => []]],
         responses: [new OA\Response(response: 201, description: 'The assessment'), new OA\Response(response: 403, description: 'Missing amla:cdd, in words'), new OA\Response(response: 404, description: 'Not found, or not in scope'), new OA\Response(response: 422, description: 'Invalid, or no profile yet')],
@@ -150,6 +152,14 @@ class AmlaCddController extends Controller
             $request->validated('override_level'),
             $request->validated('override_reason'),
         );
+
+        if ($assessment instanceof AmlaRiskDowngrade) {
+            return response()->json([
+                'success' => true,
+                'message' => 'Lowering a High risk needs a second AMLA CDD holder\'s approval, so the request is waiting.',
+                'data' => AmlaCasePresenter::downgrade($assessment),
+            ], 202);
+        }
 
         return response()->json([
             'success' => true,

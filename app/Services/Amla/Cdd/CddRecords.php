@@ -7,11 +7,13 @@ use App\Models\AmlaProfile;
 use App\Models\AmlaProfileChange;
 use App\Models\AmlaReview;
 use App\Models\AmlaRiskAssessment;
+use App\Models\AmlaRiskDowngrade;
 use App\Models\Borrower;
 use App\Models\Document;
 use App\Models\GCashNonMember;
 use App\Models\User;
 use App\Rules\UniqueWalkInIdNumber;
+use App\Services\Amla\Cases\RiskDowngrades;
 use App\Services\Amla\Foundation\AmlaLog;
 use App\Services\Amla\Foundation\AmlaSettings;
 use Carbon\CarbonImmutable;
@@ -152,13 +154,38 @@ final class CddRecords
      *
      * @throws ValidationException 422 when CDD hasn't started
      */
-    public function assessNow(User $user, Borrower|GCashNonMember $subject, ?string $overrideLevel, ?string $overrideReason): AmlaRiskAssessment
+    /**
+     * An assessment now, or with an override. An override down from High
+     * waits for a second CDD holder (AMLA-B6, RiskDowngrades) and returns the
+     * request instead; while one waits, no other override is taken (409).
+     */
+    public function assessNow(User $user, Borrower|GCashNonMember $subject, ?string $overrideLevel, ?string $overrideReason): AmlaRiskAssessment|AmlaRiskDowngrade
     {
         return DB::transaction(function () use ($user, $subject, $overrideLevel, $overrideReason) {
             $profile = $this->existingLockedProfile($subject, 'Start the AMLA profile before assessing risk.');
 
+            if ($overrideLevel !== null) {
+                $downgrades = app(RiskDowngrades::class);
+                abort_if($downgrades->pendingFor($profile), 409, 'A risk downgrade for this subject is waiting for approval, so no other override is taken until it is decided.');
+
+                if ($downgrades->isDowngradeFromHigh($profile, $overrideLevel)) {
+                    return $downgrades->request($user, $profile, $overrideLevel, (string) $overrideReason);
+                }
+            }
+
             return $this->assess($user, $subject, $profile, $overrideLevel === null ? 'manual' : 'override', $overrideLevel, $overrideReason);
         });
+    }
+
+    /**
+     * The override a second CDD holder approved (RiskDowngrades), recorded as
+     * the requester's. Runs inside the approval's transaction.
+     */
+    public function applyApprovedOverride(User $requester, Borrower|GCashNonMember $subject, string $level, string $reason): AmlaRiskAssessment
+    {
+        $profile = $this->existingLockedProfile($subject, 'The AMLA profile is gone.');
+
+        return $this->assess($requester, $subject, $profile, 'override', $level, $reason);
     }
 
     /**
