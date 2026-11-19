@@ -79,6 +79,11 @@ final class LindaMatcher
             'share capital', 'share capitals', 'capital build up', 'capital buildup', 'cbu', 'capital', 'kapital',
             'share capital ledger', 'share capital balance',
         ],
+        'cda_summary' => [
+            'cda', 'cda deadline', 'cda deadlines', 'cda readiness', 'cda report', 'cda reports', 'cda compliance',
+            'compliance', 'compliance status', 'readiness', 'ready', 'deadline', 'deadlines', 'next deadline', 'next deadlines', 'next cda deadline', 'next cda deadlines',
+            'sunod nga deadline', 'susunod na deadline', 'handa', 'andam',
+        ],
         'borrower_summary' => [
             'active members', 'active member', 'inactive members', 'inactive member', 'blacklisted members',
             'blacklisted member', 'new members', 'new member', 'repeat members', 'repeat member', 'repeat borrowers',
@@ -197,7 +202,7 @@ final class LindaMatcher
         'list', 'many', 'me', 'much', 'my', 'need', 'now', 'number', 'of', 'on', 'operation',
         'operations', 'our', 'payment', 'payments', 'please', 'pls', 'right', 'see', 'show', 'so',
         'tell', 'the', 'there', 'this', 'to', 'total', 'totals', 'us', 'was', 'we', 'were', 'what',
-        'whats', 'which', 'who', 'whos', 'with', 'would', 'you', 'big', 'size', 'soon',
+        'whats', 'which', 'who', 'whos', 'with', 'would', 'you', 'big', 'size', 'soon', 'when',
         'account', 'accounts', 'amount', 'amounts', 'loan', 'loans', 'member', 'members', 'report', 'dues',
         // "Find overdue members", "Search past-due loans": aggregate questions. A
         // name or a record number after them is no filler, so a lookup still
@@ -207,12 +212,12 @@ final class LindaMatcher
         'ako', 'ang', 'ano', 'anong', 'ba', 'bigay', 'ilan', 'ilang', 'ito', 'kabuuan', 'kami', 'ko',
         'lahat', 'magkano', 'may', 'mga', 'mo', 'na', 'namin', 'natin', 'nating', 'ng', 'nang', 'ngayon',
         'paki', 'pakibigay', 'pakita', 'pakipakita', 'po', 'sa', 'sino', 'sinong', 'sinu', 'tayo',
-        'ung', 'yung', 'pa', 'din', 'rin',
+        'ung', 'yung', 'pa', 'din', 'rin', 'kailan', 'kelan',
         // Bisaya
         'pila', 'ka', 'kabuok', 'nga', 'naa', 'naay', 'unsa', 'unsay', 'kinsa', 'asa', 'nato', 'namo',
         'atong', 'among', 'ato', 'amo', 'ug', 'og', 'palihug', 'ipakita', 'tan', 'awa', 'lang', 'man',
         'diay', 'kaha', 'ra', 'pud', 'pod', 'sab', 'sad', 'usab', 'kini', 'kana', 'niini', 'bai', 'bay',
-        'day', 'dong', 'tanan', 'tanang', 'gyud', 'jud', 'ta',
+        'day', 'dong', 'tanan', 'tanang', 'gyud', 'jud', 'ta', 'kanus', 'kanusa',
     ];
 
     /** The longest branch name taken from a branch phrase, in words. */

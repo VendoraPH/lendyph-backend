@@ -160,6 +160,11 @@ final class LindaWording
         return 'Savings isn\'t set up in this deployment yet, so there are no savings figures to show.';
     }
 
+    public static function cdaNotSetUp(): string
+    {
+        return 'No CDA reporting year has been opened yet, so there is no deadline or readiness to show.';
+    }
+
     public static function branchNotFound(string $name): string
     {
         return '"'.self::echoed($name).'" is not among your branches. Please check the branch name and ask again.';

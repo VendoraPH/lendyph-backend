@@ -35,6 +35,7 @@ class LindaIntentTest extends TestCase
             'general_lending_summary',
             'savings_summary',
             'share_capital_summary',
+            'cda_summary',
             'unsupported_question',
         ], array_map(fn (LindaIntent $intent) => $intent->value, LindaIntent::cases()));
     }
@@ -75,6 +76,7 @@ class LindaIntentTest extends TestCase
             LindaIntent::PortfolioSummary,
             LindaIntent::SavingsSummary,
             LindaIntent::ShareCapitalSummary,
+            LindaIntent::CdaSummary,
             LindaIntent::UnsupportedQuestion,
         ], $timeless);
     }

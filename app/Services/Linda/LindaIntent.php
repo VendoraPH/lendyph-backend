@@ -30,6 +30,7 @@ enum LindaIntent: string
     case GeneralLendingSummary = 'general_lending_summary';
     case SavingsSummary = 'savings_summary';
     case ShareCapitalSummary = 'share_capital_summary';
+    case CdaSummary = 'cda_summary';
     case UnsupportedQuestion = 'unsupported_question';
 
     /**
@@ -43,7 +44,7 @@ enum LindaIntent: string
     {
         return match ($this) {
             self::OverdueAccounts, self::LoanSummary, self::PortfolioSummary, self::SavingsSummary, self::ShareCapitalSummary,
-            self::UnsupportedQuestion,
+            self::CdaSummary, self::UnsupportedQuestion,
             self::BorrowerLookup, self::LoanDetails, self::TransactionLookup => false,
             default => true,
         };

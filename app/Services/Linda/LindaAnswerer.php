@@ -9,6 +9,7 @@ use App\Models\User;
 use App\Services\BranchAccess;
 use App\Services\Linda\Answers\Answer;
 use App\Services\Linda\Answers\BranchPerformanceAnswer;
+use App\Services\Linda\Answers\CdaSummaryAnswer;
 use App\Services\Linda\Answers\CollectionEfficiencyAnswer;
 use App\Services\Linda\Answers\CollectionSummaryAnswer;
 use App\Services\Linda\Answers\DisbursementSummaryAnswer;
@@ -65,6 +66,7 @@ final class LindaAnswerer
         'expense_summary' => ExpenseSummaryAnswer::class,
         'savings_summary' => SavingsSummaryAnswer::class,
         'share_capital_summary' => ShareCapitalSummaryAnswer::class,
+        'cda_summary' => CdaSummaryAnswer::class,
     ];
 
     /** The record numbers a lookup reads: receipts, loans (LN-, LA-) and members. */
