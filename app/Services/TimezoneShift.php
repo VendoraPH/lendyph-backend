@@ -319,6 +319,13 @@ class TimezoneShift
         'amla_change_requests' => ['created_at', 'decided_at', 'updated_at'],
         'amla_log_entries' => ['created_at'],
         'amla_settings_versions' => ['created_at', 'effective_at'],
+        // Phase 6 AMLA-B2 (2026-11-20): transaction events, harvest cursors,
+        // failures and coverage checks, well after the cutover.
+        // `amla_events.occurred_on` and `amla_coverage_checks.day` are DATEs.
+        'amla_coverage_checks' => ['created_at'],
+        'amla_event_failures' => ['created_at'],
+        'amla_events' => ['created_at', 'recorded_at', 'reversed_at'],
+        'amla_harvest_cursors' => ['created_at', 'started_at', 'updated_at', 'watermark'],
         // A column added to a table the shift covers. Listed here, not in
         // COLUMNS, because it was added after the one-shot shift ran, and
         // because the shift reads COLUMNS on a fresh database before this

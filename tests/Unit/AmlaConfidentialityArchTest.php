@@ -69,7 +69,10 @@ it('finds the AMLA files it guards', function () use ($amlaFiles, $relative) {
 
     expect($files)->toContain('app/Services/Amla/Foundation/AmlaLog.php')
         ->and($files)->toContain('app/Models/AmlaLogEntry.php')
-        ->and($files)->toContain('routes/api/amla/foundation.php');
+        ->and($files)->toContain('routes/api/amla/foundation.php')
+        ->and($files)->toContain('app/Services/Amla/Events/Harvester.php')
+        ->and($files)->toContain('app/Models/AmlaEvent.php')
+        ->and($files)->toContain('routes/console/amla/events.php');
 });
 
 /** @var array<string, string> what AMLA code must never reach, by pattern on its code */
@@ -144,8 +147,14 @@ $withoutAllowedUse = function (string $file, string $code): string {
     return (string) preg_replace('/protected function performUpdate\(.*?\n    }\n/s', '', $code, 1);
 };
 
-/** The foundation migration: its down() drops the tables it made, and refuses once the log holds rows. */
-const AMLA_FOUNDATION_MIGRATION = 'database/migrations/2026_11_19_210000_create_amla_foundation_tables.php';
+/**
+ * The AMLA migrations that create tables: each down() drops only the tables it
+ * made, and refuses once they hold rows. Nothing else may drop or alter one.
+ */
+const AMLA_TABLE_MIGRATIONS = [
+    'database/migrations/2026_11_19_210000_create_amla_foundation_tables.php',
+    'database/migrations/2026_11_20_200000_create_amla_event_tables.php',
+];
 
 it('keeps AMLA out of the main audit trail, outbound channels, notices, logs and the environment', function () use ($amlaFiles, $codeOf, $relative, $channelOffences) {
     $found = [];
@@ -218,7 +227,7 @@ it('never writes, drops or alters an AMLA table behind the models', function () 
     foreach ($filesMatching(['app', 'routes', 'database'], '/\.php$/') as $path) {
         $file = $relative($path);
 
-        if ($file === AMLA_FOUNDATION_MIGRATION) {
+        if (in_array($file, AMLA_TABLE_MIGRATIONS, true)) {
             continue;
         }
 
@@ -264,6 +273,11 @@ it('catches every bulk-write pattern', function (string $code, bool $isAmlaFile)
     'raw drop if exists' => ["DB::unprepared('drop table if exists `amla_calendar_years`');", false],
     'raw alter' => ["DB::statement('ALTER TABLE amla_log_entries DROP COLUMN details');", false],
     'raw truncate' => ["DB::statement('TRUNCATE TABLE amla_log_entries');", false],
+    'event update' => ["AmlaEvent::query()->where('source', 'gcash')->update(['amount' => '0.00']);", false],
+    'event table delete' => ["DB::table('amla_events')->where('id', 1)->delete();", false],
+    'cursor rewind' => ["DB::table('amla_harvest_cursors')->update(['watermark' => null]);", false],
+    'failure delete' => ['AmlaEventFailure::query()->delete();', false],
+    'coverage drop' => ["Schema::dropIfExists('amla_coverage_checks');", false],
 ]);
 
 it('lets reads and inserts through', function () use ($bulkWriteOffences) {

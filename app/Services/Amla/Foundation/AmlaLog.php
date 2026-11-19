@@ -24,6 +24,7 @@ final class AmlaLog
         'change_approved' => 'Change approved',
         'change_rejected' => 'Change rejected',
         'change_withdrawn' => 'Change withdrawn',
+        'history_screened' => 'Transaction history screened',
     ];
 
     /** @var array<string, string> each subject type in words, read as "<words> #<id>" */
