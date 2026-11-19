@@ -68,8 +68,9 @@ trait Auditable
     /**
      * The description for an automatic audit row, or null for none.
      *
-     * A model opts in by declaring `describeAuditEvent(string $action): ?string`;
-     * it runs after the write, so `getChanges()` holds what was changed.
+     * A model opts in by declaring `describeAuditEvent(string $action): ?string`
+     * (asked for `created` and `updated`); it runs after the write, so
+     * `getChanges()` holds what was changed.
      */
     protected static function auditDescriptionFor(Model $model, string $action): ?string
     {
@@ -85,7 +86,13 @@ trait Auditable
                 return;
             }
 
-            AuditLogService::log('created', $model, null, static::redactForAudit($model, $model->getAttributes()));
+            AuditLogService::log(
+                'created',
+                $model,
+                null,
+                static::redactForAudit($model, $model->getAttributes()),
+                static::auditDescriptionFor($model, 'created'),
+            );
         });
 
         static::updated(function (Model $model) {

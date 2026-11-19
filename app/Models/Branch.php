@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Traits\Auditable;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
@@ -9,7 +10,19 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class Branch extends Model
 {
-    use HasFactory;
+    use Auditable, HasFactory;
+
+    /**
+     * How each editable field reads in an audit description.
+     *
+     * @var array<string, string>
+     */
+    private const AUDIT_FIELD_WORDS = [
+        'name' => 'name',
+        'code' => 'code',
+        'address' => 'address',
+        'contact_number' => 'contact number',
+    ];
 
     protected $fillable = [
         'name',
@@ -24,6 +37,48 @@ class Branch extends Model
         return [
             'is_active' => 'boolean',
         ];
+    }
+
+    /**
+     * The description on this branch's automatic audit rows (multi-branch
+     * audit D2), named by auditName(): `Branch "Butuan" (BTN) created.`, `…
+     * deactivated.`, `… reactivated.`, or `… updated: name, contact number.`,
+     * a status change and other fields together as `… deactivated and updated:
+     * code.` The change list keeps the old and new values.
+     */
+    public function describeAuditEvent(string $action): ?string
+    {
+        if ($action === 'created') {
+            return sprintf('Branch %s created.', $this->auditName());
+        }
+
+        if ($action !== 'updated') {
+            return null;
+        }
+
+        $changes = $this->getChanges();
+        $status = array_key_exists('is_active', $changes)
+            ? ($this->is_active ? 'reactivated' : 'deactivated')
+            : null;
+        $fields = array_values(array_intersect_key(self::AUDIT_FIELD_WORDS, $changes));
+
+        $what = match (true) {
+            $status !== null && $fields !== [] => $status.' and updated: '.implode(', ', $fields),
+            $status !== null => $status,
+            $fields === [] => 'updated',
+            default => 'updated: '.implode(', ', $fields),
+        };
+
+        return sprintf('Branch %s %s.', $this->auditName(), $what);
+    }
+
+    /**
+     * How audit descriptions name this branch: its name as a JSON string (so a
+     * quote inside it is escaped) and its code in brackets, as Role does.
+     */
+    public function auditName(): string
+    {
+        return json_encode((string) $this->name, JSON_UNESCAPED_UNICODE).' ('.$this->code.')';
     }
 
     /**
