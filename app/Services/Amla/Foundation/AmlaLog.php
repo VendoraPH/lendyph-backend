@@ -31,6 +31,18 @@ final class AmlaLog
         'cdd_risk_assessed' => 'Risk assessed',
         'cdd_review_recorded' => 'CDD review recorded',
         'history_screened' => 'Transaction history screened',
+        'watchlist_uploaded' => 'Watchlist uploaded',
+        'screening_rescreen_requested' => 'Rescreen asked for',
+        'screening_run' => 'Screening run',
+        'screening_matches_listed' => 'Screening matches listed',
+        'screening_match_viewed' => 'Screening match viewed',
+        'screening_match_confirmed' => 'Match confirmed',
+        'screening_match_cleared' => 'Match cleared as a false positive',
+        'orders_listed' => 'Orders listed',
+        'order_viewed' => 'Order viewed',
+        'order_placed' => 'Order recorded and holds placed',
+        'order_released' => 'Order released and holds lifted',
+        'cdd_valid_ids_viewed' => 'Member IDs viewed (masked)',
     ];
 
     /** @var array<string, string> each subject type in words, read as "<words> #<id>" */
@@ -41,6 +53,10 @@ final class AmlaLog
         'calendar_year' => 'Calendar year',
         'member' => 'Member',
         'walk_in' => 'Walk-in',
+        'co_maker' => 'Co-maker',
+        'watchlist_version' => 'Watchlist version',
+        'screening_match' => 'Screening match',
+        'order' => 'Order',
     ];
 
     private const USER_AGENT_MAX = 255;

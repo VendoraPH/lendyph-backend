@@ -49,6 +49,11 @@ class AmlaAccessTest extends TestCase
             'log' => ['GET', '/api/amla/log', ['amla:audit'], true],
             'cdd worklist' => ['GET', '/api/amla/cdd/subjects', ['amla:cdd'], false],
             'risk rules' => ['GET', '/api/amla/risk-rules', ['amla:cdd', 'amla:settings', 'amla:audit'], true],
+            'watchlists' => ['GET', '/api/amla/screening/lists', ['amla:screening'], true],
+            'screening matches' => ['GET', '/api/amla/screening/matches', ['amla:screening'], true],
+            'rescreen' => ['POST', '/api/amla/screening/rescreen', ['amla:screening'], true],
+            'orders' => ['GET', '/api/amla/orders', ['amla:sanctions'], true],
+            'record an order' => ['POST', '/api/amla/orders', ['amla:sanctions'], true],
         ];
     }
 
@@ -94,6 +99,13 @@ class AmlaAccessTest extends TestCase
             'POST api/amla/cdd/{subjectType}/{id}/id-verifications',
             'POST api/amla/cdd/{subjectType}/{id}/risk-assessments',
             'POST api/amla/cdd/{subjectType}/{id}/reviews',
+            'GET api/amla/cdd/{subjectType}/{id}/valid-ids',
+            'POST api/amla/screening/lists/{source}/versions',
+            'GET api/amla/screening/matches/{id}',
+            'POST api/amla/screening/matches/{id}/confirm',
+            'POST api/amla/screening/matches/{id}/clear',
+            'GET api/amla/orders/{id}',
+            'POST api/amla/orders/{id}/release',
         ];
 
         $routes = collect(Route::getRoutes()->getRoutes())

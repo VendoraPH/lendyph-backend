@@ -203,6 +203,7 @@ const AMLA_TABLE_MIGRATIONS = [
     'database/migrations/2026_11_19_210000_create_amla_foundation_tables.php',
     'database/migrations/2026_11_20_100000_create_amla_cdd_tables.php',
     'database/migrations/2026_11_20_200000_create_amla_event_tables.php',
+    'database/migrations/2026_11_21_100000_create_amla_screening_tables.php',
 ];
 
 it('keeps AMLA out of the main audit trail, outbound channels, notices, logs and the environment', function () use ($amlaFiles, $codeOf, $relative, $channelOffences) {
@@ -339,6 +340,11 @@ it('catches every bulk-write pattern', function (string $code, bool $isAmlaFile)
     'new table update' => ["AmlaProfile::query()->update(['occupation' => null]);", false],
     'new table delete' => ["DB::table('amla_profile_changes')->delete();", false],
     'new table drop' => ["Schema::dropIfExists('amla_risk_rule_versions');", false],
+    'screening match update' => ["AmlaScreeningMatch::query()->where('status', 'pending')->update(['status' => 'cleared']);", false],
+    'watchlist entries delete' => ["DB::table('amla_watchlist_entries')->where('version_id', 1)->delete();", false],
+    'order release by hand' => ["DB::update('update amla_orders set status = ? where id = 1', ['released']);", false],
+    'order hold link delete' => ['AmlaOrderHold::whereKey(1)->delete();', false],
+    'screening cursor drop' => ["Schema::dropIfExists('amla_screening_cursors');", false],
     'raw replace into' => ["DB::insert('REPLACE INTO amla_log_entries (id, action) VALUES (1, ?)', ['x']);", false],
     'raw upsert' => ["DB::insert('insert into amla_profiles (id, occupation) values (1, null) on duplicate key update occupation = null');", false],
     'raw delete with an alias' => ["DB::delete('DELETE p FROM amla_profiles p WHERE p.id = 1');", false],

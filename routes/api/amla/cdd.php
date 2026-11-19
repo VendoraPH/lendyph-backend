@@ -27,6 +27,7 @@ Route::prefix('amla')->name('amla.')->middleware('throttle:amla')->group(functio
             Route::post('/id-verifications', [AmlaCddController::class, 'storeIdVerification'])->name('id-verifications.store');
             Route::post('/risk-assessments', [AmlaCddController::class, 'storeRiskAssessment'])->name('risk-assessments.store');
             Route::post('/reviews', [AmlaCddController::class, 'storeReview'])->name('reviews.store');
+            Route::get('/valid-ids', [AmlaCddController::class, 'validIds'])->name('valid-ids');
         });
 
     Route::get('/risk-rules', [AmlaRiskRuleController::class, 'show'])->name('risk-rules.show');

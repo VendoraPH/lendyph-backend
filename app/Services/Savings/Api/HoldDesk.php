@@ -2,6 +2,7 @@
 
 namespace App\Services\Savings\Api;
 
+use App\Models\AmlaOrderHold;
 use App\Models\PortalRequest;
 use App\Models\SavingsAccount;
 use App\Models\SavingsHold;
@@ -32,6 +33,11 @@ class HoldDesk
 {
     /** The hold types staff place by hand. */
     public const STAFF_TYPES = ['legal', 'manual'];
+
+    /** What a legal order's hold says on the account and in the audit trail: nothing about the order. */
+    public const ORDER_HOLD_REASON = 'Held under a legal order.';
+
+    public const ORDER_RELEASE_REASON = 'Released when the legal order was lifted.';
 
     public function __construct(private readonly SavingsLocks $locks) {}
 
@@ -85,6 +91,49 @@ class HoldDesk
     }
 
     /**
+     * Hold money on an account for a legal order (AMLA design decision 5): a
+     * legal hold with no end date, up to the balance not already held. It
+     * reads only as a legal hold; the order that placed it is recorded on the
+     * AMLA side (AmlaOrderHold), and only that order's release lifts it. The
+     * caller runs it inside the order's transaction.
+     *
+     * @throws ValidationException
+     */
+    public function placeForOrder(int $accountId, int $centavos, User $user): SavingsHold
+    {
+        $account = $this->locks->account($accountId);
+
+        if ($account->isClosed()) {
+            Refuse::field('account', "{$account->account_number} is closed; nothing can be held on it.");
+        }
+
+        $today = now()->toDateString();
+        $held = SavingsMath::centavos(SavingsHold::query()->where('account_id', $account->id)->holding($today)->sum('amount'));
+        $free = max(0, SavingsMath::signedCentavos($account->ledger_balance) - $held);
+
+        if ($centavos > $free) {
+            Refuse::field('amount', Refuse::peso($centavos).' is more than the '.Refuse::peso($free)." on {$account->account_number} not already held.");
+        }
+
+        return SavingsHold::query()->create([
+            'account_id' => $account->id,
+            'type' => 'legal',
+            'amount' => SavingsMath::pesos($centavos),
+            'reason' => self::ORDER_HOLD_REASON,
+            'placed_on' => $today,
+            'expires_on' => null,
+            'status' => SavingsHold::STATUS_ACTIVE,
+            'created_by' => $user->id,
+        ]);
+    }
+
+    /** Release a legal order's hold, as that order's release (decision 5). */
+    public function releaseForOrder(SavingsHold $hold, User $user): SavingsHold
+    {
+        return $this->releaseLocked($hold, self::ORDER_RELEASE_REASON, $user->id, forRequest: false, forOrder: true);
+    }
+
+    /**
      * Reserve a portal withdrawal request's amount on its account, already
      * locked by the caller (portal design §6, lock step 2). The caller has
      * checked the amount against the available balance under that lock; the
@@ -134,13 +183,17 @@ class HoldDesk
         return $this->releaseLocked($hold, $reason, $user?->id, forRequest: true);
     }
 
-    private function releaseLocked(SavingsHold $hold, string $reason, ?int $userId, bool $forRequest): SavingsHold
+    private function releaseLocked(SavingsHold $hold, string $reason, ?int $userId, bool $forRequest, bool $forOrder = false): SavingsHold
     {
         $this->locks->account($hold->account_id);
         $locked = SavingsHold::query()->whereKey($hold->id)->lockForUpdate()->firstOrFail();
 
         if (! $forRequest && $locked->type === SavingsHold::TYPE_MEMBER_REQUEST) {
             Refuse::field('hold', 'This hold reserves a member\'s withdrawal request from the portal. Decide the member\'s request instead; that releases it.');
+        }
+
+        if (! $forOrder && AmlaOrderHold::isOrderHold($locked->id)) {
+            Refuse::field('hold', 'This hold was placed under a legal order. Only that order\'s release can lift it.');
         }
 
         if ($locked->status !== SavingsHold::STATUS_ACTIVE) {
