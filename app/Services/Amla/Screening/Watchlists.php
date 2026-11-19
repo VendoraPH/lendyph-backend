@@ -45,7 +45,7 @@ final class Watchlists
 
             $version = AmlaWatchlistVersion::query()->create([
                 'source' => $source,
-                'version_label' => mb_substr(trim((string) ($label ?: $parsed['label'] ?: 'Uploaded '.now()->format('M j, Y g:i A'))), 0, 150),
+                'version_label' => self::label($label, $parsed['label']),
                 'file_sha256' => $sha256,
                 'entry_count' => count($parsed['entries']),
                 'status' => AmlaWatchlistVersion::ACTIVE,
@@ -73,6 +73,18 @@ final class Watchlists
 
             return $version;
         });
+    }
+
+    /**
+     * The label typed on upload, else the one in the file (the UN list's
+     * date), else none: screens read "Version #n" beside the upload time, so
+     * no "Uploaded <time>" label is made up.
+     */
+    private static function label(?string $typed, ?string $fromFile): ?string
+    {
+        $label = trim((string) ($typed ?: $fromFile));
+
+        return $label === '' ? null : mb_substr($label, 0, 150);
     }
 
     /**

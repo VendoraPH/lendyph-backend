@@ -238,6 +238,9 @@ final class Detector
             'window_end' => $finding->windowEnd,
             'reason' => $finding->reason,
             'indicators' => $finding->indicators,
+            'counted_amount' => PesoAmount::fromCentavos(AmlaEvent::query()->whereIn('id', $finding->eventIds)->pluck('amount')
+                ->sum(fn ($amount) => PesoAmount::centavos((string) $amount))),
+            'counted_transactions' => count($finding->eventIds),
             'from_history' => $trigger->harvested_by === 'history',
         ]);
 

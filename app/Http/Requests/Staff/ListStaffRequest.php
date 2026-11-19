@@ -2,6 +2,8 @@
 
 namespace App\Http\Requests\Staff;
 
+use App\Services\Amla\Foundation\AmlaAccess;
+use App\Services\BranchAccess;
 use Illuminate\Foundation\Http\FormRequest;
 
 /**
@@ -29,6 +31,12 @@ use Illuminate\Foundation\Http\FormRequest;
  * names-only list of active staff in the caller's branches; without the
  * parameter the loan rule above is unchanged.
  *
+ * `?for=amla_cases` (AMLA-B8) is the AMLA case assignee picker: only a
+ * caller holding `amla:cases` with `branches:view_all` may ask (the loan
+ * permissions don't open it, since it names who works compliance), and the
+ * rows are narrowed to the staff a case can be assigned to (see
+ * StaffController). Names only, like every other row.
+ *
  * `$this->authorize()` in the controller takes one ability, hence a
  * FormRequest for the `canAny()`.
  */
@@ -37,12 +45,25 @@ class ListStaffRequest extends FormRequest
     /** The one form outside lending with an officer picker: opening a savings account. */
     public const FOR_SAVINGS = 'savings';
 
+    /** The AMLA case assignee picker. */
+    public const FOR_AMLA_CASES = 'amla_cases';
+
     public function authorize(): bool
     {
         $user = $this->user();
 
+        if ($this->forAmlaCases()) {
+            return $user->can(AmlaAccess::CASES) && $user->can(BranchAccess::VIEW_ALL);
+        }
+
         return $user->canAny(['loans:create', 'loans:update', 'loans:restructure'])
             || ($this->query('for') === self::FOR_SAVINGS && $user->can('savings:create'));
+    }
+
+    /** Whether this is the AMLA case assignee picker. */
+    public function forAmlaCases(): bool
+    {
+        return $this->query('for') === self::FOR_AMLA_CASES;
     }
 
     /**
@@ -51,7 +72,7 @@ class ListStaffRequest extends FormRequest
     public function rules(): array
     {
         return [
-            'for' => ['nullable', 'string', 'in:'.self::FOR_SAVINGS],
+            'for' => ['nullable', 'string', 'in:'.self::FOR_SAVINGS.','.self::FOR_AMLA_CASES],
             'search' => ['nullable', 'string', 'max:100'],
             'per_page' => ['nullable', 'integer', 'min:1'],
             'page' => ['nullable', 'integer', 'min:1'],
@@ -62,8 +83,8 @@ class ListStaffRequest extends FormRequest
     public function messages(): array
     {
         return [
-            'for.string' => 'The staff list can be asked for the savings opening form only (for=savings), or without it.',
-            'for.in' => 'The staff list can be asked for the savings opening form only (for=savings), or without it.',
+            'for.string' => 'The staff list can be asked for the savings opening form (for=savings), the AMLA case assignee (for=amla_cases), or without either.',
+            'for.in' => 'The staff list can be asked for the savings opening form (for=savings), the AMLA case assignee (for=amla_cases), or without either.',
         ];
     }
 

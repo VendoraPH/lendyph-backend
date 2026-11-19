@@ -14,12 +14,15 @@ use App\Services\Amla\Foundation\AmlaAccess;
 use App\Services\Amla\Reports\ComplianceReport;
 use App\Services\Amla\Reports\ReportFilters;
 use App\Services\Amla\Reports\ReportNames;
+use App\Services\BranchAccess;
 use Carbon\CarbonImmutable;
+use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\DB;
 
-/** Report 1, Covered transactions: the CTR candidates of the period (transaction date), in the caller's branches. */
+/** Report 1, Covered transactions: the CTR candidates of the period (transaction date), in the caller's branches; a savings event names its savings account. */
 final class CoveredTransactions extends ComplianceReport
 {
-    public function __construct(private readonly DetectionScope $scope, private readonly FilingDeadlines $deadlines) {}
+    public function __construct(private readonly DetectionScope $scope, private readonly FilingDeadlines $deadlines, private readonly BranchAccess $branches) {}
 
     public function key(): string
     {
@@ -66,15 +69,16 @@ final class CoveredTransactions extends ComplianceReport
             ->when($filters->branchId !== null, fn ($q) => $q->where('branch_id', $filters->branchId))
             ->with(['event', 'borrower', 'walkIn', 'branch'])->orderBy('occurred_on')->orderBy('id')->get();
         $reports = AmlaReport::query()->whereIn('ctr_candidate_id', $candidates->pluck('id'))->where('status', '!=', AmlaReport::RETURNED)->get()->keyBy('ctr_candidate_id');
+        $accounts = $this->savingsAccounts($candidates, $viewer);
 
-        return $candidates->map(function (AmlaCtrCandidate $candidate) use ($reports) {
+        return $candidates->map(function (AmlaCtrCandidate $candidate) use ($reports, $accounts) {
             $report = $reports->get($candidate->id);
             $due = $report === null ? $this->deadlines->candidateDue($candidate) : $this->deadlines->due($report);
 
             return [
                 'reference' => $candidate->reference,
                 'customer' => ReportNames::subject($candidate->borrower, $candidate->walkIn),
-                'account' => Finding::NOT_AVAILABLE,
+                'account' => $candidate->event?->source === 'savings_transaction' ? ($accounts[$candidate->event->source_id] ?? Finding::NOT_AVAILABLE) : Finding::NOT_AVAILABLE,
                 'branch' => ReportNames::branch($candidate->branch),
                 'transaction' => $candidate->event === null ? null : AmlaEvent::kindWords($candidate->event->kind),
                 'method' => PaymentMethod::labelFor($candidate->channel),
@@ -86,5 +90,29 @@ final class CoveredTransactions extends ComplianceReport
                 'submission_reference' => $report?->submission_reference,
             ];
         })->values()->all();
+    }
+
+    /**
+     * The savings account number behind each savings event, by savings
+     * transaction id, in one query, for accounts in the viewer's branches.
+     *
+     * @param  Collection<int, AmlaCtrCandidate>  $candidates
+     * @return array<int, string>
+     */
+    private function savingsAccounts(Collection $candidates, User $viewer): array
+    {
+        $ids = $candidates->map(fn (AmlaCtrCandidate $candidate) => $candidate->event)
+            ->filter(fn (?AmlaEvent $event) => $event?->source === 'savings_transaction')->pluck('source_id')->unique()->values()->all();
+
+        if ($ids === []) {
+            return [];
+        }
+
+        $branchIds = $this->branches->for($viewer);
+
+        return DB::table('savings_transactions AS t')->join('savings_accounts AS a', 'a.id', '=', 't.account_id')
+            ->whereIn('t.id', $ids)
+            ->when($branchIds !== null, fn ($query) => $query->whereIn('a.branch_id', $branchIds))
+            ->pluck('a.account_number', 't.id')->map(fn ($number) => (string) $number)->all();
     }
 }
