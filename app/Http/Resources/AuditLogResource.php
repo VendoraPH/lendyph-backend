@@ -10,6 +10,7 @@ use App\Models\Branch;
 use App\Models\CdaDocument;
 use App\Models\CdaDocumentVersion;
 use App\Models\Collateral;
+use App\Models\DashboardSetting;
 use App\Models\Fee;
 use App\Models\Loan;
 use App\Models\LoanApprovalStep;
@@ -152,6 +153,7 @@ class AuditLogResource extends JsonResource
         'PortalAnnouncement' => 'Portal announcement',
         // Read by its name while it exists; this only when it is gone.
         'PenaltyConfig' => 'Penalty configuration',
+        'DashboardSetting' => 'Dashboard alert thresholds',
     ];
 
     /**
@@ -726,6 +728,7 @@ class AuditLogResource extends JsonResource
         }
 
         return $this->namedBy($field, $value)
+            ?? $this->dashboardThresholdInWords($field, $value)
             ?? $this->feeValueInWords($field, $value, $row)
             ?? $this->productRateInWords($field, $value)
             ?? self::booleanInWords($field, $value, $this->castOf($field))
@@ -891,6 +894,17 @@ class AuditLogResource extends JsonResource
             'fixed' => '₱'.number_format((float) $value, 2),
             default => null,
         };
+    }
+
+    /**
+     * An executive dashboard alert threshold in words ("1.5 points", "90%",
+     * "3 days", "₱250.00"), by DashboardSetting::valueInWords().
+     */
+    private function dashboardThresholdInWords(string $field, mixed $value): ?string
+    {
+        return $this->auditable_type === DashboardSetting::class
+            ? DashboardSetting::valueInWords($field, $value)
+            : null;
     }
 
     /**
