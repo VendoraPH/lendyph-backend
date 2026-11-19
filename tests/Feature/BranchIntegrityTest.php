@@ -62,6 +62,7 @@ class BranchIntegrityTest extends TestCase
         $this->assertSame('Butuan City Branch', $row->new_values['name']);
     }
 
+    /** Phase 6 MB-BE1: switching `is_active` off suspends the branch (decision 2). */
     public function test_deactivating_and_reactivating_a_branch_are_audited_in_words(): void
     {
         $branch = Branch::factory()->create(['name' => 'Butuan Branch', 'code' => 'BTN', 'is_active' => true]);
@@ -72,7 +73,7 @@ class BranchIntegrityTest extends TestCase
         $rows = $this->auditRows($branch->id)->where('action', 'updated')->values();
 
         $this->assertSame([
-            'Branch "Butuan Branch" (BTN) deactivated.',
+            'Branch "Butuan Branch" (BTN) suspended.',
             'Branch "Butuan Branch" (BTN2) reactivated and updated: code.',
         ], $rows->pluck('description')->all());
     }
@@ -132,12 +133,13 @@ class BranchIntegrityTest extends TestCase
         $this->putJson("/api/branches/{$this->second->id}", ['is_active' => false])->assertNotFound();
     }
 
+    /** Switching `is_active` also needs `branches:manage` since Phase 6 MB-BE1 (BranchCoreTest). */
     public function test_view_all_with_the_settings_permission_still_edits_a_branch(): void
     {
         $this->actingAs($this->branchSettingsUser([BranchAccess::VIEW_ALL]));
 
-        $this->putJson("/api/branches/{$this->second->id}", ['is_active' => false])->assertOk();
-        $this->assertFalse($this->second->fresh()->is_active);
+        $this->putJson("/api/branches/{$this->second->id}", ['name' => 'Renamed'])->assertOk();
+        $this->assertSame('Renamed', $this->second->fresh()->name);
     }
 
     public function test_view_all_without_the_settings_permission_still_cannot_edit(): void

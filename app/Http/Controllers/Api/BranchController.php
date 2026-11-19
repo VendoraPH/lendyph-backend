@@ -9,6 +9,8 @@ use App\Http\Resources\BranchResource;
 use App\Http\Resources\PublicBranchResource;
 use App\Models\Branch;
 use App\Services\BranchAccess;
+use App\Services\Branches\BranchFigures;
+use App\Services\Branches\BranchStatus;
 use Illuminate\Database\Eloquent\ModelNotFoundException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
@@ -24,25 +26,37 @@ class BranchController extends Controller
         security: [['sanctum' => []]],
         parameters: [
             new OA\Parameter(name: 'active_only', in: 'query', required: false, schema: new OA\Schema(type: 'boolean')),
+            new OA\Parameter(name: 'include', in: 'query', required: false, description: '`figures` adds each branch\'s figures (null without loans:view)', schema: new OA\Schema(type: 'string', enum: ['figures'])),
         ],
         responses: [
             new OA\Response(response: 200, description: 'Branch list'),
             new OA\Response(response: 401, description: 'Unauthenticated'),
         ],
     )]
-    public function index(): AnonymousResourceCollection
+    public function index(BranchFigures $figures): AnonymousResourceCollection
     {
         // Decision B2: a caller without `branches:view_all` lists only their
         // own branches (none when they have no branch).
         $branchIds = app(BranchAccess::class)->for(request()->user());
 
         $branches = Branch::withCount('users')
+            ->with('manager:id,first_name,last_name')
             ->when($branchIds !== null, fn ($q) => $q->whereIn('branches.id', $branchIds))
             ->when(request()->boolean('active_only'), fn ($q) => $q->where('is_active', true))
             ->orderBy('name')
             ->get();
 
-        return BranchResource::collection($branches);
+        if (request()->query('include') !== 'figures') {
+            return BranchResource::collection($branches);
+        }
+
+        $byBranch = request()->user()->can('loans:view')
+            ? $figures->for($branches->pluck('id')->map(fn ($id): int => (int) $id)->all())
+            : [];
+
+        return BranchResource::collection($branches->map(
+            fn (Branch $branch): BranchResource => (new BranchResource($branch))->withFigures($byBranch[$branch->id] ?? null),
+        ));
     }
 
     #[OA\Post(
@@ -72,7 +86,7 @@ class BranchController extends Controller
     )]
     public function store(StoreBranchRequest $request): JsonResponse
     {
-        $branch = Branch::create($request->validated());
+        $branch = Branch::create($request->validated())->load('manager:id,first_name,last_name');
 
         return (new BranchResource($branch))
             ->response()
@@ -94,13 +108,15 @@ class BranchController extends Controller
             new OA\Response(response: 404, description: 'Not found'),
         ],
     )]
-    public function show(Branch $branch): BranchResource
+    public function show(Branch $branch, BranchFigures $figures): BranchResource
     {
         $this->denyHiddenBranch($branch);
 
-        $branch->loadCount('users');
+        $branch->loadCount('users')->load('manager:id,first_name,last_name');
 
-        return new BranchResource($branch);
+        return (new BranchResource($branch))->withFigures(
+            request()->user()->can('loans:view') ? $figures->for([$branch->id])[$branch->id] : null,
+        );
     }
 
     #[OA\Put(
@@ -120,7 +136,12 @@ class BranchController extends Controller
                     new OA\Property(property: 'code', type: 'string'),
                     new OA\Property(property: 'address', type: 'string'),
                     new OA\Property(property: 'contact_number', type: 'string'),
-                    new OA\Property(property: 'is_active', type: 'boolean'),
+                    new OA\Property(property: 'email', type: 'string', nullable: true),
+                    new OA\Property(property: 'manager_user_id', type: 'integer', nullable: true),
+                    new OA\Property(property: 'opened_on', type: 'string', format: 'date', nullable: true),
+                    new OA\Property(property: 'cda_authority_number', type: 'string', nullable: true, description: 'To verify'),
+                    new OA\Property(property: 'cda_authority_issued_on', type: 'string', format: 'date', nullable: true, description: 'To verify'),
+                    new OA\Property(property: 'is_active', type: 'boolean', description: 'A changed value suspends or reactivates the branch and needs branches:manage plus branches:view_all'),
                 ],
             ),
         ),
@@ -131,11 +152,28 @@ class BranchController extends Controller
             new OA\Response(response: 422, description: 'Validation error'),
         ],
     )]
-    public function update(UpdateBranchRequest $request, Branch $branch): BranchResource
+    public function update(UpdateBranchRequest $request, Branch $branch, BranchStatus $status): BranchResource
     {
-        $branch->update($request->validated());
+        $data = $request->validated();
 
-        return new BranchResource($branch);
+        // The legacy `is_active` switch is a status change: true reactivates,
+        // false suspends, under BranchStatus's rules, in the same save (and
+        // audit row) as the other fields.
+        if (array_key_exists('is_active', $data)) {
+            $to = $data['is_active']
+                ? Branch::STATUS_ACTIVE
+                : ($branch->status === Branch::STATUS_ACTIVE ? Branch::STATUS_SUSPENDED : $branch->status);
+            unset($data['is_active']);
+
+            if ($to !== $branch->status) {
+                $status->assertCanMove($branch, $to);
+                $branch->status = $to;
+            }
+        }
+
+        $branch->fill($data)->save();
+
+        return new BranchResource($branch->load('manager:id,first_name,last_name'));
     }
 
     #[OA\Get(

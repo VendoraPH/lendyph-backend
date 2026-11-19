@@ -23,7 +23,9 @@ use Illuminate\Support\Facades\Log;
  *
  * ## Which branch is "main"
  *
- * The branches table has no head-office flag, so:
+ * The active branch carrying the main-office flag (Phase 6, multi-branch
+ * decision 4). With no flagged branch, today's rule, which data fix 1
+ * (MainOfficeMarker) also uses to set the flag:
  * 1. the only active branch, when there is just one;
  * 2. else the one active branch named as the main branch: Main, Main
  *    Branch, Main Office, Head Office or Headquarters, ignoring case and
@@ -121,13 +123,25 @@ class DefaultBranchAssignment
      */
     public static function mainBranch(): array
     {
+        $flagged = DB::table('branches')->where('is_main_office', true)->where('is_active', true)->first(['id', 'name', 'code']);
+
+        if ($flagged !== null) {
+            return ['branch' => self::describe($flagged, 'the main office'), 'reason' => null];
+        }
+
+        return self::byTodaysRule();
+    }
+
+    /**
+     * The main branch by the rule used before the main-office flag: the only
+     * active branch, else the one active branch named as the main branch.
+     *
+     * @return array{branch: array{id: int, name: string, code: string, basis: string}|null, reason: string|null}
+     */
+    public static function byTodaysRule(): array
+    {
         $active = DB::table('branches')->where('is_active', true)->orderBy('id')->get(['id', 'name', 'code']);
-        $describe = fn (object $branch, string $basis): array => [
-            'id' => (int) $branch->id,
-            'name' => (string) $branch->name,
-            'code' => (string) $branch->code,
-            'basis' => $basis,
-        ];
+        $describe = fn (object $branch, string $basis): array => self::describe($branch, $basis);
 
         if ($active->isEmpty()) {
             return ['branch' => null, 'reason' => 'there is no active branch'];
@@ -144,6 +158,19 @@ class DefaultBranchAssignment
             0 => ['branch' => null, 'reason' => "{$active->count()} active branches and none is named as the main branch"],
             default => ['branch' => null, 'reason' => "{$named->count()} active branches are named as the main branch"],
         };
+    }
+
+    /**
+     * @return array{id: int, name: string, code: string, basis: string}
+     */
+    private static function describe(object $branch, string $basis): array
+    {
+        return [
+            'id' => (int) $branch->id,
+            'name' => (string) $branch->name,
+            'code' => (string) $branch->code,
+            'basis' => $basis,
+        ];
     }
 
     /**

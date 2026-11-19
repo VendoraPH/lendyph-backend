@@ -317,6 +317,9 @@ class TimezoneShift
         // because the shift reads COLUMNS on a fresh database before this
         // column exists. The rest of `documents` stays in COLUMNS.
         'documents' => ['portal_shared_at'],
+        // Phase 6 MB-BE1 (2026-11-19): closure requests, well after the
+        // cutover. `effective_on` is a DATE.
+        'branch_closures' => ['created_at', 'decided_at', 'updated_at'],
         // The shift's own bookkeeping, written after the cutover by definition.
         'timezone_shifts' => ['completed_at', 'cutover_at', 'started_at'],
     ];
