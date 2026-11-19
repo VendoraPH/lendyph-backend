@@ -6,9 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Http\Requests\GCash\PreviewGCashTransactionRequest;
 use App\Http\Requests\GCash\StoreGCashTransactionRequest;
 use App\Http\Resources\GCashTransactionResource;
-use App\Models\Borrower;
 use App\Models\GCashTransaction;
-use App\Services\BranchAccess;
 use App\Services\GCashService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -33,7 +31,7 @@ class GCashTransactionController extends Controller
             new OA\Parameter(name: 'per_page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', default: 25)),
         ],
         responses: [
-            new OA\Response(response: 200, description: 'Paginated GCash transactions'),
+            new OA\Response(response: 200, description: 'Paginated GCash transactions. A caller without branches:view_all sees their branches\' members\' rows and the walk-in rows recorded in their branches; walk-in rows with no branch need branches:view_all.'),
             new OA\Response(response: 403, description: 'Missing gcash:view permission'),
         ],
     )]
@@ -48,15 +46,11 @@ class GCashTransactionController extends Controller
             'per_page' => ['nullable', 'integer', 'min:1'],
         ])['per_page'] ?? 25);
 
-        $branchIds = app(BranchAccess::class)->for($request->user());
-
         $transactions = GCashTransaction::query()
             ->with(['borrower', 'nonMember', 'transactor'])
-            // Member transactions follow the member's branch (BranchAccess).
-            // Walk-in transactions belong to no branch and stay visible.
-            ->when($branchIds !== null, fn ($q) => $q->where(fn ($party) => $party
-                ->whereNull('borrower_id')
-                ->orWhereHas('borrower', fn ($b) => $b->whereIn('borrowers.branch_id', $branchIds))))
+            // A member's row follows the member's branch, a walk-in's the
+            // branch it was recorded in (GCashTransaction::scopeVisibleTo).
+            ->visibleTo($request->user())
             ->when($request->query('type'), fn ($q, $t) => $q->where('type', $t))
             ->when($request->query('status'), fn ($q, $s) => $q->where('status', $s))
             ->when($request->query('borrower_id'), fn ($q, $b) => $q->where('borrower_id', $b))
@@ -155,19 +149,15 @@ class GCashTransactionController extends Controller
         responses: [
             new OA\Response(response: 200, description: 'Marked as paid'),
             new OA\Response(response: 403, description: 'Missing gcash:transact permission'),
+            new OA\Response(response: 404, description: 'Not found, or a row the caller can\'t see (another branch\'s, or a walk-in with no branch without branches:view_all)'),
             new OA\Response(response: 422, description: 'Transaction is not a pending Cash In'),
         ],
     )]
     public function markPaid(GCashTransaction $transaction): JsonResponse
     {
+        // Another branch's row answers 404 like a missing one: the
+        // `{transaction}` binding is scoped (GCashTransaction::visibleTo).
         $this->authorize('gcash:transact');
-
-        // Another branch's member transaction answers 404, like a missing one.
-        abort_if(
-            $transaction->borrower_id !== null
-                && ! Borrower::visibleTo(request()->user())->whereKey($transaction->borrower_id)->exists(),
-            404,
-        );
 
         $tx = $this->gcash->markPaid($transaction, request()->user());
         $tx->load(['borrower', 'nonMember', 'transactor', 'paidByUser']);

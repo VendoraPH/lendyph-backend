@@ -16,8 +16,9 @@ use Tests\Traits\SetupLendyPH;
  * Phase 3 follow-ups, item B4. Pending Cash In report rows carry the branch
  * whose books the row posts in: a walk-in's own recorded branch, a member's
  * branch for a member, and none ("Head office") for a walk-in recorded with no
- * branch. The report's branch scope is unchanged: a branch user sees their own
- * members' rows and every walk-in row.
+ * branch. A branch user sees their own members' rows and the walk-in rows
+ * recorded in their branches; a walk-in with no branch needs branches:view_all
+ * (Phase 6 decision 1).
  */
 class GCashPendingBranchTest extends TestCase
 {
@@ -79,7 +80,7 @@ class GCashPendingBranchTest extends TestCase
         $this->assertSame([null, 'Head office'], $this->branchesOnTheReport()[$this->headOffice->id]);
     }
 
-    public function test_the_branch_scope_is_unchanged(): void
+    public function test_a_branch_user_sees_their_members_and_their_branchs_walk_ins(): void
     {
         $role = Role::create(['name' => 'gcash_viewer_fu', 'guard_name' => 'web']);
         $role->syncPermissions(['gcash:view']);
@@ -89,9 +90,14 @@ class GCashPendingBranchTest extends TestCase
 
         $this->assertSame([
             $this->member->id => [$this->branch->id, $this->branch->name],
+        ], $this->branchesOnTheReport(), 'Another branch\'s member and walk-in rows, and head office\'s walk-in, stay hidden.');
+
+        $user->branches()->attach($this->far->id);
+        $this->assertSame([
+            $this->member->id => [$this->branch->id, $this->branch->name],
             $this->walkIn->id => [$this->far->id, 'Far Branch'],
-            $this->headOffice->id => [null, 'Head office'],
-        ], $this->branchesOnTheReport(), 'Another branch\'s member row stays hidden; walk-in rows stay visible.');
+            $this->farMember->id => [$this->far->id, 'Far Branch'],
+        ], $this->branchesOnTheReport(), 'A walk-in recorded in one of the caller\'s branches is theirs.');
 
         $user->givePermissionTo(BranchAccess::VIEW_ALL);
         $this->assertCount(4, $this->branchesOnTheReport());

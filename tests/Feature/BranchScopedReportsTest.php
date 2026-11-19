@@ -406,11 +406,14 @@ class BranchScopedReportsTest extends TestCase
     // GCash reports
     // -----------------------------------------------------------------
 
-    public function test_gcash_reports_show_the_callers_members_and_every_walk_in(): void
+    public function test_gcash_reports_show_the_callers_members_and_their_branchs_walk_ins(): void
     {
         $mine = $this->gcash(['borrower_id' => $this->here->borrower_id, 'charge_amount' => 20]);
         $theirs = $this->gcash(['borrower_id' => $this->there->borrower_id, 'charge_amount' => 30]);
-        $walkIn = $this->gcash(['borrower_id' => null, 'gcash_non_member_id' => GCashNonMember::factory(), 'charge_amount' => 15.5]);
+        $walkIn = $this->gcash(['borrower_id' => null, 'gcash_non_member_id' => GCashNonMember::factory(), 'branch_id' => $this->branch->id, 'charge_amount' => 15.5]);
+        // Phase 6 decision 1: a walk-in with no branch is head office's, seen
+        // and counted with branches:view_all only.
+        $headOffice = $this->gcash(['borrower_id' => null, 'gcash_non_member_id' => GCashNonMember::factory(), 'branch_id' => null, 'charge_amount' => 10]);
         $pendingMine = $this->gcash(['borrower_id' => $this->here->borrower_id, 'status' => 'pending']);
         $pendingTheirs = $this->gcash(['borrower_id' => $this->there->borrower_id, 'status' => 'pending']);
 
@@ -422,6 +425,7 @@ class BranchScopedReportsTest extends TestCase
         $ids = array_column($income->json('data.transactions'), 'id');
         $this->assertEqualsCanonicalizing([$mine->id, $walkIn->id], $ids);
         $this->assertNotContains($theirs->id, $ids);
+        $this->assertNotContains($headOffice->id, $ids);
         $this->assertEquals(35.5, $income->json('data.total_income'));
 
         $pending = array_column($this->getJson('/api/gcash/reports/pending')->assertOk()->json('data'), 'id');
@@ -429,7 +433,7 @@ class BranchScopedReportsTest extends TestCase
         $this->assertNotContains($pendingTheirs->id, $pending);
 
         $this->actingAs($this->admin);
-        $this->assertEquals(65.5, $this->getJson("/api/gcash/reports/income?{$range}")->json('data.total_income'));
+        $this->assertEquals(75.5, $this->getJson("/api/gcash/reports/income?{$range}")->json('data.total_income'));
     }
 
     // -----------------------------------------------------------------

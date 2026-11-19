@@ -3,6 +3,7 @@
 namespace App\Rules;
 
 use App\Models\Borrower;
+use App\Support\WholeNumberId;
 use Closure;
 use Illuminate\Contracts\Validation\ValidationRule;
 use Illuminate\Support\Carbon;
@@ -23,11 +24,13 @@ final class NotAFormerMember implements ValidationRule
 
     public function validate(string $attribute, mixed $value, Closure $fail): void
     {
-        if (! is_int($value) && ! (is_string($value) && ctype_digit($value))) {
+        $id = WholeNumberId::from($value);
+
+        if ($id === null) {
             return;
         }
 
-        $member = Borrower::query()->whereKey((int) $value)->first(['id', 'first_name', 'middle_name', 'last_name', 'suffix', 'borrower_code', 'status', 'membership_ended_on']);
+        $member = Borrower::query()->whereKey($id)->first(['id', 'first_name', 'middle_name', 'last_name', 'suffix', 'borrower_code', 'status', 'membership_ended_on']);
 
         if ($member !== null && $member->isFormerMember()) {
             $fail(self::messageFor($member, $this->as));

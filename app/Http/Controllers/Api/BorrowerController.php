@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Api\Traits\RespondsWithValidIds;
 use App\Http\Controllers\Controller;
+use App\Http\Requests\Borrower\ApproveRegistrationRequest;
 use App\Http\Requests\Borrower\RejectBorrowerRequest;
 use App\Http\Requests\Borrower\StoreBorrowerRequest;
 use App\Http\Requests\Borrower\UpdateBorrowerRequest;
@@ -33,6 +34,15 @@ use OpenApi\Attributes as OA;
 class BorrowerController extends Controller
 {
     use RespondsWithValidIds;
+
+    /**
+     * A registration still waiting on, or turned down at, Registration Review.
+     * Only approval makes it a member (borrowers:approve, a valid ID and a
+     * branch), so deactivate and reactivate leave it alone (Phase 6 D7).
+     */
+    private const UNREVIEWED_STATUSES = ['pending', 'rejected'];
+
+    private const NOT_DEACTIVATABLE = 'This registration hasn\'t been approved, so it can\'t be deactivated. Approve or reject it from Registration Review.';
 
     #[OA\Get(
         path: '/api/borrowers',
@@ -563,11 +573,18 @@ DESC,
             new OA\Response(response: 200, description: 'Borrower deactivated'),
             new OA\Response(response: 401, description: 'Unauthenticated'),
             new OA\Response(response: 403, description: 'Forbidden'),
+            new OA\Response(response: 422, description: 'A pending or rejected registration (approve or reject it from Registration Review), or a former member'),
         ],
     )]
     public function deactivate(Borrower $borrower): JsonResponse
     {
         $this->authorize('borrowers:update');
+
+        // Deactivating a registration would let /reactivate make it a member
+        // without Registration Review (Phase 6 D7).
+        if (in_array($borrower->status, self::UNREVIEWED_STATUSES, true)) {
+            throw ValidationException::withMessages(['status' => self::NOT_DEACTIVATABLE]);
+        }
 
         if ($borrower->isFormerMember()) {
             throw ValidationException::withMessages(['status' => MembershipStatus::endedMessage($borrower)]);
@@ -594,12 +611,20 @@ DESC,
             new OA\Response(response: 200, description: 'Borrower reactivated'),
             new OA\Response(response: 401, description: 'Unauthenticated'),
             new OA\Response(response: 403, description: 'Forbidden'),
-            new OA\Response(response: 422, description: 'A former member without a reason'),
+            new OA\Response(response: 422, description: 'A former member without a reason, or a pending or rejected registration (approve it from Registration Review)'),
         ],
     )]
     public function reactivate(Request $request, Borrower $borrower, MembershipStatus $membership): JsonResponse
     {
         $this->authorize('borrowers:update');
+
+        // A registration becomes a member only through Registration Review,
+        // which needs borrowers:approve, a valid ID and a branch (Phase 6 D7).
+        if (in_array($borrower->status, self::UNREVIEWED_STATUSES, true)) {
+            throw ValidationException::withMessages([
+                'status' => 'This registration hasn\'t been approved. Approve it from Registration Review.',
+            ]);
+        }
 
         if ($borrower->isFormerMember()) {
             $membership->reactivate($borrower, (string) $request->validate([
@@ -628,23 +653,31 @@ Approve a borrower whose status is `pending` (public-registration review).
 - The share-capital pledge and `borrower_code` are already created at submission time, so no extra setup runs here.
 - Requires at least one valid ID (`type=valid_id` document) on file — returns 422 otherwise.
 - Returns 422 if the borrower is not currently `pending`. Use `/reactivate` to re-activate a previously-active member — keeping the two distinct preserves the audit distinction between "approved an application" and "reactivated a member".
+- `branch_id` (optional): the member's branch, one of the caller's (any branch with `branches:view_all`). Required (422) when the registration has no branch; when it already has one, it may only repeat it (422 otherwise), so approval never moves a member.
 DESC,
         tags: ['Borrowers'],
         security: [['sanctum' => []]],
         parameters: [
             new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer')),
         ],
+        requestBody: new OA\RequestBody(
+            required: false,
+            content: new OA\JsonContent(
+                properties: [
+                    new OA\Property(property: 'branch_id', type: 'integer', nullable: true, description: 'The member\'s branch, one of the caller\'s. Required when the registration has none; otherwise it must repeat the registration\'s branch.'),
+                ],
+            ),
+        ),
         responses: [
             new OA\Response(response: 200, description: 'Registration approved; updated borrower returned'),
             new OA\Response(response: 401, description: 'Unauthenticated'),
             new OA\Response(response: 403, description: 'Forbidden'),
-            new OA\Response(response: 422, description: 'Borrower is not in pending status, or has no valid ID on file'),
+            new OA\Response(response: 404, description: 'Not found, or in a branch the caller can\'t see'),
+            new OA\Response(response: 422, description: 'Borrower is not in pending status, has no valid ID on file, has no branch and none was chosen, or the chosen branch isn\'t the caller\'s or differs from the registration\'s'),
         ],
     )]
-    public function approveRegistration(Request $request, Borrower $borrower): BorrowerResource
+    public function approveRegistration(ApproveRegistrationRequest $request, Borrower $borrower): BorrowerResource
     {
-        $this->authorize('borrowers:approve');
-
         if ($borrower->status !== 'pending') {
             throw ValidationException::withMessages([
                 'status' => 'Only members with a pending registration can be approved.',
@@ -660,9 +693,27 @@ DESC,
             ]);
         }
 
+        // Phase 6 FX-1 (D7): a member always leaves review with a branch. A
+        // registration with none takes the reviewer's pick; one that has a
+        // branch keeps it, since approval is not a member move.
+        $branchId = $request->validated('branch_id');
+
+        if ($borrower->branch_id === null && $branchId === null) {
+            throw ValidationException::withMessages([
+                'branch_id' => 'Choose the branch this member belongs to before approving the registration.',
+            ]);
+        }
+
+        if ($borrower->branch_id !== null && $branchId !== null && (int) $branchId !== (int) $borrower->branch_id) {
+            throw ValidationException::withMessages([
+                'branch_id' => 'This registration already belongs to '.($borrower->branch?->name ?? 'another branch').'. Approve it there; moving a member is done from the member\'s record.',
+            ]);
+        }
+
         // Approval makes the applicant a member today (CDA design §1): the
         // membership date and number, where neither is set yet.
         $borrower->update([
+            'branch_id' => $borrower->branch_id ?? (int) $branchId,
             'status' => 'active',
             'approved_by' => $request->user()->id,
             'approved_at' => now(),
@@ -748,7 +799,7 @@ DESC,
             ),
         ),
         responses: [
-            new OA\Response(response: 200, description: 'Bulk result'),
+            new OA\Response(response: 200, description: 'Bulk result. A pending or rejected registration, or a former member, is listed under `failed` with the reason in words and left unchanged.'),
             new OA\Response(response: 422, description: 'Validation error'),
         ],
     )]
@@ -768,6 +819,12 @@ DESC,
             try {
                 /** @var Borrower $borrower */
                 $borrower = Borrower::visibleTo(request()->user())->findOrFail($id);
+
+                if (in_array($borrower->status, self::UNREVIEWED_STATUSES, true)) {
+                    $failed[] = ['id' => $id, 'reason' => self::NOT_DEACTIVATABLE];
+
+                    continue;
+                }
 
                 if ($borrower->isFormerMember()) {
                     $failed[] = ['id' => $id, 'reason' => MembershipStatus::endedMessage($borrower)];

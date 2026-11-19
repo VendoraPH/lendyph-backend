@@ -50,7 +50,8 @@ class GCashNonMemberController extends Controller
         $search = $validated['search'] ?? null;
 
         $nonMembers = GCashNonMember::query()
-            ->withCount('transactions')
+            // Only the transactions the caller may see (Phase 6 decision 1).
+            ->withCount(['transactions' => fn ($q) => $q->visibleTo($request->user())])
             ->when(filled($search), function ($q) use ($search) {
                 $like = LikePattern::contains($search);
                 // ID numbers also match normalised, the way the duplicate rule
@@ -109,7 +110,7 @@ class GCashNonMemberController extends Controller
             description: "GCash walk-in {$nonMember->full_name} registered",
         );
 
-        return (new GCashNonMemberResource($nonMember->loadCount('transactions')))
+        return (new GCashNonMemberResource($nonMember->loadCount(['transactions' => fn ($q) => $q->visibleTo($request->user())])))
             ->response()
             ->setStatusCode(201);
     }
@@ -154,7 +155,7 @@ class GCashNonMemberController extends Controller
 
         return response()->json([
             'message' => 'Walk-in customer updated.',
-            'data' => new GCashNonMemberResource($nonMember->loadCount('transactions')),
+            'data' => new GCashNonMemberResource($nonMember->loadCount(['transactions' => fn ($q) => $q->visibleTo($request->user())])),
         ]);
     }
 

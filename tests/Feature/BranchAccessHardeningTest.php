@@ -388,7 +388,7 @@ class BranchAccessHardeningTest extends TestCase
         $this->assertSame(0, Repayment::where('loan_id', $there->id)->count());
     }
 
-    public function test_m2_gcash_member_transactions_follow_the_members_branch_and_walk_ins_stay_visible(): void
+    public function test_m2_gcash_member_transactions_follow_the_members_branch_and_walk_ins_their_own(): void
     {
         $here = GCashTransaction::factory()->create([
             'borrower_id' => Borrower::factory()->create(['branch_id' => $this->branch->id])->id,
@@ -399,7 +399,11 @@ class BranchAccessHardeningTest extends TestCase
             'transactor_user_id' => $this->admin->id,
             'status' => 'pending',
         ]);
-        $walkIn = GCashTransaction::factory()->forNonMember()->create(['transactor_user_id' => $this->admin->id]);
+        $walkIn = GCashTransaction::factory()->forNonMember()->create(['transactor_user_id' => $this->admin->id, 'branch_id' => $this->branch->id]);
+        // Phase 6 decision 1: another branch's walk-in, and one with no branch
+        // (head office), are hidden from a branch user.
+        $farWalkIn = GCashTransaction::factory()->forNonMember()->create(['transactor_user_id' => $this->admin->id, 'branch_id' => $this->far->id, 'status' => 'pending']);
+        $headOfficeWalkIn = GCashTransaction::factory()->forNonMember()->create(['transactor_user_id' => $this->admin->id, 'branch_id' => null]);
 
         $this->actingAs($this->branchUser(['gcash:transact']));
 
@@ -407,8 +411,11 @@ class BranchAccessHardeningTest extends TestCase
         $this->assertContains($here->id, $ids);
         $this->assertContains($walkIn->id, $ids);
         $this->assertNotContains($there->id, $ids);
+        $this->assertNotContains($farWalkIn->id, $ids);
+        $this->assertNotContains($headOfficeWalkIn->id, $ids);
 
         $this->patchJson("/api/gcash/transactions/{$there->id}/paid")->assertNotFound();
+        $this->patchJson("/api/gcash/transactions/{$farWalkIn->id}/paid")->assertNotFound();
         $this->postJson('/api/gcash/transactions', [
             'borrower_id' => $there->borrower_id,
             'type' => 'cash_in',

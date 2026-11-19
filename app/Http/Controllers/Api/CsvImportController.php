@@ -87,7 +87,7 @@ class CsvImportController extends Controller
             content: new OA\JsonContent(
                 required: ['branch_id', 'files'],
                 properties: [
-                    new OA\Property(property: 'branch_id', type: 'integer', description: 'Branch every imported member and loan is assigned to. Required — a legacy export cannot supply it and loans.branch_id is NOT NULL.', example: 1),
+                    new OA\Property(property: 'branch_id', type: 'integer', description: 'Branch every imported member and loan is assigned to: one of the caller\'s branches (any with branches:view_all). Required — a legacy export cannot supply it and loans.branch_id is NOT NULL.', example: 1),
                     new OA\Property(property: 'as_of_date', type: 'string', format: 'date', nullable: true, description: 'Date the extract represents. Defaults to today (Asia/Manila).', example: '2026-08-01'),
                     new OA\Property(
                         property: 'files',

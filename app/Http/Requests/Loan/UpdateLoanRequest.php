@@ -39,7 +39,9 @@ class UpdateLoanRequest extends FormRequest
             // LoanService::coMakerIdsForMembers(). The same rule as the
             // principal borrower on StoreLoanRequest, because a co-maker is
             // jointly liable: a rejected registration must not become one.
-            'co_maker_ids.*' => ['integer', $this->nonRejectedBorrowerRule(), new NotAFormerMember(NotAFormerMember::AS_CO_MAKER)],
+            // `bail`: an id outside the caller's branches stops at `exists`, so the
+            // former-member rule never names another branch's member.
+            'co_maker_ids.*' => ['bail', 'integer', $this->nonRejectedBorrowerRule(), new NotAFormerMember(NotAFormerMember::AS_CO_MAKER)],
             // Sent by the edit form's account-officer picker. Without a rule the
             // value never reached validated(), so a draft's officer could be
             // changed on screen and silently not saved.
