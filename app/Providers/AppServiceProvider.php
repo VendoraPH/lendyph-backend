@@ -348,6 +348,13 @@ class AppServiceProvider extends ServiceProvider
                 return Limit::none();
             }
 
+            // The public loan application (routes/api/public-apply/, every
+            // route named `public-apply.*`) is anonymous for the same reason,
+            // and LoanOriginationServiceProvider gives it its own limiters.
+            if ($request->routeIs('public-apply.*')) {
+                return Limit::none();
+            }
+
             // A portal user's id is not a staff id: portal user 7 and staff user
             // 7 must not share one bucket (§0, finding 4).
             $key = $caller instanceof PortalUser ? 'portal:'.$caller->getKey() : ($caller?->getKey() ?: $request->ip());
