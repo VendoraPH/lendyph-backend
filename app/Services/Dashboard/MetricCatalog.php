@@ -21,6 +21,22 @@ final class MetricCatalog
     private const LOAN_FILTERS = ['branch_id', 'product_id', 'officer_id'];
 
     /**
+     * The books' figures come from the accounting dashboard's sources (the
+     * income statement), `/api/accounting/dashboard`, not a lending report.
+     */
+    public const BOOKS_SOURCE = 'accounting/dashboard';
+
+    /**
+     * Sources outside `/api/reports`, as self::REPORTS describes a report: the
+     * books follow the branch filter only (by journal branch).
+     *
+     * @var array<string, array{full: list<string>, partial: array<string, list<string>>}>
+     */
+    public const OTHER_SOURCES = [
+        self::BOOKS_SOURCE => ['full' => ['branch_id'], 'partial' => []],
+    ];
+
+    /**
      * Cash Flow's repayment cash and every total built from it, as response
      * paths (`*` is each `by_branch` row): what the collector filter narrows,
      * and part of what product and officer narrow. Share capital
@@ -311,6 +327,28 @@ final class MetricCatalog
                 'source' => 'share-capital',
                 'filters' => ['branch_id'],
                 'permissions' => ['reports:view', 'share_capital:view'],
+                'has_history' => false,
+            ],
+            'interest_income' => [
+                'label' => 'Interest income (cash basis)',
+                'definition' => 'The interest posted to the books in the period, on the account set for interest income, by journal branch. The books are kept on a cash basis, so this is interest received; it differs from the Income report\'s collected interest by payments that posted no journal and by deferred interest recognised later. It is never added to collected interest.',
+                'formula' => 'Credits less debits on the interest income account in the period',
+                'unit' => 'money',
+                'date_rule' => 'period',
+                'source' => self::BOOKS_SOURCE,
+                'filters' => ['branch_id'],
+                'permissions' => ['accounting:view'],
+                'has_history' => false,
+            ],
+            'net_income' => [
+                'label' => 'Net Income',
+                'definition' => 'Income less expenses posted to the books in the period, by journal branch, the income statement\'s own figure; year-end closing entries are left out. It reads Net Surplus on the cooperative chart of accounts.',
+                'formula' => 'Total income − total expenses on the income statement for the period',
+                'unit' => 'money',
+                'date_rule' => 'period',
+                'source' => self::BOOKS_SOURCE,
+                'filters' => ['branch_id'],
+                'permissions' => ['accounting:view'],
                 'has_history' => false,
             ],
         ];
