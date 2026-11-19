@@ -8,13 +8,13 @@ use App\Http\Resources\Amla\AmlaCasePresenter;
 use App\Http\Resources\Amla\AmlaDetectionPresenter;
 use App\Models\AmlaCase;
 use App\Models\AmlaCaseEvidence;
-use App\Models\Document;
 use App\Services\Amla\Cases\CaseRecords;
 use App\Services\Amla\Cases\EvidenceStore;
 use App\Services\Amla\Cases\FilingDeadlines;
 use App\Services\Amla\Cases\Filings;
 use App\Services\Amla\Foundation\AmlaAccess;
 use App\Services\Amla\Foundation\AmlaLog;
+use App\Services\DownloadFilename;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Carbon;
@@ -135,12 +135,15 @@ class AmlaCaseController extends Controller
         abort_unless(Storage::disk(EvidenceStore::DISK)->exists($evidence->file_path), 404);
         $this->log->record('case_evidence_downloaded', $request->user(), 'case', $case->id, ['evidence_id' => $evidence->id]);
 
-        return Storage::disk(EvidenceStore::DISK)->download($evidence->file_path, Document::cleanOriginalFilename($evidence->original_name));
+        return Storage::disk(EvidenceStore::DISK)->download($evidence->file_path, null, [
+            'Content-Disposition' => DownloadFilename::attachmentDisposition($evidence->original_name, $evidence->file_path),
+        ]);
     }
 
-    #[OA\Post(path: '/api/amla/cases/{id}/decision', summary: 'Record the case\'s authorized decision', description: 'Needs `amla:cases` and `branches:view_all`. `decision`: no_str (closes the case) or str (suspicion established); `reason` (encrypted); `determination_date` (str only, not after today): the STR is due the next working day after it ("to verify"). Nothing is filed by itself.', tags: ['AMLA'], security: [['sanctum' => []]], responses: [new OA\Response(response: 200, description: 'The case')])]
+    #[OA\Post(path: '/api/amla/cases/{id}/decision', summary: 'Record the case\'s authorized decision', description: 'Needs `amla:cases`, `amla:approve` and `branches:view_all`. `decision`: no_str (closes the case; never by its opener or assignee, 403) or str (suspicion established); `reason` (encrypted); `determination_date` (str only, not after today): the STR is due the next working day after it ("to verify"). Nothing is filed by itself.', tags: ['AMLA'], security: [['sanctum' => []]], responses: [new OA\Response(response: 200, description: 'The case')])]
     public function decide(Request $request, int $id): JsonResponse
     {
+        $this->access->authorizeHeadOffice($request->user(), AmlaAccess::APPROVE);
         $case = $this->case($request, $id);
         $input = $request->validate([
             'decision' => ['required', 'in:no_str,str'],
@@ -180,6 +183,6 @@ class AmlaCaseController extends Controller
 
     private function detail(AmlaCase $case, int $status = 200): JsonResponse
     {
-        return response()->json(['success' => true, 'data' => AmlaCasePresenter::caseDetail($case->fresh(['borrower', 'walkIn', 'branch', 'assignee', 'opener', 'decider']), $this->alerts)], $status);
+        return response()->json(['success' => true, 'data' => AmlaCasePresenter::caseDetail($case->fresh(['borrower', 'walkIn', 'branch', 'assignee', 'opener', 'decider']), $this->alerts, request()->user())], $status);
     }
 }

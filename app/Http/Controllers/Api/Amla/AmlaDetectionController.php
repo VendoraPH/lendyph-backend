@@ -71,7 +71,7 @@ class AmlaDetectionController extends Controller
             ->orderByDesc('id')
             ->paginate((int) ($filters['per_page'] ?? 25));
 
-        return $this->page($page, fn (AmlaAlert $alert) => $this->presenter->alertRow($alert));
+        return $this->page($page, fn (AmlaAlert $alert) => $this->presenter->alertRow($alert, $request->user()));
     }
 
     #[OA\Get(
@@ -89,7 +89,7 @@ class AmlaDetectionController extends Controller
         $alert = $this->scope->constrainAlerts(AmlaAlert::query(), $request->user())->with(['events', 'borrower', 'walkIn', 'branch'])->whereKey($id)->first() ?? abort(404);
         $this->log->record('alert_viewed', $request->user(), 'alert', $alert->id, ['reference' => $alert->reference]);
 
-        return response()->json(['success' => true, 'data' => $this->presenter->alertDetail($alert)]);
+        return response()->json(['success' => true, 'data' => $this->presenter->alertDetail($alert, $request->user())]);
     }
 
     #[OA\Get(

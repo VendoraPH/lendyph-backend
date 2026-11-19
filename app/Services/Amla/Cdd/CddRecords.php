@@ -168,13 +168,25 @@ final class CddRecords
                 $downgrades = app(RiskDowngrades::class);
                 abort_if($downgrades->pendingFor($profile), 409, 'A risk downgrade for this subject is waiting for approval, so no other override is taken until it is decided.');
 
-                if ($downgrades->isDowngradeFromHigh($profile, $overrideLevel)) {
+                if ($downgrades->isDowngradeFromHigh($profile, $this->computedLevel($subject, $profile), $overrideLevel)) {
                     return $downgrades->request($user, $profile, $overrideLevel, (string) $overrideReason);
                 }
             }
 
             return $this->assess($user, $subject, $profile, $overrideLevel === null ? 'manual' : 'override', $overrideLevel, $overrideReason);
         });
+    }
+
+    /**
+     * The level the current rules compute for the subject now, without
+     * recording anything, so a downgrade is judged on a fresh score.
+     */
+    public function computedLevel(Borrower|GCashNonMember $subject, AmlaProfile $profile): string
+    {
+        $today = CarbonImmutable::now(CddState::TIMEZONE)->startOfDay();
+        $idState = CddState::idState($profile->idVerifications()->latest('id')->first(), $today);
+
+        return $this->scorer->score($subject, $profile, $idState, $this->rules->current())['level'];
     }
 
     /**

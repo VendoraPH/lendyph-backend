@@ -13,8 +13,10 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
  * version in force when it was recorded. Exactly the threshold isn't one, and
  * a same-day sum never makes one (that's a structuring alert).
  *
- * Kept forever. The one change it allows is marking, once, that its event was
- * later voided or reversed; its status workflow comes with the filing slice.
+ * Kept forever. It allows marking, once, that its event was later voided or
+ * reversed, and one filing step at a time: a CTR prepared (or returned), or
+ * set aside as not reportable, which one person asks for with a reason and
+ * a different `amla:approve` holder approves.
  *
  * @property int $id
  * @property string $reference
@@ -43,25 +45,29 @@ class AmlaCtrCandidate extends Model
 
     public const REPORT_PREPARED = 'report_prepared';
 
+    public const SET_ASIDE_PENDING = 'set_aside_pending';
+
     public const NOT_REPORTABLE = 'not_reportable';
 
     /** @var array<string, string> */
     public const STATUS_WORDS = [
         self::DETECTED => 'Detected',
         self::REPORT_PREPARED => 'CTR prepared',
+        self::SET_ASIDE_PENDING => 'Not reportable, waiting for a second approver',
         self::NOT_REPORTABLE => 'Not reportable, with a documented reason',
     ];
 
     /** @var array<string, list<string>> where a candidate's filing status may go (a returned report sends it back) */
     private const NEXT = [
-        self::DETECTED => [self::REPORT_PREPARED, self::NOT_REPORTABLE],
+        self::DETECTED => [self::REPORT_PREPARED, self::SET_ASIDE_PENDING],
         self::REPORT_PREPARED => [self::DETECTED],
+        self::SET_ASIDE_PENDING => [self::NOT_REPORTABLE, self::DETECTED],
     ];
 
     protected $fillable = [
         'reference', 'event_id', 'settings_version', 'threshold', 'amount', 'direction', 'channel', 'borrower_id',
         'gcash_non_member_id', 'branch_id', 'occurred_on', 'status', 'from_history', 'explanation', 'event_reversed_at',
-        'not_reportable_reason', 'status_changed_by',
+        'not_reportable_reason', 'set_aside_requested_by', 'set_aside_approved_by', 'status_changed_by',
     ];
 
     protected function casts(): array
@@ -78,6 +84,8 @@ class AmlaCtrCandidate extends Model
             'from_history' => 'boolean',
             'event_reversed_at' => 'datetime',
             'not_reportable_reason' => 'encrypted',
+            'set_aside_requested_by' => 'integer',
+            'set_aside_approved_by' => 'integer',
             'status_changed_by' => 'integer',
             'created_at' => 'datetime',
         ];
@@ -121,11 +129,19 @@ class AmlaCtrCandidate extends Model
             return $this->getOriginal('event_reversed_at') === null && $this->event_reversed_at !== null;
         }
 
-        return in_array('status', $dirty, true)
-            && array_diff($dirty, ['status', 'status_changed_by', 'not_reportable_reason']) === []
-            && in_array($this->status, self::NEXT[(string) $this->getOriginal('status')] ?? [], true)
-            && $this->status_changed_by !== null
-            && ($this->status !== self::NOT_REPORTABLE || filled($this->not_reportable_reason));
+        if (! in_array('status', $dirty, true)
+            || array_diff($dirty, ['status', 'status_changed_by', 'not_reportable_reason', 'set_aside_requested_by', 'set_aside_approved_by']) !== []
+            || ! in_array($this->status, self::NEXT[(string) $this->getOriginal('status')] ?? [], true)
+            || $this->status_changed_by === null) {
+            return false;
+        }
+
+        return match ($this->status) {
+            self::SET_ASIDE_PENDING => filled($this->not_reportable_reason) && $this->set_aside_requested_by !== null,
+            // Four eyes: never approved by the person who asked.
+            self::NOT_REPORTABLE => $this->set_aside_approved_by !== null && $this->set_aside_approved_by !== (int) $this->getOriginal('set_aside_requested_by'),
+            default => true,
+        };
     }
 
     protected function amlaUpdateConditions(): array

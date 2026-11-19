@@ -87,10 +87,11 @@ class AmlaFilingTest extends TestCase
         $this->actingAs($this->amlaUser(['amla:ctr']))->postJson("/api/amla/reports/{$id}/approve")->assertForbidden();
 
         $submitter = $this->amlaUser(['amla:submit']);
+        $approver = $this->amlaUser(['amla:approve']);
+        $outside = $this->outsideAmlaCounts();
         $this->actingAs($submitter)->post("/api/amla/reports/{$id}/submissions", ['status' => 'submitted', 'reference' => 'GT-1', 'date' => '2026-11-20', 'evidence' => $this->evidence()], ['Accept' => 'application/json'])
             ->assertConflict();
 
-        $approver = $this->amlaUser(['amla:approve']);
         $this->actingAs($approver)->postJson("/api/amla/reports/{$id}/approve")->assertOk()->assertJsonPath('data.status', 'approved')->assertJsonPath('data.approved_by.id', $approver->id);
 
         $this->actingAs($submitter)->post("/api/amla/reports/{$id}/submissions", ['status' => 'submitted', 'date' => '2026-11-20'], ['Accept' => 'application/json'])
@@ -106,6 +107,7 @@ class AmlaFilingTest extends TestCase
         $this->assertSame('accepted', $report['status']);
         $this->assertSame(['submitted', 'accepted'], array_column($report['submissions'], 'status'));
         $this->assertSame('GT-2026-0001', $report['submission_reference']);
+        $this->assertNothingWrittenOutsideAmla($outside);
     }
 
     public function test_a_returned_report_goes_back_to_its_preparer_and_a_candidate_can_be_set_aside_with_a_reason(): void
@@ -119,14 +121,14 @@ class AmlaFilingTest extends TestCase
 
         $other = $this->ctrCandidate();
         $this->actingAs($preparer)->postJson("/api/amla/ctr-candidates/{$other->id}/not-reportable")->assertUnprocessable();
-        $this->postJson("/api/amla/ctr-candidates/{$other->id}/not-reportable", ['reason' => 'Exempt institution transfer.'])->assertOk()->assertJsonPath('data.status', 'not_reportable');
+        $this->postJson("/api/amla/ctr-candidates/{$other->id}/not-reportable", ['reason' => 'Exempt institution transfer.'])->assertStatus(202)->assertJsonPath('data.status', 'set_aside_pending');
         $this->postJson("/api/amla/ctr-candidates/{$other->id}/report")->assertConflict();
     }
 
     public function test_an_str_needs_the_cases_str_decision_and_is_due_the_next_working_day_and_provisional_across_an_unconfirmed_year(): void
     {
         $this->confirmYear(2026);
-        $officer = $this->headOffice(['amla:cases', 'amla:str']);
+        $officer = $this->headOffice(['amla:cases', 'amla:str', 'amla:approve']);
         $case = $this->openCase($officer);
 
         $this->actingAs($officer)->postJson("/api/amla/cases/{$case->id}/str", ['narrative' => 'x'])->assertConflict();
@@ -176,9 +178,11 @@ class AmlaFilingTest extends TestCase
             $this->actingAs($ctrOfficer)->postJson("/api/amla/ctr-candidates/{$candidate->id}/report")->assertCreated();
         }
         $notTold = $this->amlaUser(['amla:cdd']);
+        $outside = $this->outsideAmlaCounts();
 
         $this->artisan('amla:deadlines')->assertSuccessful();
         $this->artisan('amla:deadlines')->assertSuccessful();
+        $this->assertNothingWrittenOutsideAmla($outside);
 
         $kinds = AmlaInboxItem::query()->where('user_id', $ctrOfficer->id)->pluck('kind')->sort()->values()->all();
         $this->assertSame(['filing_due_today', 'filing_overdue', 'filing_upcoming'], array_values(array_filter($kinds, fn ($k) => str_starts_with($k, 'filing_'))));

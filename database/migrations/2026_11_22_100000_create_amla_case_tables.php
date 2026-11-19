@@ -14,8 +14,8 @@ use Illuminate\Support\Facades\Schema;
  * - `amla_cases`, their alerts, notes (encrypted), evidence (on the private
  *   disk; names and descriptions encrypted) and `amla_case_actions`, the
  *   case's own history;
- * - CTR candidates gain their filing status and a not-reportable reason
- *   (encrypted);
+ * - CTR candidates gain their filing status, and a not-reportable reason
+ *   (encrypted) asked for by one person and approved by another;
  * - `amla_report_formats` (version 1 is an internal record filed by hand on
  *   the AMLC portal: the GoTRACS file adapter isn't built),
  *   `amla_reports` (CTR and STR records: fields and narrative encrypted)
@@ -121,7 +121,9 @@ return new class extends Migration
 
         Schema::table('amla_ctr_candidates', function (Blueprint $table) {
             $table->text('not_reportable_reason')->nullable()->after('status');
-            $table->foreignId('status_changed_by')->nullable()->after('not_reportable_reason')->constrained('users')->restrictOnDelete();
+            $table->foreignId('set_aside_requested_by')->nullable()->after('not_reportable_reason')->constrained('users')->restrictOnDelete();
+            $table->foreignId('set_aside_approved_by')->nullable()->after('set_aside_requested_by')->constrained('users')->restrictOnDelete();
+            $table->foreignId('status_changed_by')->nullable()->after('set_aside_approved_by')->constrained('users')->restrictOnDelete();
         });
 
         Schema::create('amla_report_formats', function (Blueprint $table) {
@@ -205,6 +207,7 @@ return new class extends Migration
             $table->foreignId('decided_by')->nullable()->constrained('users')->restrictOnDelete();
             $table->timestamp('decided_at')->nullable();
             $table->text('decision_note')->nullable();
+            $table->foreignId('base_assessment_id')->constrained('amla_risk_assessments')->restrictOnDelete();
             $table->foreignId('assessment_id')->nullable()->constrained('amla_risk_assessments')->restrictOnDelete();
             $table->timestamps();
 
@@ -232,8 +235,11 @@ return new class extends Migration
     {
         if ((Schema::hasTable('amla_cases') && DB::table('amla_cases')->exists())
             || (Schema::hasTable('amla_reports') && DB::table('amla_reports')->exists())
-            || (Schema::hasTable('amla_alert_actions') && DB::table('amla_alert_actions')->exists())) {
-            throw new RuntimeException('AMLA cases, reports and alert decisions are kept forever, so the AMLA case tables are not dropped.');
+            || (Schema::hasTable('amla_alert_actions') && DB::table('amla_alert_actions')->exists())
+            || (Schema::hasTable('amla_risk_downgrades') && DB::table('amla_risk_downgrades')->exists())
+            || (Schema::hasTable('amla_inbox_items') && DB::table('amla_inbox_items')->exists())
+            || (Schema::hasColumn('amla_ctr_candidates', 'set_aside_requested_by') && DB::table('amla_ctr_candidates')->whereNotNull('set_aside_requested_by')->exists())) {
+            throw new RuntimeException('AMLA cases, reports, alert decisions, downgrade requests, inbox items and set-aside reasons are kept forever, so the AMLA case tables are not dropped.');
         }
 
         DB::table('amla_detection_locks')->whereIn('name', ['cases', 'reports'])->delete();
@@ -246,6 +252,8 @@ return new class extends Migration
 
         Schema::table('amla_ctr_candidates', function (Blueprint $table) {
             $table->dropConstrainedForeignId('status_changed_by');
+            $table->dropConstrainedForeignId('set_aside_approved_by');
+            $table->dropConstrainedForeignId('set_aside_requested_by');
             $table->dropColumn('not_reportable_reason');
         });
 

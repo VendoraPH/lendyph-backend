@@ -35,12 +35,21 @@ final class RiskDowngrades
         private readonly BranchAccess $branches,
     ) {}
 
-    /** Whether an override to `$level` from the profile's current level is a downgrade from High. */
-    public function isDowngradeFromHigh(AmlaProfile $profile, string $level): bool
+    /**
+     * The level an override is lowered from: the higher of the saved level
+     * and the level computed now, so a stale saved level never hides a High.
+     */
+    public function fromLevel(AmlaProfile $profile, string $computedLevel): string
     {
-        $current = $profile->riskAssessments()->latest('id')->value('level');
+        $saved = (string) ($profile->riskAssessments()->latest('id')->value('level') ?? $computedLevel);
 
-        return $current === 'high' && (self::LEVELS[$level] ?? 3) < self::LEVELS['high'];
+        return (self::LEVELS[$saved] ?? 3) >= (self::LEVELS[$computedLevel] ?? 3) ? $saved : $computedLevel;
+    }
+
+    /** Whether an override to `$level` lowers a High, saved or computed now. */
+    public function isDowngradeFromHigh(AmlaProfile $profile, string $computedLevel, string $level): bool
+    {
+        return $this->fromLevel($profile, $computedLevel) === 'high' && (self::LEVELS[$level] ?? 3) < self::LEVELS['high'];
     }
 
     public function pendingFor(AmlaProfile $profile): bool
@@ -54,6 +63,7 @@ final class RiskDowngrades
         try {
             $downgrade = AmlaRiskDowngrade::query()->create([
                 'profile_id' => $profile->id,
+                'base_assessment_id' => (int) $profile->riskAssessments()->latest('id')->value('id'),
                 'from_level' => 'high',
                 'to_level' => $level,
                 'reason' => trim($reason),
@@ -96,8 +106,16 @@ final class RiskDowngrades
 
         return DB::transaction(function () use ($user, $downgrade, $records) {
             $locked = $this->lockPending($downgrade);
-            $profile = AmlaProfile::query()->with(['borrower', 'walkIn'])->findOrFail($locked->profile_id);
+            $profile = AmlaProfile::query()->with(['borrower', 'walkIn'])->lockForUpdate()->findOrFail($locked->profile_id);
             $subject = $profile->borrower ?? $profile->walkIn;
+
+            // Re-checked on approval: the risk must be what it was when asked for.
+            abort_unless(
+                (int) $profile->riskAssessments()->latest('id')->value('id') === $locked->base_assessment_id
+                    && $this->fromLevel($profile, $records->computedLevel($subject, $profile)) === $locked->from_level,
+                409,
+                'The subject\'s risk changed after this downgrade was asked for. Reject it and ask again from the current assessment.',
+            );
             $assessment = $records->applyApprovedOverride(User::query()->findOrFail($locked->requested_by), $subject, $locked->to_level, $locked->reason);
 
             $this->decide($locked, AmlaRiskDowngrade::APPROVED, $user, null, $assessment);

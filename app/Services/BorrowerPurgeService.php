@@ -2,11 +2,11 @@
 
 namespace App\Services;
 
-use App\Models\AmlaProfile;
 use App\Models\Borrower;
 use App\Models\CsvImportRow;
 use App\Models\LindaQuestion;
 use App\Models\PortalUser;
+use App\Services\Amla\Foundation\AmlaMemberRecords;
 use App\Services\CsvImport\CsvImportRowRedactor;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Facades\DB;
@@ -74,9 +74,10 @@ class BorrowerPurgeService
             ]);
         }
 
-        // AMLA records are kept forever and restrict the delete. Refused in
-        // words that don't say why, before anything is touched.
-        if (AmlaProfile::query()->where('borrower_id', $borrower->getKey())->exists()) {
+        // AMLA records (a profile, an event, an alert, a case, a report…) are
+        // kept forever and restrict the delete. Refused in words that don't
+        // say why, before anything is touched, never a 500 naming a table.
+        if (app(AmlaMemberRecords::class)->holdsMember((int) $borrower->getKey())) {
             throw ValidationException::withMessages([
                 'borrower' => [self::RECORDS_KEPT],
             ]);

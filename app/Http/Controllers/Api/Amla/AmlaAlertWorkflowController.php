@@ -36,7 +36,7 @@ class AmlaAlertWorkflowController extends Controller
         $alert = $this->alert($request, $id);
         $input = $request->validate(['assignee_id' => ['required', 'integer', 'min:1'], 'note' => ['sometimes', 'nullable', 'string', 'max:2000']]);
 
-        return $this->respond($this->workflow->assign($request->user(), $alert, (int) $input['assignee_id'], $input['note'] ?? null));
+        return $this->respond($request, $this->workflow->assign($request->user(), $alert, (int) $input['assignee_id'], $input['note'] ?? null));
     }
 
     #[OA\Post(path: '/api/amla/alerts/{id}/review', summary: 'Start reviewing an AMLA alert', description: 'Needs `amla:alerts`. Open or assigned to under review; optional `note`. 409 otherwise.', tags: ['AMLA'], security: [['sanctum' => []]], responses: [new OA\Response(response: 200, description: 'The alert')])]
@@ -45,7 +45,7 @@ class AmlaAlertWorkflowController extends Controller
         $alert = $this->alert($request, $id);
         $input = $request->validate(['note' => ['sometimes', 'nullable', 'string', 'max:2000']]);
 
-        return $this->respond($this->workflow->review($request->user(), $alert, $input['note'] ?? null));
+        return $this->respond($request, $this->workflow->review($request->user(), $alert, $input['note'] ?? null));
     }
 
     #[OA\Post(path: '/api/amla/alerts/{id}/close', summary: 'Close an AMLA alert with a documented reason', description: 'Needs `amla:alerts`. `reason` is required and kept encrypted in the alert\'s history. The window is freed, so later activity raises a new alert.', tags: ['AMLA'], security: [['sanctum' => []]], responses: [new OA\Response(response: 200, description: 'The alert')])]
@@ -54,7 +54,7 @@ class AmlaAlertWorkflowController extends Controller
         $alert = $this->alert($request, $id);
         $input = $request->validate(['reason' => ['required', 'string', 'min:3', 'max:2000']], ['reason.required' => 'Say why the alert is closed.']);
 
-        return $this->respond($this->workflow->close($request->user(), $alert, $input['reason']));
+        return $this->respond($request, $this->workflow->close($request->user(), $alert, $input['reason']));
     }
 
     #[OA\Post(path: '/api/amla/alerts/{id}/escalate', summary: 'Escalate an AMLA alert to a case', description: 'Needs `amla:alerts`, `amla:cases` and `branches:view_all`. Into an open case about the same subject (`case_id`), or a new case (`title`, optional).', tags: ['AMLA'], security: [['sanctum' => []]], responses: [new OA\Response(response: 201, description: 'The case')])]
@@ -70,7 +70,7 @@ class AmlaAlertWorkflowController extends Controller
 
         $case = $this->workflow->escalate($request->user(), $alert, $input['case_id'] ?? null, $input['title'] ?? null, $input['note'] ?? null);
 
-        return response()->json(['success' => true, 'data' => AmlaCasePresenter::caseDetail($case->load(['borrower', 'walkIn', 'branch', 'assignee', 'opener', 'decider']), $alerts)], 201);
+        return response()->json(['success' => true, 'data' => AmlaCasePresenter::caseDetail($case->load(['borrower', 'walkIn', 'branch', 'assignee', 'opener', 'decider']), $alerts, $request->user())], 201);
     }
 
     #[OA\Get(path: '/api/amla/alerts/{id}/history', summary: 'An AMLA alert\'s workflow history', description: 'Needs `amla:alerts`. Each step with who, when, from and to which status, and its note. Logged.', tags: ['AMLA'], security: [['sanctum' => []]], responses: [new OA\Response(response: 200, description: 'The history')])]
@@ -81,7 +81,7 @@ class AmlaAlertWorkflowController extends Controller
 
         return response()->json([
             'success' => true,
-            'data' => $alert->actions()->with(['user', 'assignee'])->orderBy('id')->get()->map(fn (AmlaAlertAction $action) => AmlaCasePresenter::alertAction($action))->values()->all(),
+            'data' => $alert->actions()->with(['user', 'assignee'])->orderBy('id')->get()->map(fn (AmlaAlertAction $action) => AmlaCasePresenter::alertAction($action, $request->user()))->values()->all(),
         ]);
     }
 
@@ -92,8 +92,8 @@ class AmlaAlertWorkflowController extends Controller
         return $this->workflow->find($request->user(), $id);
     }
 
-    private function respond(AmlaAlert $alert): JsonResponse
+    private function respond(Request $request, AmlaAlert $alert): JsonResponse
     {
-        return response()->json(['success' => true, 'data' => $this->presenter->alertRow($alert->load(['events', 'borrower', 'walkIn', 'branch', 'assignee', 'amlaCase']))]);
+        return response()->json(['success' => true, 'data' => $this->presenter->alertRow($alert->load(['events', 'borrower', 'walkIn', 'branch', 'assignee', 'amlaCase']), $request->user())]);
     }
 }

@@ -138,6 +138,10 @@ final class CaseRecords
     /** @param  array{decision: string, reason: string, determination_date?: string|null}  $input */
     public function decide(User $user, AmlaCase $case, array $input): AmlaCase
     {
+        if ($input['decision'] === 'no_str' && in_array($user->id, [$case->opened_by, $case->assigned_to], true)) {
+            app(AmlaAccess::class)->refuse($user, 'own_case_no_str', 'You opened or are investigating this case, so someone else holding AMLA report approval must decide that no STR is needed.');
+        }
+
         return $this->step($user, $case, 'decided', function (AmlaCase $locked) use ($user, $input) {
             abort_unless(in_array($locked->status, AmlaCase::ACTIVE, true), 409, 'This case already has its decision.');
             $str = $input['decision'] === 'str';

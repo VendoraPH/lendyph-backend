@@ -39,12 +39,15 @@ Route::prefix('amla')->name('amla.')->middleware('throttle:amla')->group(functio
 
     Route::post('/ctr-candidates/{id}/report', [AmlaFilingController::class, 'prepareCtr'])->where('id', $id)->name('ctr-candidates.report');
     Route::post('/ctr-candidates/{id}/not-reportable', [AmlaFilingController::class, 'notReportable'])->where('id', $id)->name('ctr-candidates.not-reportable');
+    Route::post('/ctr-candidates/{id}/not-reportable/approve', [AmlaFilingController::class, 'approveNotReportable'])->where('id', $id)->name('ctr-candidates.not-reportable.approve');
+    Route::post('/ctr-candidates/{id}/not-reportable/reject', [AmlaFilingController::class, 'rejectNotReportable'])->where('id', $id)->name('ctr-candidates.not-reportable.reject');
     Route::get('/reports', [AmlaFilingController::class, 'index'])->name('reports.index');
     Route::get('/reports/{id}', [AmlaFilingController::class, 'show'])->where('id', $id)->name('reports.show');
     Route::post('/reports/{id}/approve', [AmlaFilingController::class, 'approve'])->where('id', $id)->name('reports.approve');
     Route::post('/reports/{id}/return', [AmlaFilingController::class, 'return'])->where('id', $id)->name('reports.return');
     Route::post('/reports/{id}/submissions', [AmlaFilingController::class, 'submission'])->where('id', $id)->name('reports.submissions');
     Route::get('/reports/{id}/export', [AmlaFilingController::class, 'export'])->where('id', $id)->name('reports.export');
+    Route::get('/reports/{id}/submissions/{submissionId}/evidence', [AmlaFilingController::class, 'submissionEvidence'])->where(['id' => $id, 'submissionId' => $id])->name('reports.submissions.evidence');
     Route::get('/report-formats', [AmlaFilingController::class, 'formats'])->name('report-formats');
     Route::get('/filing-deadlines', [AmlaFilingController::class, 'deadlines'])->name('filing-deadlines');
 

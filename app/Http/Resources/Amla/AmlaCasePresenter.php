@@ -14,6 +14,7 @@ use App\Models\AmlaReportSubmission;
 use App\Models\AmlaRiskDowngrade;
 use App\Models\Borrower;
 use App\Models\GCashNonMember;
+use App\Models\User;
 use App\Services\Amla\Cases\FilingDeadlines;
 use App\Services\Amla\Detection\Finding;
 use Carbon\CarbonImmutable;
@@ -28,7 +29,8 @@ use Carbon\CarbonImmutable;
 final class AmlaCasePresenter
 {
     /** @return array<string, mixed> */
-    public static function alertAction(AmlaAlertAction $action): array
+    /** One workflow step; which case it went to shows only to head-office case holders. */
+    public static function alertAction(AmlaAlertAction $action, ?User $viewer = null): array
     {
         return [
             'id' => (int) $action->id,
@@ -39,7 +41,7 @@ final class AmlaCasePresenter
             'to_status_words' => AmlaAlert::STATUS_WORDS[$action->to_status] ?? $action->to_status,
             'by' => AmlaPresenter::user($action->user),
             'assignee' => AmlaPresenter::user($action->assignee),
-            'case_id' => $action->case_id,
+            'case_id' => AmlaDetectionPresenter::seesCases($viewer) ? $action->case_id : null,
             'note' => $action->note,
             'at' => $action->created_at?->toIso8601String(),
         ];
@@ -66,7 +68,7 @@ final class AmlaCasePresenter
     }
 
     /** @return array<string, mixed> */
-    public static function caseDetail(AmlaCase $case, AmlaDetectionPresenter $alerts): array
+    public static function caseDetail(AmlaCase $case, AmlaDetectionPresenter $alerts, ?User $viewer = null): array
     {
         return [
             ...self::caseRow($case),
@@ -78,7 +80,7 @@ final class AmlaCasePresenter
             'decision_reason' => $case->decision_reason,
             'decided_by' => AmlaPresenter::user($case->decider),
             'alerts' => $case->alerts()->with(['events', 'borrower', 'walkIn', 'branch', 'assignee', 'amlaCase'])->orderBy('amla_alerts.id')->get()
-                ->map(fn (AmlaAlert $alert) => $alerts->alertRow($alert))->values()->all(),
+                ->map(fn (AmlaAlert $alert) => $alerts->alertRow($alert, $viewer))->values()->all(),
             'notes' => $case->notes()->with('author')->orderBy('id')->get()->map(fn (AmlaCaseNote $note) => [
                 'id' => (int) $note->id, 'body' => $note->body, 'by' => AmlaPresenter::user($note->author), 'at' => $note->created_at?->toIso8601String(),
             ])->values()->all(),

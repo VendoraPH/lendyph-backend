@@ -5,25 +5,26 @@ namespace App\Http\Controllers\Api\Amla;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\Document\UploadFileTypes;
 use App\Http\Resources\Amla\AmlaCasePresenter;
-use App\Models\AmlaCase;
 use App\Models\AmlaCtrCandidate;
 use App\Models\AmlaReport;
 use App\Models\AmlaReportFormat;
-use App\Models\AmlaSettingsVersion;
+use App\Models\AmlaReportSubmission;
 use App\Models\User;
+use App\Services\Amla\Cases\EvidenceStore;
 use App\Services\Amla\Cases\FilingDeadlines;
 use App\Services\Amla\Cases\Filings;
 use App\Services\Amla\Detection\DetectionScope;
 use App\Services\Amla\Foundation\AmlaAccess;
 use App\Services\Amla\Foundation\AmlaLog;
-use App\Services\Amla\Foundation\Deadlines;
 use App\Services\Amla\Foundation\WorkingDayCalendar;
 use App\Services\BranchAccess;
+use App\Services\DownloadFilename;
 use Carbon\CarbonImmutable;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\Storage;
 use OpenApi\Attributes as OA;
 use Symfony\Component\HttpFoundation\StreamedResponse;
 
@@ -60,22 +61,48 @@ class AmlaFilingController extends Controller
     #[OA\Post(path: '/api/amla/ctr-candidates/{id}/report', summary: 'Prepare a CTR', description: 'Needs `amla:ctr`. From a detected candidate in the caller\'s scope: a snapshot of its fields ("Data not available" where Lendy holds none), due the settings\' working days after the transaction ("to verify"). Waits for approval by someone else. 409 once prepared or set aside.', tags: ['AMLA'], security: [['sanctum' => []]], responses: [new OA\Response(response: 201, description: 'The report')])]
     public function prepareCtr(Request $request, int $id): JsonResponse
     {
-        $candidate = $this->candidate($request, $id);
+        $candidate = $this->candidate($request, $id, AmlaAccess::CTR);
 
         return $this->respondWith($this->filings->prepareCtr($request->user(), $candidate), 201);
     }
 
-    #[OA\Post(path: '/api/amla/ctr-candidates/{id}/not-reportable', summary: 'Set a CTR candidate aside as not reportable', description: 'Needs `amla:ctr`. `reason` is required (kept encrypted).', tags: ['AMLA'], security: [['sanctum' => []]], responses: [new OA\Response(response: 200, description: 'The candidate')])]
+    #[OA\Post(path: '/api/amla/ctr-candidates/{id}/not-reportable', summary: 'Ask to set a CTR candidate aside as not reportable', description: 'Needs `amla:ctr`. `reason` is required (kept encrypted). Answers 202: it waits for a different `amla:approve` holder.', tags: ['AMLA'], security: [['sanctum' => []]], responses: [new OA\Response(response: 202, description: 'The candidate, waiting')])]
     public function notReportable(Request $request, int $id): JsonResponse
     {
-        $candidate = $this->candidate($request, $id);
+        $candidate = $this->candidate($request, $id, AmlaAccess::CTR);
         $input = $request->validate(['reason' => ['required', 'string', 'max:2000']], ['reason.required' => 'Say why it isn\'t reportable.']);
-        $candidate = $this->filings->notReportable($request->user(), $candidate, $input['reason']);
 
-        return response()->json(['success' => true, 'data' => [
-            'id' => (int) $candidate->id, 'reference' => $candidate->reference, 'status' => $candidate->status,
-            'status_words' => AmlaCtrCandidate::STATUS_WORDS[$candidate->status], 'reason' => $candidate->not_reportable_reason,
-        ]]);
+        return $this->candidateResponse($this->filings->requestNotReportable($request->user(), $candidate, $input['reason']), 202);
+    }
+
+    #[OA\Post(path: '/api/amla/ctr-candidates/{id}/not-reportable/approve', summary: 'Approve setting a CTR candidate aside', description: 'Needs `amla:approve`; never the person who asked (403, logged).', tags: ['AMLA'], security: [['sanctum' => []]], responses: [new OA\Response(response: 200, description: 'The candidate')])]
+    public function approveNotReportable(Request $request, int $id): JsonResponse
+    {
+        $candidate = $this->candidate($request, $id, AmlaAccess::APPROVE);
+
+        return $this->candidateResponse($this->filings->decideNotReportable($request->user(), $candidate, true));
+    }
+
+    #[OA\Post(path: '/api/amla/ctr-candidates/{id}/not-reportable/reject', summary: 'Refuse setting a CTR candidate aside', description: 'Needs `amla:approve`; never the person who asked. `reason` required; the candidate goes back to Detected.', tags: ['AMLA'], security: [['sanctum' => []]], responses: [new OA\Response(response: 200, description: 'The candidate')])]
+    public function rejectNotReportable(Request $request, int $id): JsonResponse
+    {
+        $candidate = $this->candidate($request, $id, AmlaAccess::APPROVE);
+        $input = $request->validate(['reason' => ['required', 'string', 'max:2000']]);
+
+        return $this->candidateResponse($this->filings->decideNotReportable($request->user(), $candidate, false, $input['reason']));
+    }
+
+    #[OA\Get(path: '/api/amla/reports/{id}/submissions/{submissionId}/evidence', summary: 'Download a filing step\'s evidence', description: 'Needs a reporting key and the report in scope. Logged by id only.', tags: ['AMLA'], security: [['sanctum' => []]], responses: [new OA\Response(response: 200, description: 'The file')])]
+    public function submissionEvidence(Request $request, int $id, int $submissionId): StreamedResponse
+    {
+        $report = $this->find($request, $id, self::READ);
+        $step = AmlaReportSubmission::query()->where('report_id', $report->id)->whereKey($submissionId)->first() ?? abort(404);
+        abort_unless(Storage::disk(EvidenceStore::DISK)->exists($step->evidence_path), 404);
+        $this->log->record('report_evidence_downloaded', $request->user(), 'report', $report->id, ['submission_id' => $step->id]);
+
+        return Storage::disk(EvidenceStore::DISK)->download($step->evidence_path, null, [
+            'Content-Disposition' => DownloadFilename::attachmentDisposition($step->evidence_name, $step->evidence_path),
+        ]);
     }
 
     #[OA\Get(path: '/api/amla/reports', summary: 'AMLA CTR and STR records', description: 'Needs a reporting key. CTRs in the caller\'s branches; STRs with head-office access. Filters `type`, `status`. Logged.', tags: ['AMLA'], security: [['sanctum' => []]], responses: [new OA\Response(response: 200, description: 'The reports')])]
@@ -182,32 +209,21 @@ class AmlaFilingController extends Controller
     }
 
     #[OA\Get(path: '/api/amla/filing-deadlines', summary: 'AMLA filings still to make, with their deadlines', description: 'Needs a reporting key. Unfiled reports, detected CTR candidates with no CTR yet, and (head office) cases whose STR isn\'t prepared; each with its due date on the working-day calendar, whether it is provisional, and whether it is upcoming, due today or overdue. Logged.', tags: ['AMLA'], security: [['sanctum' => []]], responses: [new OA\Response(response: 200, description: 'The filings')])]
-    public function deadlines(Request $request, Deadlines $engine): JsonResponse
+    public function deadlines(Request $request): JsonResponse
     {
         $user = $request->user();
         $this->access->authorize($user, self::READ);
         $this->log->record('filing_deadlines_viewed', $user);
         $today = CarbonImmutable::now(WorkingDayCalendar::TIMEZONE)->toDateString();
+        $headOffice = $user->can(BranchAccess::VIEW_ALL);
         $rows = [];
 
-        foreach ($this->visibleReports($user)->whereIn('status', AmlaReport::UNFILED)->orderBy('id')->get() as $report) {
-            $rows[] = AmlaCasePresenter::deadline('report', $report->id, $report->reference, AmlaReport::STATUS_WORDS[$report->status], $this->deadlines->due($report), $today, $this->deadlines);
-        }
+        foreach ($this->deadlines->filings() as $filing) {
+            $keys = $filing['type'] === AmlaReport::STR ? self::STR_READ : self::CTR_READ;
+            $visible = $user->canAny($keys) && ($filing['head_office'] ? $headOffice : $this->branches->canSee($user, $filing['branch_id']));
 
-        if ($user->canAny(self::CTR_READ)) {
-            foreach ($this->scope->constrain(AmlaCtrCandidate::query(), $user)->where('status', AmlaCtrCandidate::DETECTED)->orderBy('id')->get() as $candidate) {
-                $due = $engine->due('ctr', $candidate->occurred_on->toDateString(), AmlaSettingsVersion::query()->where('version', $candidate->settings_version)->first());
-                $rows[] = AmlaCasePresenter::deadline('ctr_candidate', $candidate->id, $candidate->reference, AmlaCtrCandidate::STATUS_WORDS[$candidate->status], $due, $today, $this->deadlines);
-            }
-        }
-
-        if ($user->can(BranchAccess::VIEW_ALL) && $user->canAny(self::STR_READ)) {
-            $cases = AmlaCase::query()->where('status', AmlaCase::STR_REQUIRED)
-                ->whereNotExists(fn ($reports) => $reports->selectRaw('1')->from('amla_reports')->whereColumn('amla_reports.case_id', 'amla_cases.id')->where('amla_reports.status', '!=', AmlaReport::RETURNED))
-                ->orderBy('id')->get();
-
-            foreach ($cases as $case) {
-                $rows[] = AmlaCasePresenter::deadline('case', $case->id, $case->reference, AmlaCase::STATUS_WORDS[$case->status], $engine->due('str', $case->determination_date->toDateString()), $today, $this->deadlines);
+            if ($visible) {
+                $rows[] = AmlaCasePresenter::deadline($filing['subject_type'], $filing['id'], $filing['reference'], $filing['status_words'], $filing['due'], $today, $this->deadlines);
             }
         }
 
@@ -252,11 +268,19 @@ class AmlaFilingController extends Controller
         return $report;
     }
 
-    private function candidate(Request $request, int $id): AmlaCtrCandidate
+    private function candidate(Request $request, int $id, string $key): AmlaCtrCandidate
     {
-        $this->access->authorize($request->user(), AmlaAccess::CTR);
+        $this->access->authorize($request->user(), $key);
 
         return $this->scope->constrain(AmlaCtrCandidate::query(), $request->user())->whereKey($id)->first() ?? abort(404);
+    }
+
+    private function candidateResponse(AmlaCtrCandidate $candidate, int $status = 200): JsonResponse
+    {
+        return response()->json(['success' => true, 'data' => [
+            'id' => (int) $candidate->id, 'reference' => $candidate->reference, 'status' => $candidate->status,
+            'status_words' => AmlaCtrCandidate::STATUS_WORDS[$candidate->status], 'reason' => $candidate->not_reportable_reason,
+        ]], $status);
     }
 
     private function respondWith(AmlaReport $report, int $status = 200): JsonResponse

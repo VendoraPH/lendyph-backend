@@ -23,6 +23,15 @@ use Symfony\Component\HttpFoundation\HeaderUtils;
  */
 final class DownloadFilename
 {
+    /** As inlineDisposition(), for a file the browser should save rather than open. */
+    public static function attachmentDisposition(?string $name, string $storedPath): string
+    {
+        $storedName = basename($storedPath);
+        $name = self::withStoredExtension(self::separatorsReplaced(Document::cleanOriginalFilename((string) $name)), $storedName);
+
+        return HeaderUtils::makeDisposition(HeaderUtils::DISPOSITION_ATTACHMENT, $name, self::fallback($name, $storedName));
+    }
+
     public static function inlineDisposition(?string $name, string $storedPath): string
     {
         $storedName = basename($storedPath);

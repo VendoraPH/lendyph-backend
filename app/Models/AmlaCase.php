@@ -147,10 +147,19 @@ class AmlaCase extends Model
         return $this->hasMany(AmlaCaseAction::class, 'case_id');
     }
 
+    /**
+     * One workflow step at a time. A no-STR decision closes the case for
+     * good, so its decider is never the case's opener or assignee.
+     */
     protected function amlaAllowsUpdate(): bool
     {
-        return in_array($this->status, self::NEXT[(string) $this->getOriginal('status')] ?? [], true)
-            && array_diff(array_keys($this->getDirty()), self::WORKFLOW_COLUMNS) === [];
+        if (! in_array($this->status, self::NEXT[(string) $this->getOriginal('status')] ?? [], true)
+            || array_diff(array_keys($this->getDirty()), self::WORKFLOW_COLUMNS) !== []) {
+            return false;
+        }
+
+        return $this->status !== self::CLOSED_NO_REPORT
+            || ($this->decided_by !== null && ! in_array($this->decided_by, [(int) $this->getOriginal('opened_by'), (int) $this->getOriginal('assigned_to')], true));
     }
 
     protected function amlaUpdateConditions(): array

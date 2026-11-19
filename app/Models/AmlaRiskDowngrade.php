@@ -39,7 +39,7 @@ class AmlaRiskDowngrade extends Model
 
     private const DECISION_COLUMNS = ['status', 'pending_key', 'decided_by', 'decided_at', 'decision_note', 'assessment_id', 'updated_at'];
 
-    protected $fillable = ['profile_id', 'from_level', 'to_level', 'reason', 'status', 'pending_key', 'requested_by', 'decided_by', 'decided_at', 'decision_note', 'assessment_id'];
+    protected $fillable = ['profile_id', 'from_level', 'to_level', 'reason', 'status', 'pending_key', 'requested_by', 'decided_by', 'decided_at', 'decision_note', 'base_assessment_id', 'assessment_id'];
 
     protected function casts(): array
     {
@@ -51,6 +51,7 @@ class AmlaRiskDowngrade extends Model
             'decided_by' => 'integer',
             'decided_at' => 'datetime',
             'decision_note' => 'encrypted',
+            'base_assessment_id' => 'integer',
             'assessment_id' => 'integer',
         ];
     }

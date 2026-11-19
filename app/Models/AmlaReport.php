@@ -150,10 +150,19 @@ class AmlaReport extends Model
         return $this->hasMany(AmlaReportSubmission::class, 'report_id');
     }
 
+    /**
+     * One filing step at a time; an approval names an approver who isn't the
+     * preparer (four eyes, whatever the caller's role).
+     */
     protected function amlaAllowsUpdate(): bool
     {
-        return in_array($this->status, self::NEXT[(string) $this->getOriginal('status')] ?? [], true)
-            && array_diff(array_keys($this->getDirty()), self::WORKFLOW_COLUMNS) === [];
+        if (! in_array($this->status, self::NEXT[(string) $this->getOriginal('status')] ?? [], true)
+            || array_diff(array_keys($this->getDirty()), self::WORKFLOW_COLUMNS) !== []) {
+            return false;
+        }
+
+        return $this->status !== self::APPROVED
+            || ($this->approved_by !== null && $this->approved_by !== (int) $this->getOriginal('prepared_by'));
     }
 
     protected function amlaUpdateConditions(): array

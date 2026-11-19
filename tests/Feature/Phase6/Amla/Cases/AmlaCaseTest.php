@@ -55,7 +55,8 @@ class AmlaCaseTest extends TestCase
 
     public function test_notes_and_the_decision_are_encrypted_and_a_decision_closes_or_marks_the_case_for_an_str(): void
     {
-        $officer = $this->headOffice(['amla:cases']);
+        $officer = $this->headOffice(['amla:cases', 'amla:approve']);
+        $reviewer = $this->headOffice(['amla:cases', 'amla:approve']);
         $case = $this->openCase($officer);
         $other = $this->openCase($officer);
         $outside = $this->outsideAmlaCounts();
@@ -70,9 +71,11 @@ class AmlaCaseTest extends TestCase
         $this->postJson("/api/amla/cases/{$case->id}/decision", ['decision' => 'str', 'reason' => 'Pattern has no business reason.', 'determination_date' => '2026-11-20'])
             ->assertOk()->assertJsonPath('data.status', 'str_required')->assertJsonPath('data.determination_date', '2026-11-20');
         $this->assertNotSame('Pattern has no business reason.', AmlaCase::query()->toBase()->value('decision_reason'));
-        $this->postJson("/api/amla/cases/{$case->id}/decision", ['decision' => 'no_str', 'reason' => 'Changed my mind.'])->assertConflict();
+        $this->actingAs($reviewer)->postJson("/api/amla/cases/{$case->id}/decision", ['decision' => 'no_str', 'reason' => 'Changed my mind.'])->assertConflict();
 
-        $this->actingAs($officer)->postJson("/api/amla/cases/{$other->id}/decision", ['decision' => 'no_str', 'reason' => 'Salary documented.'])
+        // A no-STR decision is never its opener's (or assignee's) own.
+        $this->actingAs($officer)->postJson("/api/amla/cases/{$other->id}/decision", ['decision' => 'no_str', 'reason' => 'Salary documented.'])->assertForbidden();
+        $this->actingAs($reviewer)->postJson("/api/amla/cases/{$other->id}/decision", ['decision' => 'no_str', 'reason' => 'Salary documented.'])
             ->assertOk()->assertJsonPath('data.status', 'closed_no_report');
         $this->assertNothingWrittenOutsideAmla($outside);
     }

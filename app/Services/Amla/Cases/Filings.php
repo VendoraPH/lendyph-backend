@@ -88,13 +88,43 @@ final class Filings
         });
     }
 
-    public function notReportable(User $user, AmlaCtrCandidate $candidate, string $reason): AmlaCtrCandidate
+    /**
+     * Ask to set a candidate aside as not reportable, with a reason. It waits
+     * for a different `amla:approve` holder: setting a CTR aside is final.
+     */
+    public function requestNotReportable(User $user, AmlaCtrCandidate $candidate, string $reason): AmlaCtrCandidate
     {
         return DB::transaction(function () use ($user, $candidate, $reason) {
             $locked = AmlaCtrCandidate::query()->lockForUpdate()->findOrFail($candidate->id);
-            abort_unless($locked->status === AmlaCtrCandidate::DETECTED, 409, 'This CTR candidate already has its CTR or was set aside.');
-            $locked->forceFill(['status' => AmlaCtrCandidate::NOT_REPORTABLE, 'not_reportable_reason' => trim($reason), 'status_changed_by' => $user->id])->save();
-            $this->log->record('ctr_not_reportable', $user, 'ctr_candidate', $locked->id, ['reference' => $locked->reference]);
+            abort_unless($locked->status === AmlaCtrCandidate::DETECTED, 409, 'This CTR candidate already has its CTR or is being set aside.');
+            $locked->forceFill([
+                'status' => AmlaCtrCandidate::SET_ASIDE_PENDING,
+                'not_reportable_reason' => trim($reason),
+                'set_aside_requested_by' => $user->id,
+                'status_changed_by' => $user->id,
+            ])->save();
+            $this->log->record('ctr_set_aside_requested', $user, 'ctr_candidate', $locked->id, ['reference' => $locked->reference]);
+            $this->inbox->send($this->inbox->recipients([AmlaAccess::APPROVE], $locked->branch_id, $locked->gcash_non_member_id !== null, [$user->id]),
+                'ctr_set_aside_needs_approval', 'ctr_candidate', $locked->id, "Setting CTR candidate {$locked->reference} aside is waiting for your approval.");
+
+            return $locked;
+        });
+    }
+
+    /** Approve (`$approve`) or refuse a set-aside, never by the person who asked for it. */
+    public function decideNotReportable(User $user, AmlaCtrCandidate $candidate, bool $approve, ?string $note = null): AmlaCtrCandidate
+    {
+        if ($candidate->set_aside_requested_by === $user->id) {
+            $this->access->refuse($user, 'requester_cannot_decide', 'You asked to set this CTR candidate aside, so someone else holding AMLA report approval must decide it.');
+        }
+
+        return DB::transaction(function () use ($user, $candidate, $approve, $note) {
+            $locked = AmlaCtrCandidate::query()->lockForUpdate()->findOrFail($candidate->id);
+            abort_unless($locked->status === AmlaCtrCandidate::SET_ASIDE_PENDING, 409, 'This CTR candidate isn\'t waiting to be set aside.');
+            $locked->forceFill($approve
+                ? ['status' => AmlaCtrCandidate::NOT_REPORTABLE, 'set_aside_approved_by' => $user->id, 'status_changed_by' => $user->id]
+                : ['status' => AmlaCtrCandidate::DETECTED, 'status_changed_by' => $user->id])->save();
+            $this->log->record($approve ? 'ctr_set_aside_approved' : 'ctr_set_aside_rejected', $user, 'ctr_candidate', $locked->id, ['reference' => $locked->reference, 'noted' => filled($note)]);
 
             return $locked;
         });
@@ -137,6 +167,10 @@ final class Filings
 
     public function return(User $user, AmlaReport $report, string $reason): AmlaReport
     {
+        if ($report->prepared_by === $user->id) {
+            $this->access->refuse($user, 'preparer_cannot_return', 'You prepared this report, so someone else holding AMLA report approval must return it.');
+        }
+
         return $this->step($user, $report, 'report_returned', AmlaReport::PENDING_APPROVAL, function (AmlaReport $locked) use ($user, $reason) {
             $locked->forceFill(['status' => AmlaReport::RETURNED, 'returned_reason' => trim($reason)])->save();
 
