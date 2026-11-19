@@ -57,6 +57,12 @@ class LindaQuestion extends Model
     /** A lookup (a member, a loan or a receipt) the server answered itself, with no model call. */
     public const SOURCE_LOOKUP = 'lookup';
 
+    /** An open question's written answer was shown (round 3). */
+    public const OPEN_USED = 'used';
+
+    /** An open question's written answer failed a check, or couldn't be had, so a fixed reply was shown. */
+    public const OPEN_FELL_BACK = 'fell_back';
+
     protected $fillable = [
         'user_id',
         'asked_at',
@@ -78,6 +84,7 @@ class LindaQuestion extends Model
         'cache_write_tokens',
         'cost',
         'duration_ms',
+        'open_answer',
     ];
 
     /** The database defaults, so a row reads the same before and after it is saved. */

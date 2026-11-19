@@ -60,6 +60,39 @@ final class LindaMatcher
             'repayment rate', 'collection percentage', 'percent', 'percentage', 'porsyento sa koleksyon',
             'porsyento ng koleksyon', 'porsyento', 'porsiyento',
         ],
+        'portfolio_summary' => [
+            'portfolio', 'portfolio summary', 'loan portfolio', 'portfolio at risk', 'par', 'par 1', 'par 30', 'par 90',
+            'principal balance', 'outstanding principal', 'portpolyo',
+        ],
+        'income_summary' => [
+            'income', 'interest income', 'penalty income', 'fee income', 'income report', 'revenue', 'revenues', 'earn',
+            'earned', 'earnings', 'kita', 'kinita', 'kinitaan', 'ganansya', 'ganansiya',
+        ],
+        'expense_summary' => [
+            'expense', 'expenses', 'spend', 'spent', 'spending', 'gastos', 'gasto', 'gigasto', 'gastu', 'gastohan',
+        ],
+        'savings_summary' => [
+            'savings', 'savings account', 'savings accounts', 'savings deposits', 'deposits', 'total deposits',
+            'time deposit', 'time deposits', 'maturing time deposits', 'maturing', 'ipon', 'impok', 'tinipid', 'tinigom', 'tigom',
+        ],
+        'share_capital_summary' => [
+            'share capital', 'share capitals', 'capital build up', 'capital buildup', 'cbu', 'capital', 'kapital',
+            'share capital ledger', 'share capital balance',
+        ],
+        'cda_summary' => [
+            'cda', 'cda deadline', 'cda deadlines', 'cda readiness', 'cda report', 'cda reports', 'cda compliance',
+            'compliance', 'compliance status', 'readiness', 'ready', 'deadline', 'deadlines', 'next deadline', 'next deadlines', 'next cda deadline', 'next cda deadlines',
+            'sunod nga deadline', 'susunod na deadline', 'handa', 'andam',
+        ],
+        'borrower_summary' => [
+            'active members', 'active member', 'inactive members', 'inactive member', 'blacklisted members',
+            'blacklisted member', 'new members', 'new member', 'repeat members', 'repeat member', 'repeat borrowers',
+            'repeat borrower', 'membership', 'member count', 'members count',
+            'aktibong miyembro', 'aktibong members', 'active na miyembro', 'active na members', 'bagong miyembro',
+            'bagong members', 'bagong member',
+            'aktibo nga miyembro', 'aktibo nga members', 'active nga miyembro', 'active nga members',
+            'bag ong miyembro', 'bag ong members', 'bag ong member',
+        ],
     ];
 
     /**
@@ -71,7 +104,16 @@ final class LindaMatcher
      */
     private const WEAK_SUBJECTS = [
         'loan_summary' => ['pila ka loans', 'pila ka loan', 'pila kabuok nga loan', 'pila kabuok loan'],
+        'borrower_summary' => ['members', 'member', 'miyembro', 'myembro', 'kasapi'],
     ];
+
+    /**
+     * Words that keep a bare member word from being a member count: "how many
+     * loans do our members have" is about loans.
+     *
+     * @var list<string>
+     */
+    private const NOT_A_MEMBER_COUNT = ['loan', 'loans'];
 
     /**
      * Officer words: any of them makes the question about officer
@@ -160,7 +202,7 @@ final class LindaMatcher
         'list', 'many', 'me', 'much', 'my', 'need', 'now', 'number', 'of', 'on', 'operation',
         'operations', 'our', 'payment', 'payments', 'please', 'pls', 'right', 'see', 'show', 'so',
         'tell', 'the', 'there', 'this', 'to', 'total', 'totals', 'us', 'was', 'we', 'were', 'what',
-        'whats', 'which', 'who', 'whos', 'with', 'would', 'you',
+        'whats', 'which', 'who', 'whos', 'with', 'would', 'you', 'big', 'size', 'soon', 'when',
         'account', 'accounts', 'amount', 'amounts', 'loan', 'loans', 'member', 'members', 'report', 'dues',
         // "Find overdue members", "Search past-due loans": aggregate questions. A
         // name or a record number after them is no filler, so a lookup still
@@ -170,12 +212,12 @@ final class LindaMatcher
         'ako', 'ang', 'ano', 'anong', 'ba', 'bigay', 'ilan', 'ilang', 'ito', 'kabuuan', 'kami', 'ko',
         'lahat', 'magkano', 'may', 'mga', 'mo', 'na', 'namin', 'natin', 'nating', 'ng', 'nang', 'ngayon',
         'paki', 'pakibigay', 'pakita', 'pakipakita', 'po', 'sa', 'sino', 'sinong', 'sinu', 'tayo',
-        'ung', 'yung', 'pa', 'din', 'rin',
+        'ung', 'yung', 'pa', 'din', 'rin', 'kailan', 'kelan',
         // Bisaya
         'pila', 'ka', 'kabuok', 'nga', 'naa', 'naay', 'unsa', 'unsay', 'kinsa', 'asa', 'nato', 'namo',
         'atong', 'among', 'ato', 'amo', 'ug', 'og', 'palihug', 'ipakita', 'tan', 'awa', 'lang', 'man',
         'diay', 'kaha', 'ra', 'pud', 'pod', 'sab', 'sad', 'usab', 'kini', 'kana', 'niini', 'bai', 'bay',
-        'day', 'dong', 'tanan', 'tanang', 'gyud', 'jud', 'ta',
+        'day', 'dong', 'tanan', 'tanang', 'gyud', 'jud', 'ta', 'kanus', 'kanusa',
     ];
 
     /** The longest branch name taken from a branch phrase, in words. */
@@ -412,6 +454,9 @@ final class LindaMatcher
      *   names ("which branch collected the most"), so it wins over them all;
      * - collection efficiency is about collections ("porsyento sa
      *   koleksyon"), so it wins over collections;
+     * - a bare member word ("members", "miyembro") only says whose figures
+     *   another subject is about ("which members are overdue"), and beside a
+     *   loan word it is a loan question, so it counts only on its own;
      * - "summary" beside another subject only describes it ("collection
      *   summary"), and so do the weak phrases ("pila ka loan").
      *
@@ -459,6 +504,10 @@ final class LindaMatcher
         }
 
         if ($intents === []) {
+            if (array_intersect($words, self::NOT_A_MEMBER_COUNT) !== []) {
+                unset($weakIntents[LindaIntent::BorrowerSummary->value]);
+            }
+
             $intents = $weakIntents;
         }
 

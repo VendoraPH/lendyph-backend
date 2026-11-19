@@ -73,7 +73,7 @@ class ShareCapitalMemberService
 
         return [
             'members' => $members,
-            'totals' => $this->totals($this->ledgerWithBorrowers(null, $branchIds)),
+            'totals' => $this->bookTotals($branchIds),
             'matching_totals' => $this->totals($matching),
         ];
     }
@@ -180,6 +180,18 @@ class ShareCapitalMemberService
             ->map(fn ($rows): int => $rows->sum(fn (object $row): int => LoanService::toCentavos((float) $row->credit)))
             ->mapWithKeys(fn (int $centavos, $id): array => [(int) $id => $centavos])
             ->all();
+    }
+
+    /**
+     * The totals of the whole book for members of `$branchIds` (null: every
+     * branch): the member list's `meta.totals`, which Linda also reads.
+     *
+     * @param  list<int>|null  $branchIds
+     * @return array{member_count: int, total_credits: float|int, total_debits: float|int, balance: float|int}
+     */
+    public function bookTotals(?array $branchIds): array
+    {
+        return $this->totals($this->ledgerWithBorrowers(null, $branchIds));
     }
 
     /**

@@ -93,7 +93,7 @@ class AccountingExpenseController extends Controller
         app(BranchAccess::class)->authorizeBranchFilter(request()->user(), $filters['branch_id'] ?? null);
 
         // Every filter but `status`, so the status counts can share it.
-        $filtered = fn (): Builder => $this->visibleToCaller(AccountingExpense::query())
+        $filtered = fn (): Builder => AccountingExpense::query()->visibleTo(request()->user())
             ->search($filters['search'] ?? null)
             ->when(isset($filters['from']), fn ($q) => $q->where('date', '>=', $filters['from']))
             ->when(isset($filters['to']), fn ($q) => $q->where('date', '<=', $filters['to']))
@@ -118,7 +118,7 @@ class AccountingExpenseController extends Controller
 
         return AccountingExpenseResource::collection($expenses)
             ->additional(['meta' => [
-                'totals' => $this->listTotals($matching()),
+                'totals' => AccountingExpense::listTotals($matching()),
                 'stats' => $this->statusCounts($filtered),
             ]]);
     }
@@ -242,30 +242,6 @@ class AccountingExpenseController extends Controller
     }
 
     /**
-     * `{count, amount, amount_paid, amount_due}` over every expense the list
-     * matches (its `status` filter included), not the page, in one aggregate.
-     * Integer centavos; `amount_due` is `amount - amount_paid` summed in SQL,
-     * the same figure as each row's `amount_due`.
-     *
-     * @param  Builder<AccountingExpense>  $matching
-     * @return array{count: int, amount: int, amount_paid: int, amount_due: int}
-     */
-    private function listTotals(Builder $matching): array
-    {
-        $row = $matching
-            ->toBase()
-            ->selectRaw('COUNT(*) as row_count, COALESCE(SUM(amount), 0) as amount, COALESCE(SUM(amount_paid), 0) as amount_paid, COALESCE(SUM(amount - amount_paid), 0) as amount_due')
-            ->first();
-
-        return [
-            'count' => (int) $row->row_count,
-            'amount' => (int) $row->amount,
-            'amount_paid' => (int) $row->amount_paid,
-            'amount_due' => (int) $row->amount_due,
-        ];
-    }
-
-    /**
      * Expenses per derived status, with every filter except `status`: the
      * screen's tab counts. Each count goes through
      * AccountingExpense::scopeWithStatus(), so a count always agrees with the
@@ -283,19 +259,5 @@ class AccountingExpenseController extends Controller
         }
 
         return $counts;
-    }
-
-    /**
-     * Rows in the caller's branches (BranchAccess). A row with no branch is
-     * visible only to `branches:view_all`.
-     *
-     * @param  Builder<AccountingExpense>  $query
-     * @return Builder<AccountingExpense>
-     */
-    private function visibleToCaller(Builder $query): Builder
-    {
-        $branchIds = app(BranchAccess::class)->for(request()->user());
-
-        return $branchIds === null ? $query : $query->whereIn('branch_id', $branchIds);
     }
 }

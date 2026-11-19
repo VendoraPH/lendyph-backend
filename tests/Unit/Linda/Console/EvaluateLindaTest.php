@@ -105,7 +105,7 @@ class EvaluateLindaTest extends LindaTestCase
         $this->assertNotContains('How much have we collected this month?', $sent);
         $this->assertNotContains('What is our collection efficiency this month?', $sent);
         $this->assertNotContains('Pila ang nakolekta karong bulana?', $sent);
-        $this->assertContains('What was our interest income last month?', $sent);
+        $this->assertContains('How much did we earn in penalties this year?', $sent);
         $this->assertLessThan(count($cases), count($fake->requests));
     }
 

@@ -444,7 +444,7 @@ class LindaAnswererTest extends LindaAnswersTestCase
 
     public function test_an_intent_linda_cant_answer_yet_links_to_its_report_when_the_user_can_open_it(): void
     {
-        $reports = $this->answerer()->answer($this->branchUser(), LindaIntent::IncomeSummary, null, null);
+        $reports = $this->answerer()->notYet(LindaIntent::IncomeSummary, $this->branchUser());
         $this->assertSame('not_yet', $reports->outcome);
         $this->assertSame('income_summary', $reports->intent);
         $this->assertSame([['label' => 'Open Income Report', 'url' => '/reports/income_report']], $reports->links);
@@ -457,7 +457,7 @@ class LindaAnswererTest extends LindaAnswersTestCase
         );
         $this->assertSame(['/reports/portfolio_summary'], $this->linkUrls($this->answerer()->answer($this->branchUser(), LindaIntent::PortfolioSummary, null, null)));
 
-        $noReports = $this->answerer()->answer($this->branchUser(['loans:view']), LindaIntent::IncomeSummary, null, null);
+        $noReports = $this->answerer()->notYet(LindaIntent::IncomeSummary, $this->branchUser(['loans:view']));
         $this->assertSame('not_yet', $noReports->outcome);
         $this->assertSame([], $noReports->links);
 
