@@ -8,6 +8,7 @@ use App\Services\LoanOrigination\Files\FileScanner;
 use App\Services\LoanOrigination\Files\MisconfiguredScanner;
 use App\Services\LoanOrigination\Files\NoScanner;
 use App\Services\LoanOrigination\Files\OriginationFileStore;
+use App\Services\LoanOrigination\Files\PdfNormaliseException;
 use App\Services\LoanOrigination\Files\QpdfNormaliser;
 use App\Services\LoanOrigination\Files\ScannerUnavailableException;
 use App\Services\LoanOrigination\Files\ScanResult;
@@ -454,22 +455,76 @@ it('stores qpdf\'s own copy of a plain PDF, never the file as sent, pictures ins
         ->and($version->sha256)->toBe(hash('sha256', $file->getContent()));
 });
 
-it('refuses a PDF that would open up past the size it can check', function () {
+it('keeps a large image-heavy scan: its pictures stay compressed, under the size limit', function () {
     loNeedsQpdf();
     $application = OriginationApplication::query()->create();
-    $objects = loPageObjects();
-    $objects[4] = loStreamBody('/Filter /FlateDecode', (string) gzcompress(str_repeat(' ', OriginationFileStore::MAX_NORMALISED_BYTES + 1024)));
+    // A 4500 x 4200 colour scan is about 57 MB once uncompressed: past the
+    // limit if qpdf opened up every stream, a few hundred kB as stored.
+    $pixels = (string) gzcompress(str_repeat("\xF0\xF0\xF0", 4500 * 4200));
+    $objects = loPageObjects(contents: 'q 612 0 0 792 0 0 cm /Im1 Do Q', page: '/Resources << /XObject << /Im1 5 0 R >> >>');
+    $objects[5] = loStreamBody('/Type /XObject /Subtype /Image /Width 4500 /Height 4200 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /FlateDecode', $pixels);
 
-    expect(fn () => loStore()->store($application, 'payslip', UploadedFile::fake()->createWithContent('big.pdf', loBuildPdf($objects))))
-        ->toThrow(UploadRefusedException::class, OriginationFileStore::PDF_TOO_LARGE);
+    $version = loStore()->store($application, 'payslip', UploadedFile::fake()->createWithContent('scan.pdf', loBuildPdf($objects)));
 
-    expect(Storage::disk('private')->allFiles())->toBe([]);
+    expect($version->size_bytes)->toBeLessThan(OriginationFileStore::MAX_NORMALISED_BYTES);
 });
 
-it('refuses an encrypted PDF, an XFA form and actions that run on opening', function (string $catalog, string $trailer, array $extra, string $message) {
+it('stops qpdf and refuses when its copy grows past the limit', function () {
+    loNeedsQpdf();
+
+    try {
+        (new QpdfNormaliser)->normalised(loPdf()->getContent(), 100);
+        $this->fail('A copy past the limit was returned.');
+    } catch (PdfNormaliseException $e) {
+        expect($e->tooLarge)->toBeTrue();
+    }
+});
+
+it('runs qpdf under prlimit with the configured CPU and memory limits when prlimit is there', function () {
+    config(['loan_origination.qpdf.cpu_seconds' => 7, 'loan_origination.qpdf.memory_mb' => 300]);
+
+    expect((new QpdfNormaliser('qpdf', prlimit: '/usr/bin/prlimit'))->command(['--object-streams=disable'], '/tmp/x/in.pdf', '/tmp/x/out.pdf'))
+        ->toBe(['/usr/bin/prlimit', '--cpu=7', '--as='.(300 * 1024 * 1024), 'qpdf', '--object-streams=disable', '/tmp/x/in.pdf', '/tmp/x/out.pdf'])
+        ->and((new QpdfNormaliser('qpdf', prlimit: false))->command(['--object-streams=disable'], '/tmp/x/in.pdf', '/tmp/x/out.pdf'))
+        ->toBe(['qpdf', '--object-streams=disable', '/tmp/x/in.pdf', '/tmp/x/out.pdf']);
+});
+
+it('refuses a PDF when qpdf runs out of the memory it is allowed', function () {
+    loNeedsQpdf();
+    if ((new ExecutableFinder)->find('prlimit') === null) {
+        Assert::fail('prlimit is required for this test: it is part of util-linux on the servers and the test image.');
+    }
+
+    config(['loan_origination.qpdf.memory_mb' => 1]);
+    $store = new OriginationFileStore(new NoScanner, pdf: new QpdfNormaliser);
+
+    expect(fn () => $store->store(OriginationApplication::query()->create(), 'payslip', loPdf()))
+        ->toThrow(UploadRefusedException::class, OriginationFileStore::UNCHECKABLE_PDF);
+});
+
+it('clears folders an interrupted run left behind for over an hour, and only those', function () {
+    loNeedsQpdf();
+    $old = sys_get_temp_dir().'/lendyph-qpdf-'.bin2hex(random_bytes(8));
+    $fresh = sys_get_temp_dir().'/lendyph-qpdf-'.bin2hex(random_bytes(8));
+    mkdir($old, 0700);
+    mkdir($fresh, 0700);
+    file_put_contents("{$old}/in.pdf", 'an applicant\'s PDF');
+    file_put_contents("{$fresh}/in.pdf", 'a run in progress');
+    touch("{$old}/in.pdf", time() - 7200);
+    touch($old, time() - 7200);
+
+    (new QpdfNormaliser)->normalised(loPdf()->getContent(), OriginationFileStore::MAX_NORMALISED_BYTES);
+
+    expect(is_dir($old))->toBeFalse()->and(is_file("{$fresh}/in.pdf"))->toBeTrue();
+
+    unlink("{$fresh}/in.pdf");
+    rmdir($fresh);
+});
+
+it('refuses an encrypted PDF, an XFA form, attached files and actions that run on opening', function (string $catalog, string $trailer, array $extra, string $message, string $page = '', array $pageExtra = []) {
     loNeedsQpdf();
     $application = OriginationApplication::query()->create();
-    $file = UploadedFile::fake()->createWithContent('form.pdf', loBuildPdf(loPageObjects($catalog) + $extra, [], $trailer));
+    $file = UploadedFile::fake()->createWithContent('form.pdf', loBuildPdf(loPageObjects($catalog, page: $page) + $extra + $pageExtra, [], $trailer));
 
     expect(fn () => loStore()->store($application, 'payslip', $file))->toThrow(UploadRefusedException::class, $message);
 })->with([
@@ -479,6 +534,9 @@ it('refuses an encrypted PDF, an XFA form and actions that run on opening', func
     'open action as a dictionary' => ['/OpenAction << /S /GoTo /D [3 0 R /Fit] >>', '', [], OriginationFileStore::ACTIVE_PDF],
     'open JavaScript by reference' => ['/OpenAction 7 0 R', '', [7 => '<< /S /JavaScript /JS (app.alert\\(1\\)) >>'], OriginationFileStore::ACTIVE_PDF],
     'open JavaScript as a dictionary' => ['/OpenAction << /S /JavaScript /JS (app.alert\\(1\\)) >>', '', [], OriginationFileStore::ACTIVE_PDF],
+    'a file attached to an annotation' => ['', '', [], OriginationFileStore::ACTIVE_PDF, '/Annots [6 0 R]', [6 => '<< /Type /Annot /Subtype /FileAttachment /Rect [0 0 10 10] /FS << /Type /Filespec /F (a.txt) /EF << /F 7 0 R >> >> >>', 7 => loStreamBody('', 'hello')]],
+    'a file specification with an embedded stream' => ['/Extra << /Type /Filespec /F (a.txt) /EF << /F 7 0 R >> >>', '', [7 => loStreamBody('', 'hello')], OriginationFileStore::ACTIVE_PDF],
+    'rich media' => ['', '', [], OriginationFileStore::ACTIVE_PDF, '/Annots [6 0 R]', [6 => '<< /Type /Annot /Subtype /RichMedia /Rect [0 0 10 10] >>']],
     'additional actions' => ['/AA << /WC 7 0 R >>', '', [7 => '<< /S /GoTo /D [3 0 R /Fit] >>'], OriginationFileStore::ACTIVE_PDF],
 ]);
 

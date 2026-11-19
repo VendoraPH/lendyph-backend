@@ -26,14 +26,15 @@ use Throwable;
  * - scanned by the FileScanner seam: an infected file is refused; while a
  *   configured scanner can't be reached every file is refused (503); with no
  *   scanner a file is kept as "Not scanned";
- * - a PDF is rewritten by qpdf (object streams opened up, streams
- *   uncompressed) and checked on qpdf's copy, failing closed: one carrying
- *   JavaScript, an action run on opening (/AA, or an /OpenAction that isn't
- *   just a destination array), a launch action,
- *   embedded files or an XFA form is refused, and so is an encrypted one, one
- *   qpdf can't read or that opens up past 50 MB, and any check that fails.
- *   qpdf's compressed copy of the checked file is stored, never the PDF as
- *   sent. Without a working qpdf, PDFs are refused;
+ * - a PDF is rewritten by qpdf with its object streams written out, so every
+ *   dictionary key is plain text, and checked on qpdf's copy, failing
+ *   closed: one carrying JavaScript, an action run on opening (/AA, or an
+ *   /OpenAction that isn't just a destination array), a launch action, an
+ *   attached or embedded file (/EF, /EmbeddedFile, /FileAttachment), rich
+ *   media or an XFA form is refused, and so is an encrypted one, one qpdf
+ *   can't read or whose copy passes 50 MB, and any check that fails. qpdf's
+ *   copy is stored, never the PDF as sent. Without a working qpdf, PDFs are
+ *   refused;
  * - an image is decoded and re-encoded (GD), so only the picture is kept;
  *   while GD is missing pictures are refused, never kept as sent;
  * - stored on the private disk under a random name, opened only through
@@ -83,20 +84,20 @@ final class OriginationFileStore
 
     public const PICTURES_UNAVAILABLE = 'Pictures can\'t be accepted on this server right now. Upload the document as a PDF instead.';
 
-    /** PDF names that run something or carry other files (decoded from `#xx` escapes first). */
     /**
-     * Active names in qpdf's opened-up copy. /OpenAction passes only when its
-     * value is an explicit destination array (`/OpenAction [3 0 R /Fit]`),
-     * which just sets the page and zoom it opens at. An action dictionary
-     * (`<< … >>`) or an indirect reference (`7 0 R`, which may point to an
-     * action) is refused.
+     * Names in qpdf's copy (after `#xx` escapes are decoded) that run something
+     * or carry another file. /OpenAction passes only when its value is an
+     * explicit destination array (`/OpenAction [3 0 R /Fit]`), which just sets
+     * the page and zoom it opens at; an action dictionary (`<< … >>`) or an
+     * indirect reference (`7 0 R`, which may point to an action) is refused.
+     * A file specification's /EF carries a file whether or not its stream says
+     * /Type /EmbeddedFile, so /EF itself is refused.
      */
-    private const ACTIVE_PDF_NAMES = '~/(?:JavaScript|JS|AA|Launch|EmbeddedFiles?|XFA)(?![A-Za-z0-9])|/OpenAction(?![A-Za-z0-9])(?!\s*\[)~';
+    private const ACTIVE_PDF_NAMES = '~/(?:JavaScript|JS|AA|Launch|EmbeddedFiles?|EF|FileAttachment|RichMedia|XFA)(?![A-Za-z0-9])|/OpenAction(?![A-Za-z0-9])(?!\s*\[)~';
 
     private const ENCRYPT_NAME = '~/Encrypt(?![A-Za-z0-9])~';
 
-    /** The most decompressed PDF stream bytes read while looking for active content. */
-    /** The most a PDF may open up to once qpdf has uncompressed it. */
+    /** The largest copy qpdf may write of one PDF; past it the PDF is refused. */
     public const MAX_NORMALISED_BYTES = 50 * 1024 * 1024;
 
     private readonly bool $gdAvailable;
@@ -250,8 +251,8 @@ final class OriginationFileStore
     }
 
     /**
-     * qpdf's copy of the PDF, once its fully opened-up form holds nothing
-     * active. An encrypted PDF is refused before qpdf sees it.
+     * qpdf's copy of the PDF, object streams written out, once nothing in it
+     * is active. An encrypted PDF is refused before qpdf sees it.
      *
      * @throws UploadRefusedException
      */
@@ -266,13 +267,14 @@ final class OriginationFileStore
         }
 
         try {
-            $plain = $this->pdf->uncompressed($bytes, self::MAX_NORMALISED_BYTES);
-            $this->assertNothingActive($plain);
-
-            return $this->pdf->compressed($plain, self::MAX_NORMALISED_BYTES);
+            $copy = $this->pdf->normalised($bytes, self::MAX_NORMALISED_BYTES);
         } catch (PdfNormaliseException $e) {
             throw UploadRefusedException::because($e->tooLarge ? self::PDF_TOO_LARGE : self::UNCHECKABLE_PDF);
         }
+
+        $this->assertNothingActive($copy);
+
+        return $copy;
     }
 
     /**

@@ -20,7 +20,8 @@
 |
 | Every PDF is rewritten by qpdf (`LOAN_ORIGINATION_QPDF_BINARY`, `qpdf` on the
 | PATH by default) before it is checked, and qpdf's copy is what is stored.
-| Without a working qpdf, PDFs are refused.
+| Without a working qpdf, PDFs are refused. Where prlimit is on the path, qpdf
+| runs with a CPU-seconds and an address-space limit.
 */
 
 return [
@@ -31,6 +32,9 @@ return [
     'qpdf' => [
         'binary' => env('LOAN_ORIGINATION_QPDF_BINARY', 'qpdf'),
         'timeout' => (float) env('LOAN_ORIGINATION_QPDF_TIMEOUT', 15),
+        // Applied through prlimit when it is on the path (the Linux servers).
+        'cpu_seconds' => (int) env('LOAN_ORIGINATION_QPDF_CPU_SECONDS', 10),
+        'memory_mb' => (int) env('LOAN_ORIGINATION_QPDF_MEMORY_MB', 512),
     ],
 
     'scanner' => [
