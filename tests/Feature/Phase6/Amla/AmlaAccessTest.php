@@ -49,6 +49,10 @@ class AmlaAccessTest extends TestCase
             'log' => ['GET', '/api/amla/log', ['amla:audit'], true],
             'cdd worklist' => ['GET', '/api/amla/cdd/subjects', ['amla:cdd'], false],
             'risk rules' => ['GET', '/api/amla/risk-rules', ['amla:cdd', 'amla:settings', 'amla:audit'], true],
+            'alerts' => ['GET', '/api/amla/alerts', ['amla:alerts'], false],
+            'ctr candidates' => ['GET', '/api/amla/ctr-candidates', ['amla:ctr'], false],
+            'detection rules' => ['GET', '/api/amla/detection-rules', ['amla:view', 'amla:alerts', 'amla:settings'], true],
+            'detection rule versions' => ['GET', '/api/amla/detection-rules/versions', ['amla:settings'], true],
         ];
     }
 
@@ -94,6 +98,8 @@ class AmlaAccessTest extends TestCase
             'POST api/amla/cdd/{subjectType}/{id}/id-verifications',
             'POST api/amla/cdd/{subjectType}/{id}/risk-assessments',
             'POST api/amla/cdd/{subjectType}/{id}/reviews',
+            'GET api/amla/alerts/{id}',
+            'GET api/amla/ctr-candidates/{id}',
         ];
 
         $routes = collect(Route::getRoutes()->getRoutes())

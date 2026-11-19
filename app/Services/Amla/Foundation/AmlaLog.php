@@ -31,6 +31,11 @@ final class AmlaLog
         'cdd_risk_assessed' => 'Risk assessed',
         'cdd_review_recorded' => 'CDD review recorded',
         'history_screened' => 'Transaction history screened',
+        'alerts_viewed' => 'Alerts viewed',
+        'alert_viewed' => 'Alert viewed',
+        'ctr_candidates_viewed' => 'CTR candidates viewed',
+        'ctr_candidate_viewed' => 'CTR candidate viewed',
+        'detection_rules_viewed' => 'Detection rules viewed',
     ];
 
     /** @var array<string, string> each subject type in words, read as "<words> #<id>" */
@@ -41,6 +46,8 @@ final class AmlaLog
         'calendar_year' => 'Calendar year',
         'member' => 'Member',
         'walk_in' => 'Walk-in',
+        'alert' => 'Alert',
+        'ctr_candidate' => 'CTR candidate',
     ];
 
     private const USER_AGENT_MAX = 255;
