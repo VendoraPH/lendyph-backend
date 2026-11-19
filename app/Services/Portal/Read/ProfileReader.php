@@ -23,7 +23,7 @@ use App\Support\PhilippineMobile;
  *
  * | email | MemberContact::maskEmail ("ju***@gmail.com") |
  * | birthdate | the year only (`birth_year`) |
- * | street address | "On file" |
+ * | street address | "On file" when `street_address` or the older `address` (which the staff form fills) holds one |
  * | government ID numbers | type + last 4 ("UMID •••• 4821"); a number shorter than 8 characters, type only ("Passport ••••") |
  * | income, spouse, photo, co-makers, ID images, the combined address | never |
  *
@@ -65,7 +65,7 @@ final class ProfileReader
             $this->field('civil_status', 'Civil status', MemberWords::of(MemberWords::CIVIL_STATUS, $member->civil_status)),
             $this->field('contact_number', 'Mobile number', self::maskedMobile($member->contact_number), true),
             $this->field('email', 'Email', self::maskedEmail($member->email), true),
-            $this->field('street_address', 'Street address', self::maskedStreet($member->street_address), true),
+            $this->field('street_address', 'Street address', self::maskedStreet(filled($member->street_address) ? $member->street_address : $member->address), true),
             $this->field('barangay', 'Barangay', $member->barangay),
             $this->field('city', 'City or municipality', $member->city),
             $this->field('province', 'Province', $member->province),

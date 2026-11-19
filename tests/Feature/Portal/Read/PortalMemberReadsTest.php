@@ -73,6 +73,32 @@ class PortalMemberReadsTest extends TestCase
         );
     }
 
+    /**
+     * UI-round flag 36: the staff member form fills the older `address`
+     * field and leaves `street_address` empty, so the street line reads "On
+     * file" from either one. The address itself never leaves the server.
+     */
+    public function test_the_street_line_reads_on_file_from_either_address_field(): void
+    {
+        $cases = [
+            'older address only' => [['street_address' => null, 'address' => '7 Rizal Avenue, Poblacion'], 'On file'],
+            'street address only' => [['street_address' => '7 Rizal Avenue', 'address' => null], 'On file'],
+            'neither' => [['street_address' => null, 'address' => null], null],
+            'blank strings' => [['street_address' => '  ', 'address' => ''], null],
+        ];
+
+        foreach ($cases as $case => [$address, $expected]) {
+            $me = $this->portalMember($address);
+
+            $response = $this->portalJson('GET', '/api/portal/profile', [], $this->portalToken($me))->assertOk();
+            $street = collect($response->json('data.fields'))->firstWhere('key', 'street_address');
+
+            $this->assertSame($expected, $street['value'], $case);
+            $this->assertTrue($street['masked'], $case);
+            $this->assertStringNotContainsString('Rizal', (string) $response->getContent(), $case);
+        }
+    }
+
     public function test_a_short_id_number_is_masked_entirely(): void
     {
         $me = $this->portalMember();
