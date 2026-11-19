@@ -39,7 +39,7 @@ use Illuminate\Support\Facades\DB;
  * @property int $approval_wait_days
  * @property int $release_wait_days
  * @property string $control_difference_above
- * @property int|null $updated_by
+ * @property int|null $updated_by set directly by the saver, never mass-assigned
  * @property Carbon|null $updated_at
  */
 class DashboardSetting extends Model
@@ -89,7 +89,6 @@ class DashboardSetting extends Model
         'approval_wait_days',
         'release_wait_days',
         'control_difference_above',
-        'updated_by',
     ];
 
     protected function casts(): array
@@ -127,6 +126,36 @@ class DashboardSetting extends Model
         ]);
 
         return static::query()->findOrFail(self::ROW_ID);
+    }
+
+    /**
+     * Validated thresholds in the one form they are stored and audited in:
+     * percentages, points and pesos as two-decimal strings ("085" reads
+     * "85.00", ".5" reads "0.50"), worked on the digits so nothing is
+     * rounded; days as whole numbers. Keys other than thresholds are dropped.
+     *
+     * @param  array<string, mixed>  $values  already validated (non-negative, at most two decimals)
+     * @return array<string, string|int>
+     */
+    public static function normalised(array $values): array
+    {
+        $normalised = [];
+
+        foreach (array_intersect_key($values, self::DEFAULTS) as $field => $value) {
+            $normalised[$field] = in_array($field, self::DAY_FIELDS, true)
+                ? (int) $value
+                : self::twoDecimals((string) $value);
+        }
+
+        return $normalised;
+    }
+
+    private static function twoDecimals(string $value): string
+    {
+        [$whole, $fraction] = array_pad(explode('.', ltrim(trim($value), '+'), 2), 2, '');
+        $whole = ltrim($whole, '0');
+
+        return ($whole === '' ? '0' : $whole).'.'.str_pad($fraction, 2, '0');
     }
 
     /**

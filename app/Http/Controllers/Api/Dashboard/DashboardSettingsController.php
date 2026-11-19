@@ -70,7 +70,7 @@ class DashboardSettingsController extends Controller
     )]
     public function update(UpdateDashboardSettingsRequest $request): JsonResponse
     {
-        $values = $request->validated();
+        $values = DashboardSetting::normalised($request->validated());
         DashboardSetting::current();
 
         $settings = DB::transaction(function () use ($values, $request): DashboardSetting {

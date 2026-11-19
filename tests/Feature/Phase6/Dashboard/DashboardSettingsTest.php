@@ -7,6 +7,7 @@ use App\Models\Role;
 use App\Models\User;
 use App\Services\AuditLogModules;
 use App\Services\BranchAccess;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use Spatie\Permission\PermissionRegistrar;
 use Tests\TestCase;
@@ -192,7 +193,101 @@ it('checks percentages, points, days and pesos in range, in words', function (ar
     'pesos with three decimals' => [['control_difference_above' => '0.001'], 'control_difference_above'],
     'pesos above the cap' => [['control_difference_above' => '1000000.01'], 'control_difference_above'],
     'a list' => [['approval_wait_days' => [3]], 'approval_wait_days'],
+    'days true' => [['approval_wait_days' => true], 'approval_wait_days'],
+    'compare days true' => [['par30_compare_days' => true], 'par30_compare_days'],
+    'release days false' => [['release_wait_days' => false], 'release_wait_days'],
 ]);
+
+it('stores each value in one form, whatever form it was sent in, and audits it that way', function () {
+    $editor = ebcEditor();
+
+    $this->actingAs($editor)->putJson('/api/dashboard/settings', [
+        'collection_efficiency_below' => '085',
+        'overdue_share_above' => '.5',
+        'par30_rise_points' => 2,
+        'control_difference_above' => '0007.1',
+        'approval_wait_days' => '5',
+    ])->assertOk()
+        ->assertJsonPath('data.thresholds.collection_efficiency_below', '85.00')
+        ->assertJsonPath('data.thresholds.overdue_share_above', '0.50')
+        ->assertJsonPath('data.thresholds.par30_rise_points', '2.00')
+        ->assertJsonPath('data.thresholds.control_difference_above', '7.10')
+        ->assertJsonPath('data.thresholds.approval_wait_days', 5);
+
+    $row = AuditLog::query()->where('auditable_type', DashboardSetting::class)->latest('id')->firstOrFail();
+
+    expect($row->new_values)->toMatchArray([
+        'collection_efficiency_below' => '85.00',
+        'overdue_share_above' => '0.50',
+        'par30_rise_points' => '2.00',
+        'control_difference_above' => '7.10',
+        'approval_wait_days' => 5,
+    ]);
+
+    $changes = ebcAuditChanges($row);
+
+    expect($changes['collection_efficiency_below'])->toBe(['old' => '90%', 'new' => '85%'])
+        ->and($changes['overdue_share_above'])->toBe(['old' => '5%', 'new' => '0.5%'])
+        ->and($changes['control_difference_above'])->toBe(['old' => '₱0.00', 'new' => '₱7.10']);
+});
+
+it('refuses a caller whose only role is switched off, on read and save', function () {
+    $user = ebcStaff(['dashboard:analytics', 'dashboard:settings', BranchAccess::VIEW_ALL]);
+    DB::table('roles')->whereIn('id', $user->roles->pluck('id'))->update(['is_active' => false]);
+    app(PermissionRegistrar::class)->forgetCachedPermissions();
+    $user = User::findOrFail($user->id);
+
+    $this->actingAs($user)->getJson('/api/dashboard/settings')->assertForbidden();
+    $this->actingAs($user)->putJson('/api/dashboard/settings', ['approval_wait_days' => 9])->assertForbidden();
+
+    expect(DashboardSetting::current()->approval_wait_days)->toBe(3);
+});
+
+it('lets super_admin read and save', function () {
+    $superAdmin = User::where('username', 'super_admin')->firstOrFail();
+
+    $this->actingAs($superAdmin)->getJson('/api/dashboard/settings')
+        ->assertOk()
+        ->assertJsonPath('data.can_update', true);
+
+    $this->actingAs($superAdmin)->putJson('/api/dashboard/settings', ['approval_wait_days' => 4])
+        ->assertOk()
+        ->assertJsonPath('data.thresholds.approval_wait_days', 4)
+        ->assertJsonPath('data.updated_by.id', $superAdmin->id);
+});
+
+it('ignores the id, who saved it and the timestamps in the body', function () {
+    $editor = ebcEditor();
+    $someoneElse = ebcStaff([]);
+
+    $this->actingAs($editor)->putJson('/api/dashboard/settings', [
+        'id' => 99,
+        'updated_by' => $someoneElse->id,
+        'created_at' => '2020-01-01 00:00:00',
+        'updated_at' => '2020-01-01 00:00:00',
+        'approval_wait_days' => 6,
+    ])->assertOk()
+        ->assertJsonPath('data.updated_by.id', $editor->id);
+
+    $row = DashboardSetting::current();
+
+    expect(DashboardSetting::query()->pluck('id')->all())->toBe([DashboardSetting::ROW_ID])
+        ->and($row->updated_by)->toBe($editor->id)
+        ->and($row->approval_wait_days)->toBe(6)
+        ->and($row->created_at->year)->not->toBe(2020)
+        ->and($row->updated_at->year)->not->toBe(2020);
+});
+
+it('answers 403, not 422, to a caller without permission who sends bad data', function () {
+    $this->actingAs(ebcStaff(['dashboard:analytics']))
+        ->putJson('/api/dashboard/settings', ['collection_efficiency_below' => 'lots', 'approval_wait_days' => -4])
+        ->assertForbidden()
+        ->assertJsonMissingPath('errors');
+});
+
+it('only takes the thresholds from mass assignment', function () {
+    expect((new DashboardSetting)->getFillable())->toBe(array_keys(EBC_DEFAULTS));
+});
 
 it('accepts the edges of each range', function () {
     $this->actingAs(ebcEditor())->putJson('/api/dashboard/settings', [
