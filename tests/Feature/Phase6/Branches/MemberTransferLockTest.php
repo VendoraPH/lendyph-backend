@@ -134,6 +134,9 @@ class MemberTransferLockTest extends TestCase
                 'DB_USERNAME' => (string) $database['username'],
                 'DB_PASSWORD' => (string) $database['password'],
                 'CACHE_STORE' => 'database',
+                // A parallel worker's cache prefix carries its token, so the
+                // other process takes the same member lock key.
+                'CACHE_PREFIX' => (string) config('cache.prefix'),
                 // Not a test worker: it uses the database it is given.
                 'TEST_TOKEN' => false,
                 'LARAVEL_PARALLEL_TESTING' => false,
