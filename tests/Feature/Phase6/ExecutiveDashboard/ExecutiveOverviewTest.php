@@ -8,6 +8,7 @@ use App\Models\PortfolioDailySnapshot;
 use App\Models\Role;
 use App\Models\ShareCapitalLedger;
 use App\Models\User;
+use App\Services\Accounting\AllowanceCalculator;
 use App\Services\Accounting\IncomeStatementBuilder;
 use App\Services\Dashboard\DashboardPeriod;
 use App\Services\Dashboard\ExecutiveCacheKey;
@@ -66,7 +67,7 @@ class ExecutiveOverviewTest extends TestCase
 
         foreach ($data['cards'] as $key => $card) {
             $this->assertSame(
-                ['key', 'label', 'unit', 'value', 'previous_value', 'change', 'change_unit', 'as_of', 'previous_as_of', 'state', 'filters_applied', 'details'],
+                ['key', 'label', 'unit', 'value', 'previous_value', 'change', 'change_unit', 'as_of', 'previous_as_of', 'previous_state', 'state', 'filters_applied', 'details'],
                 array_keys($card),
                 $key,
             );
@@ -105,7 +106,7 @@ class ExecutiveOverviewTest extends TestCase
         $this->assertEquals($efficiency['collection_rate'], $cards['collection_efficiency']['value']);
 
         $this->assertSame($this->report('borrowers', self::PERIOD)['total_active_borrowers'], $cards['active_members']['value']);
-        $this->assertEquals($this->report('provisioning', '')['totals']['required_allowance'], $cards['required_allowance']['value']);
+        $this->assertEquals($this->report('provisioning', '')['principal_basis']['totals']['required_allowance'], $cards['required_allowance']['value'], 'The figure the allowance posting books.');
         $this->assertEquals($this->report('share-capital', self::PERIOD)['closing_balance'], $cards['share_capital']['value']);
 
         $statement = app(IncomeStatementBuilder::class)->build('2026-11-01', '2026-11-19');
@@ -120,6 +121,57 @@ class ExecutiveOverviewTest extends TestCase
         foreach ($cards as $key => $card) {
             $this->assertSame('ready', $card['state'], $key);
         }
+    }
+
+    public function test_required_allowance_is_what_the_allowance_posting_books(): void
+    {
+        $this->book();
+
+        $card = $this->overview()['cards']['required_allowance'];
+        $posting = app(AllowanceCalculator::class)->forDate('2026-11-19')['totals']['required'];
+        $report = $this->report('provisioning', '');
+
+        $this->assertGreaterThan(0, $posting);
+        $this->assertEquals($posting / 100, $card['value'], 'Provisioning rates on past-due principal, each bucket rounded half up.');
+        $this->assertNotEquals($report['totals']['required_allowance'], $card['value'], 'Not the past-due amount basis.');
+    }
+
+    public function test_a_branch_user_s_required_allowance_is_their_branch_s_posting(): void
+    {
+        $this->book();
+        $other = Branch::factory()->create();
+        $there = $this->createReleasedLoan(['principal_amount' => 40000]);
+        DB::table('loans')->where('id', $there->id)->update(['branch_id' => $other->id]);
+        DB::table('borrowers')->where('id', $there->borrower_id)->update(['branch_id' => $other->id]);
+        DB::table('amortization_schedules')->where('loan_id', $there->id)->where('period_number', 1)->update(['due_date' => '2026-07-01']);
+
+        $this->actingAs($this->userWith(['dashboard:analytics', 'reports:view'], $other));
+        $card = $this->overview()['cards']['required_allowance'];
+
+        $posting = app(AllowanceCalculator::class)->forDate('2026-11-19', [$other->id])['totals']['required'];
+        $this->assertGreaterThan(0, $posting);
+        $this->assertEquals($posting / 100, $card['value']);
+    }
+
+    public function test_previous_state_says_why_a_card_has_no_previous_value(): void
+    {
+        $this->book();
+
+        $cards = $this->overview()['cards'];
+        $this->assertSame('no_snapshot', $cards['gross_loan_portfolio']['previous_state'], 'No snapshot on Oct 31.');
+        $this->assertSame('ready', $cards['loans_released']['previous_state']);
+        $this->assertSame('no_data', $cards['required_allowance']['previous_state'], 'Worked out from today\'s schedules only.');
+
+        $this->snapshot('2026-10-31', 100000);
+        Cache::flush();
+        $this->assertSame('ready', $this->overview()['cards']['gross_loan_portfolio']['previous_state']);
+
+        $officer = $this->overview("officer_id={$this->admin->id}")['cards']['gross_loan_portfolio'];
+        $this->assertNull($officer['previous_value']);
+        $this->assertSame('no_data', $officer['previous_state'], 'History doesn\'t follow the officer filter.');
+
+        $this->actingAs($this->userWith(['dashboard:analytics']));
+        $this->assertNull($this->overview()['cards']['gross_loan_portfolio']['previous_state']);
     }
 
     public function test_period_cards_compare_with_the_previous_period(): void

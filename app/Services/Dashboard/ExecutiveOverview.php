@@ -106,6 +106,7 @@ final class ExecutiveOverview
                     'previous_value' => null,
                     'change' => null,
                     'previous_as_of' => null,
+                    'previous_state' => null,
                     'state' => 'no_access',
                     'details' => [],
                 ];
@@ -149,7 +150,7 @@ final class ExecutiveOverview
             : [];
         $pointOn = fn (string $date): ?array => collect($points)->firstWhere('requested_date', $date);
 
-        $balance = function (string $card, mixed $liveValue, array $details = []) use ($isLive, $pointOn, $to, $previousTo): array {
+        $balance = function (string $card, mixed $liveValue, array $details = []) use ($isLive, $pointOn, $to, $previousTo, $historyUsable): array {
             $figure = self::HISTORY_FIGURES[$card];
             $read = function (?array $point) use ($figure, $card): mixed {
                 $value = $point['figures'][$figure] ?? null;
@@ -162,7 +163,11 @@ final class ExecutiveOverview
             $value = $isLive ? $liveValue : $read($now);
             $state = $isLive || ($now['state'] ?? null) === 'ready' ? 'ready' : 'no_snapshot';
 
-            return $this->card($card, $state === 'ready' ? $value : null, $read($then), $isLive ? $to : ($now['snapshot_date'] ?? $to), $then['snapshot_date'] ?? $previousTo, $state, $isLive ? $details : []);
+            // No previous value: the comparison day has no snapshot, or history
+            // can't answer this request at all (an officer or collector filter).
+            $missingPrevious = $historyUsable && ($then === null || $then['state'] === 'no_snapshot') ? 'no_snapshot' : 'no_data';
+
+            return $this->card($card, $state === 'ready' ? $value : null, $read($then), $isLive ? $to : ($now['snapshot_date'] ?? $to), $then['snapshot_date'] ?? $previousTo, $state, $isLive ? $details : [], $missingPrevious);
         };
 
         $repayments = fn (array $cashFlow): array => $cashFlow['inflows']['repayments'];
@@ -198,7 +203,10 @@ final class ExecutiveOverview
             ...$this->bookCards($period, $scope),
             $this->card('share_capital', $shareCapital['closing_balance'], $shareCapital['opening_balance'], $to, $previousTo, 'ready'),
             $this->card('collected_insurance', $repayments($flow)['insurance'], $repayments($previousFlow)['insurance'], $to, $previousTo, 'ready'),
-            $this->card('required_allowance', $allowance['totals']['required_allowance'] ?? null, null, $to, null, $isLive ? 'ready' : 'no_snapshot'),
+            // The allowance posting's own figure (AllowanceCalculator): the
+            // provisioning rates on past-due principal, each bucket rounded
+            // half up, the report's `principal_basis`. It has no history.
+            $this->card('required_allowance', $allowance['principal_basis']['totals']['required_allowance'] ?? null, null, $to, null, $isLive ? 'ready' : 'no_snapshot'),
         ];
 
         $byKey = [];
@@ -270,11 +278,18 @@ final class ExecutiveOverview
     }
 
     /**
+     * `previous_state` says whether there is a previous value (`ready`) or
+     * why not: `no_snapshot` (the comparison day has no daily snapshot) or
+     * `no_data` (nothing could be compared).
+     *
      * @param  array<string, mixed>  $details
+     * @param  'no_snapshot'|'no_data'  $missingPrevious  why there's no previous value, when there's none
      * @return array<string, mixed>
      */
-    private function card(string $key, mixed $value, mixed $previousValue, string $asOf, ?string $previousAsOf, string $state, array $details = []): array
+    private function card(string $key, mixed $value, mixed $previousValue, string $asOf, ?string $previousAsOf, string $state, array $details = [], string $missingPrevious = 'no_data'): array
     {
+        $previous = $state === 'ready' || $state === 'no_snapshot' ? $previousValue : null;
+
         $metric = MetricCatalog::all()[$key];
         $isRatio = $metric['unit'] === 'percent';
         $ready = $state === 'ready';
@@ -284,11 +299,12 @@ final class ExecutiveOverview
             'label' => $metric['label'],
             'unit' => $metric['unit'],
             'value' => $ready ? $value : null,
-            'previous_value' => $ready || $state === 'no_snapshot' ? $previousValue : null,
+            'previous_value' => $previous,
             'change' => $ready ? self::change($value, $previousValue, $isRatio) : null,
             'change_unit' => $isRatio ? 'points' : 'percent',
             'as_of' => $asOf,
-            'previous_as_of' => $previousValue === null ? null : $previousAsOf,
+            'previous_as_of' => $previous === null ? null : $previousAsOf,
+            'previous_state' => $previous === null ? $missingPrevious : 'ready',
             'state' => $state,
             'filters_applied' => [],
             'details' => $ready ? $details : [],
