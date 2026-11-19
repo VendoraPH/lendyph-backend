@@ -37,6 +37,9 @@ final class ExecutiveBranches
 {
     public const NO_BRANCH = 'No branch';
 
+    /** Marks, inside the cached table only, a row that only the books hold. */
+    private const BOOKS_ONLY = 'books_only';
+
     /** Each column's catalogue metric, whose `filters` say which filters it follows. */
     private const COLUMN_METRICS = [
         'gross_loan_portfolio' => 'gross_loan_portfolio',
@@ -79,13 +82,18 @@ final class ExecutiveBranches
             $table['books_state'] = 'no_access';
         }
 
+        // Without the books, the rows only the books hold go too: the "No
+        // branch" row and any branch listed only because it has journal
+        // entries, whose row alone would show that it has some.
         if ($table['books_state'] !== 'ready') {
             $table['rows'] = array_values(array_map(
                 fn (array $row): array => [...$row, 'revenue' => null, 'expenses' => null, 'net' => null],
-                array_filter($table['rows'], fn (array $row): bool => $row['branch_id'] !== null),
+                array_filter($table['rows'], fn (array $row): bool => $row['branch_id'] !== null && ! $row[self::BOOKS_ONLY]),
             ));
             $table['totals'] = [...$table['totals'], 'revenue' => null, 'expenses' => null, 'net' => null];
         }
+
+        $table['rows'] = array_map(fn (array $row): array => array_diff_key($row, [self::BOOKS_ONLY => true]), $table['rows']);
 
         return [
             'period' => $period->toArray(),
@@ -141,6 +149,7 @@ final class ExecutiveBranches
                 'collected_insurance' => $cash['inflow_insurance'] ?? 0.0,
                 'collection_efficiency' => $efficiencyRows->get($id)['collection_rate'] ?? 0.0,
                 ...$bookFigures($id),
+                self::BOOKS_ONLY => false,
             ];
         }
 
@@ -167,6 +176,7 @@ final class ExecutiveBranches
                     'collected_insurance' => 0.0,
                     'collection_efficiency' => 0.0,
                     ...$bookFigures($id),
+                    self::BOOKS_ONLY => true,
                 ];
             }
         }
@@ -186,6 +196,7 @@ final class ExecutiveBranches
                 'collected_insurance' => null,
                 'collection_efficiency' => null,
                 ...$bookFigures('none'),
+                self::BOOKS_ONLY => true,
             ];
         }
 

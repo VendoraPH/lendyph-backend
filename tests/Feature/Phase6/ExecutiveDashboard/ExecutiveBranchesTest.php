@@ -151,7 +151,9 @@ class ExecutiveBranchesTest extends TestCase
 
     public function test_a_less_privileged_caller_never_reads_an_admin_s_cached_books(): void
     {
-        $this->branches();
+        $closed = Branch::factory()->create(['is_active' => false]);
+        $this->postSimpleJournal('1010', '4010', 75000, ['date' => '2026-11-06', 'branch_id' => $closed->id]);
+        $this->assertNotNull(collect($this->branches()['rows'])->firstWhere('branch_id', $closed->id));
 
         $this->actingAs($this->userWith(['dashboard:analytics', 'reports:view', 'branches:view_all']));
         $data = $this->branches();
@@ -160,6 +162,7 @@ class ExecutiveBranchesTest extends TestCase
         $this->assertNull(collect($data['rows'])->firstWhere('branch_id', null));
         $this->assertSame([null], array_values(array_unique(array_column($data['rows'], 'net'))));
         $this->assertNull($data['totals']['revenue']);
+        $this->assertNull(collect($data['rows'])->firstWhere('branch_id', $closed->id), 'Its row would show it had journal entries.');
     }
 
     public function test_a_branch_filter_leaves_out_the_no_branch_row(): void
