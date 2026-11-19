@@ -112,6 +112,35 @@ final class PortfolioRisk
     }
 
     /**
+     * The loans self::par() counts in `$par` (`par_1`, `par_30`, `par_60` or
+     * `par_90`) over `$loans`, as a Loan query with the columns
+     * `oldest_unpaid_due` (its oldest period still marked unpaid),
+     * `days_past_due` (from that period's bare due date to `$asOf`) and
+     * `par_principal` (its principal still unpaid, the amount PAR adds up),
+     * most days past due first, then by id. Their count and `par_principal`
+     * total are self::par()'s `loans` and `amount` for the same loans.
+     *
+     * @param  Builder<Loan>  $loans  its select, eager loads and order are ignored
+     * @return Builder<Loan>
+     */
+    public function parLoans(Builder $loans, string $par, ?Carbon $asOf = null): Builder
+    {
+        $asOf ??= Carbon::today();
+        $cutoff = $asOf->copy()->subDays(self::PAR_DAYS[$par])->toDateString();
+
+        return Loan::query()
+            ->joinSub($this->perLoan($loans), 'per_loan', 'per_loan.loan_id', '=', 'loans.id')
+            ->where('per_loan.oldest_unpaid', '<', $cutoff)
+            ->select('loans.*')
+            ->selectRaw(
+                'per_loan.oldest_unpaid as oldest_unpaid_due, DATEDIFF(?, per_loan.oldest_unpaid) as days_past_due, per_loan.principal as par_principal',
+                [$asOf->toDateString()],
+            )
+            ->orderBy('per_loan.oldest_unpaid')
+            ->orderBy('loans.id');
+    }
+
+    /**
      * Per loan of `$loans`: its oldest period still marked unpaid and the
      * principal still unpaid on all its periods.
      *
