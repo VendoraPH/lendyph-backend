@@ -15,6 +15,7 @@ use App\Services\Linda\Answers\CollectionSummaryAnswer;
 use App\Services\Linda\Answers\DisbursementSummaryAnswer;
 use App\Services\Linda\Answers\ExpenseSummaryAnswer;
 use App\Services\Linda\Answers\GeneralLendingSummaryAnswer;
+use App\Services\Linda\Answers\HowToAnswer;
 use App\Services\Linda\Answers\IncomeSummaryAnswer;
 use App\Services\Linda\Answers\LoanLookupAnswer;
 use App\Services\Linda\Answers\LoanSummaryAnswer;
@@ -79,6 +80,11 @@ final class LindaAnswerer
     {
         if ($intent === LindaIntent::UnsupportedQuestion) {
             return $this->unsupported();
+        }
+
+        // Where a page is in the menu: no figures, so no branch scope.
+        if ($intent === LindaIntent::HowTo) {
+            return app(HowToAnswer::class)->answer($user, $question);
         }
 
         $lookupKind = $intent->lookupKind();

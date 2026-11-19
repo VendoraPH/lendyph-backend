@@ -33,6 +33,7 @@ final class FakeModel implements LindaModel
      */
     private const RULES = [
         ['unsupported_question', ['ignore', 'you are now', 'pretend', 'system prompt', 'instructions', 'weather', 'joke', 'poem', 'delete', 'send', 'kalimti']],
+        ['how_to', ['how do i', 'how can i', 'how to', 'where is', 'where are', 'where can i', 'paano', 'unsaon', 'saan', 'asa makita']],
         ['collection_efficiency', ['efficiency', 'collection rate', 'porsyento', 'porsiyento', 'percent', 'percentage']],
         ['income_summary', ['income', 'interest earned', 'earn', 'earned', 'revenue', 'kita', 'kinita', 'ganansya', 'kinitaan']],
         ['expense_summary', ['expense', 'expenses', 'gastos', 'gasto', 'gigasto', 'gastu']],

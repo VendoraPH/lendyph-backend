@@ -29,6 +29,8 @@ use Throwable;
  *    source `lookup`, and the model never sees it. A "name" that is one of
  *    the user's own branches or a loan product is no lookup ("collections
  *    from Main"); the rest of the question is read again without it.
+ *    A "How do I…" or "Where is…" question whose every word names a page in
+ *    the menu is answered from the menu (LindaMenu), also on the server.
  * 2. Right after a lookup turn ("Which member?"), a short reply (a record
  *    number, or a name) is that lookup's target (LindaLookup::reply()).
  * 3. With no match and the none driver, the reply lists what Linda can
@@ -99,6 +101,14 @@ final class LindaAssistant
             [$period, $branchName] = LindaFollowUp::carry($match->intent, $match->period, $match->branchName, $match->followUp, $history->earlier, $user);
 
             return $this->answered($log, $started, $user, $match->intent, $period, $this->asTyped($branchName, $question, $history), $question);
+        }
+
+        // "How do I…", "Where is…": a page in the menu, found only when every
+        // word is understood, so a name or a record number never lands here.
+        if (LindaMenu::find($question) !== null) {
+            $log->source = LindaQuestion::SOURCE_MATCHER;
+
+            return $this->answered($log, $started, $user, LindaIntent::HowTo, null, null, $question);
         }
 
         $lookup = $this->lookupIn($user, $question, $history);

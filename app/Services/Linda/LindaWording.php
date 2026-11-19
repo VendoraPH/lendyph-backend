@@ -160,6 +160,28 @@ final class LindaWording
         return 'Savings isn\'t set up in this deployment yet, so there are no savings figures to show.';
     }
 
+    /**
+     * Where pages are in the side menu: "Go to Members → New Member in the
+     * side menu.", or every place when there are several.
+     *
+     * @param  list<string>  $paths
+     */
+    public static function menuPlaces(array $paths): string
+    {
+        if (count($paths) === 1) {
+            return 'Go to '.$paths[0].' in the side menu.';
+        }
+
+        $count = [2 => 'two', 3 => 'three', 4 => 'four'][count($paths)] ?? (string) count($paths);
+
+        return 'You\'ll find that in '.$count.' places in the side menu: '.self::listOf($paths).'.';
+    }
+
+    public static function menuDenied(): string
+    {
+        return 'Your role doesn\'t have access to that page. Please ask your administrator if you need it.';
+    }
+
     public static function cdaNotSetUp(): string
     {
         return 'No CDA reporting year has been opened yet, so there is no deadline or readiness to show.';
