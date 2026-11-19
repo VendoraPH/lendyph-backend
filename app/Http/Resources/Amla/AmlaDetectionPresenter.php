@@ -10,9 +10,12 @@ use App\Models\AmlaRuleVersion;
 use App\Models\Borrower;
 use App\Models\Branch;
 use App\Models\GCashNonMember;
+use App\Models\User;
 use App\Services\Amla\Detection\DetectionRules;
 use App\Services\Amla\Detection\Finding;
 use App\Services\Amla\Events\PesoAmount;
+use App\Services\Amla\Foundation\AmlaAccess;
+use App\Services\BranchAccess;
 use Illuminate\Support\Collection;
 
 /**
@@ -26,7 +29,8 @@ final class AmlaDetectionPresenter
     public function __construct(private readonly DetectionRules $rules) {}
 
     /** @return array<string, mixed> */
-    public function alertRow(AmlaAlert $alert): array
+    /** The alert's row; its case shows only to `amla:cases` holders with head-office access (`$viewer`). */
+    public function alertRow(AmlaAlert $alert, ?User $viewer = null): array
     {
         $standing = $alert->events->whereNull('reversed_at');
 
@@ -47,15 +51,18 @@ final class AmlaDetectionPresenter
             'amount' => self::pesos($standing),
             'transactions_count' => $alert->events->count(),
             'from_history' => (bool) $alert->from_history,
+            'assigned_to' => AmlaPresenter::user($alert->assignee),
+            'case' => $alert->amlaCase === null || ! self::seesCases($viewer) ? null : ['id' => (int) $alert->amlaCase->id, 'reference' => $alert->amlaCase->reference],
+            'closed_at' => $alert->closed_at?->toIso8601String(),
             'detected_at' => $alert->created_at?->toIso8601String(),
         ];
     }
 
     /** @return array<string, mixed> */
-    public function alertDetail(AmlaAlert $alert): array
+    public function alertDetail(AmlaAlert $alert, ?User $viewer = null): array
     {
         return [
-            ...$this->alertRow($alert),
+            ...$this->alertRow($alert, $viewer),
             'reason' => $alert->reason,
             'indicators' => $alert->indicators,
             'cleared_at' => $alert->cleared_at?->toIso8601String(),
@@ -174,5 +181,11 @@ final class AmlaDetectionPresenter
     private static function pesos(Collection $events): string
     {
         return PesoAmount::words(PesoAmount::fromCentavos($events->sum(fn (AmlaEvent $event) => PesoAmount::centavos((string) $event->amount))));
+    }
+
+    /** Whether the viewer may see which case an alert went to: cases are head office's. */
+    public static function seesCases(?User $viewer): bool
+    {
+        return $viewer !== null && $viewer->can(AmlaAccess::CASES) && $viewer->can(BranchAccess::VIEW_ALL);
     }
 }

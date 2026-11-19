@@ -231,13 +231,14 @@ class AmlaDetectionReviewFixesTest extends TestCase
 
     public function test_the_detector_locks_the_row_the_migration_wrote_and_never_creates_one(): void
     {
-        $this->assertSame(['detector'], AmlaDetectionLock::query()->pluck('name')->all());
+        $this->assertContains('detector', AmlaDetectionLock::query()->pluck('name')->all());
+        $locks = AmlaDetectionLock::query()->count();
 
         $this->event($this->member(), '800000.00');
         $this->detect();
         $this->detect();
 
-        $this->assertSame(1, AmlaDetectionLock::query()->count());
+        $this->assertSame($locks, AmlaDetectionLock::query()->count());
         $this->assertSame(1, AmlaCtrCandidate::query()->count());
     }
 }

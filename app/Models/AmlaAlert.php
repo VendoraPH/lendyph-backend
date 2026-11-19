@@ -7,6 +7,7 @@ use Carbon\CarbonInterface;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 
 /**
  * An AMLA monitoring alert (AMLA design §4.7; task §8, §12): one rule, one
@@ -49,17 +50,43 @@ class AmlaAlert extends Model
 
     public const CLEARED = 'cleared';
 
+    public const ASSIGNED = 'assigned';
+
+    public const UNDER_REVIEW = 'under_review';
+
+    public const ESCALATED = 'escalated';
+
+    public const CLOSED = 'closed';
+
     /** @var array<string, string> */
-    public const STATUS_WORDS = [self::OPEN => 'Open', self::CLEARED => 'Cleared by a rerun'];
+    public const STATUS_WORDS = [
+        self::OPEN => 'Open',
+        self::ASSIGNED => 'Assigned',
+        self::UNDER_REVIEW => 'Under review',
+        self::ESCALATED => 'Escalated to a case',
+        self::CLOSED => 'Closed with a documented reason',
+        self::CLEARED => 'Cleared by a rerun',
+    ];
+
+    /** @var list<string> statuses a person can still act on */
+    public const WORKABLE = [self::OPEN, self::ASSIGNED, self::UNDER_REVIEW];
+
+    /** @var array<string, list<string>> each workable status and where it may go next (AMLA-B6 workflow, B3's rerun clearing) */
+    private const NEXT = [
+        self::OPEN => [self::ASSIGNED, self::UNDER_REVIEW, self::ESCALATED, self::CLOSED, self::CLEARED],
+        self::ASSIGNED => [self::ASSIGNED, self::UNDER_REVIEW, self::ESCALATED, self::CLOSED],
+        self::UNDER_REVIEW => [self::UNDER_REVIEW, self::ESCALATED, self::CLOSED],
+    ];
 
     /** @var array<string, string> */
     public const PRIORITY_WORDS = ['low' => 'Low', 'medium' => 'Medium', 'high' => 'High', 'critical' => 'Critical'];
 
-    private const CLEARING_COLUMNS = ['status', 'open_key', 'cleared_at', 'cleared_note'];
+    private const WORKFLOW_COLUMNS = ['status', 'open_key', 'cleared_at', 'cleared_note', 'assigned_to', 'case_id', 'closed_at'];
 
     protected $fillable = [
         'reference', 'rule_code', 'rule_version', 'priority', 'status', 'open_key', 'borrower_id', 'gcash_non_member_id',
         'branch_id', 'window_start', 'window_end', 'reason', 'indicators', 'from_history', 'cleared_at', 'cleared_note',
+        'assigned_to', 'case_id', 'closed_at',
     ];
 
     protected function casts(): array
@@ -74,6 +101,9 @@ class AmlaAlert extends Model
             'indicators' => 'array',
             'from_history' => 'boolean',
             'cleared_at' => 'datetime',
+            'assigned_to' => 'integer',
+            'case_id' => 'integer',
+            'closed_at' => 'datetime',
             'created_at' => 'datetime',
         ];
     }
@@ -105,17 +135,47 @@ class AmlaAlert extends Model
         return $this->belongsTo(Branch::class);
     }
 
+    /**
+     * Only a workable alert changes, one step of its workflow at a time:
+     * assigned, under review, escalated, closed, or (from open only) cleared
+     * by a rerun. Leaving the workflow (escalated, closed, cleared) frees its
+     * window for a new alert. The UPDATE requires the status this copy read.
+     */
     protected function amlaAllowsUpdate(): bool
     {
-        return $this->getOriginal('status') === self::OPEN
-            && $this->status === self::CLEARED
-            && $this->cleared_at !== null
-            && $this->open_key === null
-            && array_diff(array_keys($this->getDirty()), self::CLEARING_COLUMNS) === [];
+        $from = (string) $this->getOriginal('status');
+        $to = (string) $this->status;
+
+        if (! in_array($to, self::NEXT[$from] ?? [], true) || array_diff(array_keys($this->getDirty()), self::WORKFLOW_COLUMNS) !== []) {
+            return false;
+        }
+
+        return match ($to) {
+            self::CLEARED => $this->cleared_at !== null && $this->open_key === null,
+            self::CLOSED => $this->closed_at !== null && $this->open_key === null,
+            self::ESCALATED => $this->case_id !== null && $this->open_key === null,
+            default => $this->open_key !== null && $this->open_key === $this->getOriginal('open_key'),
+        };
     }
 
     protected function amlaUpdateConditions(): array
     {
-        return ['status' => self::OPEN];
+        return ['status' => $this->getOriginal('status')];
+    }
+
+    public function assignee(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'assigned_to');
+    }
+
+    public function amlaCase(): BelongsTo
+    {
+        return $this->belongsTo(AmlaCase::class, 'case_id');
+    }
+
+    /** @return HasMany<AmlaAlertAction, $this> */
+    public function actions(): HasMany
+    {
+        return $this->hasMany(AmlaAlertAction::class, 'alert_id');
     }
 }
