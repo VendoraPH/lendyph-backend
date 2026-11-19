@@ -332,6 +332,9 @@ class TimezoneShift
         'origination_rule_revisions' => ['created_at'],
         'origination_settings' => ['created_at', 'updated_at'],
         'origination_status_history' => ['created_at'],
+        // Added 2026-11-19 with the public application (LO-B2), for the same reason.
+        'origination_otp_challenges' => ['closed_at', 'created_at', 'expires_at', 'verified_at'],
+        'origination_sessions' => ['created_at', 'ended_at', 'expires_at', 'last_used_at'],
         // Added 2026-11-19 with the AMLA foundation (Phase 6), well after the
         // cutover, for the same reason. `amla_calendar_entries.date` is a DATE.
         'amla_calendar_entries' => ['created_at', 'removed_at'],
