@@ -502,23 +502,78 @@ it('refuses a PDF when qpdf runs out of the memory it is allowed', function () {
         ->toThrow(UploadRefusedException::class, OriginationFileStore::UNCHECKABLE_PDF);
 });
 
-it('clears folders an interrupted run left behind for over an hour, and only those', function () {
+/** A run folder in the private qpdf folder, its file dated $age seconds ago. */
+function loRunFolder(int $age): string
+{
+    $root = QpdfNormaliser::temporaryRoot();
+    @mkdir($root, 0700, true);
+    $folder = $root.'/'.QpdfNormaliser::FOLDER_PREFIX.bin2hex(random_bytes(8));
+    mkdir($folder, 0700);
+    file_put_contents("{$folder}/in.pdf", 'an applicant\'s PDF');
+    touch("{$folder}/in.pdf", time() - $age);
+    touch($folder, time() - $age);
+
+    return $folder;
+}
+
+it('works in a private folder of its own in the app\'s storage, never the shared /tmp', function () {
     loNeedsQpdf();
-    $old = sys_get_temp_dir().'/lendyph-qpdf-'.bin2hex(random_bytes(8));
-    $fresh = sys_get_temp_dir().'/lendyph-qpdf-'.bin2hex(random_bytes(8));
-    mkdir($old, 0700);
-    mkdir($fresh, 0700);
-    file_put_contents("{$old}/in.pdf", 'an applicant\'s PDF');
-    file_put_contents("{$fresh}/in.pdf", 'a run in progress');
-    touch("{$old}/in.pdf", time() - 7200);
-    touch($old, time() - 7200);
 
     (new QpdfNormaliser)->normalised(loPdf()->getContent(), OriginationFileStore::MAX_NORMALISED_BYTES);
 
-    expect(is_dir($old))->toBeFalse()->and(is_file("{$fresh}/in.pdf"))->toBeTrue();
+    expect(QpdfNormaliser::temporaryRoot())->toBe(storage_path('app/qpdf-tmp'))
+        ->and(is_dir(QpdfNormaliser::temporaryRoot()))->toBeTrue()
+        ->and(fileperms(QpdfNormaliser::temporaryRoot()) & 0777)->toBe(0700)
+        ->and(glob(QpdfNormaliser::temporaryRoot().'/'.QpdfNormaliser::FOLDER_PREFIX.'*'))->toBe([]);
+});
+
+it('clears its own folders an interrupted run left behind for over an hour, and only those', function () {
+    loNeedsQpdf();
+    $old = loRunFolder(7200);
+    $fresh = loRunFolder(0);
+    $shared = sys_get_temp_dir().'/'.QpdfNormaliser::FOLDER_PREFIX.bin2hex(random_bytes(8));
+    mkdir($shared, 0700);
+    file_put_contents("{$shared}/in.pdf", 'someone else\'s file');
+    touch($shared, time() - 7200);
+
+    (new QpdfNormaliser)->normalised(loPdf()->getContent(), OriginationFileStore::MAX_NORMALISED_BYTES);
+
+    expect(is_dir($old))->toBeFalse()
+        ->and(is_file("{$fresh}/in.pdf"))->toBeTrue()
+        ->and(is_file("{$shared}/in.pdf"))->toBeTrue();
 
     unlink("{$fresh}/in.pdf");
     rmdir($fresh);
+    unlink("{$shared}/in.pdf");
+    rmdir($shared);
+});
+
+it('never follows a symlink while clearing, whatever it points at', function () {
+    loNeedsQpdf();
+    @mkdir(QpdfNormaliser::temporaryRoot(), 0700, true);
+    $elsewhere = sys_get_temp_dir().'/lo-elsewhere-'.bin2hex(random_bytes(8));
+    mkdir($elsewhere, 0700);
+    file_put_contents("{$elsewhere}/keep.txt", 'not ours');
+    touch("{$elsewhere}/keep.txt", time() - 7200);
+    touch($elsewhere, time() - 7200);
+    $link = QpdfNormaliser::temporaryRoot().'/'.QpdfNormaliser::FOLDER_PREFIX.'link'.bin2hex(random_bytes(4));
+    symlink($elsewhere, $link);
+
+    $old = loRunFolder(7200);
+    $inside = $old.'/linked.txt';
+    symlink("{$elsewhere}/keep.txt", $inside);
+
+    (new QpdfNormaliser)->normalised(loPdf()->getContent(), OriginationFileStore::MAX_NORMALISED_BYTES);
+
+    expect(is_file("{$elsewhere}/keep.txt"))->toBeTrue()
+        ->and(is_dir($elsewhere))->toBeTrue();
+
+    @unlink($link);
+    @unlink($inside);
+    @unlink("{$old}/in.pdf");
+    @rmdir($old);
+    unlink("{$elsewhere}/keep.txt");
+    rmdir($elsewhere);
 });
 
 it('refuses an encrypted PDF, an XFA form, attached files and actions that run on opening', function (string $catalog, string $trailer, array $extra, string $message, string $page = '', array $pageExtra = []) {

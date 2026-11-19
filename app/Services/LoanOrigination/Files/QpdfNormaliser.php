@@ -19,9 +19,11 @@ use Symfony\Component\Process\Process;
  *   string) and a timeout, and under prlimit (CPU seconds and address space,
  *   both from the config) when prlimit is on the path, as on the Linux
  *   servers.
- * - Input and output sit in a private temporary folder that is always
- *   removed; folders an interrupted run left behind for over an hour are
- *   removed before each run.
+ * - Input and output sit in a folder of their own under the app's private
+ *   `storage/app/qpdf-tmp` (0700), never the shared /tmp, and are always
+ *   removed. Before each run, folders an interrupted run left there for over
+ *   an hour are removed; the sweep looks only in that folder and never
+ *   follows a symlink.
  * - Output above $maxBytes stops qpdf at once.
  * - Exit codes 0 and 3 (written, with warnings) are success; anything else is
  *   a failure.
@@ -79,9 +81,10 @@ final class QpdfNormaliser
      */
     public function normalised(string $pdf, int $maxBytes): string
     {
-        $this->clearStaleFolders();
+        $root = $this->privateRoot();
+        $this->clearStaleFolders($root);
 
-        $folder = sys_get_temp_dir().'/'.self::FOLDER_PREFIX.bin2hex(random_bytes(16));
+        $folder = $root.'/'.self::FOLDER_PREFIX.bin2hex(random_bytes(16));
 
         if (! @mkdir($folder, 0700)) {
             throw new PdfNormaliseException('The temporary folder could not be made.');
@@ -152,19 +155,76 @@ final class QpdfNormaliser
         return [$this->prlimit, "--cpu={$cpu}", "--as={$memory}", ...$qpdf];
     }
 
-    /** Remove folders a killed run left behind, so no applicant's PDF stays in the temporary folder. */
-    private function clearStaleFolders(): void
+    /** The private folder qpdf's runs work in. */
+    public static function temporaryRoot(): string
+    {
+        return storage_path('app/qpdf-tmp');
+    }
+
+    /**
+     * The private folder, made 0700 if it is missing; refused if it is a
+     * symlink or anything but a folder.
+     *
+     * @throws PdfNormaliseException
+     */
+    private function privateRoot(): string
+    {
+        $root = self::temporaryRoot();
+
+        if (! file_exists($root) && ! is_link($root)) {
+            @mkdir($root, 0700, true);
+        }
+
+        clearstatcache(true, $root);
+
+        if (is_link($root) || ! is_dir($root)) {
+            throw new PdfNormaliseException('The private temporary folder is missing or not a folder.');
+        }
+
+        @chmod($root, 0700);
+
+        return $root;
+    }
+
+    /**
+     * Remove run folders a killed run left behind for over an hour, so no
+     * applicant's PDF stays on disk. Only entries of the private folder are
+     * looked at, by lstat: a symlink is never followed (at most the link
+     * itself is removed), and inside a run folder only plain files and links
+     * are unlinked, which never touches what a link points at.
+     */
+    private function clearStaleFolders(string $root): void
     {
         $cutoff = time() - self::STALE_AFTER_SECONDS;
 
-        foreach (glob(sys_get_temp_dir().'/'.self::FOLDER_PREFIX.'*', GLOB_ONLYDIR) ?: [] as $folder) {
-            if (is_link($folder) || @filemtime($folder) >= $cutoff) {
+        foreach (@scandir($root) ?: [] as $entry) {
+            if (! str_starts_with($entry, self::FOLDER_PREFIX)) {
                 continue;
             }
 
-            foreach (glob($folder.'/*') ?: [] as $file) {
-                if (is_file($file) || is_link($file)) {
-                    @unlink($file);
+            $folder = $root.'/'.$entry;
+            $stat = @lstat($folder);
+
+            if ($stat === false || $stat['mtime'] >= $cutoff) {
+                continue;
+            }
+
+            if (is_link($folder) || ($stat['mode'] & 0170000) !== 0040000) {
+                @unlink($folder);
+
+                continue;
+            }
+
+            foreach (@scandir($folder) ?: [] as $file) {
+                if ($file === '.' || $file === '..') {
+                    continue;
+                }
+
+                $path = $folder.'/'.$file;
+                $fileStat = @lstat($path);
+
+                if ($fileStat !== false && ($fileStat['mode'] & 0170000) !== 0040000) {
+                    @unlink($path);
                 }
             }
 
