@@ -23,7 +23,10 @@ use Illuminate\Validation\ValidationException;
  * Every CDD write (AMLA design §4.8–10; task §9–10): profile answers, ID
  * verifications, risk assessments and reviews. Each runs in a transaction
  * under the profile's row lock, writes only AMLA tables, and logs to the AMLA
- * log by field name and record id, never by value.
+ * log by action, field name and record id only: never a value or an outcome
+ * (a level, a result, an override), since `amla:audit` holders read the log.
+ * A save that changes nothing still returns the profile, so it is logged as
+ * a view.
  *
  * - A profile change keeps its old and new values in AmlaProfileChange and
  *   reassesses the risk when a risk factor changed (a change of
@@ -79,6 +82,12 @@ final class CddRecords
                     $this->assess($user, $subject, $profile, 'profile_change');
                 }
 
+                // The answer is the whole profile, so a save that changed nothing is still a logged read.
+                $this->log->record('cdd_profile_viewed', $user, CddSubjects::type($subject), $subject->getKey(), [
+                    'profile_id' => $profile->id,
+                    'unchanged_save' => true,
+                ]);
+
                 return $profile;
             }
 
@@ -118,7 +127,7 @@ final class CddRecords
             $verification = AmlaIdVerification::query()->create([
                 'profile_id' => $profile->id,
                 'document_id' => $documentId,
-                'id_type' => mb_substr($idType, 0, 100),
+                'id_type' => $idType,
                 'id_number_last4' => $normalised === '' ? null : mb_substr($normalised, -4),
                 'method' => $input['method'],
                 'result' => $input['result'],
@@ -130,7 +139,6 @@ final class CddRecords
             $this->log->record('cdd_id_verified', $user, CddSubjects::type($subject), $subject->getKey(), [
                 'profile_id' => $profile->id,
                 'verification_id' => $verification->id,
-                'result' => $verification->result,
             ]);
 
             $this->assess($user, $subject, $profile, 'id_verification');
@@ -188,8 +196,6 @@ final class CddRecords
             $this->log->record('cdd_review_recorded', $user, CddSubjects::type($subject), $subject->getKey(), [
                 'profile_id' => $profile->id,
                 'review_id' => $review->id,
-                'kind' => $review->kind,
-                'outcome' => $review->outcome,
             ]);
 
             return $review;
@@ -254,9 +260,6 @@ final class CddRecords
             'profile_id' => $profile->id,
             'assessment_id' => $assessment->id,
             'rule_version' => $rules->version,
-            'trigger' => $trigger,
-            'level' => $level,
-            'overridden' => $overridden,
         ]);
 
         return $assessment;
@@ -327,7 +330,7 @@ final class CddRecords
                 throw ValidationException::withMessages(['id' => 'This walk-in has no ID on record, so there is nothing to verify.']);
             }
 
-            return [(string) $subject->id_type, (string) $subject->id_number, null];
+            return [IdTypes::fromWalkIn((string) $subject->id_type), (string) $subject->id_number, null];
         }
 
         $document = $documentId === null ? null : Document::query()
@@ -341,6 +344,6 @@ final class CddRecords
             throw ValidationException::withMessages(['document_id' => 'Pick one of this member\'s own valid IDs.']);
         }
 
-        return [(string) ($document->label ?: $document->custom_type_name ?: 'Valid ID'), $document->id_number, (int) $document->id];
+        return [IdTypes::fromDocument($document->label, $document->custom_type_name), $document->id_number, (int) $document->id];
     }
 }

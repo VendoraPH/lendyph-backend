@@ -13,6 +13,7 @@ use App\Models\GCashNonMember;
 use App\Models\SavingsAccount;
 use App\Services\Accounting\Money;
 use App\Services\Amla\Cdd\CddState;
+use App\Services\Amla\Cdd\IdTypes;
 
 /**
  * How the AMLA CDD endpoints present a subject (AMLA-B4): who it is (type,
@@ -123,6 +124,7 @@ final class AmlaCddPresenter
             'id' => (int) $verification->id,
             'document_id' => $verification->document_id,
             'id_type' => $verification->id_type,
+            'id_type_words' => IdTypes::words($verification->id_type),
             'id_number_masked' => $verification->id_number_last4 === null ? null : '****'.$verification->id_number_last4,
             'method' => $verification->method,
             'method_words' => AmlaIdVerification::METHODS[$verification->method] ?? $verification->method,

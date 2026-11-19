@@ -47,13 +47,14 @@ trait CddTestHelpers
         return Branch::factory()->create();
     }
 
-    protected function validId(Borrower $member, string $number = 'P1234567A'): Document
+    protected function validId(Borrower $member, string $number = 'P1234567A', string $label = 'passport', ?string $customTypeName = null): Document
     {
         return Document::query()->create([
             'documentable_type' => Borrower::class,
             'documentable_id' => $member->id,
             'type' => 'valid_id',
-            'label' => 'Passport',
+            'label' => $label,
+            'custom_type_name' => $customTypeName,
             'id_number' => $number,
             'side' => 'front',
             'file_path' => 'borrowers/'.$member->id.'/passport.jpg',

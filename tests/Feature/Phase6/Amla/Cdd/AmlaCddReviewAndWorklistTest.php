@@ -45,6 +45,7 @@ class AmlaCddReviewAndWorklistTest extends TestCase
         $this->assertSame('2029-11-20', $profile['next_review_on'], 'low risk: every 3 years');
 
         Carbon::setTestNow('2027-03-01 09:00:00');
+        $before = $this->outsideAmlaCounts();
         $review = $this->actingAs($officer)->postJson($this->cddUrl($member, '/reviews'), [
             'kind' => 'periodic', 'outcome' => 'no_change', 'notes' => 'Called the member; nothing changed.',
         ])->assertCreated()->json('data');
@@ -52,7 +53,9 @@ class AmlaCddReviewAndWorklistTest extends TestCase
         $this->assertSame('2027-03-01', $review['reviewed_on']);
         $this->assertSame('2030-03-01', $review['next_review_on']);
         $this->assertSame('Periodic review', $review['kind_words']);
-        $this->assertSame(1, AmlaLogEntry::query()->where('action', 'cdd_review_recorded')->count());
+        $logged = AmlaLogEntry::query()->where('action', 'cdd_review_recorded')->sole();
+        $this->assertEqualsCanonicalizing(['profile_id', 'review_id'], array_keys($logged->details), 'ids only: no kind or outcome in the log');
+        $this->assertNothingWrittenOutsideAmla($before);
     }
 
     public function test_past_the_next_review_date_the_profile_reads_review_overdue(): void
@@ -101,6 +104,8 @@ class AmlaCddReviewAndWorklistTest extends TestCase
         $walkIn = $this->walkIn();
         $officer = $this->cddOfficer();
         $this->actingAs($officer)->putJson($this->cddUrl($started), $this->completeProfile())->assertOk();
+        $headOffice = $this->headOfficeCddOfficer();
+        $before = $this->outsideAmlaCounts();
 
         $rows = collect($this->actingAs($officer)->getJson('/api/amla/cdd/subjects?per_page=100')->assertOk()->json('data'));
         $ids = $rows->where('type', 'member')->pluck('id')->all();
@@ -114,11 +119,12 @@ class AmlaCddReviewAndWorklistTest extends TestCase
         $this->assertNotContains($started->id, $notStarted->pluck('id')->all());
         $this->assertSame('Not Started', $notStarted->firstWhere('id', $untouched->id)['cdd_status_words']);
 
-        $all = collect($this->actingAs($this->headOfficeCddOfficer())->getJson('/api/amla/cdd/subjects?per_page=100')->json('data'));
+        $all = collect($this->actingAs($headOffice)->getJson('/api/amla/cdd/subjects?per_page=100')->json('data'));
         $this->assertContains($elsewhere->id, $all->where('type', 'member')->pluck('id')->all());
         $this->assertContains($walkIn->id, $all->where('type', 'walk_in')->pluck('id')->all());
 
         $this->assertSame(3, AmlaLogEntry::query()->where('action', 'cdd_list_viewed')->count());
+        $this->assertNothingWrittenOutsideAmla($before);
         $this->actingAs($officer)->getJson('/api/amla/cdd/subjects?status=sleepy')->assertUnprocessable();
     }
 

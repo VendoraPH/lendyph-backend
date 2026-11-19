@@ -81,7 +81,7 @@ $channels = [
     'SMS' => '/\bSms\w*|\bsemaphore\b|\btwilio\b/i',
     'mail' => '/\bMail::|Illuminate\\\\Support\\\\Facades\\\\Mail\b|\bMailable\b|\bMailer\b|Illuminate\\\\Contracts\\\\Mail\\\\|(?<![\w>:$\\\\])mail\s*\(/i',
     'notifications' => '/\bNotification::|\bStaffNotification\b|\bStaffRecipients\b|->notify(?:Now)?\s*\(|Illuminate\\\\Notifications\\\\|Services\\\\Notifications\b|\bNotifications::|\b\w+Notices\b/',
-    'the application log' => '/\bLog::|Illuminate\\\\Support\\\\Facades\\\\Log\b|(?<![\w>:$\\\\])logger\s*\(|\bLoggerInterface\b/',
+    'the application log' => '/\bLog::|Illuminate\\\\Support\\\\Facades\\\\Log\b|(?<![\w>:$\\\\])logger\s*\(|\bLoggerInterface\b|\bLogManager\b|\b(?:app|resolve)\s*\(\s*[\'"]log[\'"]\s*\)|->\s*make\s*\(\s*[\'"]log[\'"]\s*\)/',
     'the environment' => '/(?<![\w>:$\\\\])env\s*\(|\bgetenv\s*\(|\$_ENV\b|\$_SERVER\b/',
     'outbound calls' => '/\bHttp::|Illuminate\\\\Http\\\\Client\\\\|GuzzleHttp\\\\|\bcurl_\w+\s*\(/',
 ];
@@ -107,8 +107,8 @@ $withoutStrings = function (string $code): string {
     return $kept;
 };
 
-/** Laravel's global log helpers, which write the application log (AMLA-B1 re-review). */
-$logHelpers = '/(?<![\w>:$\\\\])(?:info|report|report_if|report_unless)\s*\(/';
+/** PHP's and Laravel's global log helpers, which write the application log (AMLA-B1 and B4 reviews). */
+$logHelpers = '/(?<![\w>:$\\\\])(?:info|report|report_if|report_unless|rescue|logs|error_log)\s*\(/';
 
 /** @return list<string> what the code reaches that AMLA must not */
 $channelOffences = function (string $code) use ($channels, $withoutStrings, $logHelpers): array {
@@ -142,7 +142,12 @@ $bulkWriteOffences = function (string $code, bool $isAmlaFile): array {
     $underTheModel = '/->\s*(?:toBase|getQuery|getBaseQuery)\s*\(/';
     $schemaDrop = '/\bSchema::(?:drop\w*|rename)\s*\(\s*[\'"]amla_/i';
     $rawDdl = '/\b(?:drop|alter|rename|truncate)\s+table\s+(?:if\s+exists\s+)?`?amla_/i';
-    $rawWrite = '/\b(?:update|delete\s+from)\s+`?amla_/i';
+    /*
+     * Raw SQL that writes an AMLA table, whatever method runs it: UPDATE,
+     * DELETE FROM, REPLACE INTO, a multi-table UPDATE … SET or DELETE alias
+     * FROM, and an INSERT … ON DUPLICATE KEY UPDATE.
+     */
+    $rawWrite = '/\b(?:update|delete\s+from|replace\s+into)\s+`?amla_|\bdelete\s+`?\w+`?(?:\s*,\s*`?\w+`?)*\s+from\s+`?amla_|\binto\s+`?amla_\w*`?[^;]*?\bon\s+duplicate\s+key\s+update\b|\bupdate\s+[^;]*?\bamla_\w+[^;]*?\bset\b/i';
 
     foreach (explode(';', $code) as $statement) {
         $named = preg_match($namesAmla, $statement) === 1;
@@ -162,14 +167,14 @@ $bulkWriteOffences = function (string $code, bool $isAmlaFile): array {
     }
 
     /*
-     * A Schema::table() block on an AMLA table that drops or renames a column,
-     * matched across the whole block, since its closure spans several
-     * statements.
+     * A Schema::table() block on an AMLA table that drops, renames or changes
+     * a column, matched across the whole block (a closure spans several
+     * statements; an arrow function is one).
      */
-    preg_match_all('/\bSchema::table\s*\(\s*[\'"]amla_\w*[\'"]\s*,\s*(?:static\s+)?function\b.*?\n\s*}\s*\)/s', $code, $blocks);
+    preg_match_all('/\bSchema::table\s*\(\s*[\'"]amla_\w*[\'"]\s*,\s*(?:static\s+)?(?:function\b.*?\n\s*}\s*\)|fn\b[^;]*)/s', $code, $blocks);
 
     foreach ($blocks[0] as $block) {
-        if (preg_match('/->\s*(?:dropColumn|dropColumns|renameColumn|dropMorphs|dropTimestamps|dropSoftDeletes|dropForeign|dropConstrainedForeignId)\s*\(/i', $block) === 1) {
+        if (preg_match('/->\s*(?:dropColumn|dropColumns|renameColumn|dropMorphs|dropTimestamps|dropSoftDeletes|dropForeign|dropConstrainedForeignId|change)\s*\(/i', $block) === 1) {
             $offences[] = 'drop or alter: '.trim((string) preg_replace('/\s+/', ' ', $block));
         }
     }
@@ -232,6 +237,11 @@ it('catches every channel pattern', function (string $code, string $what) use ($
     'info helper' => ['info("case opened", ["id" => $id]);', 'the application log'],
     'report helper' => ['report($exception);', 'the application log'],
     'report_if helper' => ['report_if($failed, $exception);', 'the application log'],
+    'rescue helper' => ['rescue(fn () => $this->post($case));', 'the application log'],
+    'logs helper' => ['logs()->warning("case opened");', 'the application log'],
+    'log from the container' => ["app('log')->info('case opened');", 'the application log'],
+    'log resolved' => ["resolve('log')->error('x');", 'the application log'],
+    'error_log' => ["error_log('case 12 opened');", 'the application log'],
     'env' => ["env('AMLA_MONITORING_ENABLED');", 'the environment'],
     'http' => ['Http::post("https://x.test");', 'outbound calls'],
 ]);
@@ -324,6 +334,12 @@ it('catches every bulk-write pattern', function (string $code, bool $isAmlaFile)
     'new table update' => ["AmlaProfile::query()->update(['occupation' => null]);", false],
     'new table delete' => ["DB::table('amla_profile_changes')->delete();", false],
     'new table drop' => ["Schema::dropIfExists('amla_risk_rule_versions');", false],
+    'raw replace into' => ["DB::insert('REPLACE INTO amla_log_entries (id, action) VALUES (1, ?)', ['x']);", false],
+    'raw upsert' => ["DB::insert('insert into amla_profiles (id, occupation) values (1, null) on duplicate key update occupation = null');", false],
+    'raw delete with an alias' => ["DB::delete('DELETE p FROM amla_profiles p WHERE p.id = 1');", false],
+    'raw multi-table update' => ["DB::update('UPDATE borrowers b JOIN amla_profiles p ON p.borrower_id = b.id SET p.occupation = null');", false],
+    'Schema table with an arrow function' => ["Schema::table('amla_profiles', fn (Blueprint \$table) => \$table->dropColumn('pep_details'));", false],
+    'Schema table change' => ["Schema::table('amla_profiles', function (Blueprint \$table) {\n    \$table->string('occupation', 10)->change();\n});", false],
 ]);
 
 it('lets an added column through', function () use ($bulkWriteOffences) {

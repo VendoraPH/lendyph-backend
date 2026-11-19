@@ -3,9 +3,9 @@
 namespace Tests\Feature\Phase6\Amla;
 
 use App\Models\AmlaLogEntry;
+use App\Providers\AmlaServiceProvider;
 use App\Services\Amla\Foundation\AmlaAccess;
 use App\Services\Amla\Foundation\AmlaMonitoring;
-use Illuminate\Cache\RateLimiting\Limit;
 use Illuminate\Http\Request;
 use Illuminate\Routing\Route as RoutingRoute;
 use Illuminate\Support\Facades\RateLimiter;
@@ -208,17 +208,23 @@ class AmlaAccessTest extends TestCase
         $this->assertSame($before + 10, AmlaLogEntry::query()->where('action', 'access_denied')->count());
     }
 
-    public function test_a_caller_holding_an_amla_key_is_not_cut_to_the_refused_bucket(): void
+    public function test_a_caller_holding_an_amla_key_gets_a_bucket_of_their_own_of_30_a_minute(): void
     {
         $viewer = $this->amlaUser(['amla:view']);
+        $other = $this->amlaUser(['amla:view']);
 
-        for ($i = 0; $i < 12; $i++) {
+        for ($i = 0; $i < AmlaServiceProvider::HOLDER_PER_MINUTE; $i++) {
             $this->actingAs($viewer)->getJson('/api/amla/status')->assertOk();
         }
 
+        $this->actingAs($viewer)->getJson('/api/amla/status')->assertTooManyRequests();
+        $this->actingAs($other)->getJson('/api/amla/status')->assertOk();
+
         $request = Request::create('/api/amla/status', 'GET');
         $request->setUserResolver(fn () => $viewer);
-        $this->assertEquals(Limit::none(), RateLimiter::limiter('amla')($request));
+        $limit = RateLimiter::limiter('amla')($request);
+        $this->assertSame(30, $limit->maxAttempts);
+        $this->assertSame('amla:user:User:'.$viewer->id, $limit->key);
 
         $request->setUserResolver(fn () => $this->amlaUser(['loans:view']));
         $limit = RateLimiter::limiter('amla')($request);

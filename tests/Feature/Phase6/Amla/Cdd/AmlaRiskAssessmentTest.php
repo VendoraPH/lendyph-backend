@@ -3,6 +3,7 @@
 namespace Tests\Feature\Phase6\Amla\Cdd;
 
 use App\Exceptions\AmlaRecordIsAppendOnlyException;
+use App\Models\AmlaLogEntry;
 use App\Models\AmlaRiskAssessment;
 use App\Models\AmlaRiskRuleVersion;
 use App\Services\Amla\Cdd\RiskRules;
@@ -99,6 +100,7 @@ class AmlaRiskAssessmentTest extends TestCase
         $member = $this->member();
         $officer = $this->cddOfficer();
         $this->actingAs($officer)->putJson($this->cddUrl($member), $this->completeProfile())->assertOk();
+        $before = $this->outsideAmlaCounts();
 
         $this->actingAs($officer)->postJson($this->cddUrl($member, '/risk-assessments'), ['override_level' => 'high'])
             ->assertUnprocessable()->assertJsonValidationErrors(['override_reason']);
@@ -116,6 +118,11 @@ class AmlaRiskAssessmentTest extends TestCase
         $this->assertFalse($moved['overridden']);
 
         $this->assertSame(4, AmlaRiskAssessment::query()->count(), 'history is kept: every assessment is its own row');
+        $this->assertNothingWrittenOutsideAmla($before);
+
+        foreach (AmlaLogEntry::query()->where('action', 'cdd_risk_assessed')->get() as $logged) {
+            $this->assertEqualsCanonicalizing(['profile_id', 'assessment_id', 'rule_version'], array_keys($logged->details), 'ids only: no level, override or trigger in the log');
+        }
     }
 
     public function test_an_assessment_is_kept_as_written(): void
@@ -150,6 +157,20 @@ class AmlaRiskAssessmentTest extends TestCase
 
         $this->expectException(AmlaRecordIsAppendOnlyException::class);
         AmlaRiskRuleVersion::query()->where('version', 1)->firstOrFail()->delete();
+    }
+
+    public function test_a_super_admin_who_asked_for_a_rules_change_cannot_approve_it(): void
+    {
+        $definition = app(RiskRules::class)->current()->definition;
+        $definition['thresholds'] = ['medium' => 25, 'high' => 50];
+
+        $id = $this->actingAs($this->admin)->postJson('/api/amla/change-requests', [
+            'type' => 'risk_rules', 'reason' => 'Counsel review.', 'definition' => $definition,
+        ])->assertCreated()->json('data.id');
+
+        $this->actingAs($this->admin)->postJson("/api/amla/change-requests/{$id}/approve")->assertForbidden()
+            ->assertJsonPath('message', 'You asked for this change, so another AMLA settings holder must approve it.');
+        $this->assertSame(1, app(RiskRules::class)->current()->version);
     }
 
     public function test_a_risk_rules_change_must_keep_every_factor_and_rising_thresholds(): void

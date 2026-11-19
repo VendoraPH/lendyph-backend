@@ -5,6 +5,7 @@ namespace Tests\Feature\Phase6\Amla\Cdd;
 use App\Exceptions\AmlaRecordIsAppendOnlyException;
 use App\Models\AmlaIdVerification;
 use App\Models\AmlaLogEntry;
+use App\Services\Amla\Cdd\IdTypes;
 use Illuminate\Support\Carbon;
 use Tests\TestCase;
 use Tests\Traits\SetupLendyPH;
@@ -68,9 +69,11 @@ class AmlaCddVerificationAndCompletenessTest extends TestCase
         $this->assertSame('verified', $data['cdd_status']);
         $this->assertTrue($data['completeness']['complete']);
         $this->assertSame('Original ID seen in person', $data['id_verifications'][0]['method_words']);
-        $this->assertSame('Passport', $data['id_verifications'][0]['id_type']);
+        $this->assertSame('passport', $data['id_verifications'][0]['id_type']);
+        $this->assertSame('Passport', $data['id_verifications'][0]['id_type_words']);
         $this->assertSame('****567A', $data['id_verifications'][0]['id_number_masked']);
-        $this->assertSame(1, AmlaLogEntry::query()->where('action', 'cdd_id_verified')->count());
+        $logged = AmlaLogEntry::query()->where('action', 'cdd_id_verified')->sole();
+        $this->assertEqualsCanonicalizing(['profile_id', 'verification_id'], array_keys($logged->details), 'ids only: the result never reaches the log');
         $this->assertNothingWrittenOutsideAmla($before);
     }
 
@@ -150,11 +153,38 @@ class AmlaCddVerificationAndCompletenessTest extends TestCase
 
         $this->actingAs($officer)->postJson($this->cddUrl($walkIn, '/id-verifications'), [
             'method' => 'original_seen', 'result' => 'verified',
-        ])->assertCreated()->assertJsonPath('data.id_type', $walkIn->id_type);
+        ])->assertCreated()->assertJsonPath('data.id_type', IdTypes::fromWalkIn($walkIn->id_type));
+        $this->assertNotSame(IdTypes::OTHERS, IdTypes::fromWalkIn($walkIn->id_type), 'the factory\'s types are all on the list');
 
         $this->actingAs($officer)->postJson($this->cddUrl($bare, '/id-verifications'), [
             'method' => 'original_seen', 'result' => 'verified',
         ])->assertUnprocessable()->assertJsonPath('message', 'This walk-in has no ID on record, so there is nothing to verify.');
+    }
+
+    public function test_only_a_fixed_id_type_is_kept_never_free_text_that_could_hold_a_number(): void
+    {
+        $officer = $this->cddOfficer();
+        $cases = [
+            ['umid', null, 'umid'],
+            ['UMID 0111-2222333-4', null, 'others'],
+            ['others', 'Company HR ID', 'Company HR ID'],
+            ['others', 'Employee no. 4471', 'others'],
+            ['others', null, 'others'],
+        ];
+
+        foreach ($cases as [$label, $custom, $expected]) {
+            $member = $this->member();
+            $document = $this->validId($member, 'X99887766', $label, $custom);
+
+            $this->actingAs($officer)->postJson($this->cddUrl($member, '/id-verifications'), [
+                'document_id' => $document->id, 'method' => 'original_seen', 'result' => 'verified',
+            ])->assertCreated()->assertJsonPath('data.id_type', $expected);
+        }
+
+        $this->assertSame('drivers_license', IdTypes::fromWalkIn("Driver's License"));
+        $this->assertSame('philippine_id', IdTypes::fromWalkIn('PhilSys'));
+        $this->assertSame('others', IdTypes::fromWalkIn('ID no. 1234567'));
+        $this->assertSame('UMID', IdTypes::words('umid'));
     }
 
     public function test_a_verification_is_kept_as_written(): void

@@ -98,6 +98,26 @@ class AmlaCddProfileTest extends TestCase
         $this->assertSame(1, AmlaLogEntry::query()->where('action', 'cdd_profile_updated')->count());
     }
 
+    public function test_a_save_that_changes_nothing_is_logged_as_one_view(): void
+    {
+        $member = $this->member();
+        $officer = $this->cddOfficer();
+        $this->actingAs($officer)->putJson($this->cddUrl($member), [...$this->completeProfile(), 'pep_details' => 'Councillor'])->assertOk();
+        $views = AmlaLogEntry::query()->where('action', 'cdd_profile_viewed')->count();
+
+        $data = $this->actingAs($officer)->putJson($this->cddUrl($member), [])->assertOk()->json('data');
+
+        $this->assertSame('Councillor', $data['profile']['pep_details'], 'the whole profile came back');
+        $this->assertSame($views + 1, AmlaLogEntry::query()->where('action', 'cdd_profile_viewed')->count());
+        $viewed = AmlaLogEntry::query()->where('action', 'cdd_profile_viewed')->latest('id')->firstOrFail();
+        $this->assertSame($officer->id, $viewed->user_id);
+        $this->assertSame($member->id, $viewed->subject_id);
+        $this->assertTrue($viewed->details['unchanged_save']);
+
+        $this->actingAs($officer)->putJson($this->cddUrl($member), $this->completeProfile())->assertOk();
+        $this->assertSame($views + 2, AmlaLogEntry::query()->where('action', 'cdd_profile_viewed')->count(), 'an unchanged save of the same answers is a view too');
+    }
+
     public function test_answers_are_checked_in_words(): void
     {
         $member = $this->member();
@@ -144,6 +164,46 @@ class AmlaCddProfileTest extends TestCase
         $this->actingAs($headOffice)->getJson($this->cddUrl($walkIn))->assertOk()
             ->assertJsonPath('data.subject.type', 'walk_in')
             ->assertJsonPath('data.subject.branch', null);
+    }
+
+    public function test_the_post_routes_check_the_permission_before_the_lookup_and_answer_404_out_of_scope(): void
+    {
+        $member = $this->member();
+        $this->validId($member);
+        $elsewhere = $this->member([], $this->otherBranch());
+        $walkIn = $this->walkIn();
+        $outsider = $this->amlaUser(['amla:view', 'amla:settings', 'amla:audit', 'branches:view_all', 'borrowers:view']);
+        $officer = $this->cddOfficer();
+        $bodies = [
+            '/id-verifications' => ['method' => 'original_seen', 'result' => 'verified'],
+            '/risk-assessments' => [],
+            '/reviews' => ['kind' => 'periodic', 'outcome' => 'no_change'],
+        ];
+
+        foreach ($bodies as $suffix => $body) {
+            foreach (["/api/amla/cdd/members/{$member->id}", '/api/amla/cdd/members/999999', "/api/amla/cdd/walk-ins/{$walkIn->id}"] as $url) {
+                $this->actingAs($outsider)->postJson($url.$suffix, $body)->assertForbidden()
+                    ->assertJsonPath('message', 'This needs the AMLA customer due diligence permission.');
+            }
+
+            $this->actingAs($officer)->postJson($this->cddUrl($elsewhere, $suffix), $body)->assertNotFound();
+            $this->actingAs($officer)->postJson($this->cddUrl($walkIn, $suffix), $body)->assertNotFound();
+            $this->actingAs($officer)->postJson('/api/amla/cdd/members/999999'.$suffix, $body)->assertNotFound();
+        }
+
+        $this->assertSame(0, AmlaProfile::query()->count(), 'nothing out of scope was started');
+    }
+
+    public function test_super_admin_passes_every_cdd_check_through_its_bypass(): void
+    {
+        $elsewhere = $this->member([], $this->otherBranch());
+        $walkIn = $this->walkIn();
+
+        $this->actingAs($this->admin)->getJson($this->cddUrl($elsewhere))->assertOk();
+        $this->actingAs($this->admin)->getJson($this->cddUrl($walkIn))->assertOk();
+        $this->actingAs($this->admin)->putJson($this->cddUrl($walkIn), $this->completeProfile())->assertOk();
+        $this->actingAs($this->admin)->getJson('/api/amla/risk-rules')->assertOk();
+        $this->assertSame(2, AmlaLogEntry::query()->where('action', 'cdd_profile_viewed')->where('user_id', $this->admin->id)->count());
     }
 
     public function test_a_pending_registration_is_not_a_cdd_subject(): void
