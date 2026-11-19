@@ -226,6 +226,11 @@ class TimezoneShift
         // cannot hold a row written by the old UTC application. Same reasoning
         // as the csv_import_* tables above.
         'portfolio_daily_snapshots' => ['created_at'],
+        // Added 2026-11-19 with the executive dashboard's snapshot lines and
+        // run log (Phase 6 EB-B), well after the cutover, so neither table can
+        // hold a row written by the old UTC application.
+        'portfolio_snapshot_lines' => ['created_at'],
+        'portfolio_snapshot_runs' => ['finished_at', 'started_at'],
         // Added 2026-11-08 with payment reminders (Phase 2), well after the
         // cutover completed (2026-08-06 on every deployment), so none of these
         // tables can hold a row written by the old UTC application. Same

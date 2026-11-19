@@ -75,17 +75,70 @@ final class PortfolioRisk
     public function par(Builder $loans, ?Carbon $asOf = null): array
     {
         $asOf ??= Carbon::today();
+
+        $row = DB::query()
+            ->fromSub($this->perLoan($loans), 'per_loan')
+            ->selectRaw(...$this->parSelect($asOf))
+            ->first();
+
+        return $this->parFigures($row);
+    }
+
+    /**
+     * self::par() per group of `$columns` (such as `loans.branch_id` and
+     * `loans.loan_product_id`), in one grouped query, keyed as
+     * LoanListTotals::grouped() keys its groups. Each group's ratio is over
+     * that group's own unpaid principal. A group whose loans have no period
+     * has no key.
+     *
+     * @param  Builder<Loan>  $loans  its select, eager loads and order are ignored
+     * @param  list<string>  $columns  `loans.` columns
+     * @return array<string, array{portfolio_principal: float, par_1: array{amount: float, ratio: float, loans: int}, par_30: array{amount: float, ratio: float, loans: int}, par_60: array{amount: float, ratio: float, loans: int}, par_90: array{amount: float, ratio: float, loans: int}}>
+     */
+    public function parBy(Builder $loans, array $columns, ?Carbon $asOf = null): array
+    {
+        $asOf ??= Carbon::today();
+        [$select, $bindings] = $this->parSelect($asOf);
+
+        return DB::query()
+            ->fromSub($this->perLoan($loans), 'per_loan')
+            ->join('loans', 'loans.id', '=', 'per_loan.loan_id')
+            ->groupBy($columns)
+            ->select($columns)
+            ->selectRaw($select, $bindings)
+            ->get()
+            ->mapWithKeys(fn (object $row) => [LoanListTotals::groupKey($row, $columns) => $this->parFigures($row)])
+            ->all();
+    }
+
+    /**
+     * Per loan of `$loans`: its oldest period still marked unpaid and the
+     * principal still unpaid on all its periods.
+     *
+     * @param  Builder<Loan>  $loans
+     */
+    private function perLoan(Builder $loans): QueryBuilder
+    {
         $unpaid = implode(', ', array_fill(0, count(AmortizationSchedule::UNPAID_STATUSES), '?'));
 
-        $perLoan = DB::table('amortization_schedules')
+        return DB::table('amortization_schedules')
             ->whereIn('amortization_schedules.loan_id', $this->idsOf($loans))
             ->groupBy('amortization_schedules.loan_id')
             ->selectRaw(
-                "MIN(CASE WHEN amortization_schedules.status IN ({$unpaid}) THEN amortization_schedules.due_date END) as oldest_unpaid,
+                "amortization_schedules.loan_id,
+                MIN(CASE WHEN amortization_schedules.status IN ({$unpaid}) THEN amortization_schedules.due_date END) as oldest_unpaid,
                 SUM(".AmortizationSchedule::remainingPrincipalSql().') as principal',
                 AmortizationSchedule::UNPAID_STATUSES,
             );
+    }
 
+    /**
+     * The PAR sums over `per_loan`, with their bindings.
+     *
+     * @return array{0: string, 1: list<string>}
+     */
+    private function parSelect(Carbon $asOf): array
+    {
         $select = ['COALESCE(SUM(per_loan.principal), 0) as portfolio_principal'];
         $bindings = [];
         foreach (self::PAR_DAYS as $key => $days) {
@@ -95,8 +148,14 @@ final class PortfolioRisk
             array_push($bindings, $cutoff, $cutoff);
         }
 
-        $row = DB::query()->fromSub($perLoan, 'per_loan')->selectRaw(implode(', ', $select), $bindings)->first();
+        return [implode(', ', $select), $bindings];
+    }
 
+    /**
+     * @return array{portfolio_principal: float, par_1: array{amount: float, ratio: float, loans: int}, par_30: array{amount: float, ratio: float, loans: int}, par_60: array{amount: float, ratio: float, loans: int}, par_90: array{amount: float, ratio: float, loans: int}}
+     */
+    private function parFigures(?object $row): array
+    {
         $portfolio = round((float) ($row->portfolio_principal ?? 0), 2);
         $result = ['portfolio_principal' => $portfolio];
 
