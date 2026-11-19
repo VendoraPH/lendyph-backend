@@ -14,4 +14,8 @@
 
 return [
     'monitoring_enabled' => filter_var(env('AMLA_MONITORING_ENABLED', false), FILTER_VALIDATE_BOOL),
+
+    // Failed rows the harvester tries again per source per run, least
+    // recently tried first.
+    'harvest_retries_per_run' => 200,
 ];

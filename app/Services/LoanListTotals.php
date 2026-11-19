@@ -138,6 +138,59 @@ class LoanListTotals
     }
 
     /**
+     * The same figures as self::for(), per group of `$columns` (such as
+     * `loans.branch_id` and `loans.loan_product_id`), plus each group's
+     * `loan_count`, in one grouped query, keyed by the group's values joined
+     * with `-` in the order given. A group with no loan has no key. Each
+     * group's figures are self::for()'s over that group's loans, so the
+     * groups add up to self::for() over all of them.
+     *
+     * @param  Builder<Loan>  $loans  the filtered loans; its select, eager loads and order are ignored
+     * @param  list<string>  $columns  `loans.` columns
+     * @return array<string, array{total_outstanding: float, outstanding_principal: float, overdue_amount: float, overdue_count: int, loan_count: int}>
+     */
+    public function grouped(Builder $loans, array $columns, ?Carbon $asOf = null): array
+    {
+        $asOf ??= Carbon::today();
+
+        $perLoan = $this->perLoan($this->baseOf($loans)->select('loans.id'), $asOf);
+
+        return $this->baseOf($loans)
+            ->leftJoinSub($perLoan, 'per_loan', 'per_loan.loan_id', '=', 'loans.id')
+            ->groupBy($columns)
+            ->select($columns)
+            ->selectRaw(
+                'COALESCE(SUM(per_loan.owed), 0) + COALESCE(SUM(GREATEST(loans.insurance_remaining_balance, 0)), 0) as total_outstanding,
+                COALESCE(SUM(per_loan.principal), 0) as outstanding_principal,
+                COALESCE(SUM(per_loan.overdue), 0) as overdue_amount,
+                COUNT(CASE WHEN per_loan.overdue > 0 THEN 1 END) as overdue_count,
+                COUNT(*) as loan_count',
+            )
+            ->get()
+            ->mapWithKeys(fn (object $row) => [self::groupKey($row, $columns) => [
+                'total_outstanding' => round((float) $row->total_outstanding, 2),
+                'outstanding_principal' => round((float) $row->outstanding_principal, 2),
+                'overdue_amount' => round((float) $row->overdue_amount, 2),
+                'overdue_count' => (int) $row->overdue_count,
+                'loan_count' => (int) $row->loan_count,
+            ]])
+            ->all();
+    }
+
+    /**
+     * A grouped row's key: its `$columns` values, joined with `-`.
+     *
+     * @param  list<string>  $columns
+     */
+    public static function groupKey(object $row, array $columns): string
+    {
+        return implode('-', array_map(
+            fn (string $column): string => (string) $row->{str_contains($column, '.') ? substr($column, strrpos($column, '.') + 1) : $column},
+            $columns,
+        ));
+    }
+
+    /**
      * The members with a LATE period on the filtered loans (unpaid and past
      * the due date plus the loan's grace), as of $asOf: the Past Due Loans
      * page's members (GET /reports/due-past-due with `past_due_only=1`,

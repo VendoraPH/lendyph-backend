@@ -2,10 +2,14 @@
 
 namespace App\Http\Requests\Borrower;
 
+use App\Models\Borrower;
+use App\Rules\BranchTakesNew;
 use App\Services\BranchAccess;
+use App\Services\Branches\BranchWriteGuard;
 use Illuminate\Contracts\Validation\ValidationRule;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Rule;
+use Illuminate\Validation\Validator;
 
 /**
  * Approving a public registration (Phase 6 FX-1, D7).
@@ -31,11 +35,35 @@ class ApproveRegistrationRequest extends FormRequest
     {
         return [
             'branch_id' => [
+                'bail',
                 'nullable',
                 'integer',
                 app(BranchAccess::class)->constrainBranchExists(Rule::exists('branches', 'id'), $this->user()),
+                BranchTakesNew::activeOnly(BranchWriteGuard::MEMBERS, $this->user()),
             ],
         ];
+    }
+
+    /**
+     * A registration that already names a branch, approved without choosing
+     * one, joins that branch: it waits while the branch is suspended or
+     * closed (Phase 6 MB-BE2). The controller keeps the other approval checks.
+     */
+    public function withValidator(Validator $validator): void
+    {
+        $validator->after(function (Validator $validator): void {
+            $registration = $this->route('borrower');
+
+            if ($this->filled('branch_id') || ! $registration instanceof Borrower || $registration->branch_id === null) {
+                return;
+            }
+
+            BranchTakesNew::activeOnly(BranchWriteGuard::MEMBERS, $this->user())->validate(
+                'branch_id',
+                $registration->branch_id,
+                fn (string $message) => $validator->errors()->add('branch_id', $message),
+            );
+        });
     }
 
     /**

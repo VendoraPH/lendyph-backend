@@ -83,6 +83,22 @@ class BranchClosureTest extends TestCase
         ], $this->auditRows($this->quiet->id)->map(fn (AuditLog $row) => [$row->action, $row->description])->all());
     }
 
+    public function test_a_branch_waiting_to_close_cannot_become_the_main_office(): void
+    {
+        $this->requestClosure();
+
+        $this->putJson("/api/branches/{$this->quiet->id}/main-office", ['reason' => 'Head office moved'])
+            ->assertUnprocessable()
+            ->assertJsonPath('errors.branch.0', 'A request to close this branch is waiting. Reject or cancel it before making it the main office.');
+
+        $this->assertFalse($this->quiet->fresh()->is_main_office);
+        $this->assertSame('pending', BranchClosure::query()->where('branch_id', $this->quiet->id)->sole()->status);
+
+        // Once the request is cancelled, the move goes ahead.
+        $this->deleteJson("/api/branches/{$this->quiet->id}/closure")->assertOk();
+        $this->putJson("/api/branches/{$this->quiet->id}/main-office", ['reason' => 'Head office moved'])->assertOk();
+    }
+
     public function test_the_person_who_asked_cannot_approve(): void
     {
         $this->requestClosure();

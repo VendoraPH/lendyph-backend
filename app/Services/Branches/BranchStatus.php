@@ -33,8 +33,10 @@ use Symfony\Component\HttpKernel\Exception\HttpException;
  *   reject with a note.
  * - Each step writes one audit row on the branch, in words.
  *
- * Enforcing a suspended or closed status on new records is MB-BE2's
- * (wave 2). Interbranch transfers (MB-BE5) count both ways: one waiting for
+ * A suspended or closed status is enforced on writes by BranchWriteGuard and
+ * the BranchTakesNew rules (MB-BE2). A status change and a closure approval
+ * hold the guard's branch lock, so a guarded write never interleaves with
+ * them. Interbranch transfers (MB-BE5) count both ways: one waiting for
  * approval is a pending approval, and one approved and not yet received
  * keeps both its branches open, since 1190 is still open on each.
  */
@@ -46,15 +48,19 @@ class BranchStatus
     /** A time deposit that hasn't been paid out or rolled over yet. */
     public const OPEN_TIME_DEPOSIT_STATUSES = ['active', 'matured'];
 
-    public function __construct(private TrialBalanceBuilder $trialBalance) {}
+    public function __construct(
+        private TrialBalanceBuilder $trialBalance,
+        private BranchWriteGuard $guard,
+    ) {}
 
     /**
-     * Suspend or reactivate a branch. `$reason` is null only for the
-     * profile's `is_active` switch, which predates reasons.
+     * Suspend or reactivate a branch, with the reason its audit row carries.
+     * This is the only way a status changes outside a closure: the profile
+     * edit refuses a changed `is_active`.
      */
-    public function change(Branch $branch, string $to, ?string $reason): Branch
+    public function change(Branch $branch, string $to, string $reason): Branch
     {
-        return DB::transaction(function () use ($branch, $to, $reason): Branch {
+        return $this->guard->exclusively((int) $branch->getKey(), fn (): Branch => DB::transaction(function () use ($branch, $to, $reason): Branch {
             $locked = Branch::query()->whereKey($branch->getKey())->lockForUpdate()->firstOrFail();
 
             $this->assertCanMove($locked, $to);
@@ -68,7 +74,7 @@ class BranchStatus
             $locked->save();
 
             return $locked;
-        });
+        }));
     }
 
     /**
@@ -106,6 +112,16 @@ class BranchStatus
 
             if ($locked->is_main_office) {
                 return $locked;
+            }
+
+            // A branch waiting to close can't become the main office, which
+            // stays open (MB-BE1 browser check M1). Read under the branch row's
+            // lock and then the request's, the closure approval's order, so a
+            // move and a closure request on the same branch serialize: the
+            // later one is refused in words, and no request is ever left
+            // waiting on the main office.
+            if (BranchClosure::query()->where('branch_id', $locked->id)->where('status', BranchClosure::STATUS_PENDING)->lockForUpdate()->exists()) {
+                throw ValidationException::withMessages(['branch' => ['A request to close this branch is waiting. Reject or cancel it before making it the main office.']]);
             }
 
             foreach ($current as $old) {
@@ -204,7 +220,7 @@ class BranchStatus
 
     public function approveClosure(Branch $branch, User $by, ?string $note): BranchClosure
     {
-        return DB::transaction(function () use ($branch, $by, $note): BranchClosure {
+        return $this->guard->exclusively((int) $branch->getKey(), fn (): BranchClosure => DB::transaction(function () use ($branch, $by, $note): BranchClosure {
             $locked = Branch::query()->whereKey($branch->getKey())->lockForUpdate()->firstOrFail();
             $closure = $this->waiting($locked);
 
@@ -228,7 +244,7 @@ class BranchStatus
             $locked->save();
 
             return $closure;
-        });
+        }));
     }
 
     public function rejectClosure(Branch $branch, User $by, string $note): BranchClosure

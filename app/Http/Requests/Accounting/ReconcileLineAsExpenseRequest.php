@@ -2,7 +2,9 @@
 
 namespace App\Http\Requests\Accounting;
 
+use App\Http\Requests\Concerns\RefusesAClosedBranch;
 use Illuminate\Foundation\Http\FormRequest;
+use Illuminate\Validation\Validator;
 
 /**
  * Recording an unmatched statement line (money out) as an expense paid from
@@ -15,6 +17,8 @@ use Illuminate\Foundation\Http\FormRequest;
  */
 class ReconcileLineAsExpenseRequest extends FormRequest
 {
+    use RefusesAClosedBranch;
+
     public function authorize(): bool
     {
         $user = $this->user();
@@ -43,5 +47,11 @@ class ReconcileLineAsExpenseRequest extends FormRequest
         if ($this->has('payee')) {
             $this->merge(['payee' => trim((string) $this->input('payee'))]);
         }
+    }
+
+    /** Posts into the reconciliation's branch, which a closed branch refuses (Phase 6 MB-BE2). */
+    public function after(): array
+    {
+        return [fn (Validator $validator) => $this->refuseAClosedBranch($validator, $this->route('reconciliation')?->branch_id)];
     }
 }

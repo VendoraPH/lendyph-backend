@@ -3,6 +3,8 @@
 namespace App\Http\Requests\Savings\TimeDeposit;
 
 use App\Models\TimeDeposit;
+use App\Rules\MemberBranchTakesNew;
+use App\Services\Branches\BranchWriteGuard;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Rule;
 
@@ -26,7 +28,7 @@ class PlaceTimeDepositRequest extends FormRequest
 
         return [
             ...TimeDepositRules::quote($user),
-            'borrower_id' => ['required', 'integer', TimeDepositRules::visible('borrowers', $user)],
+            'borrower_id' => ['bail', 'required', 'integer', TimeDepositRules::visible('borrowers', $user), new MemberBranchTakesNew(BranchWriteGuard::TIME_DEPOSITS, $user)],
             'maturity_instruction' => ['required', Rule::in(TimeDeposit::MATURITY_INSTRUCTIONS)],
             'payment_method' => ['required', ...TimeDepositRules::method()],
             'reference' => ['nullable', 'string', 'max:100'],
