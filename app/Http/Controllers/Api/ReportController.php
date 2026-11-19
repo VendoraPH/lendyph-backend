@@ -11,8 +11,11 @@ use App\Http\Resources\RepaymentResource;
 use App\Models\AmortizationSchedule;
 use App\Models\Borrower;
 use App\Models\Loan;
+use App\Models\LoanProduct;
+use App\Models\User;
 use App\Services\BranchAccess;
 use App\Services\ContactVisibility;
+use App\Services\Dashboard\MetricCatalog;
 use App\Services\ReportService;
 use Carbon\Carbon;
 use Illuminate\Auth\Access\AuthorizationException;
@@ -87,6 +90,13 @@ class ReportController extends Controller
             // LoanController::index() for the original write-up.
             'branch_id' => ['nullable', 'integer', 'min:1'],
             'loan_id' => ['nullable', 'integer', 'min:1'],
+            // The executive dashboard's filters (Phase 6 EB-A): a loan
+            // product, the loan's account officer, and the collector (the
+            // user who recorded a payment). Each report applies the ones it
+            // can and lists them in `filters_applied` (MetricCatalog::REPORTS).
+            'product_id' => ['nullable', 'integer', 'min:1'],
+            'officer_id' => ['nullable', 'integer', 'min:1'],
+            'collector_id' => ['nullable', 'integer', 'min:1'],
             'per_page' => ['nullable', 'integer', 'min:1', 'max:1000'],
         ], $extra));
 
@@ -103,6 +113,21 @@ class ReportController extends Controller
         $filters['branch_ids'] = $access->for(request()->user());
 
         return $filters;
+    }
+
+    /**
+     * A report built from the shared filters, with what it did with the
+     * executive dashboard's filters (`filters_applied`, `filters_applied_to`;
+     * MetricCatalog::filtersApplied()) added to its payload.
+     *
+     * @param  callable(array<string, mixed>): array<string, mixed>  $build
+     * @return array<string, mixed>
+     */
+    private function reportData(string $report, callable $build): array
+    {
+        $filters = $this->reportFilters();
+
+        return [...$build($filters), ...MetricCatalog::filtersApplied($report, $filters)];
     }
 
     /**
@@ -249,7 +274,10 @@ class ReportController extends Controller
         return LoanResource::collection($this->reportService->listOfReleases($filters))
             // Totals over the full filtered set — the client caps its fetch at
             // one page and must not add the visible rows up itself.
-            ->additional(['totals' => $this->reportService->listOfReleasesTotals($filters)]);
+            ->additional([
+                'totals' => $this->reportService->listOfReleasesTotals($filters),
+                ...MetricCatalog::filtersApplied('releases', $filters),
+            ]);
     }
 
     #[OA\Get(
@@ -279,7 +307,10 @@ class ReportController extends Controller
         ]);
 
         return RepaymentResource::collection($this->reportService->listOfRepayments($filters))
-            ->additional(['totals' => $this->reportService->listOfRepaymentsTotals($filters)]);
+            ->additional([
+                'totals' => $this->reportService->listOfRepaymentsTotals($filters),
+                ...MetricCatalog::filtersApplied('repayments', $filters),
+            ]);
     }
 
     #[OA\Get(
@@ -401,6 +432,7 @@ class ReportController extends Controller
                 ];
             }),
             'totals' => $this->reportService->listOfDuePastDueTotals($filters),
+            ...MetricCatalog::filtersApplied('due-past-due', $filters),
             'meta' => [
                 'current_page' => $results->currentPage(),
                 'last_page' => $results->lastPage(),
@@ -430,7 +462,7 @@ class ReportController extends Controller
         $this->authorize('reports:view');
 
         return response()->json([
-            'data' => $this->reportService->loanBalanceSummary($this->reportFilters()),
+            'data' => $this->reportData('loan-balance-summary', $this->reportService->loanBalanceSummary(...)),
         ]);
     }
 
@@ -450,7 +482,7 @@ class ReportController extends Controller
     {
         $this->authorize('reports:view');
 
-        return response()->json(['data' => $this->reportService->dailyCollection($this->reportFilters())]);
+        return response()->json(['data' => $this->reportData('daily-collection', $this->reportService->dailyCollection(...))]);
     }
 
     #[OA\Get(
@@ -469,7 +501,7 @@ class ReportController extends Controller
     {
         $this->authorize('reports:view');
 
-        return response()->json(['data' => $this->reportService->incomeReport($this->reportFilters())]);
+        return response()->json(['data' => $this->reportData('income', $this->reportService->incomeReport(...))]);
     }
 
     #[OA\Get(
@@ -518,11 +550,13 @@ class ReportController extends Controller
     {
         $this->authorize('reports:view');
 
-        $report = $this->reportService->incomeByLoanReport($this->reportFilters());
+        $filters = $this->reportFilters();
+        $report = $this->reportService->incomeByLoanReport($filters);
 
         return IncomeByLoanResource::collection($report['page'])->additional([
             'totals' => $report['totals'],
             'meta' => ['totals' => $report['totals']],
+            ...MetricCatalog::filtersApplied('income/by-loan', $filters),
         ]);
     }
 
@@ -543,7 +577,7 @@ class ReportController extends Controller
     {
         $this->authorize('reports:view');
 
-        return response()->json(['data' => $this->reportService->agingReport($this->reportFilters())]);
+        return response()->json(['data' => $this->reportData('aging', $this->reportService->agingReport(...))]);
     }
 
     #[OA\Get(
@@ -562,7 +596,7 @@ class ReportController extends Controller
     {
         $this->authorize('reports:view');
 
-        return response()->json(['data' => $this->reportService->borrowerReport($this->reportFilters())]);
+        return response()->json(['data' => $this->reportData('borrowers', $this->reportService->borrowerReport(...))]);
     }
 
     #[OA\Get(
@@ -657,7 +691,10 @@ class ReportController extends Controller
         $filters = $this->reportFilters();
 
         return BorrowerReleasedResource::collection($this->reportService->borrowersReleased($filters))
-            ->additional(['totals' => $this->reportService->borrowersReleasedTotals($filters)]);
+            ->additional([
+                'totals' => $this->reportService->borrowersReleasedTotals($filters),
+                ...MetricCatalog::filtersApplied('borrowers/released', $filters),
+            ]);
     }
 
     #[OA\Get(
@@ -676,7 +713,7 @@ class ReportController extends Controller
     {
         $this->authorize('reports:view');
 
-        return response()->json(['data' => $this->reportService->disbursementReport($this->reportFilters())]);
+        return response()->json(['data' => $this->reportData('disbursements', $this->reportService->disbursementReport(...))]);
     }
 
     #[OA\Get(
@@ -697,7 +734,7 @@ class ReportController extends Controller
     {
         $this->authorize('reports:view');
 
-        return response()->json(['data' => $this->reportService->cashFlow($this->reportFilters())]);
+        return response()->json(['data' => $this->reportData('cash-flow', $this->reportService->cashFlow(...))]);
     }
 
     #[OA\Get(
@@ -718,7 +755,7 @@ class ReportController extends Controller
     {
         $this->authorize('reports:view');
 
-        return response()->json(['data' => $this->reportService->collectionEfficiency($this->reportFilters())]);
+        return response()->json(['data' => $this->reportData('collection-efficiency', $this->reportService->collectionEfficiency(...))]);
     }
 
     #[OA\Get(
@@ -738,7 +775,7 @@ class ReportController extends Controller
     {
         $this->authorize('reports:view');
 
-        return response()->json(['data' => $this->reportService->portfolioByProduct($this->reportFilters())]);
+        return response()->json(['data' => $this->reportData('portfolio-by-product', $this->reportService->portfolioByProduct(...))]);
     }
 
     #[OA\Get(
@@ -777,7 +814,7 @@ class ReportController extends Controller
         $includeMembers = (bool) request()->user()?->can('reports:export');
 
         return response()->json([
-            'data' => $this->reportService->shareCapital($this->reportFilters(), $includeMembers),
+            'data' => $this->reportData('share-capital', fn (array $filters): array => $this->reportService->shareCapital($filters, $includeMembers)),
         ]);
     }
 
@@ -798,7 +835,7 @@ class ReportController extends Controller
     {
         $this->authorize('reports:view');
 
-        return response()->json(['data' => $this->reportService->performance($this->reportFilters())]);
+        return response()->json(['data' => $this->reportData('performance', $this->reportService->performance(...))]);
     }
 
     #[OA\Get(
@@ -818,7 +855,7 @@ class ReportController extends Controller
     {
         $this->authorize('reports:view');
 
-        return response()->json(['data' => $this->reportService->provisioning($this->reportFilters())]);
+        return response()->json(['data' => $this->reportData('provisioning', $this->reportService->provisioning(...))]);
     }
 
     #[OA\Get(
@@ -859,11 +896,11 @@ class ReportController extends Controller
     {
         $this->authorize('reports:export');
 
-        $query = $this->reportService
-            ->releasesQuery($this->reportFilters([
-                'status' => ['nullable', 'string', Rule::in(Loan::EVER_RELEASED_STATUSES)],
-            ]))
-            ->with('borrower', 'loanProduct');
+        $filters = $this->reportFilters([
+            'status' => ['nullable', 'string', Rule::in(Loan::EVER_RELEASED_STATUSES)],
+        ]);
+        $query = $this->reportService->releasesQuery($filters)->with('borrower', 'loanProduct');
+        [$preamble, $headers] = $this->exportFilterNote('releases', $filters, (clone $query)->exists());
 
         return $this->streamCsv('releases.csv', [
             'Loan #', 'Member', 'Product', 'Principal', 'Interest Rate', 'Term', 'Released', 'Status',
@@ -876,7 +913,7 @@ class ReportController extends Controller
             $l->term.' '.$l->term_unit->value,
             $l->released_at?->toDateString() ?? '',
             $l->status,
-        ]));
+        ]), $preamble, $headers);
     }
 
     #[OA\Get(
@@ -892,11 +929,11 @@ class ReportController extends Controller
 
         // Same builder as the preview, so the CSV cannot include voided
         // receipts the screen excluded.
-        $query = $this->reportService
-            ->repaymentsQuery($this->reportFilters([
-                'status' => ['nullable', 'string', 'in:posted,voided'],
-            ]))
-            ->with('loan.borrower');
+        $filters = $this->reportFilters([
+            'status' => ['nullable', 'string', 'in:posted,voided'],
+        ]);
+        $query = $this->reportService->repaymentsQuery($filters)->with('loan.borrower');
+        [$preamble, $headers] = $this->exportFilterNote('repayments', $filters, (clone $query)->exists());
 
         return $this->streamCsv('repayments.csv', [
             'Receipt #', 'Member', 'Loan #', 'Date', 'Amount', 'Insurance Premium', 'Method', 'Status',
@@ -910,7 +947,46 @@ class ReportController extends Controller
             $r->insurance_applied,
             $r->method ?? 'cash',
             $r->status,
-        ]));
+        ]), $preamble, $headers);
+    }
+
+    /**
+     * How an export was narrowed by the executive dashboard's filters, so a
+     * filtered file never passes for the whole report: a first line in words
+     * ("Filtered by: loan product Salary Loan, collected by Ana Reyes") and an
+     * `X-Filters-Applied` header with the filter keys. Neither is sent when no
+     * such filter applied, so an unfiltered export is unchanged.
+     *
+     * A staff member is named only when the export has rows, which the caller
+     * can already see with that person on them (the loan's officer, the
+     * payment's recorder); otherwise "user #id", so an id can't be used to
+     * look up a name outside the caller's branches.
+     *
+     * @param  array<string, mixed>  $filters
+     * @return array{0: list<list<string>>, 1: array<string, string>}
+     */
+    private function exportFilterNote(string $report, array $filters, bool $hasRows): array
+    {
+        $applied = MetricCatalog::filtersApplied($report, $filters)['filters_applied'];
+
+        if ($applied === []) {
+            return [[], []];
+        }
+
+        $person = function (int $id) use ($hasRows): string {
+            $user = $hasRows ? User::query()->find($id, ['id', 'first_name', 'last_name']) : null;
+            $name = $user === null ? '' : trim($user->first_name.' '.$user->last_name);
+
+            return $name !== '' ? $name : "user #{$id}";
+        };
+
+        $parts = array_map(fn (string $filter): string => match ($filter) {
+            'product_id' => 'loan product '.(LoanProduct::query()->whereKey($filters['product_id'])->value('name') ?? "#{$filters['product_id']}"),
+            'officer_id' => 'account officer '.$person((int) $filters['officer_id']),
+            'collector_id' => 'collected by '.$person((int) $filters['collector_id']),
+        }, $applied);
+
+        return [[['Filtered by: '.implode(', ', $parts)]], ['X-Filters-Applied' => implode(',', $applied)]];
     }
 
     /**
