@@ -131,6 +131,19 @@ foreach ($portalPartials as $portalPartial) {
     require $portalPartial;
 }
 
+/*
+ * Loan origination, public side (routes/api/public-apply/*.php), in file-name
+ * order, OUTSIDE the staff group below, the way routes/api/portal/ is: these
+ * routes never take a staff token. Each file sets its own prefix and
+ * middleware. An empty folder adds nothing.
+ */
+$publicApplyPartials = glob(__DIR__.'/api/public-apply/*.php') ?: [];
+sort($publicApplyPartials);
+
+foreach ($publicApplyPartials as $publicApplyPartial) {
+    require $publicApplyPartial;
+}
+
 // Protected routes
 //
 // RequirePasswordChange runs LAST of the three, and the order is the point.
@@ -822,4 +835,21 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
     Route::put('/settings/branding', [BrandingController::class, 'update']);
     Route::post('/settings/branding/logo', [BrandingController::class, 'uploadLogo']);
     Route::delete('/settings/branding/logo', [BrandingController::class, 'deleteLogo']);
+
+    /*
+     * Phase 6 module partials, in this order and each in file-name order:
+     * AMLA (routes/api/amla/), branches (routes/api/branches/), the executive
+     * dashboard (routes/api/dashboard/) and loan origination, staff side
+     * (routes/api/loan-origination/). Each slice adds its own file and never
+     * edits this one. They come after every route above, so none can shadow an
+     * existing one. Each file sets its own prefix. An empty folder adds nothing.
+     */
+    foreach (['amla', 'branches', 'dashboard', 'loan-origination'] as $phase6Module) {
+        $phase6Partials = glob(__DIR__.'/api/'.$phase6Module.'/*.php') ?: [];
+        sort($phase6Partials);
+
+        foreach ($phase6Partials as $phase6Partial) {
+            require $phase6Partial;
+        }
+    }
 });

@@ -114,3 +114,17 @@ sort($portalSchedules);
 foreach ($portalSchedules as $portalSchedule) {
     require $portalSchedule;
 }
+
+/*
+ * Phase 6 schedules: AMLA (routes/console/amla/*.php) and loan origination
+ * (routes/console/loan-origination/*.php), in that order and each in file-name
+ * order: each slice adds its own file. All run on Asia/Manila time.
+ */
+foreach (['amla', 'loan-origination'] as $phase6Module) {
+    $phase6Schedules = glob(__DIR__.'/console/'.$phase6Module.'/*.php') ?: [];
+    sort($phase6Schedules);
+
+    foreach ($phase6Schedules as $phase6Schedule) {
+        require $phase6Schedule;
+    }
+}
