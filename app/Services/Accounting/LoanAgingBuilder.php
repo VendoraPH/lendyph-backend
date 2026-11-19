@@ -32,6 +32,11 @@ use Illuminate\Support\Facades\DB;
  *   every matching row and never a sum of the page. Pesos are converted to
  *   integer centavos once, here.
  *
+ * - A loan row also names its product and its last posted payment on or
+ *   before `as_of` (the executive dashboard's PAR drilldown), and
+ *   self::bucketTotals() gives the loans and principal per bucket (its aging
+ *   chart, through PortfolioRisk).
+ *
  * Reads only. C4's allowance base reads self::rows().
  */
 final class LoanAgingBuilder
@@ -65,6 +70,47 @@ final class LoanAgingBuilder
         $aged = $this->ordered($this->query($asOf, $branchId, $filters, $loans));
 
         return $this->loanRows($this->withRowRelations($aged)->get(), $asOf);
+    }
+
+    /**
+     * The loans in each bucket and their unpaid principal, in integer
+     * centavos, every bucket listed (youngest first), in one grouped query.
+     * The principal is each loan's periods' principal still unpaid, the
+     * figure a loan row's `outstanding_principal` reads, so the buckets add up
+     * to LoanListTotals' `outstanding_principal` for the same loans.
+     *
+     * @param  int|list<int>|null  $branchId  the branch scope (null: every branch)
+     * @param  Builder<Loan>|null  $loans  a starting query, such as one narrowed by product
+     * @return array<string, array{loans: int, principal: int}>
+     */
+    public function bucketTotals(string $asOf, int|array|null $branchId = null, ?Builder $loans = null): array
+    {
+        $aged = $this->ageOnly($asOf, $branchId, [], $loans);
+
+        $principal = DB::table('amortization_schedules')
+            ->whereIn('amortization_schedules.loan_id', DB::query()->fromSub(clone $aged, 'aged_ids')->select('aged_ids.id'))
+            ->groupBy('amortization_schedules.loan_id')
+            ->selectRaw('amortization_schedules.loan_id, SUM('.AmortizationSchedule::remainingPrincipalSql().') as principal');
+
+        $rows = DB::query()
+            ->fromSub($aged, 'aged')
+            ->leftJoinSub($principal, 'loan_principal', 'loan_principal.loan_id', '=', 'aged.id')
+            ->groupBy('aged.bucket')
+            ->selectRaw('aged.bucket, COUNT(*) as loan_count, COALESCE(SUM(loan_principal.principal), 0) as principal')
+            ->get()
+            ->keyBy('bucket');
+
+        $totals = [];
+        foreach (ReceivableAgingBuilder::BUCKETS as $bucket) {
+            $row = $rows->get($bucket);
+
+            $totals[$bucket] = [
+                'loans' => (int) ($row->loan_count ?? 0),
+                'principal' => $this->centavos((float) ($row->principal ?? 0)),
+            ];
+        }
+
+        return $totals;
     }
 
     /**
@@ -273,12 +319,15 @@ final class LoanAgingBuilder
     private function loanRows(Collection $loans, string $asOf): array
     {
         $money = $this->totals->byLoan($loans->modelKeys(), Carbon::parse($asOf));
+        $lastPaid = $this->lastPaymentDates($loans->modelKeys(), $asOf);
 
         return $loans->map(fn (Loan $loan): array => [
             'loan_id' => $loan->id,
             'account_number' => $loan->loan_account_number,
             'member' => $this->member($loan->borrower, (int) $loan->borrower_id),
             'branch' => $loan->branch === null ? null : ['id' => $loan->branch->id, 'name' => $loan->branch->name],
+            'product' => $loan->loanProduct === null ? null : ['id' => $loan->loanProduct->id, 'name' => $loan->loanProduct->name],
+            'last_payment_date' => $lastPaid[$loan->id] ?? null,
             'display_status' => $loan->displayStatus(),
             'oldest_late_due_date' => $loan->getAttribute('oldest_late_due_date') === null
                 ? null
@@ -290,6 +339,31 @@ final class LoanAgingBuilder
             'total_outstanding' => $this->centavos($money[$loan->id]['total_outstanding'] ?? 0.0),
             'past_due_amount' => $this->centavos($money[$loan->id]['overdue_amount'] ?? 0.0),
         ])->values()->all();
+    }
+
+    /**
+     * Each loan's latest posted payment on or before `$asOf`, as Y-m-d, by
+     * loan id, in one grouped query; a loan with none has no key. A voided
+     * payment doesn't count.
+     *
+     * @param  array<int, int>  $loanIds
+     * @return array<int, string>
+     */
+    private function lastPaymentDates(array $loanIds, string $asOf): array
+    {
+        if ($loanIds === []) {
+            return [];
+        }
+
+        return DB::table('repayments')
+            ->whereIn('loan_id', $loanIds)
+            ->where('status', 'posted')
+            ->where('payment_date', '<=', $asOf)
+            ->groupBy('loan_id')
+            ->selectRaw('loan_id, MAX(payment_date) as last_payment_date')
+            ->pluck('last_payment_date', 'loan_id')
+            ->mapWithKeys(fn ($date, $loanId) => [(int) $loanId => Carbon::parse($date)->toDateString()])
+            ->all();
     }
 
     /**
@@ -420,6 +494,7 @@ final class LoanAgingBuilder
         return $query->with([
             'borrower:id,first_name,middle_name,last_name,suffix,borrower_code',
             'branch:id,name',
+            'loanProduct:id,name',
             'openSchedules',
         ]);
     }

@@ -212,7 +212,8 @@ class LindaReportFiguresTest extends LindaAnswersTestCase
         $summary = $this->reports()->loanBalanceSummary(['branch_ids' => null]);
         $this->assertSame([
             'portfolio', 'active_loans', 'total_outstanding', 'outstanding_principal', 'outstanding_balance', 'at_risk_amount',
-            'par_ratio', 'par_threshold_days', 'outstanding', 'overdue', 'by_branch', 'by_branch_totals', 'generated_at',
+            'par_ratio', 'par_threshold_days', 'par_1', 'par_30', 'par_60', 'par_90', 'past_due_amount', 'past_due_loan_count',
+            'aging_by_loan', 'outstanding', 'overdue', 'by_branch', 'by_branch_totals', 'generated_at',
         ], array_keys($summary));
         $this->assertSame([
             'branch_id', 'branch_name', 'loan_count', 'total_released', 'total_outstanding', 'outstanding_principal',
