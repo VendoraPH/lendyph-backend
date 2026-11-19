@@ -312,6 +312,13 @@ class TimezoneShift
         // reason. `linda_questions.period_from` and `period_to` are DATEs.
         'linda_questions' => ['asked_at', 'created_at', 'updated_at'],
         'linda_settings' => ['created_at', 'updated_at'],
+        // Added 2026-11-19 with the AMLA foundation (Phase 6), well after the
+        // cutover, for the same reason. `amla_calendar_entries.date` is a DATE.
+        'amla_calendar_entries' => ['created_at', 'removed_at'],
+        'amla_calendar_years' => ['confirmed_at', 'created_at'],
+        'amla_change_requests' => ['created_at', 'decided_at', 'updated_at'],
+        'amla_log_entries' => ['created_at'],
+        'amla_settings_versions' => ['created_at', 'effective_at'],
         // A column added to a table the shift covers. Listed here, not in
         // COLUMNS, because it was added after the one-shot shift ran, and
         // because the shift reads COLUMNS on a fresh database before this
