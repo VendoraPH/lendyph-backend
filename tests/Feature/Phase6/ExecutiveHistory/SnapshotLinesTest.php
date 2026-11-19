@@ -17,6 +17,7 @@ use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Mockery;
 use Mockery\MockInterface;
+use PHPUnit\Framework\Attributes\Group;
 use RuntimeException;
 use Tests\TestCase;
 use Tests\Traits\SetupLendyPH;
@@ -157,30 +158,101 @@ class SnapshotLinesTest extends TestCase
         $this->assertArrayHasKey('outstanding_principal', $run->checks);
     }
 
-    public function test_a_failed_run_is_logged_in_words(): void
+    public function test_lines_that_can_t_be_worked_out_keep_the_organisation_row(): void
     {
+        $this->book();
         $this->snapshotLinesWhere()->shouldReceive('build')->once()->andThrow(new RuntimeException('connection lost'));
 
-        $this->artisan('portfolio:snapshot')->assertFailed();
+        $this->artisan('portfolio:snapshot')->assertExitCode(1);
+
+        $row = PortfolioDailySnapshot::query()->sole();
+        $this->assertNull($row->line_count, 'CDA, Linda and the sparklines still read the day.');
+        $this->assertEquals(240000, $row->outstanding_principal);
+        $this->assertSame(0, PortfolioSnapshotLine::query()->count());
 
         $run = PortfolioSnapshotRun::query()->sole();
         $this->assertSame('failed', $run->status);
-        $this->assertSame('The snapshot could not be recorded: connection lost', $run->message);
-        $this->assertSame(0, PortfolioDailySnapshot::query()->count(), 'Nothing is half written.');
+        $this->assertSame('The branch and product lines could not be worked out, so the day was kept without them: connection lost', $run->message);
     }
 
-    public function test_a_forced_replay_replaces_the_day_s_lines(): void
+    public function test_a_replay_whose_lines_can_t_be_written_changes_nothing(): void
     {
         $this->book();
         $this->artisan('portfolio:snapshot')->assertSuccessful();
+        $rowBefore = PortfolioDailySnapshot::query()->sole()->toArray();
+        $linesBefore = PortfolioSnapshotLine::query()->orderBy('id')->get()->toArray();
 
         $this->travelTo(Carbon::parse('2026-11-20 10:00:00'));
+        $real = new PortfolioSnapshotLines(app(LoanListTotals::class), app(PortfolioRisk::class));
+        $this->snapshotLinesWhere()->shouldReceive('build')->once()->andReturnUsing(function (\Carbon\Carbon $asOf) use ($real): array {
+            $lines = $real->build($asOf);
+            // The figures still add up, but the row can't be stored.
+            $lines[0]['branch_id'] = null;
+
+            return $lines;
+        });
+
+        $this->artisan('portfolio:snapshot', ['--date' => '2026-11-19', '--force' => true])->assertExitCode(1);
+
+        $this->assertSame($rowBefore, PortfolioDailySnapshot::query()->sole()->toArray(), 'The day as first recorded.');
+        $this->assertSame($linesBefore, PortfolioSnapshotLine::query()->orderBy('id')->get()->toArray());
+
+        $run = PortfolioSnapshotRun::query()->orderByDesc('id')->first();
+        $this->assertSame('failed', $run->status);
+        $this->assertStringStartsWith('The snapshot could not be recorded, so nothing was changed: ', $run->message);
+    }
+
+    public function test_a_forced_replay_replaces_the_day_s_lines_with_today_s_payment_state(): void
+    {
+        $loans = $this->book();
+        $this->artisan('portfolio:snapshot')->assertSuccessful();
+
+        $this->travelTo(Carbon::parse('2026-11-20 10:00:00'));
+        // The current loan's first period, a day late: ₱200.00 penalty, then
+        // ₱1,800.00 interest and ₱10,000.00 principal.
+        app(RepaymentService::class)->processRepayment($loans['current']->fresh(), 12000, '2026-11-20', $this->admin);
         $this->artisan('portfolio:snapshot', ['--date' => '2026-11-19', '--force' => true])->assertSuccessful();
 
-        $this->assertSame(3, PortfolioSnapshotLine::query()->where('snapshot_date', '2026-11-19')->count());
+        $lines = PortfolioSnapshotLine::query()->where('snapshot_date', '2026-11-19')->get()
+            ->keyBy(fn (PortfolioSnapshotLine $line) => "{$line->branch_id}-{$line->loan_product_id}");
+        $this->assertCount(3, $lines);
+        $mainFirst = $lines["{$this->branch->id}-{$this->first->id}"];
+        $this->assertEquals(110000, $mainFirst->outstanding_principal);
+        $this->assertEquals(129800, $mainFirst->total_outstanding);
+        $this->assertEquals(60000, $lines["{$this->branch->id}-{$this->second->id}"]->outstanding_principal, 'Untouched.');
+
+        $row = PortfolioDailySnapshot::query()->sole();
+        $this->assertEquals(230000, $row->outstanding_principal);
+        $this->assertSame(3, $row->line_count);
+
         $runs = PortfolioSnapshotRun::query()->orderBy('id')->get();
         $this->assertCount(2, $runs);
         $this->assertTrue($runs[1]->is_replay);
+        $this->assertSame('succeeded', $runs[1]->status);
+    }
+
+    /**
+     * PENDING DECISION (Arvin, PR #337 money review, Medium): which loans PAR
+     * covers. The Portfolio Summary's PAR covers every loan ever released and
+     * divides by `par_portfolio_principal`; the snapshot (and so history)
+     * covers collectible loans and divides by `outstanding_principal`. They
+     * part when a restructured or completed loan still has a period marked
+     * unpaid. This test fails until one basis is chosen; the recommendation
+     * is collectible loans everywhere.
+     */
+    #[Group('pending-decision')]
+    public function test_pending_decision_history_par_equals_the_portfolio_summary_with_a_restructured_loan_still_marked_unpaid(): void
+    {
+        $this->book();
+        $restructured = $this->loanIn($this->branch, $this->second, grace: 0, daysLate: 45);
+        DB::table('loans')->where('id', $restructured->id)->update(['status' => 'restructured']);
+
+        $this->artisan('portfolio:snapshot')->assertSuccessful();
+
+        $summary = $this->getJson('/api/reports/loan-balance-summary')->assertOk()->json('data');
+        $history = $this->getJson('/api/dashboard/history?date=2026-11-19')->assertOk()->json('data.points.0.figures');
+
+        $this->assertEquals($summary['par_30'], $history['par_30'], 'One PAR basis on every screen.');
     }
 
     public function test_an_empty_book_records_a_day_with_no_lines(): void
@@ -196,10 +268,11 @@ class SnapshotLinesTest extends TestCase
      * defaulted, 100 days late. Other × first: 2 days late inside a 3-day
      * grace. Main × second: a completed loan.
      */
-    private function book(): void
+    /** @return array{late: Loan, current: Loan} */
+    private function book(): array
     {
         $late = $this->loanIn($this->branch, $this->first, grace: 0, daysLate: 40);
-        $this->loanIn($this->branch, $this->first, grace: 0, daysLate: 0);
+        $current = $this->loanIn($this->branch, $this->first, grace: 0, daysLate: 0);
         $defaulted = $this->loanIn($this->branch, $this->second, grace: 0, daysLate: 100);
         DB::table('loans')->where('id', $defaulted->id)->update(['status' => 'defaulted']);
         $this->loanIn($this->other, $this->first, grace: 3, daysLate: 2);
@@ -207,7 +280,8 @@ class SnapshotLinesTest extends TestCase
         $completed = $this->loanIn($this->branch, $this->second, grace: 0, daysLate: 0);
         app(RepaymentService::class)->processRepayment($completed->fresh(), 70800, now()->toDateString(), $this->admin);
         $this->assertSame('completed', $completed->fresh()->status);
-        $this->assertNotNull($late);
+
+        return ['late' => $late, 'current' => $current];
     }
 
     /**

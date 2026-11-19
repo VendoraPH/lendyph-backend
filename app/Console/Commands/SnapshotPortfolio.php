@@ -12,6 +12,7 @@ use Carbon\Carbon;
 use Illuminate\Console\Attributes\Description;
 use Illuminate\Console\Attributes\Signature;
 use Illuminate\Console\Command;
+use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\DB;
 use Throwable;
 
@@ -41,8 +42,11 @@ use Throwable;
  * The lines must add up to the organisation row, figure by figure. When they
  * don't, the row is kept without lines (`line_count` null), the run is logged
  * as a mismatch with the figures that differed, and the command fails, so
- * the scheduler's output shows it. A run that throws writes nothing and is
- * logged as failed.
+ * the scheduler's output shows it. Lines that can't be worked out are handled
+ * the same way, logged as failed. The figures are read and written in one
+ * transaction, so they come from one consistent view of the book; a write
+ * that fails rolls the whole day back (a replayed day keeps what it had) and
+ * is logged as failed.
  *
  * History is never rewritten. A run for today upserts, so the schedule can
  * re-run safely, and replaces the day's lines. `--date` may name a past day
@@ -58,6 +62,8 @@ use Throwable;
 class SnapshotPortfolio extends Command
 {
     public const MISMATCH_MESSAGE = 'The branch and product lines did not add up to the day\'s portfolio, so they were not kept.';
+
+    public const LINES_FAILED_MESSAGE = 'The branch and product lines could not be worked out, so the day was kept without them';
 
     public function handle(PortfolioSnapshotLines $snapshot): int
     {
@@ -88,14 +94,30 @@ class SnapshotPortfolio extends Command
         }
 
         $startedAt = now();
+        $lines = [];
+        $differences = [];
+        $linesError = null;
 
         try {
-            $figures = $snapshot->organisation($asOf);
-            $lines = $snapshot->build($asOf);
-            $differences = $snapshot->differences($figures, $lines);
-            $kept = $differences === [];
+            // One transaction around the reads and the writes, so the
+            // organisation figures and the lines come from one consistent view
+            // of the book (MySQL's repeatable read): a payment or an import
+            // landing in between can't make them differ.
+            $figures = DB::transaction(function () use ($snapshot, $asOf, $day, &$lines, &$differences, &$linesError): array {
+                $figures = $snapshot->organisation($asOf);
 
-            DB::transaction(function () use ($day, $figures, $lines, $kept): void {
+                // A failure working out the lines never costs the day its
+                // organisation row: CDA, Linda and the sparklines read it, and
+                // nothing is backfilled.
+                try {
+                    $lines = $snapshot->build($asOf);
+                    $differences = $snapshot->differences($figures, $lines);
+                } catch (Throwable $exception) {
+                    $linesError = $exception;
+                }
+
+                $kept = $linesError === null && $differences === [];
+
                 PortfolioDailySnapshot::query()->upsert(
                     [['snapshot_date' => $day, ...$figures, 'line_count' => $kept ? count($lines) : null, 'created_at' => now()]],
                     ['snapshot_date'],
@@ -113,13 +135,27 @@ class SnapshotPortfolio extends Command
                         ));
                     }
                 }
+
+                return $figures;
             });
         } catch (Throwable $exception) {
-            $this->logRun($day, $isReplay, PortfolioSnapshotRun::STATUS_FAILED, $startedAt, null, null, 'The snapshot could not be recorded: '.$exception->getMessage());
-            $this->error("The snapshot for {$day} could not be recorded: {$exception->getMessage()}");
+            // Rolled back: a replayed day keeps its row and lines as they were.
+            $reason = self::reason($exception);
+            $this->logRun($day, $isReplay, PortfolioSnapshotRun::STATUS_FAILED, $startedAt, null, null, 'The snapshot could not be recorded, so nothing was changed: '.$reason);
+            $this->error("The snapshot for {$day} could not be recorded, so nothing was changed: {$reason}");
 
             return self::FAILURE;
         }
+
+        if ($linesError !== null) {
+            $reason = self::reason($linesError);
+            $this->logRun($day, $isReplay, PortfolioSnapshotRun::STATUS_FAILED, $startedAt, null, null, self::LINES_FAILED_MESSAGE.': '.$reason);
+            $this->error("{$day}: ".self::LINES_FAILED_MESSAGE.": {$reason}");
+
+            return self::FAILURE;
+        }
+
+        $kept = $differences === [];
 
         if (! $kept) {
             $this->logRun($day, $isReplay, PortfolioSnapshotRun::STATUS_MISMATCH, $startedAt, null, $differences, self::MISMATCH_MESSAGE);
@@ -161,6 +197,17 @@ class SnapshotPortfolio extends Command
             'started_at' => $startedAt,
             'finished_at' => now(),
         ]);
+    }
+
+    /**
+     * Why a run failed, in the error's own words, without the SQL a database
+     * error carries.
+     */
+    private static function reason(Throwable $exception): string
+    {
+        return $exception instanceof QueryException && $exception->getPrevious() !== null
+            ? $exception->getPrevious()->getMessage()
+            : $exception->getMessage();
     }
 
     private function isDate(string $value): bool
