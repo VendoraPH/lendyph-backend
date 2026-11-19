@@ -5,6 +5,7 @@ namespace App\Services\Amla\Cases;
 use App\Enums\PaymentMethod;
 use App\Models\AmlaCase;
 use App\Models\AmlaCtrCandidate;
+use App\Models\AmlaCtrSetAside;
 use App\Models\AmlaEvent;
 use App\Models\AmlaProfile;
 use App\Models\AmlaReport;
@@ -20,6 +21,7 @@ use App\Services\Amla\Foundation\AmlaAccess;
 use App\Services\Amla\Foundation\AmlaLog;
 use App\Services\Amla\Foundation\AmlaSettings;
 use App\Services\BranchAccess;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
@@ -57,6 +59,38 @@ final class Filings
         private readonly BranchAccess $branches,
     ) {}
 
+    /** @var list<string> keys that read CTRs and STRs; an STR also needs head office */
+    public const CTR_READ = [AmlaAccess::CTR, AmlaAccess::APPROVE, AmlaAccess::SUBMIT, AmlaAccess::EXPORT];
+
+    public const STR_READ = [AmlaAccess::STR, AmlaAccess::APPROVE, AmlaAccess::SUBMIT, AmlaAccess::EXPORT];
+
+    /**
+     * The reports the user may read: CTRs in their branches (walk-ins and no
+     * branch: head office) with a CTR reading key, STRs with an STR reading
+     * key and head-office access.
+     *
+     * @return Builder<AmlaReport>
+     */
+    public function visibleQuery(User $user): Builder
+    {
+        $ids = $this->branches->for($user);
+        $ctr = $user->canAny(self::CTR_READ);
+        $str = $user->canAny(self::STR_READ) && $ids === null;
+
+        return AmlaReport::query()->where(function (Builder $q) use ($ctr, $str, $ids) {
+            $q->whereRaw('1 = 0');
+
+            if ($ctr) {
+                $q->orWhere(fn (Builder $c) => $c->where('type', AmlaReport::CTR)
+                    ->when($ids !== null, fn (Builder $scoped) => $scoped->whereIn('branch_id', $ids)->whereNull('gcash_non_member_id')));
+            }
+
+            if ($str) {
+                $q->orWhere('type', AmlaReport::STR);
+            }
+        });
+    }
+
     /** Whether the user may see this report: STRs need head office; a CTR follows its branch (walk-ins: head office). */
     public function visible(User $user, AmlaReport $report): bool
     {
@@ -89,21 +123,25 @@ final class Filings
     }
 
     /**
-     * Ask to set a candidate aside as not reportable, with a reason. It waits
-     * for a different `amla:approve` holder: setting a CTR aside is final.
+     * Ask to set a candidate aside as not reportable, with a reason, in its
+     * own AmlaCtrSetAside row, so an earlier ask is never overwritten. It
+     * waits for a different `amla:approve` holder: setting a CTR aside is
+     * final.
      */
     public function requestNotReportable(User $user, AmlaCtrCandidate $candidate, string $reason): AmlaCtrCandidate
     {
         return DB::transaction(function () use ($user, $candidate, $reason) {
             $locked = AmlaCtrCandidate::query()->lockForUpdate()->findOrFail($candidate->id);
             abort_unless($locked->status === AmlaCtrCandidate::DETECTED, 409, 'This CTR candidate already has its CTR or is being set aside.');
-            $locked->forceFill([
-                'status' => AmlaCtrCandidate::SET_ASIDE_PENDING,
-                'not_reportable_reason' => trim($reason),
-                'set_aside_requested_by' => $user->id,
-                'status_changed_by' => $user->id,
-            ])->save();
-            $this->log->record('ctr_set_aside_requested', $user, 'ctr_candidate', $locked->id, ['reference' => $locked->reference]);
+            $ask = AmlaCtrSetAside::query()->create([
+                'ctr_candidate_id' => $locked->id,
+                'reason' => trim($reason),
+                'status' => AmlaCtrSetAside::PENDING,
+                'pending_key' => $locked->id,
+                'requested_by' => $user->id,
+            ]);
+            $locked->forceFill(['status' => AmlaCtrCandidate::SET_ASIDE_PENDING, 'status_changed_by' => $user->id])->save();
+            $this->log->record('ctr_set_aside_requested', $user, 'ctr_candidate', $locked->id, ['reference' => $locked->reference, 'set_aside_id' => $ask->id]);
             $this->inbox->send($this->inbox->recipients([AmlaAccess::APPROVE], $locked->branch_id, $locked->gcash_non_member_id !== null, [$user->id]),
                 'ctr_set_aside_needs_approval', 'ctr_candidate', $locked->id, "Setting CTR candidate {$locked->reference} aside is waiting for your approval.");
 
@@ -111,20 +149,42 @@ final class Filings
         });
     }
 
-    /** Approve (`$approve`) or refuse a set-aside, never by the person who asked for it. */
+    /** The candidate's waiting set-aside ask, if any. */
+    public function pendingSetAside(AmlaCtrCandidate $candidate): ?AmlaCtrSetAside
+    {
+        return AmlaCtrSetAside::query()->where('pending_key', $candidate->id)->first();
+    }
+
+    /**
+     * Approve (`$approve`) or refuse a set-aside ask, never by the person who
+     * asked. A refusal keeps its reason (encrypted) on the ask's row.
+     */
     public function decideNotReportable(User $user, AmlaCtrCandidate $candidate, bool $approve, ?string $note = null): AmlaCtrCandidate
     {
-        if ($candidate->set_aside_requested_by === $user->id) {
+        $ask = $this->pendingSetAside($candidate);
+        abort_if($ask === null, 409, 'This CTR candidate isn\'t waiting to be set aside.');
+
+        if ($ask->requested_by === $user->id) {
             $this->access->refuse($user, 'requester_cannot_decide', 'You asked to set this CTR candidate aside, so someone else holding AMLA report approval must decide it.');
         }
 
         return DB::transaction(function () use ($user, $candidate, $approve, $note) {
             $locked = AmlaCtrCandidate::query()->lockForUpdate()->findOrFail($candidate->id);
-            abort_unless($locked->status === AmlaCtrCandidate::SET_ASIDE_PENDING, 409, 'This CTR candidate isn\'t waiting to be set aside.');
+            $ask = AmlaCtrSetAside::query()->where('pending_key', $locked->id)->lockForUpdate()->first();
+            abort_unless($locked->status === AmlaCtrCandidate::SET_ASIDE_PENDING && $ask !== null, 409, 'This CTR candidate isn\'t waiting to be set aside.');
+
+            $ask->forceFill([
+                'status' => $approve ? AmlaCtrSetAside::APPROVED : AmlaCtrSetAside::REJECTED,
+                'pending_key' => null,
+                'decided_by' => $user->id,
+                'decided_at' => Carbon::now(),
+                'decision_note' => filled($note) ? trim((string) $note) : null,
+            ])->save();
+
             $locked->forceFill($approve
-                ? ['status' => AmlaCtrCandidate::NOT_REPORTABLE, 'set_aside_approved_by' => $user->id, 'status_changed_by' => $user->id]
+                ? ['status' => AmlaCtrCandidate::NOT_REPORTABLE, 'not_reportable_reason' => $ask->reason, 'set_aside_requested_by' => $ask->requested_by, 'set_aside_approved_by' => $user->id, 'status_changed_by' => $user->id]
                 : ['status' => AmlaCtrCandidate::DETECTED, 'status_changed_by' => $user->id])->save();
-            $this->log->record($approve ? 'ctr_set_aside_approved' : 'ctr_set_aside_rejected', $user, 'ctr_candidate', $locked->id, ['reference' => $locked->reference, 'noted' => filled($note)]);
+            $this->log->record($approve ? 'ctr_set_aside_approved' : 'ctr_set_aside_rejected', $user, 'ctr_candidate', $locked->id, ['reference' => $locked->reference, 'set_aside_id' => $ask->id]);
 
             return $locked;
         });

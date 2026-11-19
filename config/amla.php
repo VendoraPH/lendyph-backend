@@ -18,4 +18,8 @@ return [
     // Failed rows the harvester tries again per source per run, least
     // recently tried first.
     'harvest_retries_per_run' => 200,
+
+    // The most AMLA log entries one audit history report holds; a longer
+    // period is refused with "narrow the dates", never cut short.
+    'audit_report_max_rows' => 5000,
 ];
