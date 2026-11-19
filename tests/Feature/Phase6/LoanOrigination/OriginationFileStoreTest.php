@@ -15,6 +15,7 @@ use App\Services\LoanOrigination\Files\UploadRefusedException;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Storage;
+use PHPUnit\Framework\Assert;
 use Symfony\Component\Process\ExecutableFinder;
 use Symfony\Component\Process\Process;
 use Tests\TestCase;
@@ -157,11 +158,11 @@ function loQpdfReading(string $pdf): string
     }
 }
 
-/** These tests run the real qpdf; without it they say so and skip. */
+/** These tests run the real qpdf; without it they fail, never skip. */
 function loNeedsQpdf(): void
 {
     if ((new ExecutableFinder)->find('qpdf') === null) {
-        test()->markTestSkipped('qpdf is not installed in this test run (apt-get install qpdf); the PDF checks need it.');
+        Assert::fail('qpdf is required for these tests: install it (apt-get install qpdf) where the suite runs.');
     }
 }
 
@@ -474,9 +475,22 @@ it('refuses an encrypted PDF, an XFA form and actions that run on opening', func
 })->with([
     'encrypted' => ['', '/Encrypt 6 0 R /ID [<00> <00>]', [6 => '<< /Filter /Standard /V 1 /R 2 /O <00> /U <00> /P -4 >>'], OriginationFileStore::ENCRYPTED_PDF],
     'xfa' => ['/AcroForm << /Fields [] /XFA 7 0 R >>', '', [7 => '<< >>'], OriginationFileStore::ACTIVE_PDF],
-    'open action' => ['/OpenAction 7 0 R', '', [7 => '<< /S /GoTo /D [3 0 R /Fit] >>'], OriginationFileStore::ACTIVE_PDF],
+    'open action by reference' => ['/OpenAction 7 0 R', '', [7 => '<< /S /GoTo /D [3 0 R /Fit] >>'], OriginationFileStore::ACTIVE_PDF],
+    'open action as a dictionary' => ['/OpenAction << /S /GoTo /D [3 0 R /Fit] >>', '', [], OriginationFileStore::ACTIVE_PDF],
+    'open JavaScript by reference' => ['/OpenAction 7 0 R', '', [7 => '<< /S /JavaScript /JS (app.alert\\(1\\)) >>'], OriginationFileStore::ACTIVE_PDF],
+    'open JavaScript as a dictionary' => ['/OpenAction << /S /JavaScript /JS (app.alert\\(1\\)) >>', '', [], OriginationFileStore::ACTIVE_PDF],
     'additional actions' => ['/AA << /WC 7 0 R >>', '', [7 => '<< /S /GoTo /D [3 0 R /Fit] >>'], OriginationFileStore::ACTIVE_PDF],
 ]);
+
+it('keeps a PDF whose /OpenAction is only a destination: the page and zoom it opens at', function () {
+    loNeedsQpdf();
+    $application = OriginationApplication::query()->create();
+    $file = UploadedFile::fake()->createWithContent('payslip.pdf', loBuildPdf(loPageObjects('/OpenAction [3 0 R /FitH 792]')));
+
+    $version = loStore()->store($application, 'payslip', $file);
+
+    expect(loQpdfReading(Storage::disk('private')->get($version->path)))->toMatch('~/OpenAction\s*\[~');
+});
 
 it('refuses PDFs while qpdf is missing or failing, in words, and keeps nothing', function () {
     $application = OriginationApplication::query()->create();

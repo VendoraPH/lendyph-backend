@@ -28,7 +28,8 @@ use Throwable;
  *   scanner a file is kept as "Not scanned";
  * - a PDF is rewritten by qpdf (object streams opened up, streams
  *   uncompressed) and checked on qpdf's copy, failing closed: one carrying
- *   JavaScript, an action run on opening (/OpenAction, /AA), a launch action,
+ *   JavaScript, an action run on opening (/AA, or an /OpenAction that isn't
+ *   just a destination array), a launch action,
  *   embedded files or an XFA form is refused, and so is an encrypted one, one
  *   qpdf can't read or that opens up past 50 MB, and any check that fails.
  *   qpdf's compressed copy of the checked file is stored, never the PDF as
@@ -83,7 +84,14 @@ final class OriginationFileStore
     public const PICTURES_UNAVAILABLE = 'Pictures can\'t be accepted on this server right now. Upload the document as a PDF instead.';
 
     /** PDF names that run something or carry other files (decoded from `#xx` escapes first). */
-    private const ACTIVE_PDF_NAMES = '~/(?:JavaScript|JS|OpenAction|AA|Launch|EmbeddedFiles?|XFA)(?![A-Za-z0-9])~';
+    /**
+     * Active names in qpdf's opened-up copy. /OpenAction passes only when its
+     * value is an explicit destination array (`/OpenAction [3 0 R /Fit]`),
+     * which just sets the page and zoom it opens at. An action dictionary
+     * (`<< … >>`) or an indirect reference (`7 0 R`, which may point to an
+     * action) is refused.
+     */
+    private const ACTIVE_PDF_NAMES = '~/(?:JavaScript|JS|AA|Launch|EmbeddedFiles?|XFA)(?![A-Za-z0-9])|/OpenAction(?![A-Za-z0-9])(?!\s*\[)~';
 
     private const ENCRYPT_NAME = '~/Encrypt(?![A-Za-z0-9])~';
 
