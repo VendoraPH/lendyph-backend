@@ -44,6 +44,11 @@ class DashboardPeriodAndTrendTest extends TestCase
             'income' => 250000,
             'expenses' => 90000,
             'net_income' => 160000,
+            'interest_income' => 250000,
+            'penalty_income' => 0,
+            'fee_income' => 0,
+            'income_basis' => 'cash',
+            'interest_income_label' => 'Interest income (cash basis)',
         ], $dashboard['period']);
         $this->assertSame($dashboard['income_mtd'], $dashboard['period']['income']);
         $this->assertSame($dashboard['expenses_mtd'], $dashboard['period']['expenses']);
@@ -115,19 +120,19 @@ class DashboardPeriodAndTrendTest extends TestCase
         $this->assertSame('2025-10', $months->first()['month']);
         $this->assertSame('2026-09', $months->last()['month']);
         $this->assertSame(
-            ['month' => '2025-10', 'income' => 30000, 'expenses' => 0, 'net_income' => 30000, 'cash' => 1030000],
+            ['month' => '2025-10', 'income' => 30000, 'expenses' => 0, 'net_income' => 30000, 'interest_income' => 30000, 'penalty_income' => 0, 'fee_income' => 0, 'cash' => 1030000],
             $months->first(),
         );
         $this->assertSame(
-            ['month' => '2025-11', 'income' => 0, 'expenses' => 0, 'net_income' => 0, 'cash' => 1030000],
+            ['month' => '2025-11', 'income' => 0, 'expenses' => 0, 'net_income' => 0, 'interest_income' => 0, 'penalty_income' => 0, 'fee_income' => 0, 'cash' => 1030000],
             $months[1],
         );
         $this->assertSame(
-            ['month' => '2026-02', 'income' => 0, 'expenses' => 10000, 'net_income' => -10000, 'cash' => 1020000],
+            ['month' => '2026-02', 'income' => 0, 'expenses' => 10000, 'net_income' => -10000, 'interest_income' => 0, 'penalty_income' => 0, 'fee_income' => 0, 'cash' => 1020000],
             $months->firstWhere('month', '2026-02'),
         );
         $this->assertSame(
-            ['month' => '2026-09', 'income' => 20000, 'expenses' => 5000, 'net_income' => 15000, 'cash' => 1035000],
+            ['month' => '2026-09', 'income' => 20000, 'expenses' => 5000, 'net_income' => 15000, 'interest_income' => 20000, 'penalty_income' => 0, 'fee_income' => 0, 'cash' => 1035000],
             $months->last(),
         );
     }

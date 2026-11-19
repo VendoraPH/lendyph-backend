@@ -3,6 +3,7 @@
 namespace App\Services\Accounting;
 
 use App\Models\AccountingAccount;
+use App\Models\AccountingAccountMapping;
 use App\Models\AccountingJournal;
 use App\Models\AccountingPeriod;
 use App\Services\PortfolioOutstanding;
@@ -36,6 +37,19 @@ use Illuminate\Support\Facades\DB;
  *   records keep no history, so it is always as of today, and says so.
  * - `unposted_journals` counts draft HEADERS: drafts are not in the books, so
  *   there is no balance to read them from.
+ * - `period` and each month of `months` also carry `interest_income`,
+ *   `penalty_income` and `fee_income` (Phase 6 EB-D2, ask 4): the income
+ *   statement's own lines for the accounts mapped to the `interest_income`
+ *   and `penalty_income` roles and the three loan fee roles (processing,
+ *   service and other fees), so they cover exactly the range and branches of
+ *   `net_income`. They are cash basis (`income_basis`), and differ from the
+ *   Income report's collected interest by payments that posted no journal and
+ *   by deferred interest recognised from 1210: shown beside it, never added
+ *   to it. An account mapped to two roles counts once, under the first.
+ * - `cash_total` is every money account (cash, bank and e-wallets), the
+ *   three cash cards added once here so the browser never adds them.
+ * - `books_state` is {@see BooksState}: "Requires configuration" until the
+ *   opening balances are finalised, "Books not set up" without a chart.
  *
  * Money is integer centavos throughout.
  */
@@ -49,6 +63,23 @@ final class AccountingDashboardBuilder
 
     /** How many months `months` covers, ending with as_of's month. */
     public const TREND_MONTHS = 12;
+
+    /**
+     * The income figures read by posting role, in the order an account mapped
+     * to two of them is counted (once, under the first).
+     *
+     * @var array<string, list<string>>
+     */
+    public const INCOME_ROLES = [
+        'interest_income' => ['interest_income'],
+        'penalty_income' => ['penalty_income'],
+        'fee_income' => ['processing_fee_income', 'service_fee_income', 'other_fee_income'],
+    ];
+
+    public const INTEREST_INCOME_LABEL = 'Interest income (cash basis)';
+
+    /** @var array<int, string>|null account id => the income figure it counts in, for one build */
+    private ?array $incomeAccounts = null;
 
     public function __construct(
         private TrialBalanceBuilder $trialBalance,
@@ -69,6 +100,7 @@ final class AccountingDashboardBuilder
         $from ??= $monthStart;
 
         $chart = AccountingAccount::query()->get()->keyBy('id');
+        $this->incomeAccounts = self::incomeAccounts();
         $signed = ReceivablePosition::signedByAccount($trialBalance['rows'], $chart);
         $receivables = ReceivablePosition::fromTrialBalance($trialBalance['rows'], $chart);
 
@@ -78,16 +110,22 @@ final class AccountingDashboardBuilder
         // month to as_of. The period reuses it when it covers the same range.
         $monthToDate = $months[array_key_last($months)];
         $period = $from === $monthStart
-            ? ['from' => $from, 'to' => $monthToDate['to'], 'income' => $monthToDate['income'], 'expenses' => $monthToDate['expenses'], 'net_income' => $monthToDate['net_income']]
+            ? ['from' => $from, 'to' => $monthToDate['to'], ...array_intersect_key($monthToDate, array_flip(['income', 'expenses', 'net_income', ...array_keys(self::INCOME_ROLES)]))]
             : $this->period($from, $asOf, $branchId);
+        $period = [...$period, 'income_basis' => 'cash', 'interest_income_label' => self::INTEREST_INCOME_LABEL];
 
         $currentPeriod = $this->currentPeriod($asOfDate->toDateString());
+        $cashOnHand = $this->sumByCashKind($signed, $chart, ['cash']);
+        $cashInBank = $this->sumByCashKind($signed, $chart, ['bank']);
+        $eWallets = $this->sumByCashKind($signed, $chart, ['gcash', 'maya', 'wallet']);
 
         return [
             'as_of' => $asOf,
-            'cash_on_hand' => $this->sumByCashKind($signed, $chart, ['cash']),
-            'cash_in_bank' => $this->sumByCashKind($signed, $chart, ['bank']),
-            'e_wallets' => $this->sumByCashKind($signed, $chart, ['gcash', 'maya', 'wallet']),
+            'books_state' => BooksState::current(),
+            'cash_on_hand' => $cashOnHand,
+            'cash_in_bank' => $cashInBank,
+            'e_wallets' => $eWallets,
+            'cash_total' => $cashOnHand + $cashInBank + $eWallets,
             'loans_receivable_net' => $receivables['net'],
             'loans_receivable_gross' => $receivables['gross'],
             'allowance_for_credit_losses' => $receivables['allowance'],
@@ -239,10 +277,11 @@ final class AccountingDashboardBuilder
 
     /**
      * Income, expenses and net income from `$from` to `$to`, inclusive: the
-     * income statement's totals for the same range.
+     * income statement's totals for the same range, with its interest,
+     * penalty and fee income lines by posting role.
      *
      * @param  int|list<int>|null  $branchId
-     * @return array{from: string, to: string, income: int, expenses: int, net_income: int}
+     * @return array{from: string, to: string, income: int, expenses: int, net_income: int, interest_income: int, penalty_income: int, fee_income: int}
      */
     private function period(string $from, string $to, int|array|null $branchId): array
     {
@@ -254,7 +293,53 @@ final class AccountingDashboardBuilder
             'income' => (int) $statement['total_income'],
             'expenses' => (int) $statement['total_expenses'],
             'net_income' => (int) $statement['net_income'],
+            ...$this->incomeByRole($statement['income']),
         ];
+    }
+
+    /**
+     * The income statement's income lines added up by posting role.
+     *
+     * @param  list<array{account_id: int, amount: int}>  $lines
+     * @return array{interest_income: int, penalty_income: int, fee_income: int}
+     */
+    private function incomeByRole(array $lines): array
+    {
+        $figures = array_fill_keys(array_keys(self::INCOME_ROLES), 0);
+        $accounts = $this->incomeAccounts ??= self::incomeAccounts();
+
+        foreach ($lines as $line) {
+            $figure = $accounts[(int) $line['account_id']] ?? null;
+
+            if ($figure !== null) {
+                $figures[$figure] += (int) $line['amount'];
+            }
+        }
+
+        return $figures;
+    }
+
+    /**
+     * Each account mapped to an income role, with the figure it counts in.
+     * An account mapped to two roles counts under the first (INCOME_ROLES
+     * order), so it is never counted twice.
+     *
+     * @return array<int, string>
+     */
+    private static function incomeAccounts(): array
+    {
+        $mapping = AccountingAccountMapping::resolved();
+        $accounts = [];
+
+        foreach (self::INCOME_ROLES as $figure => $roles) {
+            foreach ($roles as $role) {
+                if (isset($mapping[$role]) && ! isset($accounts[$mapping[$role]])) {
+                    $accounts[$mapping[$role]] = $figure;
+                }
+            }
+        }
+
+        return $accounts;
     }
 
     /**
@@ -268,7 +353,7 @@ final class AccountingDashboardBuilder
      * as_of, the same cut-off as the cash cards.
      *
      * @param  int|list<int>|null  $branchId
-     * @return list<array{month: string, income: int, expenses: int, net_income: int, cash: int, to: string}>
+     * @return list<array{month: string, income: int, expenses: int, net_income: int, interest_income: int, penalty_income: int, fee_income: int, cash: int, to: string}>
      */
     private function months(CarbonImmutable $asOfDate, string $asOf, int|array|null $branchId): array
     {
@@ -310,6 +395,9 @@ final class AccountingDashboardBuilder
                 'income' => $profit['income'],
                 'expenses' => $profit['expenses'],
                 'net_income' => $profit['net_income'],
+                'interest_income' => $profit['interest_income'],
+                'penalty_income' => $profit['penalty_income'],
+                'fee_income' => $profit['fee_income'],
                 'cash' => $cash,
                 'to' => $to,
             ];
