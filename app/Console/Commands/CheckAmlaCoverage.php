@@ -2,6 +2,7 @@
 
 namespace App\Console\Commands;
 
+use App\Services\Amla\Detection\Detector;
 use App\Services\Amla\Events\Coverage;
 use App\Services\Amla\Events\EventSources;
 use App\Services\Amla\Foundation\AmlaMonitoring;
@@ -14,7 +15,7 @@ use Illuminate\Support\Carbon;
 #[Description('Compare one day\'s money rows with their AMLA events, by source; rows without an event are Unscreened')]
 class CheckAmlaCoverage extends Command
 {
-    public function handle(Coverage $coverage, AmlaMonitoring $monitoring, EventSources $sources): int
+    public function handle(Coverage $coverage, AmlaMonitoring $monitoring, EventSources $sources, Detector $detector): int
     {
         if (! $monitoring->enabled()) {
             $this->line('AMLA monitoring is off, so coverage was not checked.');
@@ -31,6 +32,9 @@ class CheckAmlaCoverage extends Command
 
         $parsed = Carbon::parse($day);
 
+        // Sweep, screen what the sweep added, then count and store the day.
+        $coverage->check($day, store: false, sweep: true);
+        $detector->run();
         $results = $coverage->check($day);
         $this->line('AMLA coverage for '.$parsed->format('M j, Y').':');
 

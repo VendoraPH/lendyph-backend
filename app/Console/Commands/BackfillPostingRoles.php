@@ -8,12 +8,13 @@ use Illuminate\Console\Attributes\Signature;
 use Illuminate\Console\Command;
 
 #[Signature('accounting:backfill-posting-roles {--dry-run : Show what would be added and mapped without writing}')]
-#[Description('Add the Phase 2 posting roles (GCash service income, loan adjustments clearing, unearned restructure income, net surplus, suspense) and their accounts to a chart seeded before them')]
+#[Description('Add the Phase 2 posting roles (GCash service income, loan adjustments clearing, unearned restructure income, net surplus, suspense) and Phase 6 interbranch clearing, with their accounts, to a chart seeded before them')]
 class BackfillPostingRoles extends Command
 {
     /**
-     * The same logic the 2026_11_08_100000 migration runs on deploy, so a dry
-     * run on a database shows what that migration will change there.
+     * The same logic the 2026_11_08_100000 and 2026_11_20_300100 migrations
+     * run on deploy, so a dry run on a database shows what they will change
+     * there.
      */
     public function handle(AccountingRolesBackfill $backfill): int
     {

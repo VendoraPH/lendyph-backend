@@ -11,6 +11,7 @@ use App\Models\Collateral;
 use App\Models\CoMaker;
 use App\Models\Document;
 use App\Models\GCashTransaction;
+use App\Models\InterbranchTransfer;
 use App\Models\Loan;
 use App\Models\LoanAdjustment;
 use App\Models\LoanProduct;
@@ -53,7 +54,7 @@ class BranchAccessRouteSweepTest extends TestCase
         'loan', 'borrower', 'repayment', 'loanAdjustment', 'coMaker', 'document',
         'collateral', 'pledge', 'journal', 'expense', 'user', 'transaction',
         'reconciliation', 'branch', 'account', 'timeDeposit', 'request',
-        'run', 'approval', 'hold', 'instruction',
+        'run', 'approval', 'hold', 'instruction', 'interbranchTransfer',
     ];
 
     /**
@@ -255,6 +256,16 @@ class BranchAccessRouteSweepTest extends TestCase
             'request' => PortalRequest::factory()->create([
                 'portal_user_id' => PortalUser::factory()->create(['borrower_id' => $borrower->id])->id,
             ])->id,
+            // Between two branches, neither of them the caller's.
+            'interbranchTransfer' => tap(new InterbranchTransfer([
+                'source_branch_id' => $far->id,
+                'destination_branch_id' => Branch::factory()->create(['name' => 'Farther Branch', 'code' => 'FRT'])->id,
+                'from_account_id' => $this->account('1010'),
+                'to_account_id' => $this->account('1010'),
+                'amount' => 10_000,
+                'purpose' => 'Float',
+                'created_by' => $this->admin->id,
+            ]), fn (InterbranchTransfer $transfer) => $transfer->save())->id,
         ];
     }
 

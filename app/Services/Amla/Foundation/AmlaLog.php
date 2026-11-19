@@ -46,6 +46,11 @@ final class AmlaLog
         'order_release_rejected' => 'Order release rejected',
         'order_release_withdrawn' => 'Order release withdrawn',
         'cdd_valid_ids_viewed' => 'Member IDs viewed (masked)',
+        'alerts_viewed' => 'Alerts viewed',
+        'alert_viewed' => 'Alert viewed',
+        'ctr_candidates_viewed' => 'CTR candidates viewed',
+        'ctr_candidate_viewed' => 'CTR candidate viewed',
+        'detection_rules_viewed' => 'Detection rules viewed',
     ];
 
     /** @var array<string, string> each subject type in words, read as "<words> #<id>" */
@@ -60,6 +65,8 @@ final class AmlaLog
         'watchlist_version' => 'Watchlist version',
         'screening_match' => 'Screening match',
         'order' => 'Order',
+        'alert' => 'Alert',
+        'ctr_candidate' => 'CTR candidate',
     ];
 
     private const USER_AGENT_MAX = 255;

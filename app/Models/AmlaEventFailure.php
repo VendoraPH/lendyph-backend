@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Exceptions\AmlaRecordIsAppendOnlyException;
 use App\Traits\AmlaKeptForever;
 use Carbon\CarbonInterface;
 use Illuminate\Database\Eloquent\Model;
@@ -13,8 +14,10 @@ use Illuminate\Database\Eloquent\Model;
  * own `harvested_by` (a history failure stays history).
  *
  * Kept forever. Two changes are allowed while it is unresolved: a later
- * `last_attempted_at`, and `resolved_at` once its event exists. Both are
- * checked again inside the UPDATE.
+ * `last_attempted_at`, and `resolved_at` once its event exists. The UPDATE
+ * itself requires the row still unresolved and still holding the
+ * `last_attempted_at` this copy read, so a stale copy can never move it back
+ * (its write is skipped: someone tried the row later).
  *
  * @property int $id
  * @property string $source
@@ -57,7 +60,11 @@ class AmlaEventFailure extends Model
             $this->resolved_at = $at;
         }
 
-        $this->save();
+        try {
+            $this->save();
+        } catch (AmlaRecordIsAppendOnlyException) {
+            $this->refresh();
+        }
     }
 
     protected function amlaAllowsUpdate(): bool
@@ -71,6 +78,6 @@ class AmlaEventFailure extends Model
 
     protected function amlaUpdateConditions(): array
     {
-        return ['resolved_at' => null];
+        return ['resolved_at' => null, 'last_attempted_at' => $this->getRawOriginal('last_attempted_at')];
     }
 }

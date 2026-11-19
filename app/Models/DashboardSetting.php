@@ -18,7 +18,8 @@ use Illuminate\Support\Facades\DB;
  *   its value `par30_compare_days` days earlier (at least);
  * - `collection_efficiency_below`: Collection Efficiency is below this
  *   percentage (strictly);
- * - `overdue_share_above`: overdue is above this percentage of the portfolio
+ * - `overdue_share_above`: overdue (Past Due Amount) is above this percentage
+ *   of the outstanding balance (Outstanding: everything owed, like with like)
  *   (strictly);
  * - `approval_wait_days`: a loan has waited more than this many days for
  *   approval (strictly);
@@ -64,7 +65,7 @@ class DashboardSetting extends Model
         'par30_rise_points' => 'PAR 30 rise',
         'par30_compare_days' => 'PAR 30 comparison period',
         'collection_efficiency_below' => 'Collection Efficiency threshold',
-        'overdue_share_above' => 'Overdue share of the portfolio threshold',
+        'overdue_share_above' => 'Overdue share of the outstanding balance threshold',
         'approval_wait_days' => 'Approval waiting time',
         'release_wait_days' => 'Release waiting time',
         'control_difference_above' => 'Control difference tolerance',
@@ -183,7 +184,7 @@ class DashboardSetting extends Model
         return [
             ['key' => 'par30_rise', 'text' => sprintf('PAR 30 is up %s or more on %s ago.', self::valueInWords('par30_rise_points', $this->par30_rise_points), self::valueInWords('par30_compare_days', $this->par30_compare_days))],
             ['key' => 'collection_efficiency', 'text' => sprintf('Collection Efficiency is below %s.', self::valueInWords('collection_efficiency_below', $this->collection_efficiency_below))],
-            ['key' => 'overdue_share', 'text' => sprintf('Overdue is above %s of the portfolio.', self::valueInWords('overdue_share_above', $this->overdue_share_above))],
+            ['key' => 'overdue_share', 'text' => sprintf('Overdue is above %s of the outstanding balance.', self::valueInWords('overdue_share_above', $this->overdue_share_above))],
             ['key' => 'approval_wait', 'text' => sprintf('A loan has waited more than %s for approval.', self::valueInWords('approval_wait_days', $this->approval_wait_days))],
             ['key' => 'release_wait', 'text' => sprintf('An approved loan has not been released after more than %s.', self::valueInWords('release_wait_days', $this->release_wait_days))],
             ['key' => 'control_difference', 'text' => $difference],

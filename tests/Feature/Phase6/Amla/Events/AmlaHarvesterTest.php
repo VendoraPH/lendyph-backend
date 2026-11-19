@@ -511,4 +511,19 @@ class AmlaHarvesterTest extends TestCase
         $this->assertSame('1000.10', $credit->credit);
         $this->assertSame([], $this->eventsFor('share_capital', $credit->id));
     }
+
+    public function test_a_failures_last_try_never_moves_back_even_from_a_stale_copy(): void
+    {
+        $this->goLive();
+        $member = Borrower::factory()->create(['branch_id' => $this->branch->id, 'status' => 'active']);
+        $broken = GCashTransaction::factory()->create(['borrower_id' => $member->id, 'amount' => 1000, 'charge_amount' => 20, 'total_amount' => 999, 'status' => 'paid', 'paid_at' => now()]);
+        $this->harvestLater();
+        $stale = AmlaEventFailure::query()->where('source_id', $broken->id)->sole();
+        AmlaEventFailure::query()->whereKey($stale->id)->sole()->tried(Carbon::parse('2026-11-20 09:30:00', 'Asia/Manila'), resolved: false);
+
+        $stale->tried(Carbon::parse('2026-11-20 09:20:00', 'Asia/Manila'), resolved: false);
+
+        $this->assertSame('2026-11-20 09:30:00', AmlaEventFailure::query()->whereKey($stale->id)->sole()->last_attempted_at->format('Y-m-d H:i:s'));
+        $this->assertSame(1, DB::table('amla_event_failures')->count());
+    }
 }

@@ -54,6 +54,10 @@ class AmlaAccessTest extends TestCase
             'rescreen' => ['POST', '/api/amla/screening/rescreen', ['amla:screening'], true],
             'orders' => ['GET', '/api/amla/orders', ['amla:sanctions'], true],
             'record an order' => ['POST', '/api/amla/orders', ['amla:sanctions'], true],
+            'alerts' => ['GET', '/api/amla/alerts', ['amla:alerts'], false],
+            'ctr candidates' => ['GET', '/api/amla/ctr-candidates', ['amla:ctr'], false],
+            'detection rules' => ['GET', '/api/amla/detection-rules', ['amla:view', 'amla:alerts', 'amla:settings'], true],
+            'detection rule versions' => ['GET', '/api/amla/detection-rules/versions', ['amla:settings'], true],
         ];
     }
 
@@ -109,6 +113,8 @@ class AmlaAccessTest extends TestCase
             'POST api/amla/orders/{id}/release/approve',
             'POST api/amla/orders/{id}/release/reject',
             'POST api/amla/orders/{id}/release/withdraw',
+            'GET api/amla/alerts/{id}',
+            'GET api/amla/ctr-candidates/{id}',
         ];
 
         $routes = collect(Route::getRoutes()->getRoutes())

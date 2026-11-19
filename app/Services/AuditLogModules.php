@@ -50,6 +50,7 @@ use App\Models\Fee;
 use App\Models\GCashNonMember;
 use App\Models\GCashTier;
 use App\Models\GCashTransaction;
+use App\Models\InterbranchTransfer;
 use App\Models\LindaSetting;
 use App\Models\Loan;
 use App\Models\LoanAdjustment;
@@ -162,6 +163,7 @@ class AuditLogModules
         AccountingYearClose::class => 'accounting',
         AccountingAllowancePosting::class => 'accounting',
         AccountingOpeningBalance::class => 'accounting',
+        InterbranchTransfer::class => 'accounting',
         GCashTransaction::class => 'gcash',
         GCashNonMember::class => 'gcash',
         GCashTier::class => 'gcash',

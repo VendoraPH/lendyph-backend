@@ -348,6 +348,15 @@ class TimezoneShift
         'amla_screening_matches' => ['created_at', 'decided_at', 'updated_at'],
         'amla_watchlist_entries' => ['created_at'],
         'amla_watchlist_versions' => ['created_at', 'rescreened_at', 'superseded_at'],
+        // Phase 6 AMLA-B3 (2026-11-21): detection rules, CTR candidates, alerts
+        // and the detection cursor, well after the cutover. `occurred_on`,
+        // `window_start` and `window_end` are DATEs.
+        'amla_alert_events' => ['created_at', 'reversal_rerun_at'],
+        'amla_alerts' => ['cleared_at', 'created_at'],
+        'amla_ctr_candidates' => ['created_at', 'event_reversed_at'],
+        'amla_detection_locks' => ['created_at'],
+        'amla_event_screenings' => ['created_at'],
+        'amla_rule_versions' => ['created_at', 'effective_at'],
         // Added 2026-11-19 with the executive dashboard's alert thresholds
         // (Phase 6 EB-C), well after the cutover, for the same reason.
         'dashboard_settings' => ['created_at', 'updated_at'],
@@ -359,6 +368,9 @@ class TimezoneShift
         // Phase 6 MB-BE1 (2026-11-19): closure requests, well after the
         // cutover. `effective_on` is a DATE.
         'branch_closures' => ['created_at', 'decided_at', 'updated_at'],
+        // Phase 6 MB-BE5 (2026-11-20): interbranch transfers, well after the
+        // cutover.
+        'interbranch_transfers' => ['approved_at', 'cancelled_at', 'created_at', 'received_at', 'rejected_at', 'reversed_at', 'updated_at'],
         // The shift's own bookkeeping, written after the cutover by definition.
         'timezone_shifts' => ['completed_at', 'cutover_at', 'started_at'],
     ];
