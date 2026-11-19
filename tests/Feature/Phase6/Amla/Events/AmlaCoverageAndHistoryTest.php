@@ -56,7 +56,7 @@ class AmlaCoverageAndHistoryTest extends TestCase
 
         $this->at('2026-11-21 00:45:00');
         $missed = app(Coverage::class)->check('2026-11-20', store: false, sweep: false);
-        $result = app(Coverage::class)->check('2026-11-20');
+        $result = app(Coverage::class)->check('2026-11-20', sweep: true);
 
         $this->assertSame(['rows' => 3, 'events' => 1, 'failed' => 1, 'unscreened' => 2, 'pending' => 1], $missed['gcash']);
         $this->assertSame(['rows' => 3, 'events' => 2, 'failed' => 1, 'unscreened' => 1, 'pending' => 1], $result['gcash']);
@@ -193,5 +193,29 @@ class AmlaCoverageAndHistoryTest extends TestCase
 
         $this->harvestLater('2026-11-20 09:40:00');
         $this->assertSame(['09:40:00', '09:30:00'], [$tried($first), $tried($second)]);
+    }
+
+    public function test_the_check_writes_events_only_when_asked_to_sweep_and_while_monitoring_is_on(): void
+    {
+        $this->goLive();
+        $member = Borrower::factory()->create(['branch_id' => $this->branch->id, 'status' => 'active']);
+        $this->harvestLater();
+        $this->at('2026-11-20 09:30:00');
+        $late = GCashTransaction::factory()->create(['borrower_id' => $member->id, 'status' => 'paid', 'paid_at' => '2026-11-20 09:02:00']);
+        DB::table('gcash_transactions')->where('id', $late->id)->update(['updated_at' => '2026-11-20 09:02:00', 'created_at' => '2026-11-20 09:02:00']);
+        $this->harvestLater('2026-11-20 09:31:00');
+        $this->assertSame([], $this->eventsFor('gcash', $late->id));
+        $this->at('2026-11-21 00:45:00');
+
+        app(Coverage::class)->check('2026-11-20');
+        $this->assertSame([], $this->eventsFor('gcash', $late->id));
+
+        config(['amla.monitoring_enabled' => false]);
+        app(Coverage::class)->check('2026-11-20', sweep: true);
+        $this->assertSame([], $this->eventsFor('gcash', $late->id));
+
+        $this->monitoringOn();
+        $this->artisan('amla:coverage-check')->assertSuccessful();
+        $this->assertCount(1, $this->eventsFor('gcash', $late->id));
     }
 }

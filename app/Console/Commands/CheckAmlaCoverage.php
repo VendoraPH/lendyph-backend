@@ -31,7 +31,7 @@ class CheckAmlaCoverage extends Command
 
         $parsed = Carbon::parse($day);
 
-        $results = $coverage->check($day);
+        $results = $coverage->check($day, sweep: true);
         $this->line('AMLA coverage for '.$parsed->format('M j, Y').':');
 
         foreach ($sources->all() as $source) {

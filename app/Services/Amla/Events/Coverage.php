@@ -5,6 +5,7 @@ namespace App\Services\Amla\Events;
 use App\Models\AmlaCoverageCheck;
 use App\Models\AmlaEventFailure;
 use App\Models\AmlaHarvestCursor;
+use App\Services\Amla\Foundation\AmlaMonitoring;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 
@@ -16,7 +17,8 @@ use Illuminate\Support\Facades\DB;
  * missed. Nothing counts as cleared until it has been screened. Pending rows
  * (a GCash Cash In not yet paid) are counted apart; they aren't money yet.
  *
- * Before counting, it sweeps the day: every monitored row recorded that day
+ * When asked (the nightly command does) and only while monitoring is on,
+ * it first sweeps the day: every monitored row recorded that day
  * goes through EventWriter, which adds only what is missing. That screens a
  * row whose transaction committed after the harvester's overlap had passed
  * (a long auto-credit or bulk share capital run stamps its first rows long
@@ -32,18 +34,20 @@ final class Coverage
     public function __construct(
         private readonly EventSources $sources,
         private readonly EventWriter $writer,
+        private readonly AmlaMonitoring $monitoring,
     ) {}
 
     /**
      * @param  string  $day  Y-m-d, a Manila day
      * @return array<string, array{rows: int, events: int, failed: int, unscreened: int, pending: int}>
      */
-    public function check(string $day, bool $store = true, bool $sweep = true): array
+    public function check(string $day, bool $store = true, bool $sweep = false): array
     {
         $start = Carbon::parse($day.' 00:00:00', config('app.timezone'));
         $end = $start->copy()->addDay();
         $cursors = AmlaHarvestCursor::query()->pluck('started_at', 'source');
         $results = [];
+        $sweep = $sweep && $this->monitoring->enabled();
 
         foreach ($this->sources->all() as $source) {
             $startedAt = $cursors[$source->name()] ?? null;
