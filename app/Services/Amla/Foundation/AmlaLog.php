@@ -24,6 +24,12 @@ final class AmlaLog
         'change_approved' => 'Change approved',
         'change_rejected' => 'Change rejected',
         'change_withdrawn' => 'Change withdrawn',
+        'cdd_list_viewed' => 'CDD worklist viewed',
+        'cdd_profile_viewed' => 'CDD profile viewed',
+        'cdd_profile_updated' => 'CDD profile updated',
+        'cdd_id_verified' => 'ID verification recorded',
+        'cdd_risk_assessed' => 'Risk assessed',
+        'cdd_review_recorded' => 'CDD review recorded',
         'history_screened' => 'Transaction history screened',
     ];
 
@@ -33,6 +39,8 @@ final class AmlaLog
         'settings_version' => 'Settings version',
         'calendar_entry' => 'Calendar day',
         'calendar_year' => 'Calendar year',
+        'member' => 'Member',
+        'walk_in' => 'Walk-in',
     ];
 
     private const USER_AGENT_MAX = 255;
