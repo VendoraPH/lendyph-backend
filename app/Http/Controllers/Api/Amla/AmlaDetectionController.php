@@ -125,7 +125,7 @@ class AmlaDetectionController extends Controller
     #[OA\Get(
         path: '/api/amla/ctr-candidates/{id}',
         summary: 'One CTR candidate',
-        description: 'Needs `amla:ctr`. Why it is a candidate, the settings version it was measured against, and its transaction. Out of scope answers 404. Logged to the AMLA log.',
+        description: 'Needs `amla:ctr`. Why it is a candidate, the settings version it was measured against, its transaction, its CTR\'s id once prepared (`ctr_report_id`), and a waiting set-aside ask with `requested_by_me` (the asker is named to `amla:approve` holders only). Out of scope answers 404. Logged to the AMLA log.',
         tags: ['AMLA'],
         security: [['sanctum' => []]],
         responses: [new OA\Response(response: 200, description: 'The candidate'), new OA\Response(response: 404, description: 'No such candidate in the caller\'s scope')],
@@ -137,7 +137,7 @@ class AmlaDetectionController extends Controller
         $candidate = $this->scope->constrain(AmlaCtrCandidate::query(), $request->user())->with(['event.branch', 'borrower', 'walkIn', 'branch'])->whereKey($id)->first() ?? abort(404);
         $this->log->record('ctr_candidate_viewed', $request->user(), 'ctr_candidate', $candidate->id, ['reference' => $candidate->reference]);
 
-        return response()->json(['success' => true, 'data' => $this->presenter->ctrDetail($candidate)]);
+        return response()->json(['success' => true, 'data' => $this->presenter->ctrDetail($candidate, $request->user())]);
     }
 
     #[OA\Get(

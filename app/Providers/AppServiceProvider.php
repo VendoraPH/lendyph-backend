@@ -539,8 +539,17 @@ class AppServiceProvider extends ServiceProvider
             return Limit::perMinute(self::IMPORT_CONTROL_CALLS_PER_MINUTE)->by('imports:ctl:'.$key);
         });
 
+        /*
+         * Five exports a minute per user, on every export route. A refusal
+         * says so in words, with `retry_after` in seconds, instead of the bare
+         * "Too Many Attempts." the screens strip as framework boilerplate.
+         */
         RateLimiter::for('exports', function (Request $request) {
-            return Limit::perMinute(5)->by($request->user()?->id ?: $request->ip());
+            return Limit::perMinute(5)->by($request->user()?->id ?: $request->ip())
+                ->response(fn (Request $request, array $headers): JsonResponse => response()->json([
+                    'message' => 'You can make 5 exports a minute. Wait a minute and try again.',
+                    'retry_after' => (int) ($headers['Retry-After'] ?? 0),
+                ], 429, $headers));
         });
 
         /**

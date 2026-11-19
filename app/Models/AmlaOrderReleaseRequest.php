@@ -39,6 +39,9 @@ class AmlaOrderReleaseRequest extends Model
 
     public const WITHDRAWN = 'withdrawn';
 
+    /** @var array<string, string> */
+    public const STATUS_WORDS = [self::PENDING => 'Waiting for approval', self::APPROVED => 'Approved', self::REJECTED => 'Rejected', self::WITHDRAWN => 'Withdrawn'];
+
     private const DECISION_COLUMNS = ['status', 'pending_key', 'decided_by', 'decided_at', 'decision_note', 'updated_at'];
 
     protected $fillable = ['order_id', 'status', 'pending_key', 'reason', 'release_reference', 'requested_by', 'decided_by', 'decided_at', 'decision_note'];
@@ -83,6 +86,11 @@ class AmlaOrderReleaseRequest extends Model
     public function requester(): BelongsTo
     {
         return $this->belongsTo(User::class, 'requested_by');
+    }
+
+    public function decider(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'decided_by');
     }
 
     public function order(): BelongsTo

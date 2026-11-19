@@ -23,6 +23,9 @@ final class ReportExports
     /** Minutes after the link's expiry before its file is deleted. */
     public const PRUNE_GRACE_MINUTES = 5;
 
+    /** How far back the regular sweep looks: a day of 15-minute runs, so a missed run or a short outage still sweeps its files. */
+    public const PRUNE_LOOKBACK_HOURS = 24;
+
     public function __construct(
         private readonly AmlaReports $reports,
         private readonly ReportRenderer $renderer,
@@ -62,13 +65,20 @@ final class ReportExports
      * report's decrypted contents never sit on disk for good. The export's
      * record and checksum stay.
      *
+     * The regular sweep looks only at exports that expired in the last
+     * PRUNE_LOOKBACK_HOURS (a range on the indexed `created_at`), so it never
+     * re-checks every old export. `$full` checks every expired export, for a
+     * sweep after a longer outage (`amla:prune-exports --full`).
+     *
      * @return int files deleted
      */
-    public function pruneExpired(): int
+    public function pruneExpired(bool $full = false): int
     {
         $disk = Storage::disk(self::DISK);
         $deleted = 0;
-        $paths = AmlaExport::query()->where('created_at', '<', Carbon::now()->subMinutes(SignedFileLink::TTL_MINUTES + self::PRUNE_GRACE_MINUTES))
+        $expiredBefore = Carbon::now()->subMinutes(SignedFileLink::TTL_MINUTES + self::PRUNE_GRACE_MINUTES);
+        $paths = AmlaExport::query()->where('created_at', '<', $expiredBefore)
+            ->when(! $full, fn ($query) => $query->where('created_at', '>=', $expiredBefore->copy()->subHours(self::PRUNE_LOOKBACK_HOURS)))
             ->orderBy('id')->pluck('file_path');
 
         foreach ($paths as $path) {

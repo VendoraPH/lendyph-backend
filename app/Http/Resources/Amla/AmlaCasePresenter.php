@@ -93,7 +93,7 @@ final class AmlaCasePresenter
                 'by' => AmlaPresenter::user($action->user), 'at' => $action->created_at?->toIso8601String(),
             ])->values()->all(),
             'reports' => AmlaReport::query()->where('case_id', $case->id)->orderBy('id')->get(['id', 'reference', 'status'])
-                ->map(fn (AmlaReport $report) => ['id' => (int) $report->id, 'reference' => $report->reference, 'status_words' => AmlaReport::STATUS_WORDS[$report->status] ?? $report->status])->values()->all(),
+                ->map(fn (AmlaReport $report) => ['id' => (int) $report->id, 'reference' => $report->reference, 'status' => $report->status, 'status_words' => AmlaReport::STATUS_WORDS[$report->status] ?? $report->status])->values()->all(),
         ];
     }
 
@@ -174,14 +174,24 @@ final class AmlaCasePresenter
         ];
     }
 
-    /** @return array<string, mixed> */
-    public static function deadline(string $kind, int $id, string $reference, string $statusWords, array $due, string $today, FilingDeadlines $deadlines): array
+    /**
+     * One filing still to make, with the report type it files (`type`: ctr
+     * or str), so a screen can open the right page.
+     *
+     * @param  array{subject_type: string, id: int, reference: string, type: string, status_words: string, due: array<string, mixed>}  $filing
+     * @return array<string, mixed>
+     */
+    public static function deadline(array $filing, string $today, FilingDeadlines $deadlines): array
     {
+        $due = $filing['due'];
+
         return [
-            'kind' => $kind,
-            'id' => $id,
-            'reference' => $reference,
-            'status_words' => $statusWords,
+            'kind' => $filing['subject_type'],
+            'id' => $filing['id'],
+            'reference' => $filing['reference'],
+            'type' => $filing['type'],
+            'type_words' => AmlaReport::TYPE_WORDS[$filing['type']],
+            'status_words' => $filing['status_words'],
             'due_on' => $due['due_on'],
             'due_words' => CarbonImmutable::parse($due['due_on'])->format('M j, Y'),
             'provisional' => $due['provisional'],

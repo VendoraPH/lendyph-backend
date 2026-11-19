@@ -40,10 +40,11 @@ class AmlaLogController extends Controller
             ->with('user')
             ->orderByDesc('id')
             ->paginate((int) ($filters['per_page'] ?? 50));
+        $references = AmlaLog::references($page->items());
 
         return response()->json([
             'success' => true,
-            'data' => collect($page->items())->map(fn (AmlaLogEntry $entry) => AmlaPresenter::logEntry($entry))->values(),
+            'data' => collect($page->items())->map(fn (AmlaLogEntry $entry) => AmlaPresenter::logEntry($entry, $references))->values(),
             'meta' => ['current_page' => $page->currentPage(), 'per_page' => $page->perPage(), 'total' => $page->total(), 'last_page' => $page->lastPage()],
         ]);
     }

@@ -77,15 +77,24 @@ final class AlertWorkflow
         }, $reason);
     }
 
-    /** Escalate to an existing active case or a new one on the alert's subject. */
+    /**
+     * Escalate to an existing active case or a new one on the alert's
+     * subject. The note stays on the alert's history; a new case also keeps
+     * it as its first investigation note, by the same person, in the same
+     * transaction, so the case shows why it was opened.
+     */
     public function escalate(User $user, AmlaAlert $alert, ?int $caseId, ?string $title, ?string $note): AmlaCase
     {
         $case = null;
 
-        $this->step($user, $alert, 'escalated', function (AmlaAlert $locked) use ($user, $caseId, $title, &$case) {
+        $this->step($user, $alert, 'escalated', function (AmlaAlert $locked) use ($user, $caseId, $title, $note, &$case) {
             $case = $caseId !== null
                 ? $this->cases->activeCaseForAlert($caseId, $locked)
                 : $this->cases->open($user, ['title' => $title ?? "Alert {$locked->reference}", 'borrower_id' => $locked->borrower_id, 'gcash_non_member_id' => $locked->gcash_non_member_id]);
+
+            if ($caseId === null && $note !== null && trim($note) !== '') {
+                $this->cases->addNote($user, $case, $note);
+            }
 
             $this->cases->attachAlert($user, $case, $locked);
             $locked->forceFill(['status' => AmlaAlert::ESCALATED, 'open_key' => null, 'case_id' => $case->id])->save();

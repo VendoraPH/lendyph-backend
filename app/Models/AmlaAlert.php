@@ -36,6 +36,8 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
  * @property CarbonInterface $window_end
  * @property string $reason
  * @property list<array{label: string, value: string}> $indicators
+ * @property string|null $counted_amount what the rule counted when the alert opened, the figure its reason states (null before AMLA-B8)
+ * @property int|null $counted_transactions the transactions behind `counted_amount`
  * @property bool $from_history
  * @property CarbonInterface|null $cleared_at
  * @property string|null $cleared_note
@@ -85,7 +87,7 @@ class AmlaAlert extends Model
 
     protected $fillable = [
         'reference', 'rule_code', 'rule_version', 'priority', 'status', 'open_key', 'borrower_id', 'gcash_non_member_id',
-        'branch_id', 'window_start', 'window_end', 'reason', 'indicators', 'from_history', 'cleared_at', 'cleared_note',
+        'branch_id', 'window_start', 'window_end', 'reason', 'indicators', 'counted_amount', 'counted_transactions', 'from_history', 'cleared_at', 'cleared_note',
         'assigned_to', 'case_id', 'closed_at',
     ];
 
@@ -99,6 +101,7 @@ class AmlaAlert extends Model
             'window_start' => 'date',
             'window_end' => 'date',
             'indicators' => 'array',
+            'counted_transactions' => 'integer',
             'from_history' => 'boolean',
             'cleared_at' => 'datetime',
             'assigned_to' => 'integer',

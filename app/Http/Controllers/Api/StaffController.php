@@ -6,6 +6,8 @@ use App\Http\Controllers\Controller;
 use App\Http\Requests\Staff\ListStaffRequest;
 use App\Http\Resources\StaffResource;
 use App\Models\User;
+use App\Services\Amla\Foundation\AmlaAccess;
+use App\Services\BranchAccess;
 use App\Services\LikePattern;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
@@ -30,14 +32,15 @@ class StaffController extends Controller
         description: 'Active users only, as `{id, full_name}` — the same `full_name` a loan returns for '
             .'`account_officer`. Allowed for any caller holding `loans:create`, `loans:update` or '
             .'`loans:restructure` (the new-loan, loan-detail and restructure pickers), or with `for=savings` '
-            .'`savings:create` (the savings opening form\'s account officer); this is not user '
+            .'`savings:create` (the savings opening form\'s account officer). `for=amla_cases` (the AMLA case '
+            .'assignee picker) needs `amla:cases` with `branches:view_all` and lists only active staff holding both; this is not user '
             .'management and does not require `users:view`. `search` matches first name, last '
             .'name or "first last", never username or email. Ordered by first name, last name, then id. '
             .'`per_page` is clamped to 1..100.',
         tags: ['Staff'],
         security: [['sanctum' => []]],
         parameters: [
-            new OA\Parameter(name: 'for', in: 'query', required: false, description: '`savings`: the savings opening form; also allowed with `savings:create`.', schema: new OA\Schema(type: 'string', enum: ['savings'])),
+            new OA\Parameter(name: 'for', in: 'query', required: false, description: '`savings`: the savings opening form; also allowed with `savings:create`. `amla_cases`: the AMLA case assignee picker; only with `amla:cases` and `branches:view_all`.', schema: new OA\Schema(type: 'string', enum: ['savings', 'amla_cases'])),
             new OA\Parameter(name: 'search', in: 'query', required: false, description: 'Matches first name, last name, or "first last". Max 100 characters.', schema: new OA\Schema(type: 'string', maxLength: 100)),
             new OA\Parameter(name: 'per_page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', default: 15, minimum: 1, maximum: 100)),
             new OA\Parameter(name: 'page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', default: 1, minimum: 1)),
@@ -66,7 +69,7 @@ class StaffController extends Controller
                 ]),
             ),
             new OA\Response(response: 401, description: 'Unauthenticated'),
-            new OA\Response(response: 403, description: 'Holds none of loans:create, loans:update or loans:restructure (nor savings:create with for=savings)'),
+            new OA\Response(response: 403, description: 'Holds none of loans:create, loans:update or loans:restructure (nor savings:create with for=savings); with for=amla_cases, lacks amla:cases or branches:view_all'),
             new OA\Response(response: 422, description: 'Validation error'),
         ],
     )]
@@ -94,6 +97,9 @@ class StaffController extends Controller
                     ->orWhere('last_name', 'like', $like)
                     ->orWhereRaw("CONCAT(first_name, ' ', last_name) LIKE ?", [$like]));
             })
+            // The AMLA case assignee picker lists only the staff a case can
+            // be assigned to (CaseRecords::assign()'s rule).
+            ->when($request->forAmlaCases(), fn (Builder $query) => $query->whereIn('id', $this->amlaCaseHolderIds()))
             ->orderBy('first_name')
             ->orderBy('last_name')
             // Tiebreak on the key: two staff can share a name, and a page must
@@ -102,5 +108,28 @@ class StaffController extends Controller
             ->paginate($request->perPage());
 
         return StaffResource::collection($staff);
+    }
+
+    /**
+     * Active staff holding `amla:cases` with `branches:view_all`, through an
+     * active role (or super_admin). Spatie's scopes narrow the candidates in
+     * SQL; each is then checked with `can()`, which honours deactivated roles
+     * and Gate::before.
+     *
+     * @return list<int>
+     */
+    private function amlaCaseHolderIds(): array
+    {
+        return User::query()
+            ->active()
+            ->where(fn (Builder $q) => $q
+                ->whereIn('id', User::permission(AmlaAccess::CASES)->select('users.id'))
+                ->orWhereIn('id', User::role('super_admin')->select('users.id')))
+            ->with('roles.permissions', 'permissions')
+            ->get()
+            ->filter(fn (User $user) => $user->can(AmlaAccess::CASES) && $user->can(BranchAccess::VIEW_ALL))
+            ->map(fn (User $user) => (int) $user->id)
+            ->values()
+            ->all();
     }
 }

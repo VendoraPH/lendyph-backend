@@ -30,7 +30,6 @@ final class DashboardCounts
         private readonly DetectionScope $scope,
         private readonly FilingDeadlines $deadlines,
         private readonly CddWorklist $worklist,
-        private readonly BranchAccess $branches,
     ) {}
 
     /** @return array<string, array<string, int>|null> */
@@ -91,10 +90,8 @@ final class DashboardCounts
         $today = CarbonImmutable::now('Asia/Manila')->toDateString();
         $counts = ['upcoming' => 0, 'due_today' => 0, 'overdue' => 0];
 
-        foreach ($this->deadlines->filings() as $filing) {
-            $keys = $filing['type'] === 'str' ? Filings::STR_READ : Filings::CTR_READ;
-            $visible = $user->canAny($keys) && ($filing['head_office'] ? $user->can(BranchAccess::VIEW_ALL) : $this->branches->canSee($user, $filing['branch_id']));
-            $standing = $visible ? $this->deadlines->standing($filing['due']['due_on'], $today) : null;
+        foreach ($this->deadlines->visibleTo($user) as $filing) {
+            $standing = $this->deadlines->standing($filing['due']['due_on'], $today);
 
             if ($standing !== null) {
                 $counts[$standing]++;
