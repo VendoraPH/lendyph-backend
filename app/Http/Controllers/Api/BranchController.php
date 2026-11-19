@@ -10,10 +10,10 @@ use App\Http\Resources\PublicBranchResource;
 use App\Models\Branch;
 use App\Services\BranchAccess;
 use App\Services\Branches\BranchFigures;
-use App\Services\Branches\BranchStatus;
 use Illuminate\Database\Eloquent\ModelNotFoundException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
+use Illuminate\Support\Arr;
 use OpenApi\Attributes as OA;
 
 class BranchController extends Controller
@@ -141,7 +141,7 @@ class BranchController extends Controller
                     new OA\Property(property: 'opened_on', type: 'string', format: 'date', nullable: true),
                     new OA\Property(property: 'cda_authority_number', type: 'string', nullable: true, description: 'To verify'),
                     new OA\Property(property: 'cda_authority_issued_on', type: 'string', format: 'date', nullable: true, description: 'To verify'),
-                    new OA\Property(property: 'is_active', type: 'boolean', description: 'A changed value suspends or reactivates the branch and needs branches:manage plus branches:view_all'),
+                    new OA\Property(property: 'is_active', type: 'boolean', description: 'Accepted only unchanged; change the status with PATCH /api/branches/{id}/status'),
                 ],
             ),
         ),
@@ -152,24 +152,10 @@ class BranchController extends Controller
             new OA\Response(response: 422, description: 'Validation error'),
         ],
     )]
-    public function update(UpdateBranchRequest $request, Branch $branch, BranchStatus $status): BranchResource
+    public function update(UpdateBranchRequest $request, Branch $branch): BranchResource
     {
-        $data = $request->validated();
-
-        // The legacy `is_active` switch is a status change: true reactivates,
-        // false suspends, under BranchStatus's rules, in the same save (and
-        // audit row) as the other fields.
-        if (array_key_exists('is_active', $data)) {
-            $to = $data['is_active']
-                ? Branch::STATUS_ACTIVE
-                : ($branch->status === Branch::STATUS_ACTIVE ? Branch::STATUS_SUSPENDED : $branch->status);
-            unset($data['is_active']);
-
-            if ($to !== $branch->status) {
-                $status->assertCanMove($branch, $to);
-                $branch->status = $to;
-            }
-        }
+        // `is_active` passes validation only unchanged, so it changes nothing.
+        $data = Arr::except($request->validated(), ['is_active']);
 
         $branch->fill($data)->save();
 

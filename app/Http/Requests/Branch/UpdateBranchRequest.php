@@ -4,6 +4,7 @@ namespace App\Http\Requests\Branch;
 
 use App\Models\Branch;
 use App\Services\BranchAccess;
+use Closure;
 use Illuminate\Auth\Access\AuthorizationException;
 use Illuminate\Database\Eloquent\ModelNotFoundException;
 use Illuminate\Foundation\Http\FormRequest;
@@ -13,8 +14,7 @@ class UpdateBranchRequest extends FormRequest
 {
     public const COMPANY_WIDE_REFUSAL = 'Branches are shared by the whole cooperative, so changing one needs the settings permission and access to all branches.';
 
-    /** The words a refused edit answers with. */
-    private string $refusal = self::COMPANY_WIDE_REFUSAL;
+    public const STATUS_ELSEWHERE = "Change a branch's status from its Status action.";
 
     /**
      * A branch the caller can't see answers 404 exactly like a missing one
@@ -23,9 +23,7 @@ class UpdateBranchRequest extends FormRequest
      *
      * Editing a branch (name, code, details) also needs `branches:view_all`
      * (multi-branch audit D3): a branch-only user can't deactivate or recode
-     * their own branch. Switching `is_active` is a status change (Phase 6,
-     * decision 1), so a changed value also needs `branches:manage`; the same
-     * value is accepted, so the edit form can send it back.
+     * their own branch.
      */
     public function authorize(): bool
     {
@@ -35,39 +33,13 @@ class UpdateBranchRequest extends FormRequest
             throw (new ModelNotFoundException)->setModel(Branch::class, [$branch->id]);
         }
 
-        if (! ($this->user()->can('settings:update') && $this->user()->can(BranchAccess::VIEW_ALL))) {
-            return false;
-        }
-
-        if ($this->switchesIsActive($branch) && ! BranchStatusRequest::mayChangeStatus($this)) {
-            $this->refusal = BranchStatusRequest::REFUSAL;
-
-            return false;
-        }
-
-        return true;
+        return $this->user()->can('settings:update') && $this->user()->can(BranchAccess::VIEW_ALL);
     }
 
     /** @throws AuthorizationException */
     protected function failedAuthorization(): void
     {
-        throw new AuthorizationException($this->refusal);
-    }
-
-    /**
-     * Whether `is_active` is sent with a value other than the branch's own.
-     * A value that isn't a boolean counts as no switch, and validation
-     * refuses it.
-     */
-    private function switchesIsActive(Branch $branch): bool
-    {
-        if (! $this->has('is_active')) {
-            return false;
-        }
-
-        $sent = filter_var($this->input('is_active'), FILTER_VALIDATE_BOOL, FILTER_NULL_ON_FAILURE);
-
-        return $sent !== null && $sent !== $branch->is_active;
+        throw new AuthorizationException(self::COMPANY_WIDE_REFUSAL);
     }
 
     public function rules(): array
@@ -80,7 +52,23 @@ class UpdateBranchRequest extends FormRequest
             'address' => ['nullable', 'string', 'max:500'],
             'contact_number' => ['nullable', 'string', 'max:20'],
             ...StoreBranchRequest::profileRules(),
-            'is_active' => ['sometimes', 'boolean'],
+            'is_active' => ['sometimes', 'boolean', $this->unchangedStatus(...)],
         ];
+    }
+
+    /**
+     * `is_active` may only be sent back unchanged. Suspending, reactivating
+     * and closing go through the status and closure actions (Phase 6
+     * MB-BE1), which take a reason, the row lock and their own permission;
+     * a switch here could undo a closure or suspend the main office between
+     * their checks and this save.
+     */
+    private function unchangedStatus(string $attribute, mixed $value, Closure $fail): void
+    {
+        $sent = filter_var($value, FILTER_VALIDATE_BOOL, FILTER_NULL_ON_FAILURE);
+
+        if ($sent !== null && $sent !== $this->route('branch')->is_active) {
+            $fail(self::STATUS_ELSEWHERE);
+        }
     }
 }

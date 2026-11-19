@@ -3,8 +3,8 @@
 namespace App\Http\Controllers\Api\Branches;
 
 use App\Http\Controllers\Controller;
-use App\Http\Requests\Branch\BranchStatusRequest;
 use App\Http\Requests\Branch\ChangeBranchStatusRequest;
+use App\Http\Requests\Branch\MoveMainOfficeRequest;
 use App\Http\Resources\BranchResource;
 use App\Models\Branch;
 use App\Services\Branches\BranchStatus;
@@ -50,10 +50,14 @@ class BranchStatusController extends Controller
     #[OA\Put(
         path: '/api/branches/{branch}/main-office',
         summary: 'Make a branch the main office',
-        description: 'Moves the main-office flag to this active branch; the old main office is unflagged. Each branch gets an audit row.',
+        description: 'Moves the main-office flag to this active branch; the old main office is unflagged. Each branch gets an audit row with the reason.',
         tags: ['Branches'],
         security: [['sanctum' => []]],
         parameters: [new OA\Parameter(name: 'branch', in: 'path', required: true, schema: new OA\Schema(type: 'integer'))],
+        requestBody: new OA\RequestBody(required: true, content: new OA\JsonContent(
+            required: ['reason'],
+            properties: [new OA\Property(property: 'reason', type: 'string', maxLength: 500)],
+        )),
         responses: [
             new OA\Response(response: 200, description: 'The branch'),
             new OA\Response(response: 403, description: 'Needs branches:manage and branches:view_all'),
@@ -61,8 +65,8 @@ class BranchStatusController extends Controller
             new OA\Response(response: 422, description: 'Only an active branch can be the main office'),
         ],
     )]
-    public function mainOffice(BranchStatusRequest $request, Branch $branch): BranchResource
+    public function mainOffice(MoveMainOfficeRequest $request, Branch $branch): BranchResource
     {
-        return new BranchResource($this->status->makeMainOffice($branch)->load('manager:id,first_name,last_name'));
+        return new BranchResource($this->status->makeMainOffice($branch, $request->validated('reason'))->load('manager:id,first_name,last_name'));
     }
 }

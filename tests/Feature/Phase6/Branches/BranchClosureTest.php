@@ -17,6 +17,7 @@ use App\Models\User;
 use App\Services\AuditLogService;
 use App\Services\BranchAccess;
 use Carbon\Carbon;
+use Illuminate\Database\UniqueConstraintViolationException;
 use Tests\TestCase;
 use Tests\Traits\PostsJournals;
 use Tests\Traits\SetupLendyPH;
@@ -68,10 +69,16 @@ class BranchClosureTest extends TestCase
         $branch = $this->quiet->fresh();
         $this->assertSame('closed', $branch->status);
         $this->assertFalse($branch->is_active);
+
+        $approved = $this->auditRows($this->quiet->id)->firstWhere('action', 'branch_closure_approved');
+        $this->assertSame($this->checker->id, $approved->user_id);
+        // assertEquals: the JSON column keeps its own key order.
+        $this->assertEquals(['closure_id' => $closureId, 'status' => 'approved', 'decision_note' => 'Checked'], $approved->new_values);
         $this->assertSame($effective, $branch->closed_on->toDateString());
 
         $this->assertSame([
             ['branch_closure_requested', sprintf('Closing branch "Quiet Branch" (QUI) on %s was requested. Reason: Merged into the main office', $this->words($effective))],
+            ['branch_closure_approved', sprintf('The request to close branch "Quiet Branch" (QUI) on %s was approved. Note: Checked', $this->words($effective))],
             ['updated', sprintf('Branch "Quiet Branch" (QUI) closed on %s, requested by %s and approved by Carla Reyes.', $this->words($effective), $this->admin->full_name)],
         ], $this->auditRows($this->quiet->id)->map(fn (AuditLog $row) => [$row->action, $row->description])->all());
     }
@@ -85,6 +92,28 @@ class BranchClosureTest extends TestCase
             ->assertJsonPath('message', 'You asked to close this branch, so someone else has to approve it.');
 
         $this->assertSame('active', $this->quiet->fresh()->status);
+    }
+
+    public function test_a_requester_who_cancels_and_asks_again_still_cannot_approve(): void
+    {
+        $this->requestClosure();
+        $this->deleteJson("/api/branches/{$this->quiet->id}/closure")->assertOk();
+        $this->requestClosure();
+
+        $this->postJson("/api/branches/{$this->quiet->id}/closure/approve")
+            ->assertForbidden()
+            ->assertJsonPath('message', 'You asked to close this branch, so someone else has to approve it.');
+        $this->assertSame('active', $this->quiet->fresh()->status);
+    }
+
+    public function test_the_database_lets_one_request_wait_per_branch(): void
+    {
+        $row = ['branch_id' => $this->quiet->id, 'status' => 'pending', 'effective_on' => now()->toDateString(), 'reason' => 'x', 'requested_by' => $this->admin->id];
+        BranchClosure::create($row);
+        BranchClosure::create([...$row, 'status' => 'cancelled']);
+
+        $this->expectException(UniqueConstraintViolationException::class);
+        BranchClosure::create($row);
     }
 
     public function test_the_checklist_lists_everything_that_keeps_a_branch_open(): void
@@ -172,7 +201,7 @@ class BranchClosureTest extends TestCase
 
     public function test_the_main_office_and_a_closed_branch_cannot_be_closed(): void
     {
-        $this->putJson("/api/branches/{$this->quiet->id}/main-office")->assertOk();
+        $this->putJson("/api/branches/{$this->quiet->id}/main-office", ['reason' => 'x'])->assertOk();
         $this->postJson("/api/branches/{$this->quiet->id}/closure", ['effective_on' => now()->toDateString(), 'reason' => 'x'])
             ->assertUnprocessable()
             ->assertJsonPath('errors.branch.0', 'The main office stays open. Make another branch the main office first.');

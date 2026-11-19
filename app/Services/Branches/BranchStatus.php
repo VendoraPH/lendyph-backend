@@ -89,11 +89,11 @@ class BranchStatus
     /**
      * Move the main-office flag to an active branch. The old main office is
      * unflagged first (the unique `main_office_key` allows one), and each
-     * branch gets its own audit row.
+     * branch gets its own audit row with the reason.
      */
-    public function makeMainOffice(Branch $branch): Branch
+    public function makeMainOffice(Branch $branch, string $reason): Branch
     {
-        return DB::transaction(function () use ($branch): Branch {
+        return DB::transaction(function () use ($branch, $reason): Branch {
             $current = Branch::query()->where('is_main_office', true)->lockForUpdate()->get();
             $locked = Branch::query()->whereKey($branch->getKey())->lockForUpdate()->firstOrFail();
 
@@ -107,10 +107,12 @@ class BranchStatus
 
             foreach ($current as $old) {
                 $old->is_main_office = false;
+                $old->statusAuditNote = $reason;
                 $old->save();
             }
 
             $locked->is_main_office = true;
+            $locked->statusAuditNote = $reason;
             $locked->save();
 
             return $locked;
@@ -208,12 +210,7 @@ class BranchStatus
             $this->assertClosable($locked);
             $this->assertChecklistClear($locked);
 
-            $closure->update([
-                'status' => BranchClosure::STATUS_APPROVED,
-                'decided_by' => $by->id,
-                'decided_at' => now(),
-                'decision_note' => $note,
-            ]);
+            $this->decide($locked, $closure, BranchClosure::STATUS_APPROVED, $by, $note);
 
             $locked->status = Branch::STATUS_CLOSED;
             $locked->closed_on = $closure->effective_on;
@@ -282,7 +279,11 @@ class BranchStatus
             'decision_note' => $note,
         ]);
 
-        $what = $status === BranchClosure::STATUS_REJECTED ? 'rejected' : 'cancelled';
+        $what = match ($status) {
+            BranchClosure::STATUS_APPROVED => 'approved',
+            BranchClosure::STATUS_REJECTED => 'rejected',
+            default => 'cancelled',
+        };
 
         AuditLogService::log(
             "branch_closure_{$what}",

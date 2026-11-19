@@ -127,16 +127,13 @@ class BranchCoreTest extends TestCase
         $this->assertFalse($fresh->is_main_office);
     }
 
-    public function test_switching_is_active_on_the_profile_needs_the_branch_management_permission(): void
+    public function test_a_changed_is_active_on_the_profile_is_refused_toward_the_status_action(): void
     {
-        $user = User::factory()->inBranches($this->branch)->create();
-        $user->givePermissionTo(['settings:view', 'settings:update', BranchAccess::VIEW_ALL]);
-        $this->actingAs($user);
-
-        $this->putJson("/api/branches/{$this->second->id}", ['is_active' => false])
-            ->assertForbidden()
-            ->assertJsonPath('message', "Changing a branch's status needs the branch management permission and access to all branches.");
+        $this->putJson("/api/branches/{$this->second->id}", ['is_active' => false, 'name' => 'Renamed'])
+            ->assertUnprocessable()
+            ->assertJsonPath('errors.is_active.0', "Change a branch's status from its Status action.");
         $this->assertSame('active', $this->second->fresh()->status);
+        $this->assertSame('Second Branch', $this->second->fresh()->name);
 
         // An unchanged value is still accepted, so the edit form can send it.
         $this->putJson("/api/branches/{$this->second->id}", ['is_active' => true, 'name' => 'Renamed'])->assertOk();
@@ -149,7 +146,33 @@ class BranchCoreTest extends TestCase
 
         $this->putJson("/api/branches/{$closed->id}", ['is_active' => true])
             ->assertUnprocessable()
-            ->assertJsonPath('errors.status.0', 'A closed branch stays closed.');
+            ->assertJsonPath('errors.is_active.0', "Change a branch's status from its Status action.");
+        $this->assertSame('closed', $closed->fresh()->status);
+
+        $this->putJson("/api/branches/{$closed->id}", ['is_active' => false, 'address' => 'Moved'])->assertOk();
+        $this->assertSame('closed', $closed->fresh()->status);
+    }
+
+    public function test_the_old_switch_cannot_suspend_the_main_office(): void
+    {
+        $this->putJson("/api/branches/{$this->second->id}/main-office", ['reason' => 'Head office moved'])->assertOk();
+
+        $this->putJson("/api/branches/{$this->second->id}", ['is_active' => false])
+            ->assertUnprocessable()
+            ->assertJsonPath('errors.is_active.0', "Change a branch's status from its Status action.");
+        $this->assertSame('active', $this->second->fresh()->status);
+    }
+
+    public function test_setting_is_active_on_a_closed_branch_keeps_it_closed_or_fails_loudly(): void
+    {
+        $closed = Branch::factory()->create(['status' => 'closed']);
+
+        $closed->is_active = false;
+        $this->assertSame('closed', $closed->status);
+
+        $this->expectException(\LogicException::class);
+        $this->expectExceptionMessage('A closed branch stays closed.');
+        $closed->is_active = true;
     }
 
     // Status endpoint -------------------------------------------------------
@@ -200,7 +223,7 @@ class BranchCoreTest extends TestCase
 
     public function test_the_main_office_cannot_be_suspended(): void
     {
-        $this->putJson("/api/branches/{$this->second->id}/main-office")->assertOk();
+        $this->putJson("/api/branches/{$this->second->id}/main-office", ['reason' => 'Head office moved'])->assertOk();
 
         $this->patchJson("/api/branches/{$this->second->id}/status", ['status' => 'suspended', 'reason' => 'x'])
             ->assertUnprocessable()
@@ -224,7 +247,7 @@ class BranchCoreTest extends TestCase
         $this->actingAs($withoutManage);
         $this->patchJson("/api/branches/{$this->second->id}/status", ['status' => 'suspended', 'reason' => 'x'])
             ->assertForbidden()->assertJsonPath('message', $message);
-        $this->putJson("/api/branches/{$this->second->id}/main-office")
+        $this->putJson("/api/branches/{$this->second->id}/main-office", ['reason' => 'x'])
             ->assertForbidden()->assertJsonPath('message', $message);
 
         $this->assertSame('active', $this->second->fresh()->status);
@@ -234,19 +257,21 @@ class BranchCoreTest extends TestCase
 
     public function test_making_a_branch_the_main_office_moves_the_flag_and_audits_both(): void
     {
-        $this->putJson("/api/branches/{$this->branch->id}/main-office")->assertOk()->assertJsonPath('data.is_main_office', true);
-        $this->putJson("/api/branches/{$this->second->id}/main-office")->assertOk()->assertJsonPath('data.is_main_office', true);
+        $this->putJson("/api/branches/{$this->second->id}/main-office", [])->assertUnprocessable()->assertJsonValidationErrors('reason');
+
+        $this->putJson("/api/branches/{$this->branch->id}/main-office", ['reason' => 'Set up'])->assertOk()->assertJsonPath('data.is_main_office', true);
+        $this->putJson("/api/branches/{$this->second->id}/main-office", ['reason' => 'Head office moved'])->assertOk()->assertJsonPath('data.is_main_office', true);
 
         $this->assertFalse($this->branch->fresh()->is_main_office);
         $this->assertTrue($this->second->fresh()->is_main_office);
         $this->assertSame(1, Branch::query()->where('is_main_office', true)->count());
 
         $this->assertSame(
-            sprintf('Branch %s is no longer the main office.', $this->branch->auditName()),
+            sprintf('Branch %s is no longer the main office. Reason: Head office moved', $this->branch->auditName()),
             $this->auditRows($this->branch->id)->where('action', 'updated')->last()->description,
         );
         $this->assertSame(
-            'Branch "Second Branch" (SEC) made the main office.',
+            'Branch "Second Branch" (SEC) made the main office. Reason: Head office moved',
             $this->auditRows($this->second->id)->where('action', 'updated')->last()->description,
         );
     }
@@ -255,7 +280,7 @@ class BranchCoreTest extends TestCase
     {
         $suspended = Branch::factory()->create(['status' => 'suspended']);
 
-        $this->putJson("/api/branches/{$suspended->id}/main-office")
+        $this->putJson("/api/branches/{$suspended->id}/main-office", ['reason' => 'x'])
             ->assertUnprocessable()
             ->assertJsonPath('errors.branch.0', 'Only an active branch can be the main office.');
     }

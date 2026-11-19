@@ -62,19 +62,25 @@ class BranchIntegrityTest extends TestCase
         $this->assertSame('Butuan City Branch', $row->new_values['name']);
     }
 
-    /** Phase 6 MB-BE1: switching `is_active` off suspends the branch (decision 2). */
+    /**
+     * Phase 6 MB-BE1: deactivating is suspending (decision 2), through the
+     * Status action with a reason; the profile edit refuses a changed
+     * `is_active` (BranchCoreTest).
+     */
     public function test_deactivating_and_reactivating_a_branch_are_audited_in_words(): void
     {
         $branch = Branch::factory()->create(['name' => 'Butuan Branch', 'code' => 'BTN', 'is_active' => true]);
 
-        $this->putJson("/api/branches/{$branch->id}", ['is_active' => false])->assertOk();
-        $this->putJson("/api/branches/{$branch->id}", ['is_active' => true, 'code' => 'BTN2'])->assertOk();
+        $this->patchJson("/api/branches/{$branch->id}/status", ['status' => 'suspended', 'reason' => 'Typhoon damage'])->assertOk();
+        $this->putJson("/api/branches/{$branch->id}", ['code' => 'BTN2'])->assertOk();
+        $this->patchJson("/api/branches/{$branch->id}/status", ['status' => 'active', 'reason' => 'Repaired'])->assertOk();
 
         $rows = $this->auditRows($branch->id)->where('action', 'updated')->values();
 
         $this->assertSame([
-            'Branch "Butuan Branch" (BTN) suspended.',
-            'Branch "Butuan Branch" (BTN2) reactivated and updated: code.',
+            'Branch "Butuan Branch" (BTN) suspended. Reason: Typhoon damage',
+            'Branch "Butuan Branch" (BTN2) updated: code.',
+            'Branch "Butuan Branch" (BTN2) reactivated. Reason: Repaired',
         ], $rows->pluck('description')->all());
     }
 

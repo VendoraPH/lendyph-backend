@@ -9,6 +9,7 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use LogicException;
 
 class Branch extends Model
 {
@@ -54,8 +55,8 @@ class Branch extends Model
 
     /**
      * Said after the status word in this save's audit description, then
-     * cleared: the reason for a suspension or reactivation (" Reason: …"), or
-     * a closure's date and people. Not a column.
+     * cleared: the reason for a suspension, reactivation or main-office move
+     * (" Reason: …"), or a closure's date and people. Not a column.
      */
     public ?string $statusAuditNote = null;
 
@@ -98,18 +99,29 @@ class Branch extends Model
      * `is_active` is generated from the status in the database (active reads
      * true; suspended and closed read false), so today's readers (the pickers,
      * the public list, CDA counts) keep working. Setting it writes the status:
-     * true makes the branch active, false suspends an active branch and
-     * leaves a closed one closed.
+     * true makes a suspended branch active, false suspends an active branch.
+     * A closed branch stays closed: setting true throws, so a writer that
+     * would reopen one fails loudly (only an approved closure closes a
+     * branch, and nothing reopens it).
      */
     protected function isActive(): Attribute
     {
         return Attribute::make(
             get: fn (mixed $value, array $attributes): bool => ($attributes['status'] ?? self::STATUS_ACTIVE) === self::STATUS_ACTIVE,
-            set: fn (mixed $value, array $attributes): array => [
-                'status' => filter_var($value, FILTER_VALIDATE_BOOL)
-                    ? self::STATUS_ACTIVE
-                    : (($attributes['status'] ?? self::STATUS_ACTIVE) === self::STATUS_ACTIVE ? self::STATUS_SUSPENDED : $attributes['status']),
-            ],
+            set: function (mixed $value, array $attributes): array {
+                $status = $attributes['status'] ?? self::STATUS_ACTIVE;
+                $active = filter_var($value, FILTER_VALIDATE_BOOL);
+
+                if ($status === self::STATUS_CLOSED) {
+                    if ($active) {
+                        throw new LogicException('A closed branch stays closed.');
+                    }
+
+                    return ['status' => $status];
+                }
+
+                return ['status' => $active ? self::STATUS_ACTIVE : self::STATUS_SUSPENDED];
+            },
         );
     }
 
@@ -137,9 +149,10 @@ class Branch extends Model
         $this->statusAuditNote = null;
 
         if (array_key_exists('is_main_office', $changes) && ! array_key_exists('status', $changes)) {
-            return $this->is_main_office
+            return ($this->is_main_office
                 ? sprintf('Branch %s made the main office.', $this->auditName())
-                : sprintf('Branch %s is no longer the main office.', $this->auditName());
+                : sprintf('Branch %s is no longer the main office.', $this->auditName()))
+                .($note !== null ? " Reason: {$note}" : '');
         }
 
         $status = array_key_exists('status', $changes) ? (self::STATUS_WORDS[$this->status] ?? $this->status) : null;

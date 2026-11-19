@@ -84,6 +84,24 @@ class MarkMainOfficeTest extends TestCase
         $this->assertSame($auditRows, AuditLog::count());
     }
 
+    public function test_with_two_branches_named_main_nothing_is_written(): void
+    {
+        $other = Branch::factory()->create(['name' => 'Head Office', 'code' => 'HO']);
+        $auditRows = AuditLog::count();
+
+        $this->artisan(self::COMMAND)
+            ->expectsOutputToContain('No main office: 2 active branches are named as the main branch.')
+            ->expectsOutputToContain("Main Branch (MAIN, id {$this->branch->id})")
+            ->expectsOutputToContain("Head Office (HO, id {$other->id})")
+            ->assertFailed();
+
+        Log::spy();
+        $this->migration()->up();
+
+        $this->assertSame(0, Branch::query()->where('is_main_office', true)->count());
+        $this->assertSame($auditRows, AuditLog::count());
+    }
+
     public function test_a_dry_run_writes_nothing(): void
     {
         $auditRows = AuditLog::count();
