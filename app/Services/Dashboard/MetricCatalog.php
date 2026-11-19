@@ -311,8 +311,8 @@ final class MetricCatalog
             ],
             'required_allowance' => [
                 'label' => 'Required Allowance',
-                'definition' => 'The allowance for probable loan losses the provisioning rates require on the past-due buckets, as of today.',
-                'formula' => 'Sum over aging buckets of bucket amount × provisioning rate',
+                'definition' => 'The allowance for probable loan losses the allowance posting books, as of today: the provisioning rates on each past-due loan\'s unpaid principal, in the bucket of its oldest unpaid period, each bucket rounded half up to the centavo.',
+                'formula' => 'Sum over aging buckets of past-due principal × provisioning rate',
                 'unit' => 'money',
                 'date_rule' => 'as_of_today',
                 'source' => 'provisioning',
