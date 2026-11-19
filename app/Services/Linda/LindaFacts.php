@@ -19,12 +19,16 @@ use App\Services\Linda\LindaWording as W;
  *
  *   {as_of, branches, period, topics: [{topic, title, figures: [{label, value}]}]}
  *
+ * Each stats block is its own `topics` entry, under its own title ("From
+ * October 1 to 31, 2026" or "As of today, …"), so one topic can have two
+ * entries. Not final, so a test can hand in a pack (the encode fallback).
+ *
  * The checks: every number in the answer appears in the pack (commas,
  * trailing zeros and the ₱ and % signs aside), no number is spelled out, and
  * no identifier appears (member, loan, receipt and other record numbers,
  * digit runs of 7 or more, emails and mobile numbers).
  */
-final class LindaFacts
+class LindaFacts
 {
     /**
      * The topics a pack may read, in this order: the classifier picks up to
@@ -114,14 +118,14 @@ final class LindaFacts
                 continue;
             }
 
-            $figures = [];
-            $title = null;
+            // Each stats block is its own entry, under its own title, so figures
+            // as of today are never labelled with the asked period.
             foreach ($reply->blocks as $block) {
                 if (($block['type'] ?? null) !== 'stats') {
                     continue;
                 }
 
-                $title ??= $block['title'] ?? null;
+                $figures = [];
                 foreach ($block['items'] as $item) {
                     $value = self::shown($item);
 
@@ -129,11 +133,12 @@ final class LindaFacts
                         $figures[] = ['label' => (string) $item['label'], 'value' => $value];
                     }
                 }
-            }
 
-            if ($figures !== []) {
-                $topics[] = ['topic' => $intent->value, 'title' => $title ?? ($intent->takesPeriod() ? self::periodWords($period) : W::asOfToday()), 'figures' => $figures];
-                $links[$intent->value] = $reply->links;
+                if ($figures !== []) {
+                    $title = $block['title'] ?? ($intent->takesPeriod() ? self::periodWords($period) : W::asOfToday());
+                    $topics[] = ['topic' => $intent->value, 'title' => (string) $title, 'figures' => $figures];
+                    $links[$intent->value] = $reply->links;
+                }
             }
         }
 

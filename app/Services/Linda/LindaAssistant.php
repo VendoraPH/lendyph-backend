@@ -19,6 +19,7 @@ use App\Services\Linda\Model\LindaWriting;
 use Brick\Math\BigDecimal;
 use Brick\Math\RoundingMode;
 use Illuminate\Support\Facades\Log;
+use JsonException;
 use Throwable;
 
 /**
@@ -499,8 +500,18 @@ final class LindaAssistant
 
         $facts = $pack['facts'];
 
+        // A pack that can't be encoded is never sent: the row is written with
+        // the classifier's cost already on it, and the reply falls back.
+        try {
+            $encoded = json_encode($facts, JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR);
+        } catch (JsonException $e) {
+            Log::warning('Linda facts pack could not be encoded.', ErrorDigest::context($e));
+
+            return $this->fellBack($log, $started, $user);
+        }
+
         // The cap check counts this question's classifier call, not yet saved.
-        if ($facts['topics'] === [] || LindaFacts::hasIdentifier(json_encode($facts, JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR)) || $this->budget->reachedWith((string) ($log->cost ?? '0'))) {
+        if ($facts['topics'] === [] || LindaFacts::hasIdentifier($encoded) || $this->budget->reachedWith((string) ($log->cost ?? '0'))) {
             return $this->fellBack($log, $started, $user);
         }
 
