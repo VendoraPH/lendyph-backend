@@ -352,7 +352,7 @@ final class AnthropicModel implements LindaModel, LindaWriter
             throw new LindaModelUnavailable('bad_output', $usage);
         }
 
-        return LindaUnderstanding::fromAnswer($answer['intent'], $answer['period'], $answer['branch'], $answer['follow_up'], $usage);
+        return LindaUnderstanding::fromAnswer($answer['intent'], $answer['period'], $answer['branch'], $answer['follow_up'], $usage, $answer['topics']);
     }
 
     /** Whether ANTHROPIC_CUSTOM_HEADERS is set anywhere the SDK or PHP reads it. */
@@ -391,7 +391,7 @@ final class AnthropicModel implements LindaModel, LindaWriter
     /**
      * The model's JSON, checked against the schema.
      *
-     * @return array{intent: LindaIntent, period: ?string, branch: ?string, follow_up: bool}
+     * @return array{intent: LindaIntent, period: ?string, branch: ?string, follow_up: bool, topics: list<mixed>}
      *
      * @throws LindaModelUnavailable
      */
@@ -404,8 +404,16 @@ final class AnthropicModel implements LindaModel, LindaWriter
         }
 
         $keys = ['intent', 'period', 'branch', 'follow_up'];
+        // While open questions are on, the schema adds the topics an open question needs.
+        $allowed = LindaIntent::openQuestionsOn() ? [...$keys, 'topics'] : $keys;
 
-        if (! is_array($data) || array_is_list($data) || array_diff(array_keys($data), $keys) !== [] || array_diff($keys, array_keys($data)) !== []) {
+        if (! is_array($data) || array_is_list($data) || array_diff(array_keys($data), $allowed) !== [] || array_diff($keys, array_keys($data)) !== []) {
+            throw new LindaModelUnavailable('bad_output');
+        }
+
+        $topics = $data['topics'] ?? [];
+
+        if (! is_array($topics) || ! array_is_list($topics)) {
             throw new LindaModelUnavailable('bad_output');
         }
 
@@ -425,7 +433,7 @@ final class AnthropicModel implements LindaModel, LindaWriter
             throw new LindaModelUnavailable('bad_output');
         }
 
-        return ['intent' => $intent, 'period' => $data['period'], 'branch' => $data['branch'], 'follow_up' => $data['follow_up']];
+        return ['intent' => $intent, 'period' => $data['period'], 'branch' => $data['branch'], 'follow_up' => $data['follow_up'], 'topics' => $topics];
     }
 
     /**

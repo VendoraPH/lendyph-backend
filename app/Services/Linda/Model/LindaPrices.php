@@ -75,6 +75,28 @@ final class LindaPrices
     }
 
     /**
+     * The worst-case estimate of an open answer's write call on a model, in ₱
+     * at 6 decimal places, booked when that call fails after it may have been
+     * sent: each attempt priced as the write prompt written to the cache
+     * afresh, the typical facts pack as input (`linda.typical_write`) and the
+     * full `write_max_tokens` of output.
+     *
+     * @throws LindaModelUnavailable no_prices
+     */
+    public static function worstCaseWriteEstimate(string $model): string
+    {
+        $typical = (array) config('linda.typical_write', []);
+        $attempts = max(0, (int) config('linda.anthropic.max_retries', 1)) + 1;
+
+        return self::pesos([$model], [
+            'input' => (int) ($typical['input'] ?? 0) * $attempts,
+            'output' => max(0, (int) config('linda.anthropic.write_max_tokens', 600)) * $attempts,
+            'cache_read' => 0,
+            'cache_write' => (int) ($typical['cache_read'] ?? 0) * $attempts,
+        ])->toScale(self::COST_SCALE, RoundingMode::HalfUp)->toString();
+    }
+
+    /**
      * The exact cost of a usage: each fallback iteration at its own model
      * when the usage lists them, else every token at the highest price of
      * each kind among the models it may have run on.

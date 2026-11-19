@@ -7,11 +7,17 @@ use App\Models\LindaQuestion;
 use App\Models\Loan;
 use App\Models\Repayment;
 use App\Models\User;
+use App\Services\Cda\CdaAccess;
+use App\Services\Cda\PeriodOpener;
 use App\Services\Linda\LindaFacts;
 use App\Services\Linda\LindaWording;
 use App\Services\Linda\Model\FakeModel;
+use App\Services\Linda\Model\LindaPrices;
 use App\Services\Linda\Model\LindaPrompt;
+use App\Services\Linda\Model\LindaUsage;
 use App\Services\Linda\Model\LindaWriteRequest;
+use Brick\Math\BigDecimal;
+use Brick\Math\RoundingMode;
 
 /**
  * Linda round 3, open questions (LINDA_OPEN_QUESTIONS, off by default): a
@@ -26,6 +32,10 @@ class LindaOpenQuestionsTest extends LindaAnswersTestCase
     private const URL = '/api/linda/chat';
 
     private const OPEN = 'Why does our lending look like this overall?';
+
+    private const COLLECTIONS = 'Why are our collections like this overall?';
+
+    private const SCOPED = 'Why do the portfolio, share capital and active loans look like this overall?';
 
     private FakeModel $fake;
 
@@ -111,7 +121,7 @@ class LindaOpenQuestionsTest extends LindaAnswersTestCase
     {
         $this->fake->writer = fn (LindaWriteRequest $request): string => 'Collections were '.self::firstFigure($request).' this month.';
 
-        $reply = $this->chat($this->asker(), self::OPEN);
+        $reply = $this->chat($this->asker(), self::COLLECTIONS);
         $figure = self::firstFigure($this->fake->writeRequests[0]);
 
         $this->assertSame('open_question', $reply['intent']);
@@ -150,7 +160,7 @@ class LindaOpenQuestionsTest extends LindaAnswersTestCase
     {
         $this->fake->writer = fn (LindaWriteRequest $request): string => 'Collections were '.self::firstFigure($request).'.';
 
-        $this->chat($this->userWith(['reports:view', 'loans:view', 'linda:use'], $this->branch), self::OPEN);
+        $this->chat($this->userWith(['reports:view', 'loans:view', 'linda:use'], $this->branch), self::SCOPED);
         $branchPack = $this->fake->writeRequests[0]->facts;
         $topics = array_column($branchPack['topics'], 'topic');
 
@@ -160,7 +170,7 @@ class LindaOpenQuestionsTest extends LindaAnswersTestCase
         $this->assertNotContains('cda_summary', $topics);
         $this->assertContains('portfolio_summary', $topics);
 
-        $this->chat($this->asker(), self::OPEN);
+        $this->chat($this->asker(), self::SCOPED);
         $headPack = $this->fake->writeRequests[1]->facts;
         $this->assertSame('all branches', $headPack['branches']);
         $this->assertContains('share_capital_summary', array_column($headPack['topics'], 'topic'));
@@ -179,5 +189,70 @@ class LindaOpenQuestionsTest extends LindaAnswersTestCase
 
         $this->assertSame([], $this->fake->requests);
         $this->assertSame([], $this->fake->writeRequests);
+    }
+
+    // -----------------------------------------------------------------
+    // Security review of #327
+    // -----------------------------------------------------------------
+
+    public function test_only_the_topics_the_classifier_picks_are_built(): void
+    {
+        $this->chat($this->asker(), 'Why are our collections lower than our disbursements overall?');
+        $this->assertSame(['collection_summary', 'disbursement_summary'], array_column($this->fake->writeRequests[0]->facts['topics'], 'topic'));
+
+        // None picked: the lending summary alone, never every topic.
+        $this->chat($this->asker(), self::OPEN);
+        $this->assertSame(['general_lending_summary'], array_column($this->fake->writeRequests[1]->facts['topics'], 'topic'));
+    }
+
+    public function test_cda_is_left_out_when_a_branch_is_named(): void
+    {
+        app(PeriodOpener::class)->open(2026, $this->admin);
+        $head = $this->asker(['reports:view', CdaAccess::VIEW]);
+
+        $this->chat($head, 'Why are our CDA readiness and collections like this overall?');
+        $this->assertSame(['collection_summary', 'cda_summary'], array_column($this->fake->writeRequests[0]->facts['topics'], 'topic'));
+
+        $this->chat($head, 'Why are our CDA readiness and collections like this overall in Far branch?');
+        $this->assertSame('Far Branch', $this->fake->writeRequests[1]->facts['branches']);
+        $this->assertSame(['collection_summary'], array_column($this->fake->writeRequests[1]->facts['topics'], 'topic'));
+
+        // CDA alone, with a branch named: nothing to write from, so it falls back.
+        $reply = $this->chat($head, 'Why is our CDA readiness like this overall in Far branch?');
+        $this->assertCount(2, $this->fake->writeRequests);
+        $this->assertSame(LindaWording::notYet(), $reply['answer']);
+    }
+
+    public function test_the_second_cap_check_counts_the_first_calls_cost(): void
+    {
+        $classifier = LindaPrices::cost(new LindaUsage('claude-haiku-5-5', FakeModel::INPUT_TOKENS, FakeModel::OUTPUT_TOKENS));
+        config()->set('linda.monthly_cap', '1.00');
+        // Below the cap before the question, at or above it once the classifier's cost is added.
+        LindaQuestion::query()->create([
+            'user_id' => $this->admin->id, 'asked_at' => now(), 'source' => LindaQuestion::SOURCE_MODEL,
+            'cost' => (string) BigDecimal::of('1.00')->minus(BigDecimal::of($classifier)->dividedBy(2, 6, RoundingMode::Down)),
+        ]);
+
+        $reply = $this->chat($this->asker(), self::COLLECTIONS);
+
+        $this->assertCount(1, $this->fake->requests);
+        $this->assertSame([], $this->fake->writeRequests);
+        $this->assertSame(LindaWording::notYet(), $reply['answer']);
+        $this->assertSame('fell_back', LindaQuestion::query()->latest('id')->firstOrFail()->open_answer);
+    }
+
+    public function test_a_failed_write_is_booked_at_the_write_calls_worst_case(): void
+    {
+        $this->fake->writeFailure = 'timeout';
+
+        $this->chat($this->asker(), self::COLLECTIONS);
+
+        $classifier = LindaPrices::cost(new LindaUsage('claude-haiku-5-5', FakeModel::INPUT_TOKENS, FakeModel::OUTPUT_TOKENS));
+        $write = LindaPrices::worstCaseWriteEstimate('claude-haiku-5-5');
+        $log = LindaQuestion::query()->latest('id')->firstOrFail();
+
+        $this->assertTrue(BigDecimal::of($write)->isGreaterThan(LindaPrices::worstCaseEstimate('claude-haiku-5-5')));
+        $this->assertSame('fell_back', $log->open_answer);
+        $this->assertSame((string) BigDecimal::of($classifier)->plus($write)->toScale(6), (string) BigDecimal::of((string) $log->cost)->toScale(6));
     }
 }

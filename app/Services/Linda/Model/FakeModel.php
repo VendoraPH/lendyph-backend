@@ -2,6 +2,7 @@
 
 namespace App\Services\Linda\Model;
 
+use App\Services\Linda\LindaFacts;
 use App\Services\Linda\LindaIntent;
 use App\Services\Linda\LindaPeriod;
 use App\Services\Linda\LindaText;
@@ -77,6 +78,9 @@ final class FakeModel implements LindaModel, LindaWriter
      */
     public ?\Closure $writer = null;
 
+    /** A reason code every write() call fails with (understand() is unaffected). */
+    public ?string $writeFailure = null;
+
     /** Words that make a question an open question, while open questions are on. */
     private const OPEN_WORDS = ['why', 'overall', 'compare', 'kahimtang', 'lagay'];
 
@@ -133,7 +137,7 @@ final class FakeModel implements LindaModel, LindaWriter
             return LindaUnderstanding::fromAnswer($intent, null, null, false, $usage);
         }
 
-        return LindaUnderstanding::fromAnswer($intent, $periodWords, $branch, $followUp, $usage);
+        return LindaUnderstanding::fromAnswer($intent, $periodWords, $branch, $followUp, $usage, $intent === LindaIntent::OpenQuestion ? self::topics($clean) : []);
     }
 
     public function write(#[\SensitiveParameter] LindaWriteRequest $request): LindaWriting
@@ -141,11 +145,38 @@ final class FakeModel implements LindaModel, LindaWriter
         $this->writeRequests[] = $request;
         $usage = new LindaUsage($request->model, self::INPUT_TOKENS, self::OUTPUT_TOKENS);
 
-        if ($this->failure !== null) {
-            throw new LindaModelUnavailable($this->failure, in_array($this->failure, ['max_tokens', 'bad_output'], true) ? $usage : null);
+        $failure = $this->writeFailure ?? $this->failure;
+
+        if ($failure !== null) {
+            throw new LindaModelUnavailable($failure, in_array($failure, ['max_tokens', 'bad_output'], true) ? $usage : null);
         }
 
         return new LindaWriting($this->writer === null ? 'I can only answer from the figures.' : ($this->writer)($request), $usage);
+    }
+
+    /**
+     * An open question's topics: the facts pack topics whose keyword rules
+     * match, in rule order.
+     *
+     * @return list<string>
+     */
+    private static function topics(string $clean): array
+    {
+        $topics = [];
+        foreach (self::RULES as [$intent, $keywords]) {
+            if (! in_array(LindaIntent::from($intent), LindaFacts::TOPICS, true)) {
+                continue;
+            }
+
+            foreach ($keywords as $keyword) {
+                if (preg_match('/(?<![\pL\pN])'.preg_quote($keyword, '/').'(?![\pL\pN])/u', $clean) === 1) {
+                    $topics[] = $intent;
+                    break;
+                }
+            }
+        }
+
+        return $topics;
     }
 
     private static function intent(string $clean): ?LindaIntent

@@ -599,4 +599,36 @@ class AnthropicModelTest extends LindaTestCase
         config()->set('linda.open_questions', true);
         $this->assertSame(LindaIntent::OpenQuestion, $this->model($this->reply($this->answer('open_question')))->understand($this->request())->intent);
     }
+
+    public function test_an_open_question_carries_up_to_three_known_topics(): void
+    {
+        config()->set('linda.open_questions', true);
+        $output = [...$this->answer('open_question'), 'topics' => ['collection_summary', 'bogus', 'disbursement_summary', 'income_summary', 'expense_summary']];
+
+        $understanding = $this->model($this->reply($output))->understand($this->request());
+
+        $this->assertSame([LindaIntent::CollectionSummary, LindaIntent::DisbursementSummary, LindaIntent::IncomeSummary], $understanding->topics);
+        $this->assertSame('array', LindaPrompt::schema()['properties']['topics']['type']);
+        $this->assertContains('topics', LindaPrompt::schema()['required']);
+    }
+
+    public function test_topics_are_bad_output_when_not_a_list_or_while_open_questions_are_off(): void
+    {
+        config()->set('linda.open_questions', true);
+        try {
+            $this->model($this->reply([...$this->answer('open_question'), 'topics' => 'collection_summary']))->understand($this->request());
+            $this->fail('Expected bad_output.');
+        } catch (LindaModelUnavailable $e) {
+            $this->assertSame('bad_output', $e->reason);
+        }
+
+        config()->set('linda.open_questions', false);
+        $this->assertArrayNotHasKey('topics', LindaPrompt::schema()['properties']);
+        try {
+            $this->model($this->reply([...$this->answer(), 'topics' => []]))->understand($this->request());
+            $this->fail('Expected bad_output.');
+        } catch (LindaModelUnavailable $e) {
+            $this->assertSame('bad_output', $e->reason);
+        }
+    }
 }

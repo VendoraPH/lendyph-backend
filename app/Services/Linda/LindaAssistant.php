@@ -420,7 +420,7 @@ final class LindaAssistant
 
         if ($intent === LindaIntent::OpenQuestion) {
             return LindaIntent::openQuestionsOn()
-                ? $this->openAnswer($log, $started, $user, $question, $period, $this->asTyped($branchName, $question, $history), $history)
+                ? $this->openAnswer($log, $started, $user, $question, $period, $this->asTyped($branchName, $question, $history), $history, $understanding->topics)
                 : $this->finish($log, $started, $this->answerer->notYet($intent, $user));
         }
 
@@ -479,13 +479,16 @@ final class LindaAssistant
      *
      * @throws LindaHttpError data_unavailable
      */
-    private function openAnswer(LindaQuestion $log, int $started, User $user, #[\SensitiveParameter] string $question, ?LindaPeriod $period, ?string $branchName, LindaHistory $history): LindaReply
+    /**
+     * @param  list<LindaIntent>  $topics  the topics the classifier picked for the pack
+     */
+    private function openAnswer(LindaQuestion $log, int $started, User $user, #[\SensitiveParameter] string $question, ?LindaPeriod $period, ?string $branchName, LindaHistory $history, array $topics): LindaReply
     {
         $period ??= LindaPeriod::named('this_month');
         $log->fill(['intent' => LindaIntent::OpenQuestion->value, 'period_from' => $period->from->toDateString(), 'period_to' => $period->to->toDateString()]);
 
         try {
-            $pack = app(LindaFacts::class)->build($user, $period, $branchName);
+            $pack = app(LindaFacts::class)->build($user, $period, $branchName, $topics);
         } catch (Throwable $e) {
             Log::warning('Linda answer failed.', ['intent' => LindaIntent::OpenQuestion->value] + ErrorDigest::context($e));
             $log->fill(['outcome' => self::OUTCOME_ERROR, 'error_code' => LindaHttpError::DATA_UNAVAILABLE]);
@@ -496,7 +499,8 @@ final class LindaAssistant
 
         $facts = $pack['facts'];
 
-        if ($facts['topics'] === [] || LindaFacts::hasIdentifier((string) json_encode($facts, JSON_UNESCAPED_UNICODE)) || $this->budget->reached()) {
+        // The cap check counts this question's classifier call, not yet saved.
+        if ($facts['topics'] === [] || LindaFacts::hasIdentifier(json_encode($facts, JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR)) || $this->budget->reachedWith((string) ($log->cost ?? '0'))) {
             return $this->fellBack($log, $started, $user);
         }
 
@@ -533,7 +537,7 @@ final class LindaAssistant
         $sent = false;
 
         try {
-            LindaPrices::worstCaseEstimate($request->model);
+            LindaPrices::worstCaseWriteEstimate($request->model);
             $writer = LindaModelFactory::writer((string) config('linda.driver'));
 
             if ($writer === null) {
@@ -591,10 +595,11 @@ final class LindaAssistant
         ]);
     }
 
+    /** A failed write call's charge: the write call's own worst case, added to the row. */
     private function addWorstCase(LindaQuestion $log, string $model): void
     {
         try {
-            $log->cost = (string) BigDecimal::of((string) ($log->cost ?? '0'))->plus(LindaPrices::worstCaseEstimate($model))->toScale(6, RoundingMode::HalfUp);
+            $log->cost = (string) BigDecimal::of((string) ($log->cost ?? '0'))->plus(LindaPrices::worstCaseWriteEstimate($model))->toScale(6, RoundingMode::HalfUp);
         } catch (LindaModelUnavailable) {
             $log->error_code = 'no_prices';
         }

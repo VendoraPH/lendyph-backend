@@ -2,6 +2,7 @@
 
 namespace App\Services\Linda\Model;
 
+use App\Services\Linda\LindaFacts;
 use App\Services\Linda\LindaIntent;
 
 /**
@@ -111,8 +112,13 @@ final class LindaPrompt
                     'type' => 'boolean',
                     'description' => 'Whether the question follows on from the latest earlier question.',
                 ],
+                ...(LindaIntent::openQuestionsOn() ? ['topics' => [
+                    'type' => 'array',
+                    'items' => ['type' => 'string', 'enum' => array_map(fn (LindaIntent $intent) => $intent->value, LindaFacts::TOPICS)],
+                    'description' => 'For open_question only: the topics, at most 3, whose figures the answer needs; an empty list for any other intent.',
+                ]] : []),
             ],
-            'required' => ['intent', 'period', 'branch', 'follow_up'],
+            'required' => ['intent', 'period', 'branch', 'follow_up', ...(LindaIntent::openQuestionsOn() ? ['topics'] : [])],
             'additionalProperties' => false,
         ];
     }

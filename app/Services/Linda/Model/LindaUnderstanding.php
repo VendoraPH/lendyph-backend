@@ -2,6 +2,7 @@
 
 namespace App\Services\Linda\Model;
 
+use App\Services\Linda\LindaFacts;
 use App\Services\Linda\LindaIntent;
 use App\Services\Linda\LindaPeriod;
 use App\Services\Linda\LindaText;
@@ -38,14 +39,29 @@ final class LindaUnderstanding
         public readonly bool $followUp,
         public readonly bool $refused,
         public readonly LindaUsage $usage,
+        /** @var list<LindaIntent> the topics an open question's facts pack reads */
+        public readonly array $topics = [],
     ) {}
 
     /**
-     * From a model's answer: the intent, the period words, the branch name
-     * and the follow-up flag.
+     * From a model's answer: the intent, the period words, the branch name,
+     * the follow-up flag and, for an open question, the topics its answer
+     * needs (only the facts pack's own topics are kept, at most
+     * LindaFacts::MAX_TOPICS, in order; anything else is dropped).
+     *
+     * @param  list<mixed>  $topics
      */
-    public static function fromAnswer(LindaIntent $intent, ?string $periodWords, ?string $branch, bool $followUp, LindaUsage $usage): self
+    public static function fromAnswer(LindaIntent $intent, ?string $periodWords, ?string $branch, bool $followUp, LindaUsage $usage, array $topics = []): self
     {
+        $picked = [];
+        foreach ($intent === LindaIntent::OpenQuestion ? $topics : [] as $topic) {
+            $found = is_string($topic) ? LindaIntent::tryFrom(strtolower(trim($topic))) : null;
+
+            if ($found !== null && in_array($found, LindaFacts::TOPICS, true) && ! in_array($found, $picked, true)) {
+                $picked[] = $found;
+            }
+        }
+
         $periodWords = $periodWords === null || trim($periodWords) === '' ? null : trim($periodWords);
         [$period, $refusal] = $periodWords === null ? [null, null] : self::readPeriod($periodWords);
 
@@ -59,6 +75,7 @@ final class LindaUnderstanding
             $followUp,
             false,
             $usage,
+            array_slice($picked, 0, LindaFacts::MAX_TOPICS),
         );
     }
 

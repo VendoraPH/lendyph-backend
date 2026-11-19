@@ -26,8 +26,13 @@ use App\Services\Linda\LindaWording as W;
  */
 final class LindaFacts
 {
-    /** The topics a pack reads, in this order. Performance rows and lookups are never read. */
+    /**
+     * The topics a pack may read, in this order: the classifier picks up to
+     * self::MAX_TOPICS of them for an open question. Performance rows and
+     * lookups are never read.
+     */
     public const TOPICS = [
+        LindaIntent::GeneralLendingSummary,
         LindaIntent::CollectionSummary,
         LindaIntent::CollectionEfficiency,
         LindaIntent::DisbursementSummary,
@@ -41,6 +46,12 @@ final class LindaFacts
         LindaIntent::ShareCapitalSummary,
         LindaIntent::CdaSummary,
     ];
+
+    /** The most topics one pack reads. */
+    public const MAX_TOPICS = 3;
+
+    /** What a pack reads when the classifier picked no topic: the lending summary. */
+    public const DEFAULT_TOPICS = [LindaIntent::GeneralLendingSummary];
 
     /** Record numbers, by their prefixes, with a dash, a space or nothing before the digits. */
     private const RECORD_PATTERN = '/(?<![\pL\pN])(?:BRW|CMK|LA|LN|PN|SOA|RCP|SCV|SC|JE|ADJ|GC|SAV|SVT|SVI|TD|REQ|MC)\s*[-#]?\s*\d{2,}/iu';
@@ -57,27 +68,46 @@ final class LindaFacts
     /** A number as written: digits with thousands commas and decimals. */
     private const NUMBER_PATTERN = '/\d[\d,]*(?:\.\d+)?/u';
 
-    /** Numbers spelled out, which the number check couldn't read. */
+    /** Numbers spelled out, which the number check couldn't read: English, Tagalog and Bisaya. */
     private const NUMBER_WORDS = [
-        'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten', 'eleven', 'twelve', 'thirteen',
-        'fourteen', 'fifteen', 'sixteen', 'seventeen', 'eighteen', 'nineteen', 'twenty', 'thirty', 'forty', 'fifty',
-        'sixty', 'seventy', 'eighty', 'ninety', 'hundred', 'thousand', 'million', 'billion', 'dozen', 'twice',
-        'thrice', 'double', 'triple', 'half',
+        'zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten', 'eleven', 'twelve',
+        'thirteen', 'fourteen', 'fifteen', 'sixteen', 'seventeen', 'eighteen', 'nineteen', 'twenty', 'thirty', 'forty',
+        'fifty', 'sixty', 'seventy', 'eighty', 'ninety', 'hundred', 'thousand', 'million', 'billion', 'dozen', 'twice',
+        'thrice', 'double', 'triple', 'half', 'halves', 'third', 'thirds', 'quarter', 'quarters', 'fourth', 'fifth',
+        'sixth', 'seventh', 'eighth', 'ninth', 'tenth', 'fifths', 'tenths',
+        // Tagalog, one to ten, a hundred, a thousand.
+        'isa', 'dalawa', 'tatlo', 'apat', 'lima', 'anim', 'pito', 'walo', 'siyam', 'sampu', 'daan', 'raan', 'libo',
+        'kalahati',
+        // Bisaya, one to ten, a hundred, a thousand.
+        'usa', 'duha', 'tulo', 'upat', 'unom', 'napulo', 'gatos', 'katunga',
     ];
+
+    /** A date as the templates write it: "November 19, 2026". */
+    private const DATE_PATTERN = '/^\pL+ \d{1,2}, \d{4}$/u';
 
     public function __construct(private readonly LindaAnswerer $answerer) {}
 
     /**
-     * The pack, and the links of the topics it read, by topic.
+     * The pack, and the links of the topics it read, by topic: the topics
+     * the classifier picked ($picked, at most self::MAX_TOPICS), else the
+     * lending summary alone. CDA is left out when a branch is named.
      *
+     * @param  list<LindaIntent>  $picked
      * @return array{facts: array{as_of: string, branches: string, period: string, topics: list<array{topic: string, title: string, figures: list<array{label: string, value: string}>}>}, links: array<string, list<array{label: string, url: string}>>}
      */
-    public function build(User $user, LindaPeriod $period, ?string $branchName): array
+    public function build(User $user, LindaPeriod $period, ?string $branchName, array $picked = []): array
     {
         $topics = [];
         $links = [];
+        $scope = LindaScope::resolve($user, $branchName);
+        $chosen = array_values(array_filter(self::TOPICS, fn (LindaIntent $intent) => in_array($intent, $picked, true)));
 
-        foreach (self::TOPICS as $intent) {
+        foreach (array_slice($chosen === [] ? self::DEFAULT_TOPICS : $chosen, 0, self::MAX_TOPICS) as $intent) {
+            // CDA covers the whole cooperative, so a named branch must never be credited with it.
+            if ($intent === LindaIntent::CdaSummary && $scope->branchId !== null) {
+                continue;
+            }
+
             $reply = $this->answerer->answer($user, $intent, $intent->takesPeriod() ? $period : null, $branchName);
 
             if ($reply->outcome !== 'answered') {
@@ -107,8 +137,6 @@ final class LindaFacts
             }
         }
 
-        $scope = LindaScope::resolve($user, $branchName);
-
         return [
             'facts' => [
                 'as_of' => W::today(),
@@ -132,15 +160,38 @@ final class LindaFacts
             return false;
         }
 
-        foreach (LindaText::words(LindaText::clean($answer)) as $word) {
+        // Dates, titles and labels holding digits ("PAR 30", "November 19,
+        // 2026") may be copied whole; their digits are never figures.
+        $cutOuts = [(string) ($facts['as_of'] ?? ''), (string) ($facts['period'] ?? '')];
+        $allowed = [];
+
+        foreach ($facts['topics'] ?? [] as $topic) {
+            $cutOuts[] = (string) $topic['title'];
+
+            foreach ($topic['figures'] as $figure) {
+                if (preg_match('/\d/', (string) $figure['label']) === 1) {
+                    $cutOuts[] = (string) $figure['label'];
+                }
+
+                if (preg_match(self::DATE_PATTERN, (string) $figure['value']) === 1) {
+                    $cutOuts[] = (string) $figure['value'];
+                } else {
+                    $allowed = [...$allowed, ...self::numbers((string) $figure['value'])];
+                }
+            }
+        }
+
+        $cutOuts = array_values(array_unique(array_filter($cutOuts, fn (string $text) => trim($text) !== '')));
+        usort($cutOuts, fn (string $a, string $b) => mb_strlen($b) <=> mb_strlen($a));
+        $rest = str_ireplace($cutOuts, ' ', $answer);
+
+        foreach (LindaText::words(LindaText::clean($rest)) as $word) {
             if (in_array($word, self::NUMBER_WORDS, true)) {
                 return false;
             }
         }
 
-        $allowed = self::numbers((string) json_encode($facts, JSON_UNESCAPED_UNICODE));
-
-        return array_diff(self::numbers($answer), $allowed) === [];
+        return array_diff(self::numbers($rest), $allowed) === [];
     }
 
     /** Whether a text holds a record number, a long digit run, an email or a mobile number. */
