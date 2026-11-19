@@ -22,8 +22,9 @@ use Tests\Traits\SetupLendyPH;
  * its journal posts there, so that branch's Cash and GCash reconciliations
  * count it (O4 review, 2026-11-11). The recording user's branch, or one they
  * pick when they have several; `branches:view_all` may pick any branch or none
- * (head office). Existing transactions and journals are unchanged, and walk-in
- * rows stay visible to every branch on the GCash list.
+ * (head office). Existing transactions and journals are unchanged. Since
+ * Phase 6 (decision 1), a walk-in row is seen only in its own branch, and one
+ * with no branch only with `branches:view_all`.
  */
 class WalkInGCashBranchTest extends TestCase
 {
@@ -209,7 +210,11 @@ class WalkInGCashBranchTest extends TestCase
             'status' => 'pending', 'paid_at' => null, 'branch_id' => null,
         ]);
 
+        // Head office's row: a branch teller can't reach it (Phase 6 decision 1).
         $this->teller([$this->branch]);
+        $this->patchJson("/api/gcash/transactions/{$tx->id}/paid")->assertNotFound();
+
+        $this->teller([$this->branch], [BranchAccess::VIEW_ALL]);
         $this->patchJson("/api/gcash/transactions/{$tx->id}/paid")->assertOk();
 
         $this->assertNull($this->journalOf($tx)->branch_id);
@@ -220,7 +225,12 @@ class WalkInGCashBranchTest extends TestCase
         $this->teller([$this->branch]);
         $tx = $this->walkInCashIn(['is_pending' => true]);
 
+        // Another branch's teller can't reach it (Phase 6 decision 1). A teller
+        // holding both branches pays it, and it still posts where recorded.
         $this->teller([$this->far]);
+        $this->patchJson("/api/gcash/transactions/{$tx->id}/paid")->assertNotFound();
+
+        $this->teller([$this->far, $this->branch]);
         $this->patchJson("/api/gcash/transactions/{$tx->id}/paid")->assertOk();
 
         $this->assertSame($this->branch->id, $this->journalOf($tx)->branch_id);
@@ -267,13 +277,13 @@ class WalkInGCashBranchTest extends TestCase
         ])->assertUnprocessable()->assertJsonPath('errors.branch_id.0', "A member's transaction is in the member's branch. Leave the branch out.");
     }
 
-    public function test_walk_in_rows_stay_visible_to_every_branch_on_the_list(): void
+    public function test_a_walk_in_row_is_listed_only_in_its_own_branch(): void
     {
         $this->teller([$this->branch]);
         $tx = $this->walkInCashIn();
+        $this->assertContains($tx->id, array_column($this->getJson('/api/gcash/transactions')->assertOk()->json('data'), 'id'));
 
         $this->teller([$this->far]);
-        $ids = array_column($this->getJson('/api/gcash/transactions')->assertOk()->json('data'), 'id');
-        $this->assertContains($tx->id, $ids);
+        $this->assertNotContains($tx->id, array_column($this->getJson('/api/gcash/transactions')->assertOk()->json('data'), 'id'));
     }
 }

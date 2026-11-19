@@ -238,31 +238,54 @@ class GCashService
         });
     }
 
-    public function incomeReport(string $startDate, string $endDate): array
+    /**
+     * Charge income for non-pending rows dated in the range, plus how many of
+     * them were Cash In and Cash Out. With a $viewer, every figure covers only
+     * the rows they may see (GCashTransaction::scopeVisibleTo), so the list,
+     * the total and the counts always agree.
+     *
+     * @return array{total_income: float, cash_in_count: int, cash_out_count: int, start_date: string, end_date: string, transactions: Collection<int, GCashTransaction>}
+     */
+    public function incomeReport(string $startDate, string $endDate, ?User $viewer = null): array
     {
         $query = GCashTransaction::query()
             ->where('status', '!=', 'pending')
             ->whereBetween('transaction_date', [
                 Carbon::parse($startDate)->startOfDay(),
                 Carbon::parse($endDate)->endOfDay(),
-            ]);
+            ])
+            ->when($viewer !== null, fn ($q) => $q->visibleTo($viewer));
 
-        $transactions = (clone $query)->orderBy('transaction_date')->get();
-        $total = (float) (clone $query)->sum('charge_amount');
+        $transactions = (clone $query)->orderBy('transaction_date')->orderBy('id')->get();
+        $totals = (clone $query)
+            ->selectRaw('COALESCE(SUM(charge_amount), 0) AS total_income')
+            ->selectRaw("COALESCE(SUM(type = 'cash_in'), 0) AS cash_in_count")
+            ->selectRaw("COALESCE(SUM(type = 'cash_out'), 0) AS cash_out_count")
+            ->toBase()
+            ->first();
 
         return [
-            'total_income' => round($total, 2),
+            'total_income' => round((float) $totals->total_income, 2),
+            'cash_in_count' => (int) $totals->cash_in_count,
+            'cash_out_count' => (int) $totals->cash_out_count,
             'start_date' => $startDate,
             'end_date' => $endDate,
             'transactions' => $transactions,
         ];
     }
 
-    public function pendingReport(): Collection
+    /**
+     * Pending Cash Ins, oldest first. With a $viewer, only the rows they may
+     * see (GCashTransaction::scopeVisibleTo).
+     *
+     * @return Collection<int, GCashTransaction>
+     */
+    public function pendingReport(?User $viewer = null): Collection
     {
         return GCashTransaction::query()
             ->where('type', 'cash_in')
             ->where('status', 'pending')
+            ->when($viewer !== null, fn ($q) => $q->visibleTo($viewer))
             ->orderBy('transaction_date')
             ->get();
     }
