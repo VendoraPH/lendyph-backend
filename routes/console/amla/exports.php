@@ -7,4 +7,4 @@ use Illuminate\Support\Facades\Schedule;
  * every 15 minutes, delete the files of exports whose download link has
  * expired. Each export's record and checksum stay.
  */
-Schedule::command('amla:prune-exports')->everyFifteenMinutes()->withoutOverlapping(10);
+Schedule::command('amla:prune-exports')->everyFifteenMinutes()->timezone('Asia/Manila')->withoutOverlapping(10);
