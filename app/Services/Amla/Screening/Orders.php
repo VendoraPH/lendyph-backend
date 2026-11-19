@@ -180,10 +180,17 @@ final class Orders
                 'The order\'s holds changed while it was being released. Approve it again.',
             );
 
+            /*
+             * Each linked hold is read with a lock too: a locking read sees the
+             * latest committed row, while a plain one would read the view the
+             * first read above fixed, and miss a hold a payout committed since.
+             */
             foreach ($links as $link) {
-                $hold = SavingsHold::query()->find($link->savings_hold_id);
+                $hold = SavingsHold::query()->lockForUpdate()->find($link->savings_hold_id);
 
-                if ($hold !== null && $hold->status === SavingsHold::STATUS_ACTIVE) {
+                abort_if($hold === null, 409, 'One of the order\'s holds couldn\'t be read. Approve the release again.');
+
+                if ($hold->status === SavingsHold::STATUS_ACTIVE) {
                     $this->holds->releaseForOrder($hold, $checker);
                 }
             }
