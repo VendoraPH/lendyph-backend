@@ -78,6 +78,16 @@ final class ChartOfAccountsSeeder
     public const OPERATING_LOAN_ACCOUNT_CODES = ['1110', '1120', '1150', '1160', '1180', '1200', '1210'];
 
     /**
+     * Seeded accounts whose cash flow category isn't their type's default:
+     * the loan book (operating, above) and 1190 Interbranch Clearing,
+     * financing (Phase 6 review of MB-BE5): money between the organisation's
+     * own branches, never an investment.
+     *
+     * @var array<string, string>
+     */
+    public const CASH_FLOW_CATEGORIES = ['1190' => 'financing'];
+
+    /**
      * The seed rows, parents before children so ids resolve in one pass.
      *
      * @var list<array{code: string, name: string, type: string, parent?: string, is_group?: bool, is_contra?: bool, cash_kind?: string}>
@@ -119,6 +129,15 @@ final class ChartOfAccountsSeeder
         // Where a balance adjustment clears (Phase 2, decision 7). Reads zero
         // once each adjustment is reviewed; any balance here is flagged.
         ['code' => '1180', 'name' => 'Loan Adjustments Clearing', 'type' => 'asset', 'parent' => '1000'],
+
+        // Money moved between branches (Phase 6, multi-branch decision 9): the
+        // source branch debits it when a transfer is approved and the
+        // destination credits it on receipt. Each branch's balance is its net
+        // interbranch position (sent less received, so a received transfer
+        // leaves +X in its source and -X in its destination), and added up
+        // over the branches it is the transfers still in transit. Seeded as
+        // financing (self::CASH_FLOW_CATEGORIES).
+        ['code' => '1190', 'name' => 'Interbranch Clearing', 'type' => 'asset', 'parent' => '1000'],
 
         // Credit-balanced asset: it REDUCES loans receivable. Net Loans
         // Receivable is gross minus this, which is why `is_contra` has to be set.
@@ -323,6 +342,9 @@ final class ChartOfAccountsSeeder
         'unearned_restructure_income' => '1210',
         'net_surplus' => '3030',
         'suspense' => '2390',
+        // Phase 6 (approved 2026-11-19). Charts seeded before it get it from
+        // the 2026_11_20_300100 migration (AccountingRolesBackfill).
+        'interbranch_clearing' => '1190',
     ];
 
     /**
@@ -452,7 +474,7 @@ final class ChartOfAccountsSeeder
                         'is_active' => true,
                         'cash_kind' => $seed['cash_kind'] ?? null,
                         // Null lets the saving hook apply the default rule.
-                        'cash_flow_category' => in_array($seed['code'], self::OPERATING_LOAN_ACCOUNT_CODES, true) ? 'operating' : null,
+                        'cash_flow_category' => in_array($seed['code'], self::OPERATING_LOAN_ACCOUNT_CODES, true) ? 'operating' : (self::CASH_FLOW_CATEGORIES[$seed['code']] ?? null),
                         // Parents always precede their children in the chart, so one
                         // pass is enough and a missing parent is a broken
                         // constant rather than an ordering accident.

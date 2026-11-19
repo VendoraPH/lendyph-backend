@@ -55,6 +55,9 @@ class AccountingChartOfAccountsTest extends TestCase
         '1160' => ['Penalty Receivable', 'asset', '1000', false, false, null],
         '1170' => ['Other Receivables', 'asset', '1000', false, false, null],
         '1180' => ['Loan Adjustments Clearing', 'asset', '1000', false, false, null],
+        // Phase 6 MB-BE5 (decision 9). The frontend constant gains it with
+        // MB-FE4.
+        '1190' => ['Interbranch Clearing', 'asset', '1000', false, false, null],
         '1200' => ['Allowance for Credit Losses', 'asset', '1000', false, true, null],
         '1210' => ['Unearned Interest and Penalty – Restructured Loans', 'asset', '1000', false, true, null],
         '1300' => ['Prepaid Expenses', 'asset', '1000', false, false, null],
@@ -714,7 +717,7 @@ class AccountingChartOfAccountsTest extends TestCase
         $this->seedChart()->assertCreated();
 
         $spare = AccountingAccount::query()->create([
-            'code' => '1190',
+            'code' => '1195',
             'name' => 'Retired Receivable',
             'type' => 'asset',
             'is_active' => false,

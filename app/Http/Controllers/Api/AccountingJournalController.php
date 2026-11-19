@@ -14,6 +14,7 @@ use App\Services\Accounting\JournalPoster;
 use App\Services\Accounting\JournalPreview;
 use App\Services\Accounting\YearEndCloser;
 use App\Services\BranchAccess;
+use App\Services\Branches\InterbranchTransferJournalGuard;
 use App\Services\LikePattern;
 use App\Services\Savings\SavingsJournalGuard;
 use Illuminate\Database\Eloquent\Builder;
@@ -377,6 +378,9 @@ class AccountingJournalController extends Controller
         // A savings entry, or the reversal of one, is reversed from Savings
         // with its savings record, or not at all (SavingsJournalGuard).
         SavingsJournalGuard::assertReversibleFromJournals($journal);
+        // An interbranch transfer's leg is reversed from the transfer, both
+        // legs together (InterbranchTransferJournalGuard).
+        InterbranchTransferJournalGuard::assertReversibleFromJournals($journal);
 
         $reversal = $this->poster->reverse(
             $journal,
