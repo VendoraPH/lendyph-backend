@@ -69,7 +69,10 @@ it('finds the AMLA files it guards', function () use ($amlaFiles, $relative) {
 
     expect($files)->toContain('app/Services/Amla/Foundation/AmlaLog.php')
         ->and($files)->toContain('app/Models/AmlaLogEntry.php')
-        ->and($files)->toContain('routes/api/amla/foundation.php');
+        ->and($files)->toContain('routes/api/amla/foundation.php')
+        ->and($files)->toContain('app/Services/Amla/Events/Harvester.php')
+        ->and($files)->toContain('app/Models/AmlaEvent.php')
+        ->and($files)->toContain('routes/console/amla/events.php');
 });
 
 /** @var array<string, string> what AMLA code must never reach, by pattern on its code */
@@ -145,9 +148,10 @@ $bulkWriteOffences = function (string $code, bool $isAmlaFile): array {
     /*
      * Raw SQL that writes an AMLA table, whatever method runs it: UPDATE,
      * DELETE FROM, REPLACE INTO, a multi-table UPDATE … SET or DELETE alias
-     * FROM, and an INSERT … ON DUPLICATE KEY UPDATE.
+     * FROM, an INSERT … ON DUPLICATE KEY UPDATE, and a DELETE whose table list
+     * (FROM … JOIN, or USING, before any WHERE) names an AMLA table.
      */
-    $rawWrite = '/\b(?:update|delete\s+from|replace\s+into)\s+`?amla_|\bdelete\s+`?\w+`?(?:\s*,\s*`?\w+`?)*\s+from\s+`?amla_|\binto\s+`?amla_\w*`?[^;]*?\bon\s+duplicate\s+key\s+update\b|\bupdate\s+[^;]*?\bamla_\w+[^;]*?\bset\b/i';
+    $rawWrite = '/\b(?:update|delete\s+from|replace\s+into)\s+`?amla_|\bdelete\s+`?\w+`?(?:\s*,\s*`?\w+`?)*\s+from\s+`?amla_|\binto\s+`?amla_\w*`?[^;]*?\bon\s+duplicate\s+key\s+update\b|\bupdate\s+[^;]*?\bamla_\w+[^;]*?\bset\b|\bdelete\b(?:(?!\bwhere\b)[^;])*?\b(?:from|using)\b(?:(?!\bwhere\b)[^;])*?`?\bamla_\w+/i';
 
     foreach (explode(';', $code) as $statement) {
         $named = preg_match($namesAmla, $statement) === 1;
@@ -198,6 +202,7 @@ $withoutAllowedUse = function (string $file, string $code): string {
 const AMLA_TABLE_MIGRATIONS = [
     'database/migrations/2026_11_19_210000_create_amla_foundation_tables.php',
     'database/migrations/2026_11_20_100000_create_amla_cdd_tables.php',
+    'database/migrations/2026_11_20_200000_create_amla_event_tables.php',
 ];
 
 it('keeps AMLA out of the main audit trail, outbound channels, notices, logs and the environment', function () use ($amlaFiles, $codeOf, $relative, $channelOffences) {
@@ -338,8 +343,16 @@ it('catches every bulk-write pattern', function (string $code, bool $isAmlaFile)
     'raw upsert' => ["DB::insert('insert into amla_profiles (id, occupation) values (1, null) on duplicate key update occupation = null');", false],
     'raw delete with an alias' => ["DB::delete('DELETE p FROM amla_profiles p WHERE p.id = 1');", false],
     'raw multi-table update' => ["DB::update('UPDATE borrowers b JOIN amla_profiles p ON p.borrower_id = b.id SET p.occupation = null');", false],
+    'raw joined delete' => ["DB::delete('DELETE p FROM borrowers b JOIN amla_profiles p ON p.borrower_id = b.id WHERE b.id = 1');", false],
+    'raw delete using' => ["DB::statement('DELETE FROM p USING amla_profiles p WHERE p.id = 1');", false],
+    'raw joined delete of an event' => ["DB::connection()->statement('delete e from `loans` l inner join `amla_events` e on e.source_id = l.id');", false],
     'Schema table with an arrow function' => ["Schema::table('amla_profiles', fn (Blueprint \$table) => \$table->dropColumn('pep_details'));", false],
     'Schema table change' => ["Schema::table('amla_profiles', function (Blueprint \$table) {\n    \$table->string('occupation', 10)->change();\n});", false],
+    'event update' => ["AmlaEvent::query()->where('source', 'gcash')->update(['amount' => '0.00']);", false],
+    'event table delete' => ["DB::table('amla_events')->where('id', 1)->delete();", false],
+    'cursor rewind' => ["DB::table('amla_harvest_cursors')->update(['watermark' => null]);", false],
+    'failure delete' => ['AmlaEventFailure::query()->delete();', false],
+    'coverage drop' => ["Schema::dropIfExists('amla_coverage_checks');", false],
 ]);
 
 it('lets an added column through', function () use ($bulkWriteOffences) {
@@ -348,6 +361,10 @@ it('lets an added column through', function () use ($bulkWriteOffences) {
 
 it('keeps wording about reports out of the log-helper scan', function () use ($channelOffences) {
     expect($channelOffences("'words' => 'Covered transaction report (CTR)', 'info' => 'x',"))->toBe([]);
+});
+
+it('lets a delete through that only reads an AMLA table in its WHERE', function () use ($bulkWriteOffences) {
+    expect($bulkWriteOffences("DB::delete('DELETE FROM sessions WHERE user_id IN (SELECT user_id FROM amla_log_entries)');", false))->toBe([]);
 });
 
 it('lets reads and inserts through', function () use ($bulkWriteOffences) {

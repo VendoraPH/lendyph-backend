@@ -30,6 +30,7 @@ final class AmlaLog
         'cdd_id_verified' => 'ID verification recorded',
         'cdd_risk_assessed' => 'Risk assessed',
         'cdd_review_recorded' => 'CDD review recorded',
+        'history_screened' => 'Transaction history screened',
     ];
 
     /** @var array<string, string> each subject type in words, read as "<words> #<id>" */

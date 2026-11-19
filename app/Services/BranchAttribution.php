@@ -13,7 +13,8 @@ use Illuminate\Support\Facades\DB;
 /**
  * The one rule for which branch a money row counts in (Phase 6 decision 16,
  * D4): the branch whose books it posted in. Reports, the GCash scope and later
- * the dashboard and AMLA read it here, so no figure re-derives it.
+ * the dashboard and AMLA (its transaction events) read it here, so no
+ * figure re-derives it.
  *
  * - A share capital row and a member's GCash row carry `branch_id`, stamped
  *   when they are written ({@see self::shareCapitalPostingBranch()},
@@ -96,6 +97,36 @@ final class BranchAttribution
     public static function gcashBranchSql(string $gcash = 'gcash_transactions', string $borrowers = 'borrowers'): string
     {
         return "COALESCE({$gcash}.branch_id, {$borrowers}.branch_id)";
+    }
+
+    /**
+     * SQL for the branch a loan's release, or a payment on the loan, counts
+     * in: the loan's own, where AutomaticPoster::loanRelease() and
+     * loanCollection() post them. `$loans` must be joined to the row's loan.
+     */
+    public static function loanBranchSql(string $loans = 'loans'): string
+    {
+        return "{$loans}.branch_id";
+    }
+
+    /**
+     * SQL for the branch a savings row counts in: its account's, where
+     * AutomaticPoster::savingsTransaction() posts it. `$accounts` must be
+     * joined to the row's account.
+     */
+    public static function savingsBranchSql(string $accounts = 'savings_accounts'): string
+    {
+        return "{$accounts}.branch_id";
+    }
+
+    /**
+     * SQL for the branch a time deposit's placement or settlement counts in:
+     * the deposit's own, where AutomaticPoster::timeDepositPlacement() and
+     * timeDepositSettlement() post them.
+     */
+    public static function timeDepositBranchSql(string $deposits = 'time_deposits'): string
+    {
+        return "{$deposits}.branch_id";
     }
 
     /**

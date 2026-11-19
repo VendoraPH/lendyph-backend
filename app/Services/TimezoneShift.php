@@ -332,6 +332,13 @@ class TimezoneShift
         'amla_reviews' => ['created_at'],
         'amla_risk_assessments' => ['created_at'],
         'amla_risk_rule_versions' => ['created_at', 'effective_at'],
+        // Phase 6 AMLA-B2 (2026-11-20): transaction events, harvest cursors,
+        // failures and coverage checks, well after the cutover.
+        // `amla_events.occurred_on` and `amla_coverage_checks.day` are DATEs.
+        'amla_coverage_checks' => ['created_at'],
+        'amla_event_failures' => ['created_at', 'last_attempted_at', 'resolved_at'],
+        'amla_events' => ['created_at', 'recorded_at', 'reversed_at'],
+        'amla_harvest_cursors' => ['created_at', 'started_at', 'updated_at', 'watermark'],
         // Added 2026-11-19 with the executive dashboard's alert thresholds
         // (Phase 6 EB-C), well after the cutover, for the same reason.
         'dashboard_settings' => ['created_at', 'updated_at'],
