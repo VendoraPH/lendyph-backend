@@ -169,12 +169,21 @@ class GCashService
             }
 
             $old = ['status' => $locked->status];
-
-            $locked->update([
+            $changes = [
                 'status' => 'paid',
                 'paid_at' => now(),
                 'paid_by_user_id' => $actor->id,
-            ]);
+            ];
+
+            // A member's Cash In recorded before rows carried a branch is
+            // stamped now with the branch it posts in (Phase 6 MB-BE3), so it
+            // stays with that branch's books if the member later moves.
+            if ($locked->branch_id === null && $locked->borrower_id !== null) {
+                $changes['branch_id'] = BranchAttribution::gcashPostingBranch($locked);
+                $old['branch_id'] = null;
+            }
+
+            $locked->update($changes);
 
             AuditLogService::log(
                 action: 'status_changed',
@@ -184,6 +193,7 @@ class GCashService
                     'status' => $locked->status,
                     'paid_at' => $locked->paid_at?->toIso8601String(),
                     'paid_by_user_id' => $locked->paid_by_user_id,
+                    ...(array_key_exists('branch_id', $old) ? ['branch_id' => $locked->branch_id] : []),
                 ],
                 description: "GCash {$locked->reference_no} marked as paid",
             );

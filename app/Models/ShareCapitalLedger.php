@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Services\BranchAttribution;
 use Carbon\Carbon;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
@@ -16,6 +17,9 @@ class ShareCapitalLedger extends Model
 
     protected $fillable = [
         'borrower_id',
+        // The branch whose books the row posted in, stamped on creation
+        // (booted()); see BranchAttribution.
+        'branch_id',
         'repayment_id',
         'loan_id',
         'savings_transaction_id',
@@ -33,6 +37,7 @@ class ShareCapitalLedger extends Model
     {
         return [
             'date' => 'date',
+            'branch_id' => 'integer',
             'debit' => 'decimal:2',
             'credit' => 'decimal:2',
         ];
@@ -45,7 +50,14 @@ class ShareCapitalLedger extends Model
         // auto-credit run or a bulk entry (ShareCapitalService). Inside a loan's
         // money write the row carries its own reference instead
         // (RepaymentService, ShareCapitalReleaseCredit).
+        //
+        // Each row also keeps the branch whose books it posts in (Phase 6
+        // decision 16), stamped here so every writer is covered, the payment
+        // and void build-up rows RepaymentService writes included. A branch
+        // the caller set is kept.
         static::creating(function (ShareCapitalLedger $entry) {
+            $entry->branch_id ??= BranchAttribution::shareCapitalPostingBranch($entry);
+
             if (empty($entry->reference)) {
                 $dateStr = Carbon::parse($entry->date ?? now())->format('Ymd');
                 $lastRef = static::where('reference', 'like', "SC-{$dateStr}-%")
@@ -115,6 +127,12 @@ class ShareCapitalLedger extends Model
     public function borrower(): BelongsTo
     {
         return $this->belongsTo(Borrower::class);
+    }
+
+    /** The branch whose books this row posted in (null on a row not yet attributed). */
+    public function branch(): BelongsTo
+    {
+        return $this->belongsTo(Branch::class);
     }
 
     public function repayment(): BelongsTo

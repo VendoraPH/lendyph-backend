@@ -72,12 +72,25 @@ class GCashPendingBranchTest extends TestCase
     public function test_a_member_row_whose_member_record_is_missing_reads_unknown_branch(): void
     {
         $this->actingAs($this->admin);
+        // A row from before member rows were stamped (Phase 6 MB-BE3) has no
+        // branch of its own, so only its member could say which.
+        DB::table('gcash_transactions')->where('id', $this->member->id)->update(['branch_id' => null]);
         DB::statement('SET FOREIGN_KEY_CHECKS=0');
         DB::table('borrowers')->where('id', $this->member->borrower_id)->delete();
         DB::statement('SET FOREIGN_KEY_CHECKS=1');
 
         $this->assertSame([null, 'Unknown branch'], $this->branchesOnTheReport()[$this->member->id]);
         $this->assertSame([null, 'Head office'], $this->branchesOnTheReport()[$this->headOffice->id]);
+    }
+
+    public function test_a_stamped_member_row_keeps_its_branch_when_the_member_record_is_missing(): void
+    {
+        $this->actingAs($this->admin);
+        DB::statement('SET FOREIGN_KEY_CHECKS=0');
+        DB::table('borrowers')->where('id', $this->member->borrower_id)->delete();
+        DB::statement('SET FOREIGN_KEY_CHECKS=1');
+
+        $this->assertSame([$this->branch->id, $this->branch->name], $this->branchesOnTheReport()[$this->member->id]);
     }
 
     public function test_a_branch_user_sees_their_members_and_their_branchs_walk_ins(): void

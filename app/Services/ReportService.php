@@ -9,6 +9,7 @@ use App\Models\Repayment;
 use App\Models\ShareCapitalLedger;
 use App\Services\Accounting\AllowanceCalculator;
 use App\Services\Accounting\PostingRules;
+use App\Services\Dashboard\LoanScope;
 use Carbon\Carbon;
 use Closure;
 use DateTimeInterface;
@@ -32,6 +33,12 @@ class ReportService
      * aging bucket.
      */
     private const PAR_THRESHOLD_DAYS = 30;
+
+    /**
+     * How many products Portfolio by Product's share names before the rest
+     * become its `other` row: #614's product donut names four.
+     */
+    private const OUTSTANDING_SHARE_NAMED = 4;
 
     /**
      * Decimal places an interest-rate figure is reported to: the scale of
@@ -887,6 +894,7 @@ class ReportService
             ->when($filters['date_from'] ?? null, fn ($q, $d) => $q->where('released_at', '>=', self::dayStart($d)))
             ->when($filters['date_to'] ?? null, fn ($q, $d) => $q->where('released_at', '<', self::nextDayStart($d)))
             ->tap(self::inBranches(self::branchScope($filters), 'branch_id'))
+            ->tap(LoanScope::fromFilters($filters)->loans())
             ->when($filters['status'] ?? null, fn ($q, $s) => $q->where('status', $s))
             ->latest('released_at')
             // Tiebreaker: loans released in the same batch share a timestamp,
@@ -962,7 +970,8 @@ class ReportService
             ->when($filters['date_from'] ?? null, fn ($q, $d) => $q->where('payment_date', '>=', self::filterDay($d)))
             ->when($filters['date_to'] ?? null, fn ($q, $d) => $q->where('payment_date', '<=', self::filterDay($d)))
             ->when($filters['loan_id'] ?? null, fn ($q, $l) => $q->where('loan_id', $l))
-            ->tap(self::loanInBranches(self::branchScope($filters)))
+            ->tap(self::loanInBranches(self::branchScope($filters), LoanScope::fromFilters($filters)))
+            ->tap(LoanScope::fromFilters($filters)->receipts())
             ->latest('payment_date')
             // `payment_date` is a DATE, so same-day receipts all tie — see the
             // note on releasesQuery().
@@ -1202,11 +1211,12 @@ class ReportService
     public function loanBalanceSummary(array $filters): array
     {
         $today = Carbon::today()->toDateString();
-        $parCutoff = Carbon::today()->subDays(self::PAR_THRESHOLD_DAYS)->toDateString();
+        $scope = LoanScope::fromFilters($filters);
 
         $query = Loan::query()
             ->whereIn('status', Loan::EVER_RELEASED_STATUSES)
             ->tap(self::inBranches(self::branchScope($filters), 'branch_id'))
+            ->tap($scope->loans())
             ->when($filters['date_from'] ?? null, fn ($q, $d) => $q->where('released_at', '>=', self::dayStart($d)))
             ->when($filters['date_to'] ?? null, fn ($q, $d) => $q->where('released_at', '<', self::nextDayStart($d)));
 
@@ -1227,7 +1237,15 @@ class ReportService
             self::branchScope($filters),
             filled($filters['date_from'] ?? null) ? self::dayStart($filters['date_from']) : null,
             filled($filters['date_to'] ?? null) ? self::nextDayStart($filters['date_to']) : null,
+            $scope,
         );
+
+        // Past due is as of today over the whole book: release dates never
+        // narrow it (product and officer do), so unfiltered it is the Past Due
+        // Loans page's figure.
+        $pastDue = filled($filters['date_from'] ?? null) || filled($filters['date_to'] ?? null)
+            ? app(PortfolioOutstanding::class)->totals(self::branchScope($filters), null, null, $scope)
+            : $collectible;
 
         // Also from the bare due date. This block feeds the balance summary's
         // `overdue` figures alongside the PAR ratio below and is read with
@@ -1255,24 +1273,28 @@ class ReportService
 
         $activeLoans = (clone $query)->whereIn('status', ['released', 'ongoing'])->count();
 
-        // Portfolio at Risk — the outstanding balance of every loan carrying at
-        // least one schedule more than PAR_THRESHOLD_DAYS past due, over total
-        // outstanding. The numerator is the loan's WHOLE remaining balance, not
-        // just the late instalment; that is what makes it "at risk".
-        // From the due date, grace deliberately ignored — PAR30 is a prudential
-        // ratio struck the same way everywhere it is reported. Same reasoning
-        // as the aging buckets in overdueScheduleQuery(); see the comment
-        // there, and do not make one grace-aware without the other.
-        $atRiskLoanIds = DB::table('amortization_schedules')
-            ->whereIn('loan_id', $loanIds)
-            ->whereIn('status', AmortizationSchedule::UNPAID_STATUSES)
-            ->where('due_date', '<', $parCutoff)
-            ->select('loan_id');
+        // Portfolio at Risk 1, 30, 60 and 90 (PortfolioRisk) over the same
+        // loans: the unpaid principal of every loan whose oldest unpaid period
+        // is more than n days past due, over their unpaid principal. The
+        // numerator is the loan's WHOLE remaining principal, not just the late
+        // instalment; that is what makes it "at risk". From the due date, grace
+        // deliberately ignored — PAR is a prudential ratio struck the same way
+        // everywhere it is reported. Same reasoning as the aging buckets in
+        // overdueScheduleQuery(); see the comment there, and do not make one
+        // grace-aware without the other. PAR 30 is `at_risk_amount` and
+        // `par_ratio`, unchanged.
+        $risk = app(PortfolioRisk::class)->par($query);
+        $par30 = $risk['par_'.self::PAR_THRESHOLD_DAYS];
 
-        $atRiskAmount = (float) DB::table('amortization_schedules')
-            ->whereIn('loan_id', $atRiskLoanIds)
-            ->selectRaw('COALESCE(SUM('.AmortizationSchedule::remainingPrincipalSql().'), 0) as balance')
-            ->value('balance');
+        // Aging by loan over the collectible loans of the same scope and
+        // release dates, so its principal adds up to `outstanding_principal`.
+        $agingByLoan = app(PortfolioRisk::class)->agingByLoan(
+            Loan::query()
+                ->tap($scope->loans())
+                ->when($filters['date_from'] ?? null, fn ($q, $d) => $q->where('loans.released_at', '>=', self::dayStart($d)))
+                ->when($filters['date_to'] ?? null, fn ($q, $d) => $q->where('loans.released_at', '<', self::nextDayStart($d))),
+            self::branchScope($filters),
+        );
 
         $outstandingPrincipal = round((float) ($scheduleAgg->outstanding_principal ?? 0), 2);
         $outstandingBalance = round($outstandingPrincipal + (float) ($portfolio->insurance_remaining ?? 0), 2);
@@ -1304,12 +1326,28 @@ class ReportService
             // Deprecated alias with its old meaning, principal plus premium:
             // read `total_outstanding` or `outstanding_principal`.
             'outstanding_balance' => $outstandingBalance,
-            'at_risk_amount' => round($atRiskAmount, 2),
+            'at_risk_amount' => $par30['amount'],
             // Whole percent, e.g. 12.5 means 12.5%.
-            'par_ratio' => $outstandingPrincipal > 0
-                ? round($atRiskAmount / $outstandingPrincipal * 100, 2)
-                : 0.0,
+            'par_ratio' => $par30['ratio'],
             'par_threshold_days' => self::PAR_THRESHOLD_DAYS,
+            // PAR 1, 30, 60 and 90: `amount` (unpaid principal of the loans
+            // more than n days past due, PAR 1 one day or more), `ratio` (whole
+            // percent of the same loans' unpaid principal) and `loans`.
+            'par_1' => $risk['par_1'],
+            'par_30' => $risk['par_30'],
+            'par_60' => $risk['par_60'],
+            'par_90' => $risk['par_90'],
+            // The PAR ratios' denominator: the unpaid principal of the same
+            // ever-released loans (`outstanding.principal`), not the
+            // collectible-only `outstanding_principal`.
+            'par_portfolio_principal' => $risk['portfolio_principal'],
+            // What the collectible loans' periods past their due date AND grace
+            // still owe, and how many loans, as of today whatever the release
+            // dates: unfiltered, the Past Due Loans page's figures
+            // (GET /reports/due-past-due?past_due_only=1 `past_due_amount`).
+            'past_due_amount' => $pastDue['overdue_amount'],
+            'past_due_loan_count' => $pastDue['overdue_count'],
+            'aging_by_loan' => $agingByLoan,
             // `total` is principal + interest + penalty, the composition the
             // three lines above it make up; `balance` is the headline figure,
             // principal + insurance.
@@ -1385,6 +1423,7 @@ class ReportService
             ->leftJoinSub($scheduleTotals, 'schedule_totals', 'schedule_totals.loan_id', '=', 'loans.id')
             ->whereIn('loans.status', Loan::EVER_RELEASED_STATUSES)
             ->tap(self::inBranches($branchIds, 'loans.branch_id'))
+            ->tap(LoanScope::fromFilters($filters)->loans())
             ->when($filters['date_from'] ?? null, fn ($q, $d) => $q->where('loans.released_at', '>=', self::dayStart($d)))
             ->when($filters['date_to'] ?? null, fn ($q, $d) => $q->where('loans.released_at', '<', self::nextDayStart($d)))
             ->groupBy('loans.branch_id')
@@ -1486,18 +1525,22 @@ class ReportService
      *
      * @return array<string, mixed>
      */
-    private function periodCollection(string $fromDate, string $toDate, ?array $branchIds): array
+    private function periodCollection(string $fromDate, string $toDate, ?array $branchIds, ?LoanScope $scope = null): array
     {
-        $periods = $this->periodsDueQuery($fromDate, $toDate, $branchIds)
+        $scope ??= LoanScope::none();
+
+        $periods = $this->periodsDueQuery($fromDate, $toDate, $branchIds, $scope)
             ->selectRaw(self::periodFiguresSql())
             ->first();
 
-        // Scoped exactly like the periods: releasedLoanScope()'s statuses and
-        // branch.
+        // Scoped exactly like the periods: releasedLoanScope()'s statuses,
+        // branch, product and officer. The collector filter narrows these
+        // receipts only.
         $receipts = Repayment::query()
             ->where('status', 'posted')
             ->whereBetween('payment_date', [$fromDate, $toDate])
-            ->whereHas('loan', $this->releasedLoanScope($branchIds))
+            ->whereHas('loan', $this->releasedLoanScope($branchIds, $scope))
+            ->tap($scope->receipts())
             ->toBase()
             // The insurance premium a payment collected first is not loan
             // collection: it is left out of the money taken in.
@@ -1527,12 +1570,13 @@ class ReportService
      * statuses and branch. A period with nothing due (closed by an adjustment)
      * is not a due and is left out.
      */
-    private function periodsDueQuery(string $fromDate, string $toDate, ?array $branchIds): QueryBuilder
+    private function periodsDueQuery(string $fromDate, string $toDate, ?array $branchIds, ?LoanScope $scope = null): QueryBuilder
     {
         return DB::table('amortization_schedules')
             ->join('loans', 'loans.id', '=', 'amortization_schedules.loan_id')
             ->whereIn('loans.status', Loan::EVER_RELEASED_STATUSES)
             ->tap(self::inBranches($branchIds, 'loans.branch_id'))
+            ->tap(($scope ?? LoanScope::none())->loans())
             ->whereBetween('amortization_schedules.due_date', [$fromDate, $toDate])
             ->where('amortization_schedules.total_due', '>', 0);
     }
@@ -1694,6 +1738,7 @@ class ReportService
         return DB::table('loans')
             ->whereIn('loans.status', Loan::EVER_RELEASED_STATUSES)
             ->tap(self::inBranches(self::branchScope($filters), 'loans.branch_id'))
+            ->tap(LoanScope::fromFilters($filters)->loans())
             ->when($filters['loan_id'] ?? null, fn ($q, $l) => $q->where('loans.id', $l))
             ->when($filters['date_from'] ?? null, fn ($q, $d) => $q->where('loans.released_at', '>=', self::dayStart($d)))
             ->when($filters['date_to'] ?? null, fn ($q, $d) => $q->where('loans.released_at', '<', self::nextDayStart($d)));
@@ -2249,10 +2294,13 @@ class ReportService
 
     public function disbursementReport(array $filters): array
     {
+        $scope = LoanScope::fromFilters($filters);
+
         $query = Loan::whereIn('status', Loan::EVER_RELEASED_STATUSES)
             ->when($filters['date_from'] ?? null, fn ($q, $d) => $q->where('released_at', '>=', self::dayStart($d)))
             ->when($filters['date_to'] ?? null, fn ($q, $d) => $q->where('released_at', '<', self::nextDayStart($d)))
-            ->tap(self::inBranches(self::branchScope($filters), 'branch_id'));
+            ->tap(self::inBranches(self::branchScope($filters), 'branch_id'))
+            ->tap($scope->loans());
 
         $loansReleased = (clone $query)->count();
         $totalDisbursed = (float) (clone $query)->sum('net_proceeds');
@@ -2260,6 +2308,7 @@ class ReportService
 
         $pendingRelease = Loan::where('status', 'approved')
             ->tap(self::inBranches(self::branchScope($filters), 'branch_id'))
+            ->tap($scope->loans())
             ->count();
 
         return [
@@ -2310,12 +2359,13 @@ class ReportService
      * that figure is reported separately under `non_cash` and is excluded from
      * every total.
      *
-     * `share_capital_ledger` carries no branch column, so `branch_id` is
-     * honoured through the MEMBER's branch (`borrowers.branch_id`) — the exact
-     * scoping shareCapital() applies, under the same `borrower_branch` name,
-     * so a branch-filtered Cash Flow and the Share Capital report select the
-     * same ledger rows for the same period and branch. `share_capital.branch_scope`
-     * reports which of the two applied: `borrower_branch` when `branch_id` is
+     * `branch_id` is honoured through the branch each share capital row
+     * posted in (BranchAttribution: the row's own `branch_id`, or, on a row
+     * not yet attributed, its member's branch) — the exact scoping
+     * shareCapital() applies, under the same `posted_branch` name, so a
+     * branch-filtered Cash Flow and the Share Capital report select the same
+     * ledger rows for the same period and branch. `share_capital.branch_scope`
+     * reports which of the two applied: `posted_branch` when `branch_id` is
      * set, `organisation` when it is not.
      *
      * Share capital is still deliberately absent from `by_branch`: unfiltered,
@@ -2333,11 +2383,16 @@ class ReportService
         $fromDate = $from->toDateString();
         $toDate = $to->toDateString();
         $branchIds = self::branchScope($filters);
+        // Product and officer narrow the loan cash (repayments and releases),
+        // and the collector the repayments; share capital has no such field and
+        // stays whole (MetricCatalog::REPORTS says which figures follow which).
+        $scope = LoanScope::fromFilters($filters);
 
         $inflow = Repayment::query()
             ->where('status', 'posted')
             ->whereBetween('payment_date', [$fromDate, $toDate])
-            ->whereHas('loan', $this->releasedLoanScope($branchIds))
+            ->whereHas('loan', $this->releasedLoanScope($branchIds, $scope))
+            ->tap($scope->receipts())
             ->selectRaw('
                 COUNT(*) as entry_count,
                 COALESCE(SUM(principal_applied), 0) as principal_applied,
@@ -2353,6 +2408,7 @@ class ReportService
             ->where('released_at', '>=', self::dayStart($fromDate))
             ->where('released_at', '<', self::nextDayStart($toDate))
             ->tap(self::inBranches($branchIds, 'branch_id'))
+            ->tap($scope->loans())
             ->selectRaw('
                 COUNT(*) as loan_count,
                 COALESCE(SUM(principal_amount), 0) as principal_amount,
@@ -2361,7 +2417,8 @@ class ReportService
             ')
             ->first();
 
-        // Scoped through the member's branch, identically to shareCapital().
+        // Scoped through the branch each row posted in, identically to
+        // shareCapital().
         // A row with a `loan_id` was withheld at release, not paid in; a row
         // with a `repayment_id` is a payment's build-up (or its void's
         // reversal), cash already inside the repayment line. Both are summed
@@ -2370,10 +2427,7 @@ class ReportService
         // `savings_transaction_id` moved from the member's savings (gap round
         // S3): no cash moved, so it is summed apart too.
         $share = DB::table('share_capital_ledger')
-            ->when($branchIds !== null, fn ($q) => $q->whereIn(
-                'share_capital_ledger.borrower_id',
-                DB::table('borrowers')->whereIn('branch_id', $branchIds)->select('id'),
-            ))
+            ->tap(BranchAttribution::shareCapitalInBranches($branchIds))
             ->whereBetween('date', [$fromDate, $toDate])
             ->selectRaw('
                 COALESCE(SUM(CASE WHEN loan_id IS NULL AND repayment_id IS NULL AND savings_transaction_id IS NULL THEN 1 ELSE 0 END), 0) as entry_count,
@@ -2397,7 +2451,7 @@ class ReportService
         // holds exactly at two decimals instead of to within a rounding error.
         $repaymentsIn = round($principalIn + $interestIn + $penaltyIn + $insuranceIn + $overpaymentIn, 2);
 
-        $shareScope = $branchIds !== null ? 'borrower_branch' : 'organisation';
+        $shareScope = $branchIds !== null ? 'posted_branch' : 'organisation';
         $shareCredit = round((float) ($share->credit ?? 0), 2);
         $shareDebit = round((float) ($share->debit ?? 0), 2);
         $shareAtRelease = round((float) ($share->at_release ?? 0), 2);
@@ -2408,7 +2462,7 @@ class ReportService
 
         $totalIn = round($repaymentsIn + $shareCredit, 2);
         $totalOut = round($netProceedsOut + $shareDebit, 2);
-        $byBranch = $this->cashFlowByBranch($fromDate, $toDate, $branchIds);
+        $byBranch = $this->cashFlowByBranch($fromDate, $toDate, $branchIds, $scope);
 
         return [
             'date_from' => $fromDate,
@@ -2467,14 +2521,14 @@ class ReportService
                 'build_up_credit' => $buildUpCredit,
                 'build_up_debit' => $buildUpDebit,
                 'note' => ($branchIds !== null
-                    ? 'share_capital_ledger has no branch column, so branch_id is honoured through the member\'s branch, matching the Share Capital report.'
+                    ? 'branch_id is honoured through the branch each share capital entry posted in; an entry recorded before entries carried a branch, and not yet attributed, counts in the member\'s branch. This matches the Share Capital report.'
                     : 'No branch filter applied, so these figures are organisation-wide.')
-                    .' In by_branch, share capital paid in and out on its own is in the row of the branch each member belongs to (inflow_share_capital, outflow_share_capital, inside inflow_total and outflow_total), so the rows add up to the statement totals; a member with no branch is in an Unassigned row.'
+                    .' In by_branch, share capital paid in and out on its own is in the row of the branch each entry posted in (inflow_share_capital, outflow_share_capital, inside inflow_total and outflow_total), so the rows add up to the statement totals; an entry with no branch whose member has none is in an Unassigned row.'
                     .' credit and debit are share capital paid in and out on its own. build_up_from_payments is the share capital build-up credited from loan payments, net of void reversals: that cash is already in inflows.repayments (as overpayment), so it is in no total here. Share capital withheld at release is under non_cash.share_capital_at_release. The Share Capital report\'s credits for the same period and branch = credit + build_up_credit + non_cash.share_capital_at_release + non_cash.share_capital_from_savings; its debits = debit + build_up_debit.',
             ],
             'by_branch' => $byBranch,
             // The rows' loan cash plus the share capital paid in and out on
-            // its own, by the member's branch: the statement's inflows.total,
+            // its own, by the branch it posted in: the statement's inflows.total,
             // outflows.total and net_movement.
             'by_branch_totals' => self::columnTotals($byBranch, [
                 'inflow_repayments' => 'money',
@@ -2496,20 +2550,24 @@ class ReportService
      * `loans.branch_id` is NOT NULL, so every peso of loan cash lands in
      * exactly one branch. Share capital paid in and out on its own (no
      * `loan_id`, no `repayment_id`, the statement's share_capital_credit and
-     * share_capital_debit) is placed by the member's branch (decision 5c,
-     * 2026-11-02), and a member with no branch lands in an "Unassigned" row
-     * (`branch_id` null), so the rows add up to the statement's totals. Every
+     * share_capital_debit) is placed by the branch it posted in
+     * (BranchAttribution, Phase 6 decision 16; a row not yet attributed by its
+     * member's branch, decision 5c), and a row with neither lands in an
+     * "Unassigned" row (`branch_id` null), so the rows add up to the
+     * statement's totals. Every
      * active branch has a row, ₱0.00 when it had no cash movement.
      *
      * @return array<int, array<string, mixed>>
      */
-    private function cashFlowByBranch(string $fromDate, string $toDate, ?array $branchIds): array
+    private function cashFlowByBranch(string $fromDate, string $toDate, ?array $branchIds, LoanScope $scope): array
     {
         $inflows = DB::table('repayments')
             ->join('loans', 'loans.id', '=', 'repayments.loan_id')
             ->where('repayments.status', 'posted')
             ->whereIn('loans.status', Loan::EVER_RELEASED_STATUSES)
             ->tap(self::inBranches($branchIds, 'loans.branch_id'))
+            ->tap($scope->loans())
+            ->tap($scope->receipts())
             ->whereBetween('repayments.payment_date', [$fromDate, $toDate])
             ->groupBy('loans.branch_id')
             ->selectRaw('
@@ -2527,6 +2585,7 @@ class ReportService
         $outflows = DB::table('loans')
             ->whereIn('loans.status', Loan::EVER_RELEASED_STATUSES)
             ->tap(self::inBranches($branchIds, 'loans.branch_id'))
+            ->tap($scope->loans())
             ->where('loans.released_at', '>=', self::dayStart($fromDate))
             ->where('loans.released_at', '<', self::nextDayStart($toDate))
             ->groupBy('loans.branch_id')
@@ -2540,17 +2599,18 @@ class ReportService
             ->keyBy(fn ($row) => (int) $row->branch_id);
 
         // The same rows as cashFlow()'s share capital credit and debit,
-        // grouped by the member's branch.
+        // grouped by the branch each posted in.
+        $postedBranch = BranchAttribution::shareCapitalBranchSql();
         $share = DB::table('share_capital_ledger')
             ->leftJoin('borrowers', 'borrowers.id', '=', 'share_capital_ledger.borrower_id')
             ->whereNull('share_capital_ledger.loan_id')
             ->whereNull('share_capital_ledger.repayment_id')
             ->whereNull('share_capital_ledger.savings_transaction_id')
-            ->tap(self::inBranches($branchIds, 'borrowers.branch_id'))
+            ->tap(BranchAttribution::shareCapitalInBranches($branchIds))
             ->whereBetween('share_capital_ledger.date', [$fromDate, $toDate])
-            ->groupBy('borrowers.branch_id')
+            ->groupByRaw($postedBranch)
             ->selectRaw('
-                borrowers.branch_id,
+                '.$postedBranch.' as branch_id,
                 COUNT(*) as entry_count,
                 COALESCE(SUM(share_capital_ledger.credit), 0) as credit,
                 COALESCE(SUM(share_capital_ledger.debit), 0) as debit
@@ -2632,10 +2692,11 @@ class ReportService
         $fromDate = $from->toDateString();
         $toDate = $to->toDateString();
         $branchIds = self::branchScope($filters);
-        $byBranch = $this->collectionEfficiencyByBranch($fromDate, $toDate, $branchIds);
+        $scope = LoanScope::fromFilters($filters);
+        $byBranch = $this->collectionEfficiencyByBranch($fromDate, $toDate, $branchIds, $scope);
 
         return array_merge(
-            $this->periodCollection($fromDate, $toDate, $branchIds),
+            $this->periodCollection($fromDate, $toDate, $branchIds, $scope),
             [
                 'date_from' => $fromDate,
                 'date_to' => $toDate,
@@ -2647,7 +2708,7 @@ class ReportService
                     'total_collected' => 'money',
                     'uncollected' => 'money',
                 ]),
-                'by_period' => $this->collectionEfficiencyByPeriod($from, $to, $branchIds),
+                'by_period' => $this->collectionEfficiencyByPeriod($from, $to, $branchIds, $scope),
                 'note' => 'Counted by period: collected is the principal and interest paid on the periods due in the selected dates (each branch, each due month), capped at what each period owes, so no rate exceeds 100%. Penalty collected and total cash received are separate figures.',
                 'generated_at' => now()->toDateTimeString(),
             ],
@@ -2676,9 +2737,9 @@ class ReportService
     /**
      * @return array<int, array<string, mixed>>
      */
-    private function collectionEfficiencyByBranch(string $fromDate, string $toDate, ?array $branchIds): array
+    private function collectionEfficiencyByBranch(string $fromDate, string $toDate, ?array $branchIds, LoanScope $scope): array
     {
-        $rows = $this->periodsDueQuery($fromDate, $toDate, $branchIds)
+        $rows = $this->periodsDueQuery($fromDate, $toDate, $branchIds, $scope)
             ->groupBy('loans.branch_id')
             ->selectRaw('loans.branch_id, '.self::periodFiguresSql())
             ->get()
@@ -2704,9 +2765,9 @@ class ReportService
      *
      * @return array<int, array<string, mixed>>
      */
-    private function collectionEfficiencyByPeriod(Carbon $from, Carbon $to, ?array $branchIds): array
+    private function collectionEfficiencyByPeriod(Carbon $from, Carbon $to, ?array $branchIds, LoanScope $scope): array
     {
-        $months = $this->periodsDueQuery($from->toDateString(), $to->toDateString(), $branchIds)
+        $months = $this->periodsDueQuery($from->toDateString(), $to->toDateString(), $branchIds, $scope)
             ->groupByRaw("DATE_FORMAT(amortization_schedules.due_date, '%Y-%m')")
             ->selectRaw("DATE_FORMAT(amortization_schedules.due_date, '%Y-%m') as period, ".self::periodFiguresSql())
             ->get()
@@ -2753,6 +2814,7 @@ class ReportService
             )
             ->whereIn('loans.status', Loan::EVER_RELEASED_STATUSES)
             ->tap(self::inBranches(self::branchScope($filters), 'loans.branch_id'))
+            ->tap(LoanScope::fromFilters($filters)->loans())
             ->when($filters['date_from'] ?? null, fn ($q, $d) => $q->where('loans.released_at', '>=', self::dayStart($d)))
             ->when($filters['date_to'] ?? null, fn ($q, $d) => $q->where('loans.released_at', '<', self::nextDayStart($d)))
             ->groupBy('loan_products.id', 'loan_products.name')
@@ -2782,7 +2844,7 @@ class ReportService
         $grandLoanCount = (int) $rows->sum(fn ($r) => (int) $r->loan_count);
         $weightedRate = (float) $rows->sum(fn ($r) => (float) $r->avg_interest_rate * (int) $r->loan_count);
 
-        $products = $rows->map(function ($row) use ($grandReleased) {
+        $products = $rows->map(function ($row) use ($grandReleased, $grandOutstandingPrincipal) {
             // Every ever-released loan: the deprecated alias and PAR read this.
             $remainingPrincipal = round((float) $row->remaining_principal, 2);
             $released = round((float) $row->total_released, 2);
@@ -2805,6 +2867,10 @@ class ReportService
                 // Whole percent, e.g. 12.5 means 12.5%.
                 'par_ratio' => $remainingPrincipal > 0 ? round($atRisk / $remainingPrincipal * 100, 2) : 0.0,
                 'portfolio_share' => $grandReleased > 0 ? round($released / $grandReleased * 100, 2) : 0.0,
+                // Its share of the unpaid principal of every product's
+                // collectible loans, whole percent to two places; null when
+                // nothing is owed.
+                'outstanding_share' => self::sharePercent((float) $row->outstanding_principal, $grandOutstandingPrincipal),
             ];
         })->values()->all();
 
@@ -2812,6 +2878,13 @@ class ReportService
             'as_of_date' => $today->toDateString(),
             'par_threshold_days' => self::PAR_THRESHOLD_DAYS,
             'products' => $products,
+            'outstanding_share_named' => self::OUTSTANDING_SHARE_NAMED,
+            // The products the share names, largest first; the rest are `other`.
+            'named_product_ids' => array_column(
+                array_slice($this->rankedByPrincipal($products), 0, self::OUTSTANDING_SHARE_NAMED),
+                'product_id',
+            ),
+            'other' => $this->otherProductsShare($products, $grandOutstandingPrincipal),
             'totals' => [
                 'product_count' => count($products),
                 'loan_count' => $grandLoanCount,
@@ -2828,6 +2901,47 @@ class ReportService
             ],
             'generated_at' => now()->toDateTimeString(),
         ];
+    }
+
+    /**
+     * The products past the self::OUTSTANDING_SHARE_NAMED largest by unpaid
+     * principal, as one row, so a product share chart names the largest and
+     * shows the rest as "Other" without adding anything up itself. Products
+     * with nothing owed are in neither. Ranked by `outstanding_principal`,
+     * then name, then id.
+     *
+     * @param  list<array<string, mixed>>  $products
+     * @return array{product_count: int, product_ids: list<int>, loan_count: int, outstanding_principal: float, total_outstanding: float, outstanding_share: float|null}
+     */
+    private function otherProductsShare(array $products, float $grandOutstandingPrincipal): array
+    {
+        $rest = array_slice($this->rankedByPrincipal($products), self::OUTSTANDING_SHARE_NAMED);
+        $principal = self::sumOfFigures(array_column($rest, 'outstanding_principal'));
+
+        return [
+            'product_count' => count($rest),
+            'product_ids' => array_column($rest, 'product_id'),
+            'loan_count' => array_sum(array_column($rest, 'loan_count')),
+            'outstanding_principal' => $principal,
+            'total_outstanding' => self::sumOfFigures(array_column($rest, 'total_outstanding')),
+            'outstanding_share' => self::sharePercent($principal, $grandOutstandingPrincipal),
+        ];
+    }
+
+    /**
+     * The products with unpaid principal, largest first, then by name and id.
+     *
+     * @param  list<array<string, mixed>>  $products
+     * @return list<array<string, mixed>>
+     */
+    private function rankedByPrincipal(array $products): array
+    {
+        $owing = array_values(array_filter($products, fn (array $product): bool => $product['outstanding_principal'] > 0));
+
+        usort($owing, fn (array $a, array $b): int => [$b['outstanding_principal'], $a['product_name'], $a['product_id']]
+            <=> [$a['outstanding_principal'], $b['product_name'], $b['product_id']]);
+
+        return $owing;
     }
 
     // ── Officer / Branch Performance ─────────────────────────────────────
@@ -2947,7 +3061,8 @@ class ReportService
             )
             ->leftJoinSub($collectedInPeriod, 'repayment_totals', 'repayment_totals.loan_id', '=', 'loans.id')
             ->whereIn('loans.status', Loan::EVER_RELEASED_STATUSES)
-            ->tap(self::inBranches($branchIds, 'loans.branch_id'));
+            ->tap(self::inBranches($branchIds, 'loans.branch_id'))
+            ->tap(LoanScope::fromFilters($filters)->loans());
 
         if ($dimension === 'officer') {
             $query->leftJoin('users', 'users.id', '=', 'loans.account_officer_id')
@@ -3132,9 +3247,10 @@ class ReportService
      * decimals and is a genuine invariant a test can assert.
      *
      * `date_from` is optional: omit it and the period runs from inception, in
-     * which case `opening_balance` is 0. `share_capital_ledger` has no branch
-     * column, so `branch_id` is honoured through `borrowers.branch_id` and is
-     * applied identically to every figure below.
+     * which case `opening_balance` is 0. `branch_id` is honoured through the
+     * branch each row posted in (BranchAttribution; a row not yet attributed
+     * counts in its member's branch) and is applied identically to every
+     * figure below.
      *
      * `by_member` names every member and their balance, so one call to this
      * report would otherwise hand the complete membership roster to any role
@@ -3161,10 +3277,7 @@ class ReportService
         $branchIds = self::branchScope($filters);
 
         $ledger = fn () => DB::table('share_capital_ledger')
-            ->when($branchIds !== null, fn ($q) => $q->whereIn(
-                'share_capital_ledger.borrower_id',
-                DB::table('borrowers')->whereIn('branch_id', $branchIds)->select('id'),
-            ));
+            ->tap(BranchAttribution::shareCapitalInBranches($branchIds));
 
         $opening = $fromDate === null ? 0.0 : round((float) $ledger()
             ->where('date', '<', $fromDate)
@@ -3192,7 +3305,7 @@ class ReportService
         return [
             'date_from' => $fromDate,
             'date_to' => $toDate,
-            'branch_scope' => $branchIds !== null ? 'borrower_branch' : 'organisation',
+            'branch_scope' => $branchIds !== null ? 'posted_branch' : 'organisation',
             'opening_balance' => $opening,
             'credits' => $credits,
             'debits' => $debits,
@@ -3309,7 +3422,7 @@ class ReportService
 
         return DB::table('share_capital_ledger')
             ->join('borrowers', 'borrowers.id', '=', 'share_capital_ledger.borrower_id')
-            ->tap(self::inBranches($branchIds, 'borrowers.branch_id'))
+            ->tap(BranchAttribution::shareCapitalInBranches($branchIds))
             ->where('share_capital_ledger.date', '<=', $toDate)
             ->groupBy(
                 'borrowers.id',
@@ -3362,10 +3475,7 @@ class ReportService
     private function shareCapitalByMonth(?string $fromDate, string $toDate, ?array $branchIds, float $opening): array
     {
         $monthly = DB::table('share_capital_ledger')
-            ->when($branchIds !== null, fn ($q) => $q->whereIn(
-                'share_capital_ledger.borrower_id',
-                DB::table('borrowers')->whereIn('branch_id', $branchIds)->select('id'),
-            ))
+            ->tap(BranchAttribution::shareCapitalInBranches($branchIds))
             ->when($fromDate, fn ($q, $d) => $q->where('date', '>=', self::filterDay($d)))
             ->where('date', '<=', $toDate)
             ->groupByRaw("DATE_FORMAT(date, '%Y-%m')")
@@ -3546,11 +3656,15 @@ class ReportService
      *
      * @param  list<int>|null  $branchIds
      */
-    private static function loanInBranches(?array $branchIds): Closure
+    private static function loanInBranches(?array $branchIds, ?LoanScope $scope = null): Closure
     {
-        return fn ($query) => $branchIds === null
+        $scope ??= LoanScope::none();
+
+        return fn ($query) => $branchIds === null && $scope->productId === null && $scope->officerId === null
             ? $query
-            : $query->whereHas('loan', fn ($lq) => $lq->whereIn('branch_id', $branchIds));
+            : $query->whereHas('loan', fn ($lq) => $lq
+                ->when($branchIds !== null, fn ($bq) => $bq->whereIn('branch_id', $branchIds))
+                ->tap($scope->loans()));
     }
 
     /**
@@ -3561,11 +3675,12 @@ class ReportService
      * how the collection rate ends up above 100%: payments counted against
      * amounts that were never in the total due.
      */
-    private function releasedLoanScope(?array $branchIds): Closure
+    private function releasedLoanScope(?array $branchIds, ?LoanScope $scope = null): Closure
     {
         return fn ($q) => $q
             ->whereIn('status', Loan::EVER_RELEASED_STATUSES)
-            ->tap(self::inBranches($branchIds, 'branch_id'));
+            ->tap(self::inBranches($branchIds, 'branch_id'))
+            ->tap(($scope ?? LoanScope::none())->loans());
     }
 
     /**

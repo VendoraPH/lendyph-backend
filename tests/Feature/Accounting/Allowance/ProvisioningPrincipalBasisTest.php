@@ -77,7 +77,7 @@ class ProvisioningPrincipalBasisTest extends TestCase
         $report = $this->report();
 
         $this->assertSame(
-            ['as_of_date', 'buckets', 'totals', 'rates', 'policy_note', 'generated_at', 'principal_basis'],
+            ['as_of_date', 'buckets', 'totals', 'rates', 'policy_note', 'generated_at', 'principal_basis', 'filters_applied', 'filters_applied_to'],
             array_keys($report),
         );
         $this->assertSame(['amount', 'count', 'rate', 'rate_percent', 'required_allowance'], array_keys($report['buckets']['1_30']));

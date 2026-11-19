@@ -133,7 +133,7 @@ class LoanAgingListTest extends TestCase
         $row = $response->json('data.0');
 
         $this->assertSame([
-            'loan_id', 'account_number', 'member', 'branch', 'display_status', 'oldest_late_due_date',
+            'loan_id', 'account_number', 'member', 'branch', 'product', 'last_payment_date', 'display_status', 'oldest_late_due_date',
             'days_past_due', 'bucket', 'is_past_due', 'outstanding_principal', 'total_outstanding', 'past_due_amount',
         ], array_keys($row));
         $this->assertSame(['id' => $member->id, 'name' => 'Maria Santos', 'code' => $member->fresh()->borrower_code], $row['member']);

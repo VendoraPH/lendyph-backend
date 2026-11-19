@@ -17,7 +17,8 @@ use App\Services\ShareCapitalMemberService;
  * bookTotals()) as of today: the balance, what was paid in (credits) and
  * taken out (debits), and how many members hold share capital, in the
  * caller's branches or the one named. It needs `share_capital:view`, as the
- * list does. Never a member's name or code.
+ * list does. Never a member's name or code. A branch figure is each member's
+ * whole balance in the branch they are in now, and says so.
  */
 final class ShareCapitalSummaryAnswer extends Answer
 {
@@ -43,9 +44,16 @@ final class ShareCapitalSummaryAnswer extends Answer
         $totals = $this->members->bookTotals($scope->branchId === null ? $scope->branchIds : [$scope->branchId]);
         $count = (int) $totals['member_count'];
 
+        // The member list counts each member's whole balance in the branch
+        // they are in now, not the branch each entry posted in (Phase 6
+        // MB-BE3), so a branch figure says so. Organisation-wide, the two agree.
+        $figure = $scope->branchId === null && $scope->branchIds === null
+            ? 'share capital '.W::forScope($scope)
+            : 'share capital held by members now in '.$scope->label;
+
         $answer = $count === 0
             ? W::asOfToday().', no member holds share capital '.W::forScope($scope).'.'
-            : W::asOfToday().', share capital '.W::forScope($scope).' is '.W::money($totals['balance']).', held by '
+            : W::asOfToday().', '.$figure.' is '.W::money($totals['balance']).', held by '
                 .W::count($count, 'member').' ('.W::money($totals['total_credits']).' paid in, '
                 .W::money($totals['total_debits']).' taken out).';
 

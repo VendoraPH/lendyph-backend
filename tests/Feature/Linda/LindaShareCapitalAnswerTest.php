@@ -72,6 +72,24 @@ class LindaShareCapitalAnswerTest extends LindaTopicTestCase
         $this->assertSame('denied', $this->ask($this->headOffice(), LindaIntent::ShareCapitalSummary)->outcome);
     }
 
+    /**
+     * The member list counts each member's whole balance in their current
+     * branch (Phase 6 MB-BE3), so a branch figure says it is held by members
+     * now in that branch; the organisation-wide wording is unchanged.
+     */
+    public function test_a_branch_figure_says_it_is_held_by_members_now_in_that_branch(): void
+    {
+        $far = $this->ask($this->headOffice(['share_capital:view']), LindaIntent::ShareCapitalSummary, branch: 'Far')->answer;
+        $this->assertMatchesRegularExpression('/share capital held by members now in [^,]*Far[^,]* is ₱3,000\.00, held by 1 member \(/u', $far);
+
+        $own = $this->ask($this->branchUser(['share_capital:view']), LindaIntent::ShareCapitalSummary)->answer;
+        $this->assertStringContainsString('share capital held by members now in ', $own);
+
+        $all = $this->ask($this->headOffice(['share_capital:view']), LindaIntent::ShareCapitalSummary)->answer;
+        $this->assertStringContainsString('share capital across all branches is ', $all);
+        $this->assertStringNotContainsString('members now in', $all);
+    }
+
     public function test_share_capital_questions_route_to_the_share_capital_intent(): void
     {
         foreach ([

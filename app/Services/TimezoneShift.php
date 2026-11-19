@@ -327,11 +327,17 @@ class TimezoneShift
         'amla_reviews' => ['created_at'],
         'amla_risk_assessments' => ['created_at'],
         'amla_risk_rule_versions' => ['created_at', 'effective_at'],
+        // Added 2026-11-19 with the executive dashboard's alert thresholds
+        // (Phase 6 EB-C), well after the cutover, for the same reason.
+        'dashboard_settings' => ['created_at', 'updated_at'],
         // A column added to a table the shift covers. Listed here, not in
         // COLUMNS, because it was added after the one-shot shift ran, and
         // because the shift reads COLUMNS on a fresh database before this
         // column exists. The rest of `documents` stays in COLUMNS.
         'documents' => ['portal_shared_at'],
+        // Phase 6 MB-BE1 (2026-11-19): closure requests, well after the
+        // cutover. `effective_on` is a DATE.
+        'branch_closures' => ['created_at', 'decided_at', 'updated_at'],
         // The shift's own bookkeeping, written after the cutover by definition.
         'timezone_shifts' => ['completed_at', 'cutover_at', 'started_at'],
     ];
