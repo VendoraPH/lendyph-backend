@@ -11,6 +11,7 @@ use App\Models\GCashTransaction;
 use App\Models\LindaSetting;
 use App\Models\Loan;
 use App\Models\Role;
+use App\Models\ShareCapitalLedger;
 use App\Models\User;
 use App\Services\AuditLogModules;
 use App\Traits\Auditable;
@@ -45,10 +46,11 @@ function explicitAuditWriters(): array
         CoMaker::class,                  // DocumentController (a document's owner)
         CsvImportRun::class,             // CsvImportMappingController, CsvImportProcessor
         GCashNonMember::class,           // GCashNonMemberController
-        GCashTransaction::class,         // GCashService, GCashCashInPaidAtBackfill
+        GCashTransaction::class,         // GCashService, GCashCashInPaidAtBackfill, BranchAttributionBackfill
         LindaSetting::class,             // LindaSettings (the model change)
         Loan::class,                     // LoanService, CollateralAttacher, migrations
         Role::class,                     // RolePermissionAudit
+        ShareCapitalLedger::class,       // BranchAttributionBackfill
         User::class,                     // AuthController, UserController
     ];
 }
