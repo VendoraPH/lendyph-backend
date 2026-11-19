@@ -51,7 +51,8 @@ use Throwable;
  * real rows silently. The NULL `result` is the only marker that cannot lie,
  * because it commits with the work.
  *
- * The window is then `id > $cursor AND id <= $cursor + CHUNK_SIZE`, the shape
+ * The window is then `id > $cursor AND id <= $cursor + <window size>` (CHUNK_SIZE,
+ * or LOANS_CHUNK_SIZE in the loans phase), the shape
  * TimezoneShift::apply() uses: it advances by a fixed amount whether or not the
  * rows inside it matched, so the walk terminates by construction rather than by
  * relying on rows falling out of their own WHERE clause.
@@ -78,6 +79,19 @@ class CsvImportProcessor
      * teller's "Save" spin.
      */
     public const CHUNK_SIZE = 50;
+
+    /**
+     * Rows per transaction in the loans phase, smaller than CHUNK_SIZE.
+     *
+     * A loan row rebuilds its whole schedule, so it costs many times a member
+     * row, and the command only checks its budget between windows. The import
+     * screen also measures progress from the run row, which moves once per
+     * committed window. A small window keeps a tick close to its budget, shows
+     * progress often, and limits what a killed tick makes the next one retry
+     * row by row. Only the batching changes: each loan is written exactly as in
+     * a larger window.
+     */
+    public const LOANS_CHUNK_SIZE = 10;
 
     /**
      * How many times a row may be picked up before it is given up on.
@@ -326,7 +340,7 @@ class CsvImportProcessor
 
         $this->markInvalidRowsSkipped($file);
 
-        $rows = $this->nextWindow($file);
+        $rows = $this->nextWindow($file, self::CHUNK_SIZE);
 
         if ($rows === []) {
             return $this->finishCustomers($run);
@@ -385,7 +399,7 @@ class CsvImportProcessor
 
         $this->markInvalidRowsSkipped($file);
 
-        $rows = $this->nextWindow($file);
+        $rows = $this->nextWindow($file, self::LOANS_CHUNK_SIZE);
 
         if ($rows === []) {
             return $this->completeRun($run);
@@ -485,7 +499,7 @@ class CsvImportProcessor
      *
      * @return list<CsvImportRow>
      */
-    private function nextWindow(CsvImportFile $file): array
+    private function nextWindow(CsvImportFile $file, int $size): array
     {
         $min = DB::table('csv_import_rows')
             ->where('csv_import_file_id', $file->id)
@@ -504,7 +518,7 @@ class CsvImportProcessor
             ->where('status', 'valid')
             ->whereNull('result')
             ->where('id', '>', $cursor)
-            ->where('id', '<=', $cursor + self::CHUNK_SIZE)
+            ->where('id', '<=', $cursor + $size)
             ->orderBy('id')
             ->get()
             ->all();
@@ -564,6 +578,17 @@ class CsvImportProcessor
 
         if ($workable === []) {
             return count($rows);
+        }
+
+        if ($retrying) {
+            // A tick killed mid-window leaves no log line of its own, so this
+            // is the first moment anyone can know it happened.
+            Log::warning('csv-import: resuming a window an interrupted tick left, row by row', [
+                'csv_import_run_id' => $run->id,
+                'shape' => $shape,
+                'rows' => count($workable),
+                'from_row_id' => $workable[0]->id,
+            ]);
         }
 
         if (! $retrying) {

@@ -296,6 +296,39 @@ jobs:
               esac
             fi
 
+            # --- The scheduler: one schedule:run line for THIS folder ---------------------
+            # binhs-coop's boxes ran the scheduler only from a crontab line added by hand,
+            # which nothing installed or checked, while deploy-staging.yml,
+            # deploy-production.yml and deploy-portfolio.yml each install theirs. Without
+            # it, CSV imports never advance and the nightly jobs (penalties, past-due
+            # notices, portfolio snapshots) never run.
+            # A line for this folder in ANY common form, in any crontab or /etc/cron.d,
+            # counts as present: a second line would run every scheduled job twice a
+            # minute. The terminator after the folder ("cd DIR " / "cd DIR;" / "cd DIR&"
+            # or "DIR/artisan ") keeps production's /var/www/binhs-coop-backend from
+            # matching staging's longer /var/www/binhs-coop-backend-staging.
+            sched_lines() {
+              { crontab -l 2>/dev/null
+                for f in /var/spool/cron/crontabs/*; do [ -r "$f" ] && cat "$f"; done
+                cat /etc/crontab /etc/cron.d/* 2>/dev/null
+              } | grep -v '^[[:space:]]*#' | grep -F 'schedule:run' \
+                | grep -E "(cd ${DEPLOY_DIR}( |;|&)|${DEPLOY_DIR}/artisan )" | sort -u || true
+            }
+            if [ -z "$(sched_lines)" ]; then
+              # Same line shape and same lock as the other three deploy workflows, so
+              # two environments deploying at once can't drop each other's entry.
+              export CRON_JOB="cd $DEPLOY_DIR && php artisan schedule:run"
+              export CRON_LINE="* * * * * $CRON_JOB >> /dev/null 2>&1"
+              flock /var/lock/lendyph-scheduler-crontab.lock bash -c 'crontab -l 2>/dev/null | grep -qF "$CRON_JOB" || (crontab -l 2>/dev/null; echo "$CRON_LINE") | crontab -'
+              echo "scheduler cron added: $CRON_LINE"
+            fi
+            # Fail loudly rather than leave the box without a scheduler.
+            if [ -z "$(sched_lines)" ]; then
+              echo "::error title=No scheduler::no schedule:run line for $DEPLOY_DIR"
+              exit 1
+            fi
+            echo "scheduler cron present for $DEPLOY_DIR"
+
             # --- Did this deploy actually land? -----------------------------------------
             # Nothing here used to assert the OUTCOME of a deploy. A green job proved that
             # ssh connected and the deploy script exited 0 — not that the checkout moved.
@@ -505,6 +538,39 @@ jobs:
                 *) echo "::warning title=Config cache folder reopened::deploy.sh changed it to $mode; config.php was reachable until the reset" ;;
               esac
             fi
+
+            # --- The scheduler: one schedule:run line for THIS folder ---------------------
+            # binhs-coop's boxes ran the scheduler only from a crontab line added by hand,
+            # which nothing installed or checked, while deploy-staging.yml,
+            # deploy-production.yml and deploy-portfolio.yml each install theirs. Without
+            # it, CSV imports never advance and the nightly jobs (penalties, past-due
+            # notices, portfolio snapshots) never run.
+            # A line for this folder in ANY common form, in any crontab or /etc/cron.d,
+            # counts as present: a second line would run every scheduled job twice a
+            # minute. The terminator after the folder ("cd DIR " / "cd DIR;" / "cd DIR&"
+            # or "DIR/artisan ") keeps production's /var/www/binhs-coop-backend from
+            # matching staging's longer /var/www/binhs-coop-backend-staging.
+            sched_lines() {
+              { crontab -l 2>/dev/null
+                for f in /var/spool/cron/crontabs/*; do [ -r "$f" ] && cat "$f"; done
+                cat /etc/crontab /etc/cron.d/* 2>/dev/null
+              } | grep -v '^[[:space:]]*#' | grep -F 'schedule:run' \
+                | grep -E "(cd ${DEPLOY_DIR}( |;|&)|${DEPLOY_DIR}/artisan )" | sort -u || true
+            }
+            if [ -z "$(sched_lines)" ]; then
+              # Same line shape and same lock as the other three deploy workflows, so
+              # two environments deploying at once can't drop each other's entry.
+              export CRON_JOB="cd $DEPLOY_DIR && php artisan schedule:run"
+              export CRON_LINE="* * * * * $CRON_JOB >> /dev/null 2>&1"
+              flock /var/lock/lendyph-scheduler-crontab.lock bash -c 'crontab -l 2>/dev/null | grep -qF "$CRON_JOB" || (crontab -l 2>/dev/null; echo "$CRON_LINE") | crontab -'
+              echo "scheduler cron added: $CRON_LINE"
+            fi
+            # Fail loudly rather than leave the box without a scheduler.
+            if [ -z "$(sched_lines)" ]; then
+              echo "::error title=No scheduler::no schedule:run line for $DEPLOY_DIR"
+              exit 1
+            fi
+            echo "scheduler cron present for $DEPLOY_DIR"
 
             # --- Did this deploy actually land? -----------------------------------------
             # Nothing here used to assert the OUTCOME of a deploy. A green job proved that
