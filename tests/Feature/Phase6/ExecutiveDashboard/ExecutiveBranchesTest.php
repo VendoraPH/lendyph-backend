@@ -130,6 +130,77 @@ class ExecutiveBranchesTest extends TestCase
         $this->getJson("/api/dashboard/executive/branches?branch_id={$this->branch->id}")->assertForbidden();
     }
 
+    public function test_each_column_says_which_filters_it_followed(): void
+    {
+        $data = $this->branches("product_id={$this->there->loan_product_id}&collector_id={$this->admin->id}");
+        $columns = $data['filters_applied'];
+
+        $this->assertSame(['product_id'], $columns['gross_loan_portfolio']);
+        $this->assertSame(['product_id'], $columns['loans_released']);
+        $this->assertSame(['product_id', 'collector_id'], $columns['collections']);
+        $this->assertSame(['product_id', 'collector_id'], $columns['collected_insurance']);
+        $this->assertSame(['product_id'], $columns['collection_efficiency']);
+        foreach (['revenue', 'expenses', 'net'] as $books) {
+            $this->assertSame([], $columns[$books], "{$books}: the books follow the branch only.");
+        }
+
+        $rows = collect($data['rows'])->keyBy('branch_id');
+        $this->assertEquals(30000, $rows[$this->other->id]['gross_loan_portfolio']);
+        $this->assertEquals(0, $rows[$this->branch->id]['gross_loan_portfolio'], 'The product is the other branch\'s.');
+    }
+
+    public function test_a_less_privileged_caller_never_reads_an_admin_s_cached_books(): void
+    {
+        $this->branches();
+
+        $this->actingAs($this->userWith(['dashboard:analytics', 'reports:view', 'branches:view_all']));
+        $data = $this->branches();
+
+        $this->assertSame('no_access', $data['books_state']);
+        $this->assertNull(collect($data['rows'])->firstWhere('branch_id', null));
+        $this->assertSame([null], array_values(array_unique(array_column($data['rows'], 'net'))));
+        $this->assertNull($data['totals']['revenue']);
+    }
+
+    public function test_a_branch_filter_leaves_out_the_no_branch_row(): void
+    {
+        $data = $this->branches("branch_id={$this->branch->id}");
+
+        $this->assertSame([$this->branch->id], array_column($data['rows'], 'branch_id'));
+    }
+
+    public function test_a_branch_the_books_hold_but_the_loans_don_t_gets_a_row(): void
+    {
+        $closed = Branch::factory()->create(['is_active' => false]);
+        $this->postSimpleJournal('1010', '4010', 75000, ['date' => '2026-11-06', 'branch_id' => $closed->id]);
+
+        $data = $this->branches();
+        $row = collect($data['rows'])->firstWhere('branch_id', $closed->id);
+
+        $this->assertNotNull($row, 'So the rows add up to the books.');
+        $this->assertEquals(750, $row['revenue']);
+        $this->assertEquals(0, $row['gross_loan_portfolio']);
+        $this->assertEquals($data['totals']['net'], round(collect($data['rows'])->sum('net'), 2));
+    }
+
+    public function test_releases_are_cash_flow_s_own_principal_per_branch(): void
+    {
+        $cashFlow = $this->report('cash-flow', self::PERIOD);
+        $rows = collect($this->branches()['rows'])->keyBy('branch_id');
+
+        foreach ($cashFlow['by_branch'] as $flowRow) {
+            if ($flowRow['branch_id'] !== null) {
+                $this->assertEquals($flowRow['principal_released'], $rows[$flowRow['branch_id']]['loans_released']);
+            }
+        }
+        $this->assertEquals($cashFlow['non_cash']['principal_released'], $cashFlow['by_branch_totals']['principal_released']);
+    }
+
+    public function test_the_table_says_when_it_was_worked_out(): void
+    {
+        $this->assertSame(now()->toDateTimeString(), $this->branches()['generated_at']);
+    }
+
     public function test_it_needs_the_executive_dashboard_and_reports(): void
     {
         $this->actingAs($this->userWith(['dashboard:analytics']));

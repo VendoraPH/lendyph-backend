@@ -109,6 +109,37 @@ class ParLoansTest extends TestCase
         $this->assertCount(3, $this->getJson('/api/dashboard/executive/par-loans')->assertOk()->json('data'), 'PAR 30 by default.');
     }
 
+    public function test_it_pages_on_the_server(): void
+    {
+        $second = $this->getJson('/api/dashboard/executive/par-loans?par=1&per_page=2&page=2')->assertOk();
+
+        $this->assertSame([$this->loans[31]->id, $this->loans[10]->id], array_column($second->json('data'), 'loan_id'));
+        $this->assertSame(4, $second->json('meta.total'));
+        $this->assertSame(2, $second->json('meta.last_page'));
+        $this->assertSame(4, $second->json('meta.totals.loans'), 'Totals cover every page.');
+
+        $this->getJson('/api/dashboard/executive/par-loans?per_page=101')->assertUnprocessable()->assertJsonValidationErrors('per_page');
+    }
+
+    public function test_totals_follow_the_branch_and_the_filters(): void
+    {
+        $other = Branch::factory()->create();
+        DB::table('loans')->where('id', $this->loans[61]->id)->update(['branch_id' => $other->id]);
+
+        $this->actingAs($this->userWith(['dashboard:analytics', 'reports:view', 'loans:view'], $other));
+        $summary = $this->getJson('/api/reports/loan-balance-summary')->assertOk()->json('data');
+        $page = $this->getJson('/api/dashboard/executive/par-loans?par=30')->assertOk();
+        $this->assertSame($summary['par_30']['loans'], $page->json('meta.totals.loans'));
+        $this->assertEquals($summary['par_30']['amount'], $page->json('meta.totals.outstanding_principal'));
+
+        $this->actingAs($this->admin);
+        $product = $this->loans[95]->loan_product_id;
+        $summary = $this->getJson("/api/reports/loan-balance-summary?product_id={$product}")->assertOk()->json('data');
+        $page = $this->getJson("/api/dashboard/executive/par-loans?par=30&product_id={$product}")->assertOk();
+        $this->assertSame(1, $page->json('meta.totals.loans'));
+        $this->assertEquals($summary['par_30']['amount'], $page->json('meta.totals.outstanding_principal'));
+    }
+
     public function test_the_product_and_officer_filters_narrow_it(): void
     {
         $page = $this->getJson("/api/dashboard/executive/par-loans?par=30&product_id={$this->loans[61]->loan_product_id}")->assertOk();

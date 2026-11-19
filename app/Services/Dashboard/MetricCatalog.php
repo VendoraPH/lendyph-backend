@@ -72,7 +72,9 @@ final class MetricCatalog
         'by_branch.*.outflow_total',
         'by_branch.*.release_count',
         'by_branch.*.total_deductions',
+        'by_branch.*.principal_released',
         'by_branch_totals.outflow_net_proceeds',
+        'by_branch_totals.principal_released',
         'by_branch_totals.outflow_total',
     ];
 

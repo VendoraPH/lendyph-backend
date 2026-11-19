@@ -69,19 +69,19 @@ final class ExecutiveOverview
      */
     public function build(User $user, DashboardPeriod $period, array $filters, ?array $scope): array
     {
-        $key = 'dashboard:executive:overview:v1:'.sha1((string) json_encode([
-            DashboardPeriod::today()->toDateString(),
-            $period->toArray(),
-            $scope,
-            $filters['product_id'] ?? null,
-            $filters['officer_id'] ?? null,
-            $filters['collector_id'] ?? null,
-        ]));
+        $key = ExecutiveCacheKey::for('overview', $period, $scope, $filters);
 
-        $cards = Cache::remember($key, self::CACHE_SECONDS, fn (): array => $this->cards($period, $filters, $scope));
+        $cached = Cache::remember($key, self::CACHE_SECONDS, fn (): array => [
+            'generated_at' => now()->toDateTimeString(),
+            'cards' => $this->cards($period, $filters, $scope),
+        ]);
+        $cards = $cached['cards'];
 
         return [
             'period' => $period->toArray(),
+            // When the figures were worked out: they're cached for
+            // self::CACHE_SECONDS, so a payment just made may not be in them.
+            'generated_at' => $cached['generated_at'],
             'filters_applied' => LoanScope::fromFilters($filters)->applied(['product_id', 'officer_id', 'collector_id'])['filters_applied'],
             'cards' => array_map(fn (array $card): array => self::forCaller($card, $user), $cards),
         ];
@@ -105,6 +105,7 @@ final class ExecutiveOverview
                     'value' => null,
                     'previous_value' => null,
                     'change' => null,
+                    'previous_as_of' => null,
                     'state' => 'no_access',
                     'details' => [],
                 ];

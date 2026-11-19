@@ -11,6 +11,7 @@ use App\Services\PortfolioRisk;
 use App\Services\ReportService;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\DB;
 
 /**
  * The executive dashboard's branch table (Phase 6 EB-D1): one row per branch
@@ -36,6 +37,23 @@ final class ExecutiveBranches
 {
     public const NO_BRANCH = 'No branch';
 
+    /** Each column's catalogue metric, whose `filters` say which filters it follows. */
+    private const COLUMN_METRICS = [
+        'gross_loan_portfolio' => 'gross_loan_portfolio',
+        'total_outstanding' => 'total_outstanding',
+        'active_loans' => 'active_loans',
+        'past_due_amount' => 'past_due_amount',
+        'past_due_loans' => 'past_due_amount',
+        'par_30' => 'par_30',
+        'loans_released' => 'loans_released',
+        'collections' => 'collections',
+        'collected_insurance' => 'collected_insurance',
+        'collection_efficiency' => 'collection_efficiency',
+        'revenue' => 'net_income',
+        'expenses' => 'net_income',
+        'net' => 'net_income',
+    ];
+
     public function __construct(
         private ReportService $reports,
         private LoanListTotals $listTotals,
@@ -50,16 +68,12 @@ final class ExecutiveBranches
      */
     public function build(User $user, DashboardPeriod $period, array $filters, ?array $scope): array
     {
-        $key = 'dashboard:executive:branches:v1:'.sha1((string) json_encode([
-            DashboardPeriod::today()->toDateString(),
-            $period->toArray(),
-            $scope,
-            $filters['product_id'] ?? null,
-            $filters['officer_id'] ?? null,
-            $filters['collector_id'] ?? null,
-        ]));
+        $key = ExecutiveCacheKey::for('branches', $period, $scope, $filters);
 
-        $table = Cache::remember($key, ExecutiveOverview::CACHE_SECONDS, fn (): array => $this->table($period, $filters, $scope));
+        $table = Cache::remember($key, ExecutiveOverview::CACHE_SECONDS, fn (): array => [
+            'generated_at' => now()->toDateTimeString(),
+            ...$this->table($period, $filters, $scope),
+        ]);
 
         if ($table['books_state'] === 'ready' && ! $user->can('accounting:view')) {
             $table['books_state'] = 'no_access';
@@ -75,7 +89,7 @@ final class ExecutiveBranches
 
         return [
             'period' => $period->toArray(),
-            'filters_applied' => LoanScope::fromFilters($filters)->applied(['product_id', 'officer_id', 'collector_id'])['filters_applied'],
+            'filters_applied' => self::filtersByColumn($filters),
             ...$table,
         ];
     }
@@ -122,12 +136,39 @@ final class ExecutiveBranches
                 'past_due_amount' => $pastDue[(string) $id]['overdue_amount'] ?? 0.0,
                 'past_due_loans' => $pastDue[(string) $id]['overdue_count'] ?? 0,
                 'par_30' => $par[(string) $id]['par_30'] ?? $noPar,
-                'loans_released' => $cash === null ? 0.0 : round($cash['outflow_net_proceeds'] + $cash['total_deductions'], 2),
+                'loans_released' => $cash['principal_released'] ?? 0.0,
                 'collections' => $cash === null ? 0.0 : round($cash['inflow_repayments'] - $cash['inflow_insurance'], 2),
                 'collected_insurance' => $cash['inflow_insurance'] ?? 0.0,
                 'collection_efficiency' => $efficiencyRows->get($id)['collection_rate'] ?? 0.0,
                 ...$bookFigures($id),
             ];
+        }
+
+        // A branch the books hold but the loans don't (an inactive branch with
+        // journals), so the rows add up to the books. Only every-branch
+        // callers can reach a branch that isn't in their scope's rows.
+        if ($booksReady && $scope === null) {
+            $listed = array_column($rows, 'branch_id');
+            $unlisted = array_values(array_diff(array_filter(array_keys($books), 'is_int'), $listed));
+            $names = DB::table('branches')->whereIn('id', $unlisted)->pluck('name', 'id');
+
+            foreach ($unlisted as $id) {
+                $rows[] = [
+                    'branch_id' => $id,
+                    'branch_name' => $names[$id] ?? null,
+                    'gross_loan_portfolio' => 0.0,
+                    'total_outstanding' => 0.0,
+                    'active_loans' => 0,
+                    'past_due_amount' => 0.0,
+                    'past_due_loans' => 0,
+                    'par_30' => $noPar,
+                    'loans_released' => 0.0,
+                    'collections' => 0.0,
+                    'collected_insurance' => 0.0,
+                    'collection_efficiency' => 0.0,
+                    ...$bookFigures($id),
+                ];
+            }
         }
 
         if ($booksReady && $scope === null) {
@@ -171,6 +212,26 @@ final class ExecutiveBranches
                 'net' => $statement === null ? null : $statement['net_income'] / 100,
             ],
         ];
+    }
+
+    /**
+     * The filters the caller sent that each column followed, by column, from
+     * its catalogue metric: the books follow none of them (journal branch
+     * only), and of the lending columns only collections and collected
+     * insurance follow the collector.
+     *
+     * @param  array<string, mixed>  $filters
+     * @return array<string, list<string>>
+     */
+    private static function filtersByColumn(array $filters): array
+    {
+        $sent = LoanScope::fromFilters($filters)->applied(['product_id', 'officer_id', 'collector_id'])['filters_applied'];
+        $metrics = MetricCatalog::all();
+
+        return array_map(
+            fn (string $metric): array => array_values(array_intersect($sent, $metrics[$metric]['filters'])),
+            self::COLUMN_METRICS,
+        );
     }
 
     /**

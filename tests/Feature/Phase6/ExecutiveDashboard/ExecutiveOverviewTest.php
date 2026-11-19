@@ -9,6 +9,8 @@ use App\Models\Role;
 use App\Models\ShareCapitalLedger;
 use App\Models\User;
 use App\Services\Accounting\IncomeStatementBuilder;
+use App\Services\Dashboard\DashboardPeriod;
+use App\Services\Dashboard\ExecutiveCacheKey;
 use App\Services\RepaymentService;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Cache;
@@ -218,6 +220,7 @@ class ExecutiveOverviewTest extends TestCase
             $this->assertNull($card['previous_value'], $key);
             $this->assertNull($card['change'], $key);
             $this->assertSame([], $card['details'], $key);
+            $this->assertNull($card['previous_as_of'], "{$key}: nothing about what lies behind it.");
         }
 
         $this->actingAs($this->userWith(['dashboard:analytics', 'reports:view']));
@@ -231,6 +234,37 @@ class ExecutiveOverviewTest extends TestCase
         $cards = $this->overview()['cards'];
         $this->assertSame('ready', $cards['share_capital']['state']);
         $this->assertSame('ready', $cards['net_income']['state']);
+    }
+
+    public function test_the_overview_says_when_it_was_worked_out(): void
+    {
+        $this->assertSame(now()->toDateTimeString(), $this->overview()['generated_at']);
+    }
+
+    public function test_a_filter_must_name_a_real_record(): void
+    {
+        foreach (['product_id', 'officer_id', 'collector_id'] as $filter) {
+            $this->getJson("/api/dashboard/executive/overview?{$filter}=999999")->assertUnprocessable()->assertJsonValidationErrors($filter);
+        }
+    }
+
+    public function test_the_cache_key_ignores_the_order_and_form_of_the_branch_ids(): void
+    {
+        $period = DashboardPeriod::resolve('this_month');
+        $filters = ['product_id' => '7', 'officer_id' => null, 'collector_id' => null];
+
+        $this->assertSame(
+            ExecutiveCacheKey::for('overview', $period, [5, 3], $filters),
+            ExecutiveCacheKey::for('overview', $period, ['3', '+5'], ['product_id' => 7]),
+        );
+        $this->assertNotSame(
+            ExecutiveCacheKey::for('overview', $period, [3, 5], $filters),
+            ExecutiveCacheKey::for('overview', $period, [3], $filters),
+        );
+        $this->assertNotSame(
+            ExecutiveCacheKey::for('overview', $period, null, $filters),
+            ExecutiveCacheKey::for('branches', $period, null, $filters),
+        );
     }
 
     public function test_it_needs_the_executive_dashboard(): void

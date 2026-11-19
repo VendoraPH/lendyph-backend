@@ -44,9 +44,12 @@ class ExecutiveDashboardRequest extends FormRequest
             'date_from' => ['nullable', 'date_format:Y-m-d'],
             'date_to' => ['nullable', 'date_format:Y-m-d'],
             'branch_id' => ['nullable', 'integer', 'min:1'],
-            'product_id' => ['nullable', 'integer', 'min:1'],
-            'officer_id' => ['nullable', 'integer', 'min:1'],
-            'collector_id' => ['nullable', 'integer', 'min:1'],
+            // Real records only, so a made-up id can't buy an uncached run of
+            // every report. An id outside the caller's branches still reads
+            // nothing: every figure stays in their branches.
+            'product_id' => ['nullable', 'integer', 'min:1', Rule::exists('loan_products', 'id')],
+            'officer_id' => ['nullable', 'integer', 'min:1', Rule::exists('users', 'id')],
+            'collector_id' => ['nullable', 'integer', 'min:1', Rule::exists('users', 'id')],
         ];
     }
 
