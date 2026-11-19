@@ -15,6 +15,7 @@ use App\Services\Amla\Cdd\CddRecords;
 use App\Services\Amla\Cdd\CddState;
 use App\Services\Amla\Cdd\CddSubjects;
 use App\Services\Amla\Cdd\CddWorklist;
+use App\Services\Amla\Cdd\MaskedIds;
 use App\Services\Amla\Foundation\AmlaAccess;
 use App\Services\Amla\Foundation\AmlaLog;
 use App\Services\BranchAccess;
@@ -95,6 +96,24 @@ class AmlaCddController extends Controller
         ]);
 
         return $this->respond($subject);
+    }
+
+    #[OA\Get(
+        path: '/api/amla/cdd/{subjectType}/{id}/valid-ids',
+        summary: 'A subject\'s IDs, masked',
+        description: 'Needs `amla:cdd` (and `branches:view_all` for a walk-in), checked before the lookup; another branch\'s member answers 404. For the CDD ID picker: each ID once (whatever sides were uploaded) as `document_id`, `id_type` (a fixed key), `id_type_words` and `id_number_masked` (****last four), never the full number, so the screen needs no `borrowers:view`. A walk-in\'s ID on record has no `document_id`. Logged to the AMLA log.',
+        tags: ['AMLA'],
+        security: [['sanctum' => []]],
+        responses: [new OA\Response(response: 200, description: 'The IDs'), new OA\Response(response: 403, description: 'Missing amla:cdd, in words'), new OA\Response(response: 404, description: 'Not found, or not in scope')],
+    )]
+    public function validIds(Request $request, string $subjectType, int $id): JsonResponse
+    {
+        $this->access->authorize($request->user(), AmlaAccess::CDD);
+        $subject = $this->subjects->resolve($request->user(), $subjectType, $id);
+
+        $this->log->record('cdd_valid_ids_viewed', $request->user(), CddSubjects::type($subject), $subject->getKey());
+
+        return response()->json(['success' => true, 'data' => MaskedIds::of($subject)]);
     }
 
     #[OA\Put(

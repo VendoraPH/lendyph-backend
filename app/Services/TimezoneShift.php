@@ -339,6 +339,15 @@ class TimezoneShift
         'amla_event_failures' => ['created_at', 'last_attempted_at', 'resolved_at'],
         'amla_events' => ['created_at', 'recorded_at', 'reversed_at'],
         'amla_harvest_cursors' => ['created_at', 'started_at', 'updated_at', 'watermark'],
+        // Added 2026-11-21 with AMLA screening and orders (AMLA-B5), for the same
+        // reason. `amla_orders.received_on` and `return_due_on` are DATEs.
+        'amla_order_holds' => ['created_at'],
+        'amla_order_release_requests' => ['created_at', 'decided_at', 'updated_at'],
+        'amla_orders' => ['created_at', 'released_at', 'updated_at'],
+        'amla_screening_cursors' => ['created_at', 'updated_at', 'watermark'],
+        'amla_screening_matches' => ['created_at', 'decided_at', 'updated_at'],
+        'amla_watchlist_entries' => ['created_at'],
+        'amla_watchlist_versions' => ['created_at', 'rescreened_at', 'superseded_at'],
         // Phase 6 AMLA-B3 (2026-11-21): detection rules, CTR candidates, alerts
         // and the detection cursor, well after the cutover. `occurred_on`,
         // `window_start` and `window_end` are DATEs.

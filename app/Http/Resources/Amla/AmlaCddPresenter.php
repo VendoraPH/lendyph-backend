@@ -125,7 +125,7 @@ final class AmlaCddPresenter
             'document_id' => $verification->document_id,
             'id_type' => $verification->id_type,
             'id_type_words' => IdTypes::words($verification->id_type),
-            'id_number_masked' => $verification->id_number_last4 === null ? null : '****'.$verification->id_number_last4,
+            'id_number_masked' => '****'.($verification->id_number_last4 ?? ''),
             'method' => $verification->method,
             'method_words' => AmlaIdVerification::METHODS[$verification->method] ?? $verification->method,
             'result' => $verification->result,

@@ -128,7 +128,7 @@ final class CddRecords
                 'profile_id' => $profile->id,
                 'document_id' => $documentId,
                 'id_type' => $idType,
-                'id_number_last4' => $normalised === '' ? null : mb_substr($normalised, -4),
+                'id_number_last4' => mb_strlen($normalised) <= MaskedIds::SHOWN ? null : mb_substr($normalised, -MaskedIds::SHOWN),
                 'method' => $input['method'],
                 'result' => $input['result'],
                 'expires_on' => $input['expires_on'] ?? null,
