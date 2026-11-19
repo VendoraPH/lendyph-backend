@@ -2,6 +2,7 @@
 
 namespace App\Services\LoanOrigination\Intake;
 
+use App\Http\Middleware\TrustFrontendProxy;
 use App\Models\Branch;
 use App\Models\BrandingSetting;
 use App\Models\LoanProduct;
@@ -12,6 +13,8 @@ use App\Models\OriginationSetting;
 use App\Services\LoanOrigination\Files\OriginationFileStore;
 use App\Services\LoanOrigination\OriginationNotices;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Log;
 
 /**
  * What a public link shows and offers (origination decisions 1, 6, 9 and 16):
@@ -20,7 +23,8 @@ use Illuminate\Support\Collection;
  *
  * A link takes applications only while online applications are on in the
  * settings, the link is on and not expired, the privacy notice, terms and
- * declaration are published, at least one product is offered online, and a
+ * declaration are published, the server can tell visitors apart (the
+ * frontend proxy's secret is set), at least one product is offered online, and a
  * code can reach the applicant (ApplicantOtp::channels()). The server switch
  * (LOAN_ORIGINATION_ENABLED) is checked before any of this: while it is off
  * no public route answers at all.
@@ -39,6 +43,10 @@ final class PublicPortal
 
     public const CLOSED = 'This link isn\'t taking applications right now. Please contact the office.';
 
+    public const NO_VISITOR_ADDRESS = 'Online applications can\'t open yet: the server can\'t tell visitors apart, so it can\'t limit misuse. Please contact the office.';
+
+    private const PROXY_WARNING_KEY = 'loan-origination:proxy-secret-warning';
+
     public function __construct(
         private readonly ApplicantOtp $otp,
         private readonly OriginationNotices $notices,
@@ -51,11 +59,31 @@ final class PublicPortal
             ! OriginationSetting::current()->online_applications_enabled => self::SETTINGS_OFF,
             $link->status() === OriginationLink::STATUS_DISABLED => self::LINK_OFF,
             $link->status() === OriginationLink::STATUS_EXPIRED => self::LINK_EXPIRED,
+            ! $this->knowsVisitorAddresses() => self::NO_VISITOR_ADDRESS,
             $this->notices->missingRequired() !== [] => self::NOT_READY,
             $this->products($link)->isEmpty() => self::NO_PRODUCTS,
-            $this->otp->channels() === [] => ApplicantOtp::NO_CHANNEL,
+            $this->otp->channels($link) === [] => ApplicantOtp::NO_CHANNEL,
             default => null,
         };
+    }
+
+    /**
+     * Whether the frontend proxy's secret is set (TrustFrontendProxy), so
+     * per-IP limits see each visitor's own address. Without it every visitor
+     * shares the frontend's, so links stay closed; the first refusal logs a
+     * warning once.
+     */
+    public function knowsVisitorAddresses(): bool
+    {
+        if (strlen((string) config('trustedproxy.proxy_secret', '')) >= TrustFrontendProxy::MIN_SECRET_LENGTH) {
+            return true;
+        }
+
+        if (Cache::add(self::PROXY_WARNING_KEY, true)) {
+            Log::warning('Online applications are closed: LENDYPH_PROXY_SECRET is not set, so every visitor would share one address for the rate limits.');
+        }
+
+        return false;
     }
 
     /**
@@ -155,7 +183,7 @@ final class PublicPortal
                 ['jpg', 'jpeg', 'jpe', 'jfif', 'png', 'pdf'],
             )),
             'max_upload_mb' => min(OriginationFileStore::MAX_MB, max(1, (int) $settings->max_upload_mb)),
-            'otp_channels' => $this->otp->channels(),
+            'otp_channels' => $this->otp->channels($link),
         ];
     }
 

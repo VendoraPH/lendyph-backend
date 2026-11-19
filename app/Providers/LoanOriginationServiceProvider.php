@@ -37,16 +37,22 @@ use RuntimeException;
  *   IP (the deployment's daily cap is counted in ApplicantOtp);
  * - `public-apply-verify`: 10 in 15 minutes per mobile and 30 an hour per IP,
  *   on top of each code's own 5 tries;
- * - `public-apply-drafts`: 60 a minute per session;
- * - `public-apply-estimate`: 30 a minute per session, the `calculator`
- *   limiter's figure, keyed on the session instead of a user;
+ * - `public-apply-drafts`: 60 a minute per session and 120 per IP;
+ * - `public-apply-estimate`: 30 a minute per session (the `calculator`
+ *   limiter's figure, keyed on the session instead of a user) and 60 per IP;
  * - `public-apply-uploads`: 30 an hour per session and 60 per IP (the file
  *   store also caps an application at 20 files);
- * - `public-apply-submit`: 10 a minute per session.
+ * - `public-apply-submit`: 10 a minute per session and 20 per IP;
+ * - `public-apply-logout`: 10 a minute per session and 30 per IP.
+ *
+ * The session header is read before it is checked, so every session-keyed
+ * limiter also has a per-IP limit: a new random header each time is still
+ * metered.
  *
  * Mobiles are keyed by their keyed hash and sessions by their SHA-256, never
  * as typed. IP keys rely on TrustFrontendProxy for the visitor's address;
- * without it every visitor shares the frontend's.
+ * without its secret every visitor would share the frontend's, so links stay
+ * closed until it is set (PublicPortal::NO_VISITOR_ADDRESS).
  *
  * Production refuses to boot with the test-code mode on (origination
  * decision 7, risk 1).
@@ -94,16 +100,30 @@ class LoanOriginationServiceProvider extends ServiceProvider
             Limit::perHour(30)->by('public-apply:verify:ip:'.$ip($request))->response($tooMany),
         ]);
 
-        RateLimiter::for('public-apply-drafts', fn (Request $request) => Limit::perMinute(60)->by('public-apply:drafts:'.self::sessionKey($request))->response($tooMany));
+        RateLimiter::for('public-apply-drafts', fn (Request $request) => [
+            Limit::perMinute(60)->by('public-apply:drafts:'.self::sessionKey($request))->response($tooMany),
+            Limit::perMinute(120)->by('public-apply:drafts:ip:'.$ip($request))->response($tooMany),
+        ]);
 
-        RateLimiter::for('public-apply-estimate', fn (Request $request) => Limit::perMinute(30)->by('public-apply:estimate:'.self::sessionKey($request))->response($tooMany));
+        RateLimiter::for('public-apply-estimate', fn (Request $request) => [
+            Limit::perMinute(30)->by('public-apply:estimate:'.self::sessionKey($request))->response($tooMany),
+            Limit::perMinute(60)->by('public-apply:estimate:ip:'.$ip($request))->response($tooMany),
+        ]);
 
         RateLimiter::for('public-apply-uploads', fn (Request $request) => [
             Limit::perHour(30)->by('public-apply:uploads:'.self::sessionKey($request))->response($tooMany),
             Limit::perHour(60)->by('public-apply:uploads:ip:'.$ip($request))->response($tooMany),
         ]);
 
-        RateLimiter::for('public-apply-submit', fn (Request $request) => Limit::perMinute(10)->by('public-apply:submit:'.self::sessionKey($request))->response($tooMany));
+        RateLimiter::for('public-apply-submit', fn (Request $request) => [
+            Limit::perMinute(10)->by('public-apply:submit:'.self::sessionKey($request))->response($tooMany),
+            Limit::perMinute(20)->by('public-apply:submit:ip:'.$ip($request))->response($tooMany),
+        ]);
+
+        RateLimiter::for('public-apply-logout', fn (Request $request) => [
+            Limit::perMinute(10)->by('public-apply:logout:'.self::sessionKey($request))->response($tooMany),
+            Limit::perMinute(30)->by('public-apply:logout:ip:'.$ip($request))->response($tooMany),
+        ]);
     }
 
     /** The mobile asked about, as its keyed hash; every unreadable one shares one key. */

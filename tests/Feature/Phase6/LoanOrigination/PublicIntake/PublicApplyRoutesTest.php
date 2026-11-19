@@ -42,6 +42,7 @@ it('serves the public application from the routes the wizard needs', function ()
         'GET api/public-apply/{token}/track',
         'POST api/public-apply/{token}/documents',
         'POST api/public-apply/{token}/estimate',
+        'POST api/public-apply/{token}/logout',
         'POST api/public-apply/{token}/otp',
         'POST api/public-apply/{token}/otp/verify',
         'POST api/public-apply/{token}/submit',
@@ -64,7 +65,7 @@ it('gives every public-apply route its own public-apply limiter, never only the 
             ->and((string) $route->getName())->toStartWith('public-apply.');
     }
 
-    expect(count(loPubRoutes()))->toBe(10);
+    expect(count(loPubRoutes()))->toBe(11);
 });
 
 it('registers every limiter the public-apply routes name', function () {

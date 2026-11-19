@@ -76,11 +76,11 @@ class PublicApplyController extends Controller
             'privacy_notice_version' => ['nullable', 'string', 'max:20'],
         ]);
 
-        if ($input['purpose'] === 'apply') {
-            if (($closed = $this->portal->closedReason($link)) !== null) {
-                throw LoanWriteTransaction::conflict($closed);
-            }
+        if ($input['purpose'] !== 'track' && ($closed = $this->portal->closedReason($link)) !== null) {
+            throw LoanWriteTransaction::conflict($closed);
+        }
 
+        if ($input['purpose'] === 'apply') {
             if (($request->input('privacy_notice_version')) !== $this->notices->current('privacy_notice')?->version) {
                 throw ValidationException::withMessages(['privacy_notice_version' => 'Read and accept the current privacy notice to continue.']);
             }
@@ -125,7 +125,7 @@ class PublicApplyController extends Controller
         $input = $request->validate([
             'loan_product_id' => ['required', 'integer'],
             'amount' => ['required', 'numeric', 'regex:/^\d{1,13}(\.\d{1,2})?$/'],
-            'term' => ['required', 'integer', 'min:1', 'max:9999'],
+            'term' => ['required', 'integer', 'min:1', 'max:10950'],
             'frequency' => ['nullable', 'string', 'max:30'],
         ], [
             'amount.regex' => 'Enter an amount in pesos with at most two decimals.',
@@ -139,6 +139,10 @@ class PublicApplyController extends Controller
 
         /** @var LoanProduct $product */
         $product = LoanProduct::query()->findOrFail((int) $input['loan_product_id']);
+        if ($product->term_unit?->value !== 'days' && (int) $input['term'] > 360) {
+            throw ValidationException::withMessages(['term' => 'Choose a term of at most 360 months.']);
+        }
+
         $frequencies = array_values(array_filter((array) ($product->frequencies ?? []), 'is_string')) ?: array_filter([(string) $product->frequency]);
         $frequency = $input['frequency'] ?? (count($frequencies) === 1 ? reset($frequencies) : null);
 
@@ -160,11 +164,8 @@ class PublicApplyController extends Controller
             'file.file' => 'Choose a file to upload.',
         ]);
 
-        /** @var OriginationSession $session */
-        $session = $request->attributes->get(RequireApplicationSession::SESSION);
-
         return response()->json([
-            'data' => $this->intake->upload(self::application($request), $session, $input['type'], $request->file('file')),
+            'data' => $this->intake->upload(self::application($request), self::session($request), $input['type'], $request->file('file')),
         ], 201);
     }
 
@@ -187,10 +188,24 @@ class PublicApplyController extends Controller
             'marketing_opt_in' => ['required', 'boolean'],
         ]);
 
-        return response()->json(['data' => $this->intake->submit(self::application($request), self::link($request), [
+        $result = $this->intake->submit(self::application($request), self::link($request), [
             'credit_authorization_version' => null,
             ...$input,
-        ], $request)]);
+        ], $request);
+
+        // The draft is the office's now: this session ends, so it can't read
+        // the draft back. Tracking takes a new code and the reference.
+        $this->sessions->end(self::session($request));
+
+        return response()->json(['data' => $result]);
+    }
+
+    /** POST /public-apply/{token}/logout: ends this session. */
+    public function logout(Request $request): Response
+    {
+        $this->sessions->end(self::session($request));
+
+        return response()->noContent();
     }
 
     /** GET /public-apply/{token}/track: the whitelist only. */
@@ -233,6 +248,11 @@ class PublicApplyController extends Controller
     private static function link(Request $request): OriginationLink
     {
         return $request->attributes->get(ResolveApplicationLink::ATTRIBUTE);
+    }
+
+    private static function session(Request $request): OriginationSession
+    {
+        return $request->attributes->get(RequireApplicationSession::SESSION);
     }
 
     private static function application(Request $request): OriginationApplication

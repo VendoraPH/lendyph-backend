@@ -2,13 +2,15 @@
 
 namespace App\Services\LoanOrigination\Intake;
 
+use App\Models\OriginationLink;
 use App\Support\PhilippineMobile;
 
 /**
  * The staging test-code mode (origination decision 7). With
  * `loan_origination_intake.otp.test_codes` on, a code asked for by a staff
  * number listed in `reminders.allow_list` is shown on screen ("Test mode: not
- * sent") and never sent. Only numbers listed there count:
+ * sent") and never sent, and only on a link marked as a test (`is_test`),
+ * so a staff number typed on a real link gets nothing. Only numbers listed there count:
  * `reminders.allow_all_recipients` never widens it. Never on in production,
  * which refuses to boot with it on (LoanOriginationServiceProvider), and
  * checked here again in case the boot check is ever bypassed.
@@ -24,12 +26,18 @@ final class TestCodes
         return config('loan_origination_intake.otp.test_codes') === true && ! app()->environment('production');
     }
 
-    /** Whether $mobile gets its code on screen. */
-    public function serves(string $mobile): bool
+    /** Whether test codes work on $link: only on a link marked as a test. */
+    public function enabledOn(OriginationLink $link): bool
+    {
+        return $this->enabled() && $link->is_test;
+    }
+
+    /** Whether $mobile gets its code on screen on $link. */
+    public function serves(OriginationLink $link, string $mobile): bool
     {
         $wanted = PhilippineMobile::normalise($mobile);
 
-        if (! $this->enabled() || $wanted === null) {
+        if (! $this->enabledOn($link) || $wanted === null) {
             return false;
         }
 

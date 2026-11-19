@@ -2,7 +2,6 @@
 
 use App\Models\AuditLog;
 use App\Models\Branch;
-use App\Models\LoanProduct;
 use App\Models\OriginationApplication;
 use App\Models\OriginationConsent;
 use App\Models\OriginationDocument;
@@ -10,7 +9,9 @@ use App\Models\OriginationLink;
 use App\Models\OriginationNote;
 use App\Models\OriginationSetting;
 use App\Models\User;
+use App\Services\LoanOrigination\Intake\ApplicantIntake;
 use App\Services\LoanService;
+use Illuminate\Http\Exceptions\HttpResponseException;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
@@ -193,7 +194,7 @@ it('submits once: checks the draft, documents and notices, records the consents 
         ->assertUnprocessable()->assertJsonValidationErrors('terms_version');
 
     $first = $this->postJson($url, $this->consents(['marketing_opt_in' => true]), $this->applicantSession($this->token))->assertOk()->json('data');
-    $again = $this->postJson($url, $this->consents(), $this->applicantSession($this->token))->assertOk()->json('data');
+    $again = app(ApplicantIntake::class)->submit(OriginationApplication::query()->sole(), $this->link, $this->consents(), request());
 
     expect($first['reference_number'])->toMatch('/^OA-\d{4}-000001$/')
         ->and($again['reference_number'])->toBe($first['reference_number']);
@@ -221,13 +222,26 @@ it('lists what blocks a submit in words', function () {
         ->assertUnprocessable()->assertJsonPath('errors', ['draft.personal.gender' => ['Choose your gender.']]);
 });
 
-it('freezes the draft once submitted', function () {
+it('ends the intake session at submit and freezes the draft', function () {
     loPubSave($this, $this->link, $this->token, $this->completeDraft($this->product->id))->assertOk();
     loPubUploadRequired($this, $this->link, $this->token);
     $this->postJson("/api/public-apply/{$this->link->token}/submit", $this->consents(), $this->applicantSession($this->token))->assertOk();
 
-    loPubSave($this, $this->link, $this->token, $this->completeDraft($this->product->id))->assertStatus(409);
-    $this->post("/api/public-apply/{$this->link->token}/documents", ['type' => 'proof_of_address', 'file' => $this->png()], [...$this->applicantSession($this->token), 'Accept' => 'application/json'])->assertStatus(409);
+    $this->getJson("/api/public-apply/{$this->link->token}/draft", $this->applicantSession($this->token))->assertUnauthorized()
+        ->assertJsonPath('code', 'session_expired');
+    loPubSave($this, $this->link, $this->token, $this->completeDraft($this->product->id))->assertUnauthorized();
+    $this->post("/api/public-apply/{$this->link->token}/documents", ['type' => 'proof_of_address', 'file' => $this->png()], [...$this->applicantSession($this->token), 'Accept' => 'application/json'])->assertUnauthorized();
+
+    expect(fn () => app(ApplicantIntake::class)->saveDraft(OriginationApplication::query()->sole(), $this->link, $this->completeDraft($this->product->id)))
+        ->toThrow(HttpResponseException::class);
+    expect(OriginationApplication::query()->sole()->status)->toBe('submitted');
+});
+
+it('signs the applicant out, ending the session', function () {
+    $this->postJson("/api/public-apply/{$this->link->token}/logout", [], $this->applicantSession($this->token))->assertNoContent();
+
+    $this->getJson("/api/public-apply/{$this->link->token}/draft", $this->applicantSession($this->token))->assertUnauthorized();
+    expect(DB::table('origination_sessions')->whereNull('ended_at')->count())->toBe(0);
 });
 
 it('refuses a submit once the link stops taking applications', function () {
@@ -307,14 +321,26 @@ it('reads statuses to the applicant in their own words', function (string $statu
 ]);
 
 it('never lets one applicant\'s session reach another application', function () {
-    expect(LoanProduct::query()->count())->toBeGreaterThan(0);
     $mine = OriginationApplication::query()->sole();
+    $headers = fn (string $session) => [...$this->applicantSession($session), 'Accept' => 'application/json'];
 
     $this->travel(61)->seconds();
-    $code = $this->requestCode($this->link, '09181112222')->json('data');
-    expect($code)->not->toHaveKey('test_mode');
+    $theirs = $this->startApplication($this->link, 'apply', [], $this->secondStaffMobile);
+    $draft = $this->completeDraft($this->product->id);
+    $draft['personal']['first_name'] = 'Pedro';
+    loPubSave($this, $this->link, $theirs, $draft)->assertOk();
+    $theirDocument = $this->post("/api/public-apply/{$this->link->token}/documents", ['type' => 'government_id', 'file' => $this->png('t.png', 7)], $headers($theirs))->json('data.id');
+    $other = OriginationApplication::query()->whereKeyNot($mine->id)->sole();
 
-    $this->getJson("/api/public-apply/{$this->link->token}/draft", $this->applicantSession($this->token))->assertOk()
+    $response = $this->getJson("/api/public-apply/{$this->link->token}/draft", $this->applicantSession($this->token))->assertOk()
         ->assertJsonPath('data.verified_contact.mobile', '63917*****67');
-    expect(OriginationApplication::query()->count())->toBe(1)->and($mine->fresh()->id)->toBe($mine->id);
+    expect($response->getContent())->not->toContain('Pedro')->not->toContain((string) $theirDocument);
+
+    $this->deleteJson("/api/public-apply/{$this->link->token}/documents/{$theirDocument}", [], $this->applicantSession($this->token))->assertNotFound();
+    loPubSave($this, $this->link, $this->token, $this->completeDraft($this->product->id))->assertOk();
+
+    expect($other->fresh()->draft['personal']['first_name'])->toBe('Pedro')
+        ->and($other->documents()->count())->toBe(1)
+        ->and($mine->fresh()->draft['personal']['first_name'])->toBe('Juana')
+        ->and(OriginationApplication::query()->count())->toBe(2);
 });

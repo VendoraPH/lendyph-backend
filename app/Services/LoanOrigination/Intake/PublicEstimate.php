@@ -3,6 +3,7 @@
 namespace App\Services\LoanOrigination\Intake;
 
 use App\Models\LoanProduct;
+use App\Services\AmortizationCalculatorService;
 use App\Services\LoanService;
 use Brick\Math\BigDecimal;
 use Brick\Math\RoundingMode;
@@ -18,6 +19,10 @@ use Illuminate\Validation\ValidationException;
  * - `total_repayment` is the contract total, principal plus interest; the
  *   charges, net proceeds and any share capital build-up are separate (the
  *   Total Payable rule).
+ * - A request can't ask for unbounded work: the term is capped as the
+ *   Amortization Calculator caps it (360 months or 10,950 days), and a term
+ *   and schedule making more than AmortizationCalculatorService::MAX_PERIODS
+ *   payments are refused (422, in words), before anything is built.
  * - `installment` is the largest single instalment (principal plus
  *   interest), so the applicant never sees less than a period asks.
  */
@@ -32,9 +37,9 @@ final class PublicEstimate
      */
     public function estimate(LoanProduct $product, BigDecimal $amount, int $term, string $frequency): array
     {
-        $this->assertWithinProduct($product, $amount, $term);
-
         $today = Carbon::now('Asia/Manila')->toDateString();
+        $this->assertWithinProduct($product, $amount, $term, $frequency, $today);
+
         $preview = $this->loans->formPreview([
             'loan_product_id' => $product->id,
             'principal_amount' => (string) $amount,
@@ -80,7 +85,7 @@ final class PublicEstimate
     }
 
     /** @throws ValidationException */
-    private function assertWithinProduct(LoanProduct $product, BigDecimal $amount, int $term): void
+    private function assertWithinProduct(LoanProduct $product, BigDecimal $amount, int $term, string $frequency, string $today): void
     {
         $min = $product->min_amount === null ? null : BigDecimal::of((string) $product->min_amount);
         $max = $product->max_amount === null ? null : BigDecimal::of((string) $product->max_amount);
@@ -95,9 +100,27 @@ final class PublicEstimate
             };
         }
 
-        if (($product->min_term !== null && $term < $product->min_term) || ($product->max_term !== null && $term > $product->max_term)) {
+        // The loan code's own range: no minimum is 1, no maximum is the
+        // product's default term (LoanService::assertTermWithinProductRange()).
+        $minTerm = (int) ($product->min_term ?? 1);
+        $maxTerm = (int) ($product->max_term ?? $product->term);
+
+        if ($term < $minTerm || $term > $maxTerm) {
             $unit = $product->term_unit?->value ?? 'months';
-            $errors['term'] = "Choose a term from {$product->min_term} to {$product->max_term} {$unit}.";
+            $errors['term'] = "Choose a term from {$minTerm} to {$maxTerm} {$unit}.";
+        }
+
+        if (! isset($errors['term'])) {
+            $unit = $product->term_unit?->value ?? 'months';
+            $periods = AmortizationCalculatorService::periodCount($today, $term, $unit, $frequency);
+
+            if ($periods > AmortizationCalculatorService::MAX_PERIODS) {
+                $errors['term'] = sprintf(
+                    'This term and payment schedule make %s payments; an estimate allows at most %s.',
+                    number_format($periods),
+                    number_format(AmortizationCalculatorService::MAX_PERIODS),
+                );
+            }
         }
 
         if ($errors !== []) {

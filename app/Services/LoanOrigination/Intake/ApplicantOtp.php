@@ -18,14 +18,17 @@ use Illuminate\Validation\ValidationException;
  * like the portal's OTP: 6 digits, valid 5 minutes, 5 tries, kept hashed.
  *
  * - Channels: SMS only, and only while something can deliver it: a reminder
- *   driver that reaches someone, or the staging test-code mode. Email waits
+ *   driver that reaches someone, or the staging test-code mode on a test
+ *   link. Email waits
  *   for a mail driver. With no channel, asking for a code answers 409.
  * - Sending: an allow-listed staff number in test mode sees its code on
  *   screen; otherwise a delivering driver texts it to a number the allow-list
  *   permits. Any other number gets nothing, with the same answer. The code is
  *   never logged and never stored in plain text.
- * - A deployment hands out at most `daily_cap` codes a Manila day, against
- *   SMS pumping (429). The per-mobile and per-IP limits are route limiters.
+ * - A deployment hands out at most `daily_cap` codes a Manila day that reach
+ *   someone (sent, or shown in test mode), against SMS pumping, and one
+ *   mobile asks for at most `daily_cap_per_mobile` (429 either way). The
+ *   per-minute and per-hour limits are route limiters.
  * - Asking again closes the earlier open code for the same link, purpose and
  *   mobile, so only the newest code works.
  */
@@ -42,10 +45,16 @@ final class ApplicantOtp
         private readonly TestCodes $testCodes,
     ) {}
 
-    /** @return list<string> */
-    public function channels(): array
+    public const MOBILE_BUSY = 'This number has asked for too many codes today. Please try again tomorrow.';
+
+    /**
+     * The channels a code can reach an applicant on $link by.
+     *
+     * @return list<string>
+     */
+    public function channels(OriginationLink $link): array
     {
-        return $this->testCodes->enabled() || $this->sms->reachesSomeone() ? ['sms'] : [];
+        return $this->testCodes->enabledOn($link) || $this->sms->reachesSomeone() ? ['sms'] : [];
     }
 
     /**
@@ -55,7 +64,7 @@ final class ApplicantOtp
      */
     public function request(OriginationLink $link, string $purpose, string $mobile, ?string $reference, ?string $ip): array
     {
-        if ($this->channels() === []) {
+        if ($this->channels($link) === []) {
             throw new HttpResponseException(response()->json(['success' => false, 'message' => self::NO_CHANNEL, 'code' => 'no_channel'], 409));
         }
 
@@ -63,15 +72,28 @@ final class ApplicantOtp
         $hash = OriginationApplication::mobileHash($normalised);
         $minutes = (int) config('loan_origination_intake.otp.minutes', 5);
         $code = str_pad((string) random_int(0, 999999), 6, '0', STR_PAD_LEFT);
-        $shown = $this->testCodes->serves($normalised);
+        $shown = $this->testCodes->serves($link, $normalised);
 
         $challenge = DB::transaction(function () use ($link, $purpose, $hash, $reference, $code, $shown, $minutes, $ip): OriginationOtpChallenge {
-            // Read under a lock on the day's rows, so two requests at the cap
-            // can't both pass.
-            $today = OriginationOtpChallenge::query()->where('created_at', '>=', now()->startOfDay())->lockForUpdate()->count();
+            // Read under a lock on the day's rows, so two requests at a cap
+            // can't both pass. The deployment's cap counts only codes that
+            // reached someone (sent, or shown in test mode), so requests for
+            // numbers nothing is sent to can't use it up for everyone.
+            $reached = OriginationOtpChallenge::query()
+                ->where('created_at', '>=', now()->startOfDay())
+                ->where(fn ($query) => $query->where('delivered', true)->orWhere('test_mode', true))
+                ->lockForUpdate()->count();
 
-            if ($today >= (int) config('loan_origination_intake.otp.daily_cap', 300)) {
+            if ($reached >= (int) config('loan_origination_intake.otp.daily_cap', 300)) {
                 throw new HttpResponseException(response()->json(['success' => false, 'message' => self::BUSY, 'code' => 'daily_cap'], 429));
+            }
+
+            $forMobile = OriginationOtpChallenge::query()
+                ->where('mobile_hash', $hash)->where('created_at', '>=', now()->startOfDay())
+                ->lockForUpdate()->count();
+
+            if ($forMobile >= (int) config('loan_origination_intake.otp.daily_cap_per_mobile', 10)) {
+                throw new HttpResponseException(response()->json(['success' => false, 'message' => self::MOBILE_BUSY, 'code' => 'mobile_daily_cap'], 429));
             }
 
             OriginationOtpChallenge::query()

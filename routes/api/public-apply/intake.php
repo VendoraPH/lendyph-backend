@@ -43,5 +43,8 @@ Route::delete('/{token}/documents/{document}', [PublicApplyController::class, 'r
 Route::post('/{token}/submit', [PublicApplyController::class, 'submit'])
     ->middleware(PublicApplyStack::for('public-apply-submit', 'intake'))->name('submit');
 
+Route::post('/{token}/logout', [PublicApplyController::class, 'logout'])
+    ->middleware(PublicApplyStack::for('public-apply-logout', 'any'))->name('logout');
+
 Route::get('/{token}/track', [PublicApplyController::class, 'track'])
     ->middleware(PublicApplyStack::for('public-apply-read', 'track'))->name('track');

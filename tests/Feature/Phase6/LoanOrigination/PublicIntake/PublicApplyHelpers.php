@@ -22,13 +22,17 @@ trait PublicApplyHelpers
     /** The allow-listed staff number, as typed. */
     protected string $staffMobile = '09171234567';
 
+    /** A second allow-listed staff number. */
+    protected string $secondStaffMobile = '09190001111';
+
     public function enableIntake(array $linkAttributes = []): OriginationLink
     {
         config([
             'loan_origination.enabled' => true,
             'loan_origination_intake.otp.test_codes' => true,
-            'reminders.allow_list' => [$this->staffMobile],
+            'reminders.allow_list' => [$this->staffMobile, $this->secondStaffMobile],
             'reminders.allow_all_recipients' => false,
+            'trustedproxy.proxy_secret' => str_repeat('s', 40),
         ]);
 
         OriginationSetting::current()->forceFill(['online_applications_enabled' => true])->save();
@@ -41,6 +45,7 @@ trait PublicApplyHelpers
             'token' => OriginationLink::newToken(),
             'branch_id' => Branch::query()->orderBy('id')->value('id'),
             'active' => true,
+            'is_test' => true,
             'display_name' => 'Binhs Coop',
             'contact_phone' => '0281234567',
             'contact_email' => 'loans@example.test',
@@ -104,11 +109,11 @@ trait PublicApplyHelpers
     }
 
     /** A new application on $link: the session token. */
-    public function startApplication(OriginationLink $link, string $purpose = 'apply', array $extra = []): string
+    public function startApplication(OriginationLink $link, string $purpose = 'apply', array $extra = [], ?string $mobile = null): string
     {
-        $code = $this->requestCode($link, null, $purpose, $extra)->assertOk()->json('data.test_mode.code');
+        $code = $this->requestCode($link, $mobile, $purpose, $extra)->assertOk()->json('data.test_mode.code');
 
-        return (string) $this->verifyCode($link, (string) $code, null, $purpose, $extra)->assertOk()->json('data.session_token');
+        return (string) $this->verifyCode($link, (string) $code, $mobile, $purpose, $extra)->assertOk()->json('data.session_token');
     }
 
     /** @return array<string, string> */

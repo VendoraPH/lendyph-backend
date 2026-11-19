@@ -12,7 +12,8 @@ use Illuminate\Support\Str;
  * Applicant sessions (origination decision 8): a random 64-character token,
  * kept only as its SHA-256, tied to one link and one application. A session
  * ends 30 minutes after its last use or 4 hours after it began; a newer code
- * verified for the same application ends the earlier ones.
+ * verified for the same application ends the earlier ones, and so do submit
+ * and sign-out.
  */
 final class ApplicantSessions
 {
@@ -42,6 +43,11 @@ final class ApplicantSessions
         ]);
 
         return ['token' => $token, 'session' => $session];
+    }
+
+    public function end(OriginationSession $session): void
+    {
+        OriginationSession::query()->whereKey($session->id)->whereNull('ended_at')->update(['ended_at' => now()]);
     }
 
     /**

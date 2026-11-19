@@ -202,12 +202,11 @@ it('allows one code a minute and five an hour per mobile', function () {
 
 it('stops sending codes once the deployment\'s daily cap is reached', function () {
     $link = $this->enableIntake();
-    config(['loan_origination_intake.otp.daily_cap' => 2]);
+    config(['loan_origination_intake.otp.daily_cap' => 1]);
     $this->withoutMiddleware(ThrottleRequests::class);
 
-    $this->requestCode($link, '09181110001')->assertOk();
-    $this->requestCode($link, '09181110002')->assertOk();
-    $this->requestCode($link, '09181110003')->assertStatus(429)
+    $this->requestCode($link)->assertOk();
+    $this->requestCode($link, $this->secondStaffMobile)->assertStatus(429)
         ->assertJsonPath('message', 'Online applications are busy right now. Please try again tomorrow or contact the office.');
 });
 

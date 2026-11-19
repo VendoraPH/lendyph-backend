@@ -4,6 +4,7 @@ namespace App\Http\Middleware\PublicApply;
 
 use App\Models\OriginationLink;
 use App\Services\LoanOrigination\Intake\ApplicantSessions;
+use App\Services\LoanOrigination\Intake\PublicPortal;
 use Closure;
 use Illuminate\Http\Request;
 use Symfony\Component\HttpFoundation\Response;
@@ -16,7 +17,9 @@ use Symfony\Component\HttpFoundation\Response;
  * `session_required` with no header, `session_expired` for an unknown, ended,
  * idle or too old session, or one from another link.
  *
- * A staff bearer token counts for nothing here.
+ * An intake session answers 409 (`link_closed`, the reason in words) while
+ * its link isn't taking applications. A staff bearer token counts for
+ * nothing here.
  */
 class RequireApplicationSession
 {
@@ -24,7 +27,10 @@ class RequireApplicationSession
 
     public const APPLICATION = 'origination_application';
 
-    public function __construct(private readonly ApplicantSessions $sessions) {}
+    public function __construct(
+        private readonly ApplicantSessions $sessions,
+        private readonly PublicPortal $portal,
+    ) {}
 
     public function handle(Request $request, Closure $next, string $purpose = 'intake'): Response
     {
@@ -50,6 +56,13 @@ class RequireApplicationSession
 
         if (! $allowed) {
             return self::refuse(ApplicantSessions::WRONG_PURPOSE, 'session_wrong_purpose');
+        }
+
+        // A link that stops taking applications stops its open drafts too:
+        // an intake session answers 409 with the reason while the link is
+        // closed. Tracking goes on.
+        if (! $session->isTracking() && ($closed = $this->portal->closedReason($link)) !== null) {
+            return response()->json(['success' => false, 'message' => $closed, 'code' => 'link_closed'], 409);
         }
 
         $request->attributes->set(self::SESSION, $session);
