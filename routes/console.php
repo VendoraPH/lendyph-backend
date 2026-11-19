@@ -49,13 +49,16 @@ Schedule::command('registrations:prune')->dailyAt('03:30')->timezone('Asia/Manil
  * point of view — they are watching a progress bar — and the command budgets
  * itself to ~50 seconds so each tick returns before the next one is due.
  *
- * withoutOverlapping(10) rather than the default: the lock has to outlive a
- * tick that is killed mid-chunk (a deploy, an OOM), or the next minute's tick
- * would start a second importer against the same rows. Ten minutes is the
- * ceiling on how long a wedged tick can block the queue of ticks behind it, and
- * the budget is what keeps a healthy tick nowhere near it.
+ * withoutOverlapping(1): a cheap first filter, not the guard. A tick killed
+ * mid-chunk (a deploy, an OOM) never removes this lock, and while it stands no
+ * tick runs; at ten minutes it froze the run far past the import screen's
+ * 180-second stale warning ("stuck at step 6", ClickUp 14zfbg0dpj2). Two
+ * importers are kept apart by the command's own MySQL named lock instead,
+ * which the server frees the moment a dead tick's session ends, so this one
+ * may lapse after a minute: a tick still running past it makes the next one
+ * stand down, and a dead one blocks for a minute at most.
  */
-Schedule::command('imports:process')->everyMinute()->withoutOverlapping(10);
+Schedule::command('imports:process')->everyMinute()->withoutOverlapping(1);
 
 // Blank the personal data staged in csv_import_rows once an import run has been
 // finished for a month. The uploaded CSV is deleted the moment a run closes, but

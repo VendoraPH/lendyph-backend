@@ -9,6 +9,7 @@ use Illuminate\Console\Attributes\Description;
 use Illuminate\Console\Attributes\Signature;
 use Illuminate\Console\Command;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Throwable;
 
@@ -46,14 +47,26 @@ use Throwable;
  *
  * ## Why it returns quickly
  *
- * `withoutOverlapping(10)` takes a cache lock for the length of the run and
- * releases it on exit. A command that ran for twenty minutes would hold that
- * lock and block every tick behind it; worse, a command that DIED holding it
- * blocks everything for the full ten-minute expiry. So this exits on a budget
- * — 50 seconds or 500 rows, whichever comes first — with the cursor committed
- * and SUCCESS. The next minute's tick picks the work straight back up, because
- * the resume point is re-derived from the rows themselves and never from where
- * this process thought it had got to.
+ * It exits on a budget — 50 seconds or 500 rows, whichever comes first — with
+ * the cursor committed and SUCCESS. The next minute's tick picks the work
+ * straight back up, because the resume point is re-derived from the rows
+ * themselves and never from where this process thought it had got to.
+ *
+ * ## Why it takes a database lock
+ *
+ * Two importers must never work at once: the second one's attempt claims wait
+ * on the first one's open chunk until MySQL's lock-wait timeout, and the run is
+ * then written off as failed. The schedule's `withoutOverlapping()` cache lock
+ * cannot be the guard for that on its own. A tick that DIES (a deploy, the OOM
+ * killer) never removes it, so it blocks every tick until it expires, and any
+ * expiry long enough to outlast a slow tick is far longer than the import
+ * screen's 180-second stale warning ("stuck at step 6", ClickUp 14zfbg0dpj2).
+ *
+ * So the exclusion is a MySQL named lock (self::lockName()), held for the whole
+ * tick. The server frees it the moment the holding session ends, so a dead tick
+ * blocks nobody, while a live one makes any other tick stand down at once. The
+ * schedule's cache lock is then only a cheap first filter and can lapse after a
+ * minute.
  *
  * ## Why everything goes through Log
  *
@@ -131,6 +144,39 @@ class ProcessCsvImports extends Command
     private const STORAGE_SWEEP = 'releaseAbandonedStorage';
 
     public function handle(CsvImportProcessor $processor): int
+    {
+        $lock = self::lockName();
+
+        if ((int) DB::selectOne('SELECT GET_LOCK(?, 0) AS acquired', [$lock])->acquired !== 1) {
+            // A normal outcome: the tick that holds it is still working.
+            Log::info('imports:process stood down: another tick is still importing', ['lock' => $lock]);
+
+            $this->info('Another imports:process tick is still running; nothing to do.');
+
+            return self::SUCCESS;
+        }
+
+        try {
+            return $this->tick($processor);
+        } finally {
+            DB::selectOne('SELECT RELEASE_LOCK(?) AS released', [$lock]);
+        }
+    }
+
+    /**
+     * The MySQL named lock that keeps two importers apart.
+     *
+     * Per database: every deployment on the shared VPS talks to one MySQL
+     * server, and MySQL lock names are server-wide, so a bare name would let
+     * one cooperative's import block another's. MySQL caps a name at 64
+     * characters.
+     */
+    public static function lockName(): string
+    {
+        return mb_substr('imports:process:'.DB::connection()->getDatabaseName(), 0, 64);
+    }
+
+    private function tick(CsvImportProcessor $processor): int
     {
         $startedAt = microtime(true);
         $maxSeconds = max(1, (int) $this->option('max-seconds'));
