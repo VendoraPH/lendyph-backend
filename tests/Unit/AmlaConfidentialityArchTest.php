@@ -80,7 +80,10 @@ it('finds the AMLA files it guards', function () use ($amlaFiles, $relative) {
         ->and($files)->toContain('app/Services/Amla/Cases/CaseRecords.php')
         ->and($files)->toContain('app/Models/AmlaCase.php')
         ->and($files)->toContain('routes/api/amla/cases.php')
-        ->and($files)->toContain('routes/console/amla/deadlines.php');
+        ->and($files)->toContain('routes/console/amla/deadlines.php')
+        ->and($files)->toContain('app/Services/Amla/Reports/AmlaReports.php')
+        ->and($files)->toContain('app/Models/AmlaExport.php')
+        ->and($files)->toContain('routes/api/amla/reports.php');
 });
 
 /** @var array<string, string> what AMLA code must never reach, by pattern on its code */
@@ -214,6 +217,7 @@ const AMLA_TABLE_MIGRATIONS = [
     'database/migrations/2026_11_21_100000_create_amla_screening_tables.php',
     'database/migrations/2026_11_21_100000_create_amla_detection_tables.php',
     'database/migrations/2026_11_22_100000_create_amla_case_tables.php',
+    'database/migrations/2026_11_23_100000_create_amla_report_tables.php',
 ];
 
 it('keeps AMLA out of the main audit trail, outbound channels, notices, logs and the environment', function () use ($amlaFiles, $codeOf, $relative, $channelOffences) {
@@ -379,6 +383,8 @@ it('catches every bulk-write pattern', function (string $code, bool $isAmlaFile)
     'submission delete' => ["DB::table('amla_report_submissions')->delete();", false],
     'inbox delete' => ['AmlaInboxItem::query()->delete();', false],
     'evidence drop' => ["Schema::dropIfExists('amla_case_evidence');", false],
+    'export delete' => ['AmlaExport::query()->delete();', false],
+    'set-aside update' => ["DB::table('amla_ctr_set_asides')->update(['reason' => 'x']);", false],
 ]);
 
 it('lets an added column through', function () use ($bulkWriteOffences) {

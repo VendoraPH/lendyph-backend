@@ -66,6 +66,7 @@ final class ExportContent
         public readonly array $profile,
         public readonly array $excel,
         public readonly bool $unverified = false,
+        public readonly ?string $footerText = null,
     ) {}
 
     /** A profile field as the official workbook's cell shows it: a chosen value in words (ProfileWords). */
@@ -77,6 +78,11 @@ final class ExportContent
     /** The footer's facts, one line ("Page X of Y" is added per page by the renderer). */
     public function footer(): string
     {
+        // Another module's report (AMLA) states its own facts instead of a template and snapshot.
+        if ($this->footerText !== null) {
+            return $this->footerText;
+        }
+
         $parts = [
             $this->title.' · '.$this->periodLabel,
             'Generated '.$this->generatedAt.' (Manila) by '.$this->generatedBy,

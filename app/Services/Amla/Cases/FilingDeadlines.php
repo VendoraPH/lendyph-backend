@@ -81,10 +81,15 @@ final class FilingDeadlines
         return AmlaReport::query()->whereIn('status', AmlaReport::UNFILED)->orderBy('id')->get();
     }
 
-    /** Detected CTR candidates with no CTR prepared. @return Collection<int, AmlaCtrCandidate> */
+    /**
+     * CTR candidates with no CTR prepared: detected, or waiting for a
+     * set-aside decision (still due until the set-aside is approved).
+     *
+     * @return Collection<int, AmlaCtrCandidate>
+     */
     public function candidatesWithoutReport(): Collection
     {
-        return AmlaCtrCandidate::query()->where('status', AmlaCtrCandidate::DETECTED)->orderBy('id')->get();
+        return AmlaCtrCandidate::query()->whereIn('status', [AmlaCtrCandidate::DETECTED, AmlaCtrCandidate::SET_ASIDE_PENDING])->orderBy('id')->get();
     }
 
     /** Cases whose decision established suspicion and whose STR isn't prepared. @return Collection<int, AmlaCase> */

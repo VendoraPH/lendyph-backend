@@ -50,6 +50,9 @@ final class Detector
     /** Batches screened per run, so one run stays short after a long pause. */
     public const BATCHES_PER_RUN = 20;
 
+    /** How far back, by save time, the minute run looks for unscreened events. */
+    public const HINT_HOURS = 24;
+
     /** @var array<int, AmlaRuleVersion> rule versions read this run */
     private array $versions = [];
 
@@ -63,16 +66,24 @@ final class Detector
      * @return array{screened: int, ctr_candidates: int, alerts_opened: int, alerts_joined: int, ctr_reversed: int, alerts_rerun: int, alerts_cleared: int}|null
      *                                                                                                                                                           null while monitoring is off
      */
-    public function run(): ?array
+    /**
+     * The minute run reads only events saved in the last HINT_HOURS (from the
+     * lowest such id): an event saved out of order commits within minutes, so
+     * that bound finds it without re-reading every screened event. The nightly
+     * coverage check runs `full`, which reads from the first event, so nothing
+     * older is ever left unscreened.
+     */
+    public function run(bool $full = false): ?array
     {
         if (! $this->monitoring->enabled()) {
             return null;
         }
 
         $counts = ['screened' => 0, 'ctr_candidates' => 0, 'alerts_opened' => 0, 'alerts_joined' => 0, 'ctr_reversed' => 0, 'alerts_rerun' => 0, 'alerts_cleared' => 0];
+        $floor = $full ? 0 : AmlaEvent::query()->where('created_at', '>=', Carbon::now()->subHours(self::HINT_HOURS))->min('id');
 
-        for ($batch = 0; $batch < self::BATCHES_PER_RUN; $batch++) {
-            if (DB::transaction(fn () => $this->screenBatch($counts)) === 0) {
+        for ($batch = 0; $floor !== null && $batch < self::BATCHES_PER_RUN; $batch++) {
+            if (DB::transaction(fn () => $this->screenBatch($counts, (int) $floor)) === 0) {
                 break;
             }
         }
@@ -83,10 +94,11 @@ final class Detector
     }
 
     /** @param  array<string, int>  $counts */
-    private function screenBatch(array &$counts): int
+    private function screenBatch(array &$counts, int $floor): int
     {
         $this->lock();
         $events = AmlaEvent::query()
+            ->where('id', '>=', $floor)
             ->whereNotExists(fn ($screened) => $screened->selectRaw('1')->from('amla_event_screenings')->whereColumn('amla_event_screenings.event_id', 'amla_events.id'))
             ->orderBy('id')->limit(self::BATCH)->get();
 

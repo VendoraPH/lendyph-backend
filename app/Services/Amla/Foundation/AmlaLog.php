@@ -76,6 +76,11 @@ final class AmlaLog
         'ctr_set_aside_approved' => 'CTR candidate set aside',
         'ctr_set_aside_rejected' => 'CTR candidate set-aside refused',
         'report_evidence_downloaded' => 'Filing evidence downloaded',
+        'amla_report_viewed' => 'AMLA report viewed',
+        'amla_report_exported' => 'AMLA report exported',
+        'amla_report_export_downloaded' => 'AMLA report export downloaded',
+        'amla_dashboard_viewed' => 'AMLA dashboard viewed',
+        'set_aside_backfilled' => 'Waiting set-aside moved to its own record',
         'filing_deadlines_viewed' => 'Filing deadlines viewed',
         'risk_downgrade_requested' => 'High-risk downgrade asked for',
         'risk_downgrade_approved' => 'High-risk downgrade approved',
@@ -100,6 +105,7 @@ final class AmlaLog
         'case' => 'Case',
         'report' => 'Report',
         'risk_downgrade' => 'High-risk downgrade',
+        'amla_export' => 'AMLA report export',
     ];
 
     private const USER_AGENT_MAX = 255;
