@@ -2310,12 +2310,13 @@ class ReportService
      * that figure is reported separately under `non_cash` and is excluded from
      * every total.
      *
-     * `share_capital_ledger` carries no branch column, so `branch_id` is
-     * honoured through the MEMBER's branch (`borrowers.branch_id`) — the exact
-     * scoping shareCapital() applies, under the same `borrower_branch` name,
-     * so a branch-filtered Cash Flow and the Share Capital report select the
-     * same ledger rows for the same period and branch. `share_capital.branch_scope`
-     * reports which of the two applied: `borrower_branch` when `branch_id` is
+     * `branch_id` is honoured through the branch each share capital row
+     * posted in (BranchAttribution: the row's own `branch_id`, or, on a row
+     * not yet attributed, its member's branch) — the exact scoping
+     * shareCapital() applies, under the same `posted_branch` name, so a
+     * branch-filtered Cash Flow and the Share Capital report select the same
+     * ledger rows for the same period and branch. `share_capital.branch_scope`
+     * reports which of the two applied: `posted_branch` when `branch_id` is
      * set, `organisation` when it is not.
      *
      * Share capital is still deliberately absent from `by_branch`: unfiltered,
@@ -2361,7 +2362,8 @@ class ReportService
             ')
             ->first();
 
-        // Scoped through the member's branch, identically to shareCapital().
+        // Scoped through the branch each row posted in, identically to
+        // shareCapital().
         // A row with a `loan_id` was withheld at release, not paid in; a row
         // with a `repayment_id` is a payment's build-up (or its void's
         // reversal), cash already inside the repayment line. Both are summed
@@ -2370,10 +2372,7 @@ class ReportService
         // `savings_transaction_id` moved from the member's savings (gap round
         // S3): no cash moved, so it is summed apart too.
         $share = DB::table('share_capital_ledger')
-            ->when($branchIds !== null, fn ($q) => $q->whereIn(
-                'share_capital_ledger.borrower_id',
-                DB::table('borrowers')->whereIn('branch_id', $branchIds)->select('id'),
-            ))
+            ->tap(BranchAttribution::shareCapitalInBranches($branchIds))
             ->whereBetween('date', [$fromDate, $toDate])
             ->selectRaw('
                 COALESCE(SUM(CASE WHEN loan_id IS NULL AND repayment_id IS NULL AND savings_transaction_id IS NULL THEN 1 ELSE 0 END), 0) as entry_count,
@@ -2397,7 +2396,7 @@ class ReportService
         // holds exactly at two decimals instead of to within a rounding error.
         $repaymentsIn = round($principalIn + $interestIn + $penaltyIn + $insuranceIn + $overpaymentIn, 2);
 
-        $shareScope = $branchIds !== null ? 'borrower_branch' : 'organisation';
+        $shareScope = $branchIds !== null ? 'posted_branch' : 'organisation';
         $shareCredit = round((float) ($share->credit ?? 0), 2);
         $shareDebit = round((float) ($share->debit ?? 0), 2);
         $shareAtRelease = round((float) ($share->at_release ?? 0), 2);
@@ -2467,14 +2466,14 @@ class ReportService
                 'build_up_credit' => $buildUpCredit,
                 'build_up_debit' => $buildUpDebit,
                 'note' => ($branchIds !== null
-                    ? 'share_capital_ledger has no branch column, so branch_id is honoured through the member\'s branch, matching the Share Capital report.'
+                    ? 'branch_id is honoured through the branch each share capital entry posted in; an entry recorded before entries carried a branch, and not yet attributed, counts in the member\'s branch. This matches the Share Capital report.'
                     : 'No branch filter applied, so these figures are organisation-wide.')
-                    .' In by_branch, share capital paid in and out on its own is in the row of the branch each member belongs to (inflow_share_capital, outflow_share_capital, inside inflow_total and outflow_total), so the rows add up to the statement totals; a member with no branch is in an Unassigned row.'
+                    .' In by_branch, share capital paid in and out on its own is in the row of the branch each entry posted in (inflow_share_capital, outflow_share_capital, inside inflow_total and outflow_total), so the rows add up to the statement totals; an entry with no branch whose member has none is in an Unassigned row.'
                     .' credit and debit are share capital paid in and out on its own. build_up_from_payments is the share capital build-up credited from loan payments, net of void reversals: that cash is already in inflows.repayments (as overpayment), so it is in no total here. Share capital withheld at release is under non_cash.share_capital_at_release. The Share Capital report\'s credits for the same period and branch = credit + build_up_credit + non_cash.share_capital_at_release + non_cash.share_capital_from_savings; its debits = debit + build_up_debit.',
             ],
             'by_branch' => $byBranch,
             // The rows' loan cash plus the share capital paid in and out on
-            // its own, by the member's branch: the statement's inflows.total,
+            // its own, by the branch it posted in: the statement's inflows.total,
             // outflows.total and net_movement.
             'by_branch_totals' => self::columnTotals($byBranch, [
                 'inflow_repayments' => 'money',
@@ -2496,9 +2495,11 @@ class ReportService
      * `loans.branch_id` is NOT NULL, so every peso of loan cash lands in
      * exactly one branch. Share capital paid in and out on its own (no
      * `loan_id`, no `repayment_id`, the statement's share_capital_credit and
-     * share_capital_debit) is placed by the member's branch (decision 5c,
-     * 2026-11-02), and a member with no branch lands in an "Unassigned" row
-     * (`branch_id` null), so the rows add up to the statement's totals. Every
+     * share_capital_debit) is placed by the branch it posted in
+     * (BranchAttribution, Phase 6 decision 16; a row not yet attributed by its
+     * member's branch, decision 5c), and a row with neither lands in an
+     * "Unassigned" row (`branch_id` null), so the rows add up to the
+     * statement's totals. Every
      * active branch has a row, ₱0.00 when it had no cash movement.
      *
      * @return array<int, array<string, mixed>>
@@ -2540,17 +2541,18 @@ class ReportService
             ->keyBy(fn ($row) => (int) $row->branch_id);
 
         // The same rows as cashFlow()'s share capital credit and debit,
-        // grouped by the member's branch.
+        // grouped by the branch each posted in.
+        $postedBranch = BranchAttribution::shareCapitalBranchSql();
         $share = DB::table('share_capital_ledger')
             ->leftJoin('borrowers', 'borrowers.id', '=', 'share_capital_ledger.borrower_id')
             ->whereNull('share_capital_ledger.loan_id')
             ->whereNull('share_capital_ledger.repayment_id')
             ->whereNull('share_capital_ledger.savings_transaction_id')
-            ->tap(self::inBranches($branchIds, 'borrowers.branch_id'))
+            ->tap(BranchAttribution::shareCapitalInBranches($branchIds))
             ->whereBetween('share_capital_ledger.date', [$fromDate, $toDate])
-            ->groupBy('borrowers.branch_id')
+            ->groupByRaw($postedBranch)
             ->selectRaw('
-                borrowers.branch_id,
+                '.$postedBranch.' as branch_id,
                 COUNT(*) as entry_count,
                 COALESCE(SUM(share_capital_ledger.credit), 0) as credit,
                 COALESCE(SUM(share_capital_ledger.debit), 0) as debit
@@ -3132,9 +3134,10 @@ class ReportService
      * decimals and is a genuine invariant a test can assert.
      *
      * `date_from` is optional: omit it and the period runs from inception, in
-     * which case `opening_balance` is 0. `share_capital_ledger` has no branch
-     * column, so `branch_id` is honoured through `borrowers.branch_id` and is
-     * applied identically to every figure below.
+     * which case `opening_balance` is 0. `branch_id` is honoured through the
+     * branch each row posted in (BranchAttribution; a row not yet attributed
+     * counts in its member's branch) and is applied identically to every
+     * figure below.
      *
      * `by_member` names every member and their balance, so one call to this
      * report would otherwise hand the complete membership roster to any role
@@ -3161,10 +3164,7 @@ class ReportService
         $branchIds = self::branchScope($filters);
 
         $ledger = fn () => DB::table('share_capital_ledger')
-            ->when($branchIds !== null, fn ($q) => $q->whereIn(
-                'share_capital_ledger.borrower_id',
-                DB::table('borrowers')->whereIn('branch_id', $branchIds)->select('id'),
-            ));
+            ->tap(BranchAttribution::shareCapitalInBranches($branchIds));
 
         $opening = $fromDate === null ? 0.0 : round((float) $ledger()
             ->where('date', '<', $fromDate)
@@ -3192,7 +3192,7 @@ class ReportService
         return [
             'date_from' => $fromDate,
             'date_to' => $toDate,
-            'branch_scope' => $branchIds !== null ? 'borrower_branch' : 'organisation',
+            'branch_scope' => $branchIds !== null ? 'posted_branch' : 'organisation',
             'opening_balance' => $opening,
             'credits' => $credits,
             'debits' => $debits,
@@ -3309,7 +3309,7 @@ class ReportService
 
         return DB::table('share_capital_ledger')
             ->join('borrowers', 'borrowers.id', '=', 'share_capital_ledger.borrower_id')
-            ->tap(self::inBranches($branchIds, 'borrowers.branch_id'))
+            ->tap(BranchAttribution::shareCapitalInBranches($branchIds))
             ->where('share_capital_ledger.date', '<=', $toDate)
             ->groupBy(
                 'borrowers.id',
@@ -3362,10 +3362,7 @@ class ReportService
     private function shareCapitalByMonth(?string $fromDate, string $toDate, ?array $branchIds, float $opening): array
     {
         $monthly = DB::table('share_capital_ledger')
-            ->when($branchIds !== null, fn ($q) => $q->whereIn(
-                'share_capital_ledger.borrower_id',
-                DB::table('borrowers')->whereIn('branch_id', $branchIds)->select('id'),
-            ))
+            ->tap(BranchAttribution::shareCapitalInBranches($branchIds))
             ->when($fromDate, fn ($q, $d) => $q->where('date', '>=', self::filterDay($d)))
             ->where('date', '<=', $toDate)
             ->groupByRaw("DATE_FORMAT(date, '%Y-%m')")
