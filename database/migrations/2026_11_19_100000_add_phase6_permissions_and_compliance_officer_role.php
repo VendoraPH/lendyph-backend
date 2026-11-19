@@ -36,7 +36,9 @@ use Spatie\Permission\PermissionRegistrar;
  * deployment what it wrote on its first.
  *
  * Idempotent: insertOrIgnore throughout, a role that exists is never written,
- * and a re-run that changes no list writes no row. Nothing is revoked.
+ * and a re-run that changes no list writes no row. A role this migration
+ * already granted (its audit row names it) is skipped, so a re-run after a
+ * rollback never re-grants a key the owner removed. Nothing is revoked.
  */
 return new class extends Migration
 {
@@ -126,6 +128,10 @@ return new class extends Migration
             ->filter(fn (Role $role) => in_array($role->name, self::GRANTED_TO, true));
 
         foreach ($roles as $role) {
+            if ($this->alreadyGranted($role)) {
+                continue;
+            }
+
             $before = RolePermissionAudit::names($role);
 
             foreach ($permissionIds as $permissionId) {
@@ -142,6 +148,21 @@ return new class extends Migration
                 sprintf('Permissions for role %s changed by migration %s: added the Phase 6 permissions (AMLA, executive dashboard, branches, inter-branch transfers and loan origination)', $role->auditName(), self::NAME),
             );
         }
+    }
+
+    /**
+     * This migration already granted the role its keys (its audit row says
+     * so), so a re-run after a rollback never re-grants one the owner has
+     * removed since, as the kept and not-created cases never write twice.
+     */
+    private function alreadyGranted(Role $role): bool
+    {
+        return DB::table('audit_logs')
+            ->where('action', 'role_permissions_changed')
+            ->where('auditable_type', self::ROLE_TYPE)
+            ->where('auditable_id', $role->id)
+            ->where('description', 'like', '%'.self::NAME.'%')
+            ->exists();
     }
 
     private function createTheComplianceOfficer(string $guard): void

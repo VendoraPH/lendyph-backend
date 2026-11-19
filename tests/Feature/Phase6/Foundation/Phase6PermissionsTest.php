@@ -136,13 +136,33 @@ class Phase6PermissionsTest extends TestCase
         $this->assertSame($counts, $this->counts());
     }
 
-    public function test_the_migration_never_removes_a_grant_an_admin_made(): void
+    public function test_the_migration_leaves_an_existing_compliance_officer_exactly_as_it_is(): void
     {
-        Role::findByName('viewer')->givePermissionTo('dashboard:analytics');
+        $role = Role::findByName('compliance_officer');
+        $role->revokePermissionTo('amla:approve');
+        $before = $this->allGrants('compliance_officer');
+        $this->assertNotContains('amla:approve', $before);
 
         $this->migration()->up();
 
-        $this->assertSame(['dashboard:analytics'], $this->grants('viewer'));
+        $this->assertSame($before, $this->allGrants('compliance_officer'));
+    }
+
+    public function test_a_rerun_after_a_rollback_never_regrants_a_key_the_owner_removed(): void
+    {
+        $this->forgetPhase6();
+        Auth::logout();
+        $this->migration()->up();
+        Role::findByName('admin')->revokePermissionTo('dashboard:export');
+        $audits = AuditLog::query()->count();
+
+        $this->migration()->down();
+        $this->migration()->up();
+        app(PermissionRegistrar::class)->forgetCachedPermissions();
+
+        $this->assertNotContains('dashboard:export', $this->grants('admin'));
+        $this->assertSame($this->names(), $this->grants('super_admin'));
+        $this->assertSame($audits, AuditLog::query()->count());
     }
 
     public function test_the_migration_skips_a_role_that_does_not_exist_on_this_box(): void
@@ -216,6 +236,14 @@ class Phase6PermissionsTest extends TestCase
 
         return Role::query()->where('name', $roleName)->firstOrFail()
             ->permissions()->whereIn('name', $this->names())->orderBy('name')->pluck('name')->all();
+    }
+
+    /** @return list<string> */
+    private function allGrants(string $roleName): array
+    {
+        app(PermissionRegistrar::class)->forgetCachedPermissions();
+
+        return Role::query()->where('name', $roleName)->firstOrFail()->permissions()->orderBy('name')->pluck('name')->all();
     }
 
     /**

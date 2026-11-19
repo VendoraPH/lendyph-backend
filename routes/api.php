@@ -134,15 +134,21 @@ foreach ($portalPartials as $portalPartial) {
 /*
  * Loan origination, public side (routes/api/public-apply/*.php), in file-name
  * order, OUTSIDE the staff group below, the way routes/api/portal/ is: these
- * routes never take a staff token. Each file sets its own prefix and
+ * routes never take a staff token. They load before the staff group, and the
+ * first route registered wins, so the `/public-apply` prefix and the
+ * `public-apply.` name are forced here: a file that forgets its prefix can
+ * never answer a staff path such as GET /loans/{loan}. The name keeps them out
+ * of the shared `api` limiter (AppServiceProvider). Each file sets its own
  * middleware. An empty folder adds nothing.
  */
-$publicApplyPartials = glob(__DIR__.'/api/public-apply/*.php') ?: [];
-sort($publicApplyPartials);
+Route::prefix('public-apply')->name('public-apply.')->group(function (): void {
+    $publicApplyPartials = glob(__DIR__.'/api/public-apply/*.php') ?: [];
+    sort($publicApplyPartials);
 
-foreach ($publicApplyPartials as $publicApplyPartial) {
-    require $publicApplyPartial;
-}
+    foreach ($publicApplyPartials as $publicApplyPartial) {
+        require $publicApplyPartial;
+    }
+});
 
 // Protected routes
 //
@@ -841,8 +847,14 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
      * AMLA (routes/api/amla/), branches (routes/api/branches/), the executive
      * dashboard (routes/api/dashboard/) and loan origination, staff side
      * (routes/api/loan-origination/). Each slice adds its own file and never
-     * edits this one. They come after every route above, so none can shadow an
-     * existing one. Each file sets its own prefix. An empty folder adds nothing.
+     * edits this one. Each file sets its own prefix. An empty folder adds
+     * nothing.
+     *
+     * They come after every route above, but that alone protects nothing:
+     * Laravel's RouteCollection replaces a route with the same method, domain
+     * and URI in place, so a file here that re-declared a staff route would
+     * silently take over its controller and checks. Phase6WiringTest loads
+     * every route and fails on any repeated method, domain and URI.
      */
     foreach (['amla', 'branches', 'dashboard', 'loan-origination'] as $phase6Module) {
         $phase6Partials = glob(__DIR__.'/api/'.$phase6Module.'/*.php') ?: [];
