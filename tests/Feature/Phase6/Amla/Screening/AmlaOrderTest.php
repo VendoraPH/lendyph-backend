@@ -11,12 +11,14 @@ use App\Models\Borrower;
 use App\Models\SavingsAccount;
 use App\Models\SavingsHold;
 use App\Models\User;
+use App\Services\Amla\Screening\Orders;
 use App\Services\Savings\AvailableBalance;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use Illuminate\Testing\TestResponse;
+use Symfony\Component\HttpKernel\Exception\HttpException;
 use Tests\TestCase;
 use Tests\Traits\SetupLendyPH;
 
@@ -273,5 +275,19 @@ class AmlaOrderTest extends TestCase
 
         $this->expectException(AmlaRecordIsAppendOnlyException::class);
         AmlaOrder::query()->findOrFail($id)->delete();
+    }
+
+    public function test_a_self_approval_that_slips_past_the_first_check_is_still_refused_inside_the_lock(): void
+    {
+        $id = $this->place()->assertCreated()->json('data.id');
+        $this->actingAs($this->officer)->postJson("/api/amla/orders/{$id}/release", ['reason' => 'Lifted.', 'release_reference' => 'R-1'])->assertStatus(202);
+
+        try {
+            app(Orders::class)->approveReleaseLocked($this->officer, $id, null);
+            $this->fail('The asker approved their own release.');
+        } catch (HttpException $refused) {
+            $this->assertSame(403, $refused->getStatusCode());
+            $this->assertSame('active', AmlaOrder::query()->findOrFail($id)->status);
+        }
     }
 }

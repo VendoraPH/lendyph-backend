@@ -136,6 +136,30 @@ class HoldDesk
         ]);
     }
 
+    /**
+     * Hold money a time deposit just paid into savings for a member under a
+     * legal order (AMLA-B5 re-review: frozen funds stay frozen, and the
+     * member's own instruction still runs). The credit and this hold are one
+     * transaction, under the account lock the settlement already holds. No
+     * limit check: the amount is exactly what was just credited. `$userId` is
+     * null for the nightly maturity run.
+     */
+    public function holdCreditForOrder(int $accountId, int $centavos, ?int $userId): SavingsHold
+    {
+        $account = $this->locks->account($accountId);
+
+        return SavingsHold::query()->create([
+            'account_id' => $account->id,
+            'type' => 'legal',
+            'amount' => SavingsMath::pesos($centavos),
+            'reason' => self::ORDER_HOLD_REASON,
+            'placed_on' => now()->toDateString(),
+            'expires_on' => null,
+            'status' => SavingsHold::STATUS_ACTIVE,
+            'created_by' => $userId,
+        ]);
+    }
+
     /** Release a legal order's hold, as that order's release (decision 5). */
     public function releaseForOrder(SavingsHold $hold, User $user): SavingsHold
     {

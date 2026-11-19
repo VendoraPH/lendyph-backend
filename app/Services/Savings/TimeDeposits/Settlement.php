@@ -9,6 +9,7 @@ use App\Models\SavingsTransaction;
 use App\Models\TimeDeposit;
 use App\Models\User;
 use App\Services\Accounting\AutomaticPoster;
+use App\Services\Amla\Screening\OrderCredits;
 use App\Services\AuditLogService;
 use App\Services\Savings\ApprovalGate;
 use App\Services\Savings\SavingsLedger;
@@ -566,9 +567,15 @@ class Settlement
      * user) is not the member's doing: it doesn't count as their activity and
      * doesn't wake a dormant account. Staff paying it out at the counter does.
      */
+    /**
+     * Pay a time deposit into savings. For a member under a legal order, the
+     * credited amount is held for that order in the same transaction (AMLA-B5
+     * re-review), whoever settles: staff, a checker's approval or the nightly
+     * maturity run.
+     */
     private function creditSavings(TimeDeposit $deposit, SavingsAccount $account, int $centavos, string $date, ?int $userId, string $remarks): SavingsTransaction
     {
-        return $this->ledger->credit($account, 'deposit', $centavos, [
+        $row = $this->ledger->credit($account, 'deposit', $centavos, [
             'date' => $date,
             'method' => 'savings',
             'remarks' => $remarks,
@@ -576,6 +583,10 @@ class Settlement
             'created_by' => $userId,
             'member_activity' => $userId !== null,
         ]);
+
+        app(OrderCredits::class)->holdCredit((int) $deposit->borrower_id, $account->id, $centavos, $userId);
+
+        return $row;
     }
 
     private function tooEarly(TimeDeposit $deposit): string

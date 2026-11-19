@@ -11,6 +11,7 @@ use App\Models\User;
 use App\Services\Amla\Foundation\AmlaAccess;
 use App\Services\Amla\Foundation\AmlaLog;
 use App\Services\Savings\Api\HoldDesk;
+use App\Services\Savings\SavingsLocks;
 use App\Services\Savings\SavingsMath;
 use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\DB;
@@ -31,10 +32,13 @@ use Illuminate\Validation\ValidationException;
  */
 final class Orders
 {
+    public const ASKER_CANNOT_APPROVE = 'You asked for this release, so another AMLA sanctions holder must approve it.';
+
     public function __construct(
         private readonly HoldDesk $holds,
         private readonly AmlaLog $log,
         private readonly AmlaAccess $access,
+        private readonly SavingsLocks $locks,
     ) {}
 
     /**
@@ -134,11 +138,26 @@ final class Orders
      */
     public function approveRelease(User $checker, int $orderId, ?string $note): AmlaOrder
     {
-        $this->refuseTheAsker($checker, $orderId, 'You asked for this release, so another AMLA sanctions holder must approve it.');
+        $this->refuseTheAsker($checker, $orderId, self::ASKER_CANNOT_APPROVE);
 
+        return $this->approveReleaseLocked($checker, $orderId, $note);
+    }
+
+    /**
+     * The approval under its locks: the order's savings accounts first (in id
+     * order, as a time deposit payout into savings locks its account before
+     * the order), then the order, then the waiting request. The asker check is
+     * repeated here, under the lock, so a self-approval racing the first check
+     * still answers 403.
+     */
+    public function approveReleaseLocked(User $checker, int $orderId, ?string $note): AmlaOrder
+    {
         return DB::transaction(function () use ($checker, $orderId, $note) {
+            $this->locks->accounts(AmlaOrderHold::query()->where('order_id', $orderId)->pluck('account_id')->unique()->sort()->values());
             $order = $this->lockedActive($orderId);
             $request = $this->lockedWaiting($order);
+
+            abort_if($request->requested_by === $checker->id, 403, self::ASKER_CANNOT_APPROVE);
 
             foreach (AmlaOrderHold::query()->where('order_id', $order->id)->orderBy('account_id')->orderBy('id')->get() as $link) {
                 $hold = SavingsHold::query()->find($link->savings_hold_id);

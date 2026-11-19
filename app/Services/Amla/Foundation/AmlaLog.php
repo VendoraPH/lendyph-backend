@@ -41,6 +41,7 @@ final class AmlaLog
         'orders_listed' => 'Orders listed',
         'order_viewed' => 'Order viewed',
         'order_placed' => 'Order recorded and holds placed',
+        'order_credit_held' => 'Money paid in under an order held',
         'order_release_requested' => 'Order release asked for',
         'order_released' => 'Order release approved and holds lifted',
         'order_release_rejected' => 'Order release rejected',
