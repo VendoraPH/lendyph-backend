@@ -4,6 +4,8 @@ namespace App\Http\Requests\Loan;
 
 use App\Http\Requests\Concerns\ReferenceNumberMessages;
 use App\Http\Requests\Loan\Concerns\ValidatesReleaseInsurance;
+use App\Models\Branch;
+use App\Services\Branches\BranchWriteGuard;
 use App\Services\Cda\FormerMemberGuard;
 use Illuminate\Contracts\Validation\Validator;
 use Illuminate\Foundation\Http\FormRequest;
@@ -90,6 +92,15 @@ class ReleaseLoanRequest extends FormRequest
                 foreach ($messages as $message) {
                     $validator->errors()->add($field, $message);
                 }
+            }
+
+            // No release in a suspended or closed branch (Phase 6 MB-BE2).
+            // LoanController::release() checks again holding the branch's
+            // lock (BranchWriteGuard).
+            $branch = Branch::query()->whereKey($loan->branch_id)->first(['id', 'name', 'code', 'status']);
+
+            if ($branch !== null && $branch->status !== Branch::STATUS_ACTIVE) {
+                $validator->errors()->add('branch', BranchWriteGuard::refusal($branch, BranchWriteGuard::RELEASES));
             }
         });
     }

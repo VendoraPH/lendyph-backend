@@ -2,6 +2,7 @@
 
 namespace App\Http\Requests\Savings\Interest;
 
+use App\Services\Savings\Interest\RunPresenter;
 use Illuminate\Foundation\Http\FormRequest;
 
 /**
@@ -11,9 +12,22 @@ use Illuminate\Foundation\Http\FormRequest;
  */
 class DecideInterestRunRequest extends FormRequest
 {
+    /**
+     * The permission first (403), then the run in the caller's branches (404,
+     * the same as a missing one), and only then the reason (422), the order
+     * the other savings records answer in (Phase 6 MB-BE2 review).
+     */
     public function authorize(): bool
     {
-        return (bool) $this->user()?->can('savings:approve');
+        $user = $this->user();
+
+        if ($user === null || ! $user->can('savings:approve')) {
+            return false;
+        }
+
+        app(RunPresenter::class)->find($user, (int) $this->route('run'));
+
+        return true;
     }
 
     /** @return array<string, mixed> */

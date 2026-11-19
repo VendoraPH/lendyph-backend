@@ -3,6 +3,7 @@
 namespace App\Http\Requests\Accounting;
 
 use App\Http\Requests\Concerns\AssignsCallerBranch;
+use App\Rules\BranchTakesNew;
 use App\Services\Accounting\Money;
 use Illuminate\Foundation\Http\FormRequest;
 
@@ -57,7 +58,7 @@ class StoreFundTransferRequest extends FormRequest
             'charge' => ['nullable', 'integer', 'min:0', 'max:'.Money::maxCentavos()],
             'charge_account_id' => ['nullable', 'integer', 'exists:accounting_accounts,id'],
             'description' => ['required', 'string', 'max:500'],
-            'branch_id' => ['nullable', 'integer', $this->callerBranchRule()],
+            'branch_id' => ['bail', 'nullable', 'integer', $this->callerBranchRule(), BranchTakesNew::openOnly($this->user())],
             'reference' => ['nullable', 'string', 'max:64'],
         ];
     }

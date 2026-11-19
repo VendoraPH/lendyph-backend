@@ -23,11 +23,13 @@ use App\Http\Resources\CoMakerResource;
 use App\Http\Resources\LoanLedgerEntryResource;
 use App\Http\Resources\LoanResource;
 use App\Models\AmortizationSchedule;
+use App\Models\Borrower;
 use App\Models\CreditDecision;
 use App\Models\Loan;
 use App\Services\AmortizationBalanceService;
 use App\Services\AutoPayService;
 use App\Services\BranchAccess;
+use App\Services\Branches\BranchWriteGuard;
 use App\Services\CollateralAttacher;
 use App\Services\CollateralWriteTransaction;
 use App\Services\ContactVisibility;
@@ -611,9 +613,15 @@ DESC,
             new OA\Response(response: 422, description: 'Validation error'),
         ],
     )]
-    public function store(StoreLoanRequest $request): JsonResponse
+    public function store(StoreLoanRequest $request, BranchWriteGuard $branches): JsonResponse
     {
-        $loan = $this->loanService->createLoan($request->validated(), $request->user());
+        // Booked in the member's branch, which must take new loans (Phase 6
+        // MB-BE2), checked again holding the branch's lock (BranchWriteGuard).
+        $loan = $branches->whileTakingNew(
+            (int) Borrower::query()->whereKey($request->validated('borrower_id'))->value('branch_id'),
+            BranchWriteGuard::LOANS,
+            fn () => $this->loanService->createLoan($request->validated(), $request->user()),
+        );
         $loan->load('borrower', 'loanProduct', 'branch', 'coMakers', 'createdByUser');
 
         return (new LoanResource($loan))
@@ -889,20 +897,23 @@ DESC,
             new OA\Response(response: 422, description: 'Invalid status transition, fees exceeding principal, a sent premium that is not the server\'s, a partial amount above the premium, insurance above the net proceeds, share capital withheld for a borrower who is not a member, an unknown `method` or a missing `reference_number`, or a restructure whose source was paid down after approval below its principal (on `principal_amount`)'),
         ],
     )]
-    public function release(ReleaseLoanRequest $request, Loan $loan, LoanApprovalChainService $chain): JsonResponse
+    public function release(ReleaseLoanRequest $request, Loan $loan, LoanApprovalChainService $chain, BranchWriteGuard $branches): JsonResponse
     {
         // A release step forwarded to a named user is theirs (or admin's) to
         // release; checked before the release's transaction opens.
         $chain->assertMayRelease($loan, $request->user());
 
-        $loan = $this->loanService->release(
+        // No release in a suspended or closed branch (Phase 6 MB-BE2): the
+        // request refuses first, and this holds the branch's lock across the
+        // release, so a suspension or closure can't land midway.
+        $loan = $branches->whileTakingNew((int) $loan->branch_id, BranchWriteGuard::RELEASES, fn () => $this->loanService->release(
             $loan,
             $request->user(),
             $request->insurancePayload(),
             $request->feeFingerprint(),
             $request->releaseMethod(),
             $request->releaseReference(),
-        );
+        ));
         $loan->load('borrower', 'loanProduct', 'branch', 'coMakers',
             'approvedByUser', 'releasedByUser', 'amortizationSchedules.principalChanges', 'amortizationSchedules.postedPrincipalPayments');
 
@@ -1152,11 +1163,12 @@ DESC,
             new OA\Response(response: 422, description: 'Cannot void'),
         ],
     )]
-    public function void(Loan $loan): JsonResponse
+    public function void(Loan $loan, BranchWriteGuard $branches): JsonResponse
     {
         $this->authorize('loans:void');
 
-        $this->loanService->voidLoan($loan);
+        // A closed branch's loans stay as they are (Phase 6 MB-BE2).
+        $branches->whileOpen((int) $loan->branch_id, BranchWriteGuard::LOAN_VOIDS, fn () => $this->loanService->voidLoan($loan));
 
         return response()->json(['message' => 'Loan voided.', 'data' => new LoanResource($loan)]);
     }
@@ -1316,9 +1328,15 @@ DESC,
             new OA\Response(response: 422, description: 'Source loan is not released/ongoing, borrower mismatch, a restructure is already in progress, nothing outstanding, principal exceeds the outstanding balance, or a shortfall was sent without remarks'),
         ],
     )]
-    public function restructure(RestructureLoanRequest $request, Loan $loan): JsonResponse
+    public function restructure(RestructureLoanRequest $request, Loan $loan, BranchWriteGuard $branches): JsonResponse
     {
-        $newLoan = $this->loanService->restructure($loan, $request->validated(), $request->user());
+        // The new loan is booked in the member's branch, which must take new
+        // loans (Phase 6 MB-BE2).
+        $newLoan = $branches->whileTakingNew(
+            (int) Borrower::query()->whereKey($request->validated('borrower_id'))->value('branch_id'),
+            BranchWriteGuard::LOANS,
+            fn () => $this->loanService->restructure($loan, $request->validated(), $request->user()),
+        );
         $newLoan->load('borrower', 'loanProduct', 'branch', 'coMakers', 'createdByUser', 'sourceLoan');
 
         return (new LoanResource($newLoan))
