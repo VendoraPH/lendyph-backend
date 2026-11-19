@@ -79,7 +79,7 @@ class StoreCsvImportRunRequest extends FormRequest
                 'required',
                 'integer',
                 app(BranchAccess::class)->constrainBranchExists(Rule::exists('branches', 'id'), $this->user()),
-                BranchTakesNew::activeOnly(BranchWriteGuard::IMPORTS),
+                BranchTakesNew::activeOnly(BranchWriteGuard::IMPORTS, $this->user()),
             ],
 
             /**

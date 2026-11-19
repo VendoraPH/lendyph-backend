@@ -39,7 +39,7 @@ class ApproveRegistrationRequest extends FormRequest
                 'nullable',
                 'integer',
                 app(BranchAccess::class)->constrainBranchExists(Rule::exists('branches', 'id'), $this->user()),
-                BranchTakesNew::activeOnly(BranchWriteGuard::MEMBERS),
+                BranchTakesNew::activeOnly(BranchWriteGuard::MEMBERS, $this->user()),
             ],
         ];
     }
@@ -58,7 +58,7 @@ class ApproveRegistrationRequest extends FormRequest
                 return;
             }
 
-            BranchTakesNew::activeOnly(BranchWriteGuard::MEMBERS)->validate(
+            BranchTakesNew::activeOnly(BranchWriteGuard::MEMBERS, $this->user())->validate(
                 'branch_id',
                 $registration->branch_id,
                 fn (string $message) => $validator->errors()->add('branch_id', $message),

@@ -18,13 +18,23 @@ use Illuminate\Contracts\Validation\ValidationRule;
  * in words. A member the caller can't see is left to the field's `exists`
  * rule, so this never names another branch; a member with no branch is
  * MemberHasBranch's to report.
+ *
+ * `self::openOnly()` refuses only a closed branch, for things that go on in
+ * a suspended one (a member's GCash).
  */
 final class MemberBranchTakesNew implements ValidationRule
 {
     public function __construct(
         private readonly string $consequence,
         private readonly ?User $viewer,
+        private readonly bool $suspendedRefuses = true,
     ) {}
+
+    /** Refused by a closed branch only. */
+    public static function openOnly(?User $viewer): self
+    {
+        return new self(BranchTakesNew::NOTHING_NEW, $viewer, false);
+    }
 
     public function validate(string $attribute, mixed $value, Closure $fail): void
     {
@@ -42,7 +52,11 @@ final class MemberBranchTakesNew implements ValidationRule
 
         $branch = Branch::query()->whereKey($branchId)->first(['id', 'name', 'code', 'status']);
 
-        if ($branch !== null && $branch->status !== Branch::STATUS_ACTIVE) {
+        if ($branch === null || $branch->status === Branch::STATUS_ACTIVE) {
+            return;
+        }
+
+        if ($branch->status === Branch::STATUS_CLOSED || $this->suspendedRefuses) {
             $fail(BranchWriteGuard::refusal($branch, $this->consequence));
         }
     }

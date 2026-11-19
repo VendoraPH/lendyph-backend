@@ -26,6 +26,14 @@ use Symfony\Component\HttpKernel\Exception\HttpException;
  * status change or a closure approval (BranchStatus) holds the same lock, so
  * the two never interleave.
  *
+ * It is one exclusive lock per branch, so the guarded writes in one branch
+ * also queue behind each other: two releases in the same branch run one
+ * after the other. They are short, and a coop's branch sees few at once; a
+ * write that waits longer than `$waitSeconds` answers 409 (BUSY). Writes in
+ * different branches never wait for each other. The lock lives in the
+ * default cache store (`database` in `.env.example`), shared by every
+ * php-fpm worker of a deployment.
+ *
  * ## Why a lock, not the branch row FOR SHARE in an outer transaction
  *
  * Wrapping LoanService::release() or RepaymentService::voidRepayment() in a
@@ -54,13 +62,19 @@ class BranchWriteGuard
 
     public const LOAN_VOIDS = "its loans can't be voided";
 
-    public const BUSY = "This branch's status is being changed. Try again in a moment.";
+    public const BUSY = 'Another change in this branch is being saved. Try again in a moment.';
 
-    /** Longest a holder keeps the lock (a release or a closure approval). */
-    private const LOCK_SECONDS = 60;
+    /**
+     * Longest a holder keeps the lock: a release slowed by row-lock waits
+     * finishes well inside it, and a request killed midway frees the branch
+     * after it at most.
+     */
+    public const LOCK_SECONDS = 120;
 
-    /** How long a write waits for the lock before answering 409. */
-    private const WAIT_SECONDS = 5;
+    /**
+     * @param  int  $waitSeconds  how long a write waits for the lock before answering 409
+     */
+    public function __construct(private readonly int $waitSeconds = 15) {}
 
     /**
      * Run `$write` while the branch takes new work (active), or refuse.
@@ -106,8 +120,10 @@ class BranchWriteGuard
 
     /**
      * Run `$then` holding the branch's lock: the guarded writes above, and
-     * BranchStatus's status changes and closure approval. A holder that waits
-     * longer than WAIT_SECONDS answers 409 in words.
+     * BranchStatus's status changes and closure approval. Only waiting for the
+     * lock answers 409 (BUSY); anything `$then` throws, a database lock
+     * timeout included, passes through unchanged, and the lock is released
+     * either way.
      *
      * @template T
      *
@@ -116,10 +132,18 @@ class BranchWriteGuard
      */
     public function exclusively(int $branchId, Closure $then): mixed
     {
+        $lock = Cache::lock("branch-status:{$branchId}", self::LOCK_SECONDS);
+
         try {
-            return Cache::lock("branch-status:{$branchId}", self::LOCK_SECONDS)->block(self::WAIT_SECONDS, $then);
+            $lock->block($this->waitSeconds);
         } catch (LockTimeoutException) {
             throw new HttpException(409, self::BUSY);
+        }
+
+        try {
+            return $then();
+        } finally {
+            $lock->release();
         }
     }
 

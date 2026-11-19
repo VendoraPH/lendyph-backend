@@ -53,7 +53,7 @@ class StoreJournalRequest extends FormRequest
             'date' => ['required', 'date_format:Y-m-d'],
             'reference' => ['nullable', 'string', 'max:64'],
             'description' => ['required', 'string', 'max:500'],
-            'branch_id' => ['nullable', 'integer', $this->callerBranchRule(), BranchTakesNew::openOnly()],
+            'branch_id' => ['bail', 'nullable', 'integer', $this->callerBranchRule(), BranchTakesNew::openOnly($this->user())],
             // Accepted so a complete payload is not refused; never read.
             'total_debit' => ['sometimes', 'nullable', 'integer', 'min:0'],
             'total_credit' => ['sometimes', 'nullable', 'integer', 'min:0'],

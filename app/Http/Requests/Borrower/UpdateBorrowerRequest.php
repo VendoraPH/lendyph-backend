@@ -61,7 +61,7 @@ class UpdateBorrowerRequest extends FormRequest
                     'bail',
                     'sometimes',
                     app(BranchAccess::class)->constrainBranchExists(Rule::exists('branches', 'id'), $this->user()),
-                    BranchTakesNew::activeOnly(BranchWriteGuard::MEMBERS, $this->route('borrower')?->branch_id),
+                    BranchTakesNew::activeOnly(BranchWriteGuard::MEMBERS, $this->user(), $this->route('borrower')?->branch_id),
                 ],
             ],
         );

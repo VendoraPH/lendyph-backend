@@ -19,6 +19,10 @@ use App\Models\PortalUser;
 use App\Models\Repayment;
 use App\Models\Role;
 use App\Models\SavingsAccount;
+use App\Models\SavingsApproval;
+use App\Models\SavingsAutoCreditInstruction;
+use App\Models\SavingsHold;
+use App\Models\SavingsInterestRun;
 use App\Models\ShareCapitalPledge;
 use App\Models\TimeDeposit;
 use App\Models\User;
@@ -49,6 +53,7 @@ class BranchAccessRouteSweepTest extends TestCase
         'loan', 'borrower', 'repayment', 'loanAdjustment', 'coMaker', 'document',
         'collateral', 'pledge', 'journal', 'expense', 'user', 'transaction',
         'reconciliation', 'branch', 'account', 'timeDeposit', 'request',
+        'run', 'approval', 'hold', 'instruction',
     ];
 
     /**
@@ -59,6 +64,9 @@ class BranchAccessRouteSweepTest extends TestCase
      */
     private const PARAMETER_PREFIXES = [
         'account' => 'api/savings/',
+        // A savings interest run; `{run}` elsewhere is a CSV import run or an
+        // auto-credit run.
+        'run' => 'api/savings/interest-runs/',
     ];
 
     public function test_every_route_bound_to_a_branch_owned_record_answers_404_to_another_branch(): void
@@ -210,6 +218,8 @@ class BranchAccessRouteSweepTest extends TestCase
             'created_by' => $this->admin->id,
         ]);
 
+        $farAccount = SavingsAccount::factory()->create(['borrower_id' => $borrower->id]);
+
         return [
             'loan' => $loan->id,
             'borrower' => $borrower->id,
@@ -233,8 +243,15 @@ class BranchAccessRouteSweepTest extends TestCase
             'reconciliation' => $reconciliation->id,
             'line' => $statementLine->id,
             'branch' => $far->id,
-            'account' => SavingsAccount::factory()->create(['borrower_id' => $borrower->id])->id,
+            'account' => $farAccount->id,
             'timeDeposit' => TimeDeposit::factory()->create(['borrower_id' => $borrower->id])->id,
+            'run' => SavingsInterestRun::factory()->create(['branch_id' => $far->id])->id,
+            'approval' => SavingsApproval::factory()->create(['account_id' => $farAccount->id])->id,
+            'hold' => SavingsHold::factory()->create(['account_id' => $farAccount->id])->id,
+            'instruction' => SavingsAutoCreditInstruction::query()->create([
+                'account_id' => $farAccount->id, 'amount' => '100.00', 'schedule' => SavingsAutoCreditInstruction::SCHEDULE_15,
+                'active' => true, 'authorised_on' => now()->toDateString(), 'authorised_by' => 'Member', 'created_by' => $this->admin->id,
+            ])->id,
             'request' => PortalRequest::factory()->create([
                 'portal_user_id' => PortalUser::factory()->create(['borrower_id' => $borrower->id])->id,
             ])->id,

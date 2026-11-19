@@ -8,6 +8,7 @@ use App\Models\Loan;
 use App\Models\LoanProduct;
 use App\Models\User;
 use App\Services\AuditLogService;
+use App\Services\Branches\BranchWriteGuard;
 use App\Services\RepaymentService;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
@@ -207,6 +208,7 @@ class BranchStatusEnforcementTest extends TestCase
 
     public function test_a_status_change_and_a_guarded_write_wait_for_each_other(): void
     {
+        $this->app->instance(BranchWriteGuard::class, new BranchWriteGuard(waitSeconds: 1));
         $member = $this->member($this->town);
         $held = Cache::lock("branch-status:{$this->town->id}", 60);
         $this->assertTrue($held->get());
@@ -214,7 +216,7 @@ class BranchStatusEnforcementTest extends TestCase
         try {
             $this->patchJson("/api/branches/{$this->town->id}/status", ['status' => 'suspended', 'reason' => 'x'])
                 ->assertStatus(409)
-                ->assertJsonPath('message', "This branch's status is being changed. Try again in a moment.");
+                ->assertJsonPath('message', 'Another change in this branch is being saved. Try again in a moment.');
             $this->postJson('/api/loans', $this->loanPayload($member))->assertStatus(409);
         } finally {
             $held->release();

@@ -117,8 +117,8 @@ class StoreBorrowerRequest extends FormRequest
         // An operator may only place a member in one of their own branches
         // (BranchAccess; any branch with `branches:view_all`).
         $branchRules = $this->user()
-            ? ['bail', 'required', app(BranchAccess::class)->constrainBranchExists(Rule::exists('branches', 'id'), $this->user()), BranchTakesNew::activeOnly(BranchWriteGuard::MEMBERS)]
-            : ['bail', 'nullable', 'exists:branches,id', BranchTakesNew::activeOnly(BranchWriteGuard::MEMBERS)];
+            ? ['bail', 'required', app(BranchAccess::class)->constrainBranchExists(Rule::exists('branches', 'id'), $this->user()), BranchTakesNew::activeOnly(BranchWriteGuard::MEMBERS, $this->user())]
+            : ['bail', 'nullable', 'exists:branches,id', BranchTakesNew::forPublicRegistration()];
 
         $rules = array_merge(
             $this->requireMemberFields($this->sharedBorrowerRules($ignoreId), creating: true),

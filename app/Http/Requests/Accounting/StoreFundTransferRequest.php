@@ -58,7 +58,7 @@ class StoreFundTransferRequest extends FormRequest
             'charge' => ['nullable', 'integer', 'min:0', 'max:'.Money::maxCentavos()],
             'charge_account_id' => ['nullable', 'integer', 'exists:accounting_accounts,id'],
             'description' => ['required', 'string', 'max:500'],
-            'branch_id' => ['nullable', 'integer', $this->callerBranchRule(), BranchTakesNew::openOnly()],
+            'branch_id' => ['bail', 'nullable', 'integer', $this->callerBranchRule(), BranchTakesNew::openOnly($this->user())],
             'reference' => ['nullable', 'string', 'max:64'],
         ];
     }

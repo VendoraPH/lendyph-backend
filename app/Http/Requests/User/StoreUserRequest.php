@@ -45,9 +45,9 @@ class StoreUserRequest extends FormRequest
              */
             // Within the caller's own branches unless they hold
             // `branches:view_all` (BranchAccess).
-            'branch_id' => ['required_without:branch_ids', 'nullable', $this->assignableBranchRule(), BranchTakesNew::openOnly()],
+            'branch_id' => ['bail', 'required_without:branch_ids', 'nullable', $this->assignableBranchRule(), BranchTakesNew::openOnly($this->user())],
             'branch_ids' => ['required_without:branch_id', 'array', 'min:1'],
-            'branch_ids.*' => ['integer', $this->assignableBranchRule(), BranchTakesNew::openOnly()],
+            'branch_ids.*' => ['bail', 'integer', $this->assignableBranchRule(), BranchTakesNew::openOnly($this->user())],
             'role' => ['required', 'string', 'exists:roles,name', new AssignableRole($this->user())],
         ];
     }
