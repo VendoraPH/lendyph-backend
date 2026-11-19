@@ -148,7 +148,7 @@ final class StaffProcessing
             ]);
         }
 
-        return LoanWriteTransaction::run(function () use ($application, $user, $version, $message, $documentTypes): OriginationApplicantMessage {
+        return LoanWriteTransaction::run(conflictMessage: ApplicationTransitions::STALE, callback: function () use ($application, $user, $version, $message, $documentTypes): OriginationApplicantMessage {
             // The documents first, then the application: the order uploads
             // and document decisions take them in, so they never deadlock.
             $documents = $documentTypes === [] ? collect() : OriginationDocument::query()

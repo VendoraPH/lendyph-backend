@@ -7,6 +7,7 @@ use App\Models\OriginationDocument;
 use App\Models\OriginationDocumentVersion;
 use App\Models\User;
 use App\Services\AuditLogService;
+use App\Services\LoanOrigination\ApplicationTransitions;
 use App\Services\LoanWriteTransaction;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Facades\Storage;
@@ -62,7 +63,7 @@ final class DocumentReview
 
     public function decide(OriginationDocument $document, string $to, User $user, ?string $text): OriginationDocument
     {
-        return LoanWriteTransaction::run(function () use ($document, $to, $user, $text): OriginationDocument {
+        return LoanWriteTransaction::run(conflictMessage: ApplicationTransitions::STALE, callback: function () use ($document, $to, $user, $text): OriginationDocument {
             // The document first, then its application: the order the file
             // store takes them in on an upload, so the two never deadlock.
             /** @var OriginationDocument $locked */
