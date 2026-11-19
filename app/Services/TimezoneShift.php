@@ -317,6 +317,21 @@ class TimezoneShift
         // reason. `linda_questions.period_from` and `period_to` are DATEs.
         'linda_questions' => ['asked_at', 'created_at', 'updated_at'],
         'linda_settings' => ['created_at', 'updated_at'],
+        // Loan origination (Phase 6, LO-B1), added 2026-11-19, well after the
+        // cutover, for the same reason.
+        'origination_applications' => [
+            'created_at', 'decided_at', 'erased_at', 'last_saved_at', 'started_at', 'submitted_at', 'updated_at',
+        ],
+        'origination_consents' => ['accepted_at', 'created_at'],
+        'origination_document_versions' => ['scanned_at', 'uploaded_at'],
+        'origination_documents' => ['created_at', 'updated_at', 'verified_at'],
+        'origination_links' => ['created_at', 'expires_at', 'updated_at'],
+        'origination_notes' => ['created_at'],
+        'origination_notices' => ['created_at', 'published_at'],
+        'origination_product_settings' => ['created_at', 'updated_at'],
+        'origination_rule_revisions' => ['created_at'],
+        'origination_settings' => ['created_at', 'updated_at'],
+        'origination_status_history' => ['created_at'],
         // Added 2026-11-19 with the AMLA foundation (Phase 6), well after the
         // cutover, for the same reason. `amla_calendar_entries.date` is a DATE.
         'amla_calendar_entries' => ['created_at', 'removed_at'],
@@ -372,6 +387,10 @@ class TimezoneShift
         'amla_report_submissions' => ['created_at'],
         'amla_reports' => ['approved_at', 'created_at', 'updated_at'],
         'amla_risk_downgrades' => ['created_at', 'decided_at', 'updated_at'],
+        // Phase 6 AMLA-B7 (2026-11-23): report exports and set-aside asks, well
+        // after the cutover.
+        'amla_ctr_set_asides' => ['created_at', 'decided_at', 'updated_at'],
+        'amla_exports' => ['created_at'],
         // Added 2026-11-19 with the executive dashboard's alert thresholds
         // (Phase 6 EB-C), well after the cutover, for the same reason.
         'dashboard_settings' => ['created_at', 'updated_at'],

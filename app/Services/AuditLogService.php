@@ -25,6 +25,14 @@ class AuditLogService
     public const ACTOR_MEMBER = 'member';
 
     /**
+     * `audit_logs.actor_type` for a row an online loan applicant's own action
+     * wrote (origination decision 10). An applicant has no account, so the
+     * row names nobody: no `user_id`, no `portal_user_id`, and its values
+     * hold ids only.
+     */
+    public const ACTOR_APPLICANT = 'applicant';
+
+    /**
      * Run a callback with the Auditable trait's automatic rows turned off,
      * leaving every other model event — and every DIRECT call to self::log() —
      * running exactly as normal.
@@ -140,6 +148,7 @@ class AuditLogService
         ?string $ipAddress = null,
         ?PortalUser $member = null,
         bool $asSystem = false,
+        bool $asApplicant = false,
     ): AuditLog {
         if ($auditable !== null && app()->runningUnitTests() && ! AuditLogModules::isMapped($auditable->getMorphClass())) {
             throw new LogicException(sprintf(
@@ -148,11 +157,15 @@ class AuditLogService
             ));
         }
 
-        [$staffId, $member] = $asSystem ? [null, null] : self::actor($userId, $member);
+        [$staffId, $member] = $asSystem || $asApplicant ? [null, null] : self::actor($userId, $member);
 
         return AuditLog::create([
             'user_id' => $staffId,
-            'actor_type' => $member === null ? null : self::ACTOR_MEMBER,
+            'actor_type' => match (true) {
+                $asApplicant => self::ACTOR_APPLICANT,
+                $member !== null => self::ACTOR_MEMBER,
+                default => null,
+            },
             'portal_user_id' => $member?->getKey(),
             'action' => $action,
             'auditable_type' => $auditable ? $auditable->getMorphClass() : null,

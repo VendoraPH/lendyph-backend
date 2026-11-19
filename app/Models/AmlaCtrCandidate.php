@@ -136,11 +136,14 @@ class AmlaCtrCandidate extends Model
             return false;
         }
 
+        // The ask itself lives in AmlaCtrSetAside; the candidate takes the
+        // approved ask's reason and requester once, with a different approver.
         return match ($this->status) {
-            self::SET_ASIDE_PENDING => filled($this->not_reportable_reason) && $this->set_aside_requested_by !== null,
-            // Four eyes: never approved by the person who asked.
-            self::NOT_REPORTABLE => $this->set_aside_approved_by !== null && $this->set_aside_approved_by !== (int) $this->getOriginal('set_aside_requested_by'),
-            default => true,
+            self::NOT_REPORTABLE => filled($this->not_reportable_reason)
+                && $this->set_aside_requested_by !== null
+                && $this->set_aside_approved_by !== null
+                && $this->set_aside_approved_by !== $this->set_aside_requested_by,
+            default => ! array_intersect($dirty, ['not_reportable_reason', 'set_aside_requested_by', 'set_aside_approved_by']),
         };
     }
 

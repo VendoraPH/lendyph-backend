@@ -34,7 +34,7 @@ class CheckAmlaCoverage extends Command
 
         // Sweep, screen what the sweep added, then count and store the day.
         $coverage->check($day, store: false, sweep: true);
-        $detector->run();
+        $detector->run(full: true);
         $results = $coverage->check($day);
         $this->line('AMLA coverage for '.$parsed->format('M j, Y').':');
 

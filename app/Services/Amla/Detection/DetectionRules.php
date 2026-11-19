@@ -33,6 +33,25 @@ final class DetectionRules
 
     public const NOTE = 'Each parameter is a starting point, not a legal threshold, and is still to be verified.';
 
+    /** @var array<string, string> each parameter in words, for the rules screen */
+    public const PARAMETER_LABELS = [
+        'min_transactions' => 'Minimum transactions',
+        'multiplier' => 'Times the subject\'s own average',
+        'baseline_days' => 'Days of earlier activity compared',
+        'min_amount' => 'Minimum amount',
+        'min_baseline_transactions' => 'Minimum earlier transactions',
+        'min_in_amount' => 'Minimum money in',
+        'out_share_pct' => 'Share that leaves again (%)',
+        'within_days' => 'Within days',
+        'min_deposits' => 'Minimum deposits',
+        'min_withdrawals' => 'Minimum withdrawals',
+        'min_total' => 'Minimum total',
+        'min_share_pct' => 'Minimum share of the release (%)',
+        'channels' => 'Channels',
+        'min_branches' => 'Minimum branches',
+        'review_amount' => 'Review amount (above)',
+    ];
+
     /** @var list<class-string<DetectionRule>> */
     private const RULES = [
         Structuring::class, UnusualFrequency::class, UnusualVolume::class, IncomeMismatch::class, RapidMovement::class,

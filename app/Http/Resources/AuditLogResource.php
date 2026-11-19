@@ -484,10 +484,13 @@ class AuditLogResource extends JsonResource
             // recorded no user_id, rather than the row's own actor.
             'actor_inferred' => $this->resource->inferredActor() !== null,
             // Who wrote the row: `staff` (`user`), `member` (a member's own
-            // portal action; `user` is null and `actor_label` names them) or
-            // `system` (neither).
+            // portal action; `user` is null and `actor_label` names them),
+            // `applicant` (an online loan applicant's own action, which
+            // names nobody) or `system` (none of them).
             'actor_type' => $this->actorType(),
-            'actor_label' => self::memberActorLabel($this->resource),
+            'actor_label' => $this->resource->actor_type === AuditLogService::ACTOR_APPLICANT
+                ? 'Applicant'
+                : self::memberActorLabel($this->resource),
             'action' => $this->action,
             // Frontend-canonical module slug; the list's `module` filter uses
             // the same rules (AuditLogModules).
@@ -519,6 +522,10 @@ class AuditLogResource extends JsonResource
     {
         if ($this->resource->actor_type === AuditLogService::ACTOR_MEMBER) {
             return 'member';
+        }
+
+        if ($this->resource->actor_type === AuditLogService::ACTOR_APPLICANT) {
+            return 'applicant';
         }
 
         return $this->resource->user_id !== null || $this->resource->inferredActor() !== null ? 'staff' : 'system';

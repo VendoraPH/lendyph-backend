@@ -45,9 +45,9 @@ class AmlaFilingController extends Controller
 {
     private const READ = [AmlaAccess::CTR, AmlaAccess::STR, AmlaAccess::APPROVE, AmlaAccess::SUBMIT, AmlaAccess::EXPORT];
 
-    private const STR_READ = [AmlaAccess::STR, AmlaAccess::APPROVE, AmlaAccess::SUBMIT, AmlaAccess::EXPORT];
+    private const STR_READ = Filings::STR_READ;
 
-    private const CTR_READ = [AmlaAccess::CTR, AmlaAccess::APPROVE, AmlaAccess::SUBMIT, AmlaAccess::EXPORT];
+    private const CTR_READ = Filings::CTR_READ;
 
     public function __construct(
         private readonly AmlaAccess $access,
@@ -235,22 +235,7 @@ class AmlaFilingController extends Controller
     /** @return Builder<AmlaReport> */
     private function visibleReports(User $user): Builder
     {
-        $ids = $this->branches->for($user);
-        $ctr = $user->canAny(self::CTR_READ);
-        $str = $user->canAny(self::STR_READ) && $ids === null;
-
-        return AmlaReport::query()->where(function (Builder $q) use ($ctr, $str, $ids) {
-            $q->whereRaw('1 = 0');
-
-            if ($ctr) {
-                $q->orWhere(fn (Builder $c) => $c->where('type', AmlaReport::CTR)
-                    ->when($ids !== null, fn (Builder $scoped) => $scoped->whereIn('branch_id', $ids)->whereNull('gcash_non_member_id')));
-            }
-
-            if ($str) {
-                $q->orWhere('type', AmlaReport::STR);
-            }
-        });
+        return $this->filings->visibleQuery($user);
     }
 
     /** @param  list<string>  $keys */
@@ -279,7 +264,8 @@ class AmlaFilingController extends Controller
     {
         return response()->json(['success' => true, 'data' => [
             'id' => (int) $candidate->id, 'reference' => $candidate->reference, 'status' => $candidate->status,
-            'status_words' => AmlaCtrCandidate::STATUS_WORDS[$candidate->status], 'reason' => $candidate->not_reportable_reason,
+            'status_words' => AmlaCtrCandidate::STATUS_WORDS[$candidate->status],
+            'reason' => $candidate->status === AmlaCtrCandidate::SET_ASIDE_PENDING ? $this->filings->pendingSetAside($candidate)?->reason : $candidate->not_reportable_reason,
         ]], $status);
     }
 
