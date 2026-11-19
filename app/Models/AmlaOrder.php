@@ -13,8 +13,9 @@ use Illuminate\Support\Carbon;
  * 5; task §11): who issued it, when it came in, the member, the required
  * action, the responsible officer and the return deadline, and the savings
  * holds placed for it. The order's details are encrypted. The only change
- * ever written is its release, once, by `amla:sanctions`, which lifts its
- * holds. Never deleted.
+ * ever written is its release, once: asked for by one `amla:sanctions`
+ * holder and approved by a different one (AmlaOrderReleaseRequest), which
+ * lifts its holds. Never deleted.
  *
  * @property int $id
  * @property string $reference
@@ -46,11 +47,11 @@ class AmlaOrder extends Model
     /** @var array<string, string> */
     public const STATUSES = [self::ACTIVE => 'In force', self::RELEASED => 'Released'];
 
-    private const RELEASE_COLUMNS = ['status', 'released_by', 'released_at', 'release_reason', 'release_reference', 'updated_at'];
+    private const RELEASE_COLUMNS = ['status', 'release_requested_by', 'released_by', 'released_at', 'release_reason', 'release_reference', 'updated_at'];
 
     protected $fillable = [
         'reference', 'authority', 'received_on', 'borrower_id', 'required_action', 'details', 'responsible_officer_id',
-        'return_due_on', 'status', 'placed_by', 'released_by', 'released_at', 'release_reason', 'release_reference',
+        'return_due_on', 'status', 'placed_by', 'release_requested_by', 'released_by', 'released_at', 'release_reason', 'release_reference',
     ];
 
     protected function casts(): array
@@ -63,18 +64,31 @@ class AmlaOrder extends Model
             'responsible_officer_id' => 'integer',
             'return_due_on' => 'date',
             'placed_by' => 'integer',
+            'release_requested_by' => 'integer',
             'released_by' => 'integer',
             'released_at' => 'datetime',
             'release_reason' => 'encrypted',
         ];
     }
 
-    /** Only its one release. */
+    /**
+     * Whether a member is under an order in force. Savings refuses a time
+     * deposit's pre-termination and any payout out of the cooperative while
+     * one is (AMLA-B5 review decision), in words that don't name AMLA.
+     */
+    public static function memberIsUnderOrder(int $borrowerId): bool
+    {
+        return static::query()->where('borrower_id', $borrowerId)->where('status', self::ACTIVE)->exists();
+    }
+
+    /** Only its one release, approved by someone other than the person who asked for it. */
     protected function amlaAllowsUpdate(): bool
     {
         return $this->getOriginal('status') === self::ACTIVE
             && $this->status === self::RELEASED
             && $this->released_by !== null
+            && $this->release_requested_by !== null
+            && (int) $this->released_by !== (int) $this->release_requested_by
             && array_diff(array_keys($this->getDirty()), self::RELEASE_COLUMNS) === [];
     }
 
@@ -102,6 +116,16 @@ class AmlaOrder extends Model
     public function releaser(): BelongsTo
     {
         return $this->belongsTo(User::class, 'released_by');
+    }
+
+    public function releaseRequester(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'release_requested_by');
+    }
+
+    public function releaseRequests(): HasMany
+    {
+        return $this->hasMany(AmlaOrderReleaseRequest::class, 'order_id');
     }
 
     public function responsibleOfficer(): BelongsTo

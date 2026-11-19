@@ -28,4 +28,7 @@ Route::prefix('amla')->name('amla.')->middleware('throttle:amla')->group(functio
     Route::post('/orders', [AmlaOrderController::class, 'store'])->name('orders.store');
     Route::get('/orders/{id}', [AmlaOrderController::class, 'show'])->where('id', '[0-9]{1,18}')->name('orders.show');
     Route::post('/orders/{id}/release', [AmlaOrderController::class, 'release'])->where('id', '[0-9]{1,18}')->name('orders.release');
+    Route::post('/orders/{id}/release/approve', [AmlaOrderController::class, 'approveRelease'])->where('id', '[0-9]{1,18}')->name('orders.release.approve');
+    Route::post('/orders/{id}/release/reject', [AmlaOrderController::class, 'rejectRelease'])->where('id', '[0-9]{1,18}')->name('orders.release.reject');
+    Route::post('/orders/{id}/release/withdraw', [AmlaOrderController::class, 'withdrawRelease'])->where('id', '[0-9]{1,18}')->name('orders.release.withdraw');
 });

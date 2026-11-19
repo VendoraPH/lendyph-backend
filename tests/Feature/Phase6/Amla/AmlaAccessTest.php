@@ -106,6 +106,9 @@ class AmlaAccessTest extends TestCase
             'POST api/amla/screening/matches/{id}/clear',
             'GET api/amla/orders/{id}',
             'POST api/amla/orders/{id}/release',
+            'POST api/amla/orders/{id}/release/approve',
+            'POST api/amla/orders/{id}/release/reject',
+            'POST api/amla/orders/{id}/release/withdraw',
         ];
 
         $routes = collect(Route::getRoutes()->getRoutes())

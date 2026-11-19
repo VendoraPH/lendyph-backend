@@ -2,6 +2,7 @@
 
 namespace Tests\Feature\Phase6\Amla\Cdd;
 
+use App\Models\AmlaIdVerification;
 use App\Models\AmlaLogEntry;
 use Tests\TestCase;
 use Tests\Traits\SetupLendyPH;
@@ -73,5 +74,19 @@ class AmlaCddValidIdsTest extends TestCase
         $this->actingAs($this->cddOfficer())->getJson($this->cddUrl($elsewhere, '/valid-ids'))->assertNotFound();
         $this->actingAs($this->cddOfficer())->getJson($this->cddUrl($this->walkIn(), '/valid-ids'))->assertNotFound();
         $this->actingAs($this->headOfficeCddOfficer())->getJson($this->cddUrl($elsewhere, '/valid-ids'))->assertOk();
+    }
+
+    public function test_an_id_number_of_four_characters_or_fewer_is_masked_whole(): void
+    {
+        $member = $this->member();
+        $short = $this->validId($member, '12-34');
+        $officer = $this->cddOfficer();
+
+        $this->actingAs($officer)->getJson($this->cddUrl($member, '/valid-ids'))->assertOk()->assertJsonPath('data.0.id_number_masked', '****');
+
+        $this->actingAs($officer)->postJson($this->cddUrl($member, '/id-verifications'), [
+            'document_id' => $short->id, 'method' => 'original_seen', 'result' => 'verified',
+        ])->assertCreated()->assertJsonPath('data.id_number_masked', '****');
+        $this->assertNull(AmlaIdVerification::query()->sole()->id_number_last4, 'a short number is never kept');
     }
 }

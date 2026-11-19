@@ -14,7 +14,8 @@ use Illuminate\Support\Carbon;
  * (both the CSV template). Its entries never change. The only changes ever
  * written are its supersession by the next version of the same list, once,
  * and its rescreen state (pending until every subject has been screened
- * against it; a manual rescreen sets it pending again). Never deleted.
+ * against it, with where a run stopped; a manual rescreen sets it pending
+ * again). Never deleted.
  *
  * @property int $id
  * @property string $source un|amlc|internal
@@ -24,6 +25,8 @@ use Illuminate\Support\Carbon;
  * @property string $status active|superseded
  * @property Carbon|null $superseded_at
  * @property string $rescreen_status pending|done
+ * @property string|null $rescreen_table the subject table a stopped rescreen resumes in
+ * @property int|null $rescreen_after_id the last subject id it screened there
  * @property Carbon|null $rescreened_at
  * @property int $uploaded_by
  */
@@ -48,12 +51,13 @@ class AmlaWatchlistVersion extends Model
 
     public const RESCREEN_DONE = 'done';
 
-    protected $fillable = ['source', 'version_label', 'file_sha256', 'entry_count', 'status', 'superseded_at', 'rescreen_status', 'rescreened_at', 'uploaded_by'];
+    protected $fillable = ['source', 'version_label', 'file_sha256', 'entry_count', 'status', 'superseded_at', 'rescreen_status', 'rescreen_table', 'rescreen_after_id', 'rescreened_at', 'uploaded_by'];
 
     protected function casts(): array
     {
         return [
             'entry_count' => 'integer',
+            'rescreen_after_id' => 'integer',
             'superseded_at' => 'datetime',
             'rescreened_at' => 'datetime',
             'uploaded_by' => 'integer',
@@ -70,7 +74,7 @@ class AmlaWatchlistVersion extends Model
             return $this->getOriginal('status') === self::ACTIVE && $this->status === self::SUPERSEDED && $this->superseded_at !== null;
         }
 
-        return array_diff($dirty, ['rescreen_status', 'rescreened_at']) === []
+        return array_diff($dirty, ['rescreen_status', 'rescreen_table', 'rescreen_after_id', 'rescreened_at']) === []
             && in_array($this->rescreen_status, [self::RESCREEN_PENDING, self::RESCREEN_DONE], true);
     }
 

@@ -11,7 +11,8 @@ use Illuminate\Support\Facades\Schema;
  * - `amla_watchlist_versions` and `amla_watchlist_entries`: each uploaded list
  *   (UN consolidated list, AMLC designations, an internal list) as a version
  *   and its entries, kept forever. A new version supersedes the last and
- *   waits to be rescreened (`rescreen_status`).
+ *   waits to be rescreened (`rescreen_status`); a rescreen that runs out of
+ *   time saves where it stopped (`rescreen_table`, `rescreen_after_id`).
  * - `amla_screening_matches`: potential matches with their score, threshold
  *   and reasons, reviewed by a person (confirmed or cleared, with an
  *   encrypted reason). `match_key` keeps one match per subject and listing,
@@ -21,6 +22,10 @@ use Illuminate\Support\Facades\Schema;
  * - `amla_orders` and `amla_order_holds`: the freeze-order register and the
  *   savings holds each order placed. Those holds never expire; only the
  *   order's release lifts them.
+ * - `amla_order_release_requests`: a release takes two people. One
+ *   `amla:sanctions` holder asks, with the reason and the lifting order's
+ *   reference; a different one approves (or rejects). `pending_key` (the
+ *   order id while pending) keeps one waiting request per order.
  *
  * No money table changes: savings holds are written through the savings code,
  * as legal holds. Users, members, accounts and holds referenced here can't be
@@ -39,6 +44,8 @@ return new class extends Migration
             $table->string('status', 12)->default('active');
             $table->timestamp('superseded_at')->nullable();
             $table->string('rescreen_status', 10)->default('pending');
+            $table->string('rescreen_table', 30)->nullable();
+            $table->unsignedBigInteger('rescreen_after_id')->nullable();
             $table->timestamp('rescreened_at')->nullable();
             $table->foreignId('uploaded_by')->constrained('users')->restrictOnDelete();
             $table->timestamp('created_at')->nullable();
@@ -103,6 +110,7 @@ return new class extends Migration
             $table->date('return_due_on')->nullable();
             $table->string('status', 10)->default('active');
             $table->foreignId('placed_by')->constrained('users')->restrictOnDelete();
+            $table->foreignId('release_requested_by')->nullable()->constrained('users')->restrictOnDelete();
             $table->foreignId('released_by')->nullable()->constrained('users')->restrictOnDelete();
             $table->timestamp('released_at')->nullable();
             $table->text('release_reason')->nullable();
@@ -110,6 +118,22 @@ return new class extends Migration
             $table->timestamps();
 
             $table->index(['status', 'id']);
+        });
+
+        Schema::create('amla_order_release_requests', function (Blueprint $table) {
+            $table->id();
+            $table->foreignId('order_id')->constrained('amla_orders')->restrictOnDelete();
+            $table->string('status', 10)->default('pending');
+            $table->unsignedBigInteger('pending_key')->nullable()->unique();
+            $table->text('reason');
+            $table->string('release_reference', 150);
+            $table->foreignId('requested_by')->constrained('users')->restrictOnDelete();
+            $table->foreignId('decided_by')->nullable()->constrained('users')->restrictOnDelete();
+            $table->timestamp('decided_at')->nullable();
+            $table->text('decision_note')->nullable();
+            $table->timestamps();
+
+            $table->index(['order_id', 'id']);
         });
 
         Schema::create('amla_order_holds', function (Blueprint $table) {
@@ -134,6 +158,7 @@ return new class extends Migration
         }
 
         Schema::dropIfExists('amla_order_holds');
+        Schema::dropIfExists('amla_order_release_requests');
         Schema::dropIfExists('amla_orders');
         Schema::dropIfExists('amla_screening_cursors');
         Schema::dropIfExists('amla_screening_matches');

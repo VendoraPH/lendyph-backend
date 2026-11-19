@@ -6,6 +6,8 @@ use App\Exceptions\AmlaRecordIsAppendOnlyException;
 use App\Models\AmlaLogEntry;
 use App\Models\AmlaWatchlistEntry;
 use App\Models\AmlaWatchlistVersion;
+use App\Services\Amla\Screening\WatchlistParser;
+use Illuminate\Validation\ValidationException;
 use Tests\TestCase;
 use Tests\Traits\SetupLendyPH;
 
@@ -96,7 +98,7 @@ class WatchlistUploadTest extends TestCase
         ]), 'rows.csv')->assertUnprocessable()
             ->assertJsonPath('errors.file.0', 'Row 2: the full name is missing.')
             ->assertJsonPath('errors.file.1', 'Row 3: the type must be individual or entity.')
-            ->assertJsonPath('errors.file.2', 'Row 3: the birth year must be four digits.');
+            ->assertJsonPath('errors.file.2', 'Row 3: the birth year must be four digits, or a range such as 1960-1965.');
 
         $this->upload($screener, 'amlc', $this->csvList([]), 'empty.csv')
             ->assertUnprocessable()->assertJsonPath('errors.file.0', 'The list has no entries.');
@@ -136,5 +138,35 @@ class WatchlistUploadTest extends TestCase
             ->assertJsonPath('message', 'This needs the AMLA screening permission.');
         $this->actingAs($this->amlaUser(['amla:view', 'branches:view_all']))->getJson('/api/amla/screening/lists')->assertForbidden();
         $this->upload($this->screener(), 'ofac', $csv, 'a.csv')->assertNotFound();
+    }
+
+    public function test_birth_year_ranges_are_kept_as_every_year_in_them(): void
+    {
+        $xml = str_replace(
+            '<INDIVIDUAL_DATE_OF_BIRTH><TYPE_OF_DATE>APPROXIMATELY</TYPE_OF_DATE><YEAR>1960</YEAR></INDIVIDUAL_DATE_OF_BIRTH>',
+            '<INDIVIDUAL_DATE_OF_BIRTH><TYPE_OF_DATE>BETWEEN</TYPE_OF_DATE><FROM_YEAR>1960</FROM_YEAR><TO_YEAR>1965</TO_YEAR></INDIVIDUAL_DATE_OF_BIRTH>',
+            $this->unXml([['ref' => 'QDi.050', 'first' => 'ISNILON', 'second' => 'TOTONI', 'third' => 'HAPILON', 'year' => '1960']]),
+        );
+        $this->upload($this->screener(), 'un', $xml, 'list.xml')->assertCreated();
+        $this->assertSame(range(1960, 1965), AmlaWatchlistEntry::query()->where('reference', 'QDi.050')->sole()->birth_years);
+
+        $this->upload($this->screener(), 'internal', $this->csvList([['I-9', 'individual', 'Ana Reyes', '', '1970-1972', '']]), 'r.csv')->assertCreated();
+        $this->assertSame([1970, 1971, 1972], AmlaWatchlistEntry::query()->where('reference', 'I-9')->sole()->birth_years);
+    }
+
+    public function test_a_list_that_isnt_utf8_is_refused_so_a_utf16_document_type_never_gets_past(): void
+    {
+        $xml = "<?xml version=\"1.0\" encoding=\"UTF-16\"?>\n<!DOCTYPE x [<!ENTITY a \"aaaa\">]><CONSOLIDATED_LIST><INDIVIDUALS/></CONSOLIDATED_LIST>";
+        $utf16 = "\xFF\xFE".mb_convert_encoding($xml, 'UTF-16LE', 'UTF-8');
+
+        try {
+            app(WatchlistParser::class)->un($utf16);
+            $this->fail('A UTF-16 list was read.');
+        } catch (ValidationException $refused) {
+            $this->assertSame('The UN list must be UTF-8 XML.', $refused->errors()['file'][0]);
+        }
+
+        $this->upload($this->screener(), 'un', $utf16, 'utf16.xml')->assertUnprocessable();
+        $this->assertSame(0, AmlaWatchlistVersion::query()->count());
     }
 }

@@ -41,7 +41,10 @@ final class AmlaLog
         'orders_listed' => 'Orders listed',
         'order_viewed' => 'Order viewed',
         'order_placed' => 'Order recorded and holds placed',
-        'order_released' => 'Order released and holds lifted',
+        'order_release_requested' => 'Order release asked for',
+        'order_released' => 'Order release approved and holds lifted',
+        'order_release_rejected' => 'Order release rejected',
+        'order_release_withdrawn' => 'Order release withdrawn',
         'cdd_valid_ids_viewed' => 'Member IDs viewed (masked)',
     ];
 

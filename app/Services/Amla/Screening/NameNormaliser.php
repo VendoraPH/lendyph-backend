@@ -8,7 +8,8 @@ use App\Models\GCashNonMember;
  * Names as screening compares them: the walk-in normalisation (case and
  * spacing ignored, GCashNonMember::comparableName), then accents taken off
  * and anything but letters read as a space, so "JOSÉ  dela Peña." and
- * "Jose Dela Pena" are one name. Words are compared in any order.
+ * "Jose Dela Pena" are one name. Surname particles join the next word
+ * ("de la cruz" is "delacruz"). Words are compared in any order.
  */
 final class NameNormaliser
 {
@@ -22,6 +23,14 @@ final class NameNormaliser
         'ñ' => 'n', 'ç' => 'c', 'ý' => 'y', 'ÿ' => 'y', 'ß' => 'ss', 'æ' => 'ae', 'œ' => 'oe',
     ];
 
+    /**
+     * Surname particles that are joined to the next word, so a name written
+     * with or without the spaces compares the same.
+     *
+     * @var list<string>
+     */
+    public const PARTICLES = ['de', 'del', 'dela', 'della', 'delas', 'delos', 'la', 'las', 'los', 'le', 'da', 'das', 'do', 'dos', 'di', 'du', 'van', 'von', 'der', 'den', 'ter', 'ten', 'san', 'sta', 'sto'];
+
     public static function normalise(string $name): string
     {
         $plain = strtr(GCashNonMember::comparableName($name), self::ACCENTS);
@@ -31,11 +40,14 @@ final class NameNormaliser
     }
 
     /**
-     * The name's distinct words, sorted.
+     * The name's words in their order, with surname particles joined to the
+     * word after them (AMLA-B5 review): "de la cruz", "dela cruz" and
+     * "delacruz" are all "delacruz"; "de los santos" is "delossantos". A
+     * particle at the end stays a word of its own.
      *
      * @return list<string>
      */
-    public static function tokens(string $name): array
+    public static function words(string $name): array
     {
         $normalised = self::normalise($name);
 
@@ -43,7 +55,35 @@ final class NameNormaliser
             return [];
         }
 
-        $tokens = array_values(array_unique(explode(' ', $normalised)));
+        $words = [];
+        $pending = '';
+
+        foreach (explode(' ', $normalised) as $word) {
+            if (in_array($word, self::PARTICLES, true)) {
+                $pending .= $word;
+
+                continue;
+            }
+
+            $words[] = $pending.$word;
+            $pending = '';
+        }
+
+        if ($pending !== '') {
+            $words[] = $pending;
+        }
+
+        return $words;
+    }
+
+    /**
+     * The name's distinct words (particles joined), sorted.
+     *
+     * @return list<string>
+     */
+    public static function tokens(string $name): array
+    {
+        $tokens = array_values(array_unique(self::words($name)));
         sort($tokens);
 
         return $tokens;

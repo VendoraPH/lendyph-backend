@@ -10,6 +10,7 @@ use App\Services\Amla\Screening\NameNormaliser;
 use App\Services\Amla\Screening\Screener;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Artisan;
+use Illuminate\Support\Facades\DB;
 use Tests\TestCase;
 use Tests\Traits\SetupLendyPH;
 
@@ -52,8 +53,8 @@ class ScreeningMatcherTest extends TestCase
         $matcher = app(Matcher::class);
 
         $this->assertSame(100, $matcher->score(['Juan Dela Cruz'], null, ['JUAN DELA CRUZ'], [])['score']);
-        $this->assertSame(100, $matcher->score(['Cruz, Juan Dela'], null, ['JUAN DELA CRUZ'], [])['score']);
-        $this->assertSame(67, $matcher->score(['Juan Cruz'], null, ['JUAN DELA CRUZ'], [])['score']);
+        $this->assertSame(100, $matcher->score(['Dela Cruz, Juan'], null, ['JUAN DELA CRUZ'], [])['score'], 'surname first');
+        $this->assertSame(50, $matcher->score(['Juan Cruz'], null, ['JUAN DELA CRUZ'], [])['score'], 'Dela Cruz is one surname: only Juan matches');
 
         $nearly = $matcher->score(['Mohammed Rahman Khan'], null, ['MUHAMMED RAHMAN KHAN'], []);
         $this->assertSame(Matcher::THRESHOLD, 85);
@@ -65,9 +66,13 @@ class ScreeningMatcherTest extends TestCase
     {
         $matcher = app(Matcher::class);
 
-        $different = $matcher->score(['Juan Dela Cruz'], 1990, ['JUAN DELA CRUZ'], [1975]);
+        $different = $matcher->score(['Juan Dela Cruz'], 1990, ['JUAN SANTOS DELA CRUZ'], [1975]);
         $this->assertSame(70, $different['score']);
         $this->assertContains('Birth year differs (1990 against 1975)', $different['reasons']);
+
+        $exact = $matcher->score(['Juan Dela Cruz'], 1990, ['JUAN DELA CRUZ'], [1975]);
+        $this->assertSame(Matcher::THRESHOLD, $exact['score'], 'an exact name is kept whatever the birth year');
+        $this->assertContains('Birth year differs (1990 against 1975); kept because the name matches exactly', $exact['reasons']);
 
         $same = $matcher->score(['Juan Dela Cruz'], 1975, ['JUAN DELA CRUZ'], [1975]);
         $this->assertSame(100, $same['score']);
@@ -79,9 +84,9 @@ class ScreeningMatcherTest extends TestCase
         $matcher = app(Matcher::class);
 
         $this->assertSame(85, $matcher->score(['Mohammed Rahmann'], null, ['MUHAMMED RAHMAN'], [])['score']);
-        $this->assertSame(67, $matcher->score(['Ana Cruz'], null, ['ANA DELA CRUZ'], [])['score']);
+        $this->assertSame(50, $matcher->score(['Ana Cruz'], null, ['ANA DELA CRUZ'], [])['score']);
         $this->assertSame(0, $matcher->score(['Ana'], null, ['ANNA'], [])['score'], 'a short word is never matched one letter off');
-        $this->assertSame(67, $matcher->score(['Jose Rizal'], null, ['J. MERCADO', 'JOSE RIZAL MERCADO'], [])['score'], 'the best of the listed names counts');
+        $this->assertSame(100, $matcher->score(['Jose Rizal'], null, ['J. MERCADO', 'JOSE RIZAL MERCADO'], [])['score'], 'the best of the listed names counts');
     }
 
     public function test_matches_are_kept_at_the_threshold_and_above_never_below_and_never_confirmed(): void
@@ -171,5 +176,89 @@ class ScreeningMatcherTest extends TestCase
 
         $this->assertSame(0, AmlaScreeningMatch::query()->count());
         $this->assertTrue(app(Screener::class)->pendingRescreens()->isNotEmpty(), 'the rescreen waits for monitoring');
+    }
+
+    public function test_the_reviewers_cases_match_how_much_of_the_shorter_name_is_found(): void
+    {
+        $matcher = app(Matcher::class);
+
+        $this->assertSame(100, $matcher->score(['Isnilon Hapilon'], null, ['ISNILON TOTONI HAPILON'], [], 'Hapilon')['score']);
+        $this->assertSame(100, $matcher->score(['Juan Cruz'], null, ['JUAN SANTOS CRUZ'], [], 'Cruz')['score'], 'the listing without its middle name');
+        $this->assertSame(100, $matcher->score(['Juan Dela Cruz'], null, ['JUAN DE LA CRUZ'], [], 'Dela Cruz')['score'], 'particles join: dela cruz is de la cruz');
+        $this->assertSame(100, $matcher->score(['Maria delos Santos'], null, ['MARIA DE LOS SANTOS'], [])['score']);
+
+        $surnameMissing = $matcher->score(['Isnilon Reyes'], null, ['ISNILON TOTONI HAPILON'], [], 'Reyes');
+        $this->assertLessThan(Matcher::THRESHOLD, $surnameMissing['score'], 'the surname must be among the words found');
+        $this->assertLessThan(Matcher::THRESHOLD, $matcher->score(['Hapilon'], null, ['ISNILON TOTONI HAPILON'], [], 'Hapilon')['score'], 'one word is never enough');
+    }
+
+    public function test_a_birth_year_inside_a_listed_range_matches(): void
+    {
+        $matcher = app(Matcher::class);
+
+        $inside = $matcher->score(['Juan Dela Cruz'], 1962, ['JUAN DELA CRUZ'], range(1960, 1965));
+        $this->assertSame(100, $inside['score']);
+        $this->assertContains('Birth year matches (1962, listed 1960–1965)', $inside['reasons']);
+
+        $outside = $matcher->score(['Juan Dela Cruz'], 1970, ['JUAN SANTOS DELA CRUZ'], [...range(1960, 1965), 1975]);
+        $this->assertContains('Birth year differs (1970 against 1960–1965 or 1975)', $outside['reasons']);
+    }
+
+    public function test_a_rescreen_resumes_where_it_stopped(): void
+    {
+        Carbon::setTestNow('2026-11-21 09:00:00');
+        foreach ([1, 2, 3] as $i) {
+            $this->member(['first_name' => 'Ana', 'middle_name' => null, 'last_name' => 'Reyes']);
+        }
+        $this->upload($this->screener(), 'internal', $this->csvList([['I-1', 'individual', 'Ana Reyes', '', '', '']]), 'v1.csv')->assertCreated();
+        $screener = app(Screener::class);
+
+        foreach ([1, 2] as $run) {
+            $screener->run(Carbon::parse('2026-11-21 09:1'.$run.':00'), 1);
+            $this->assertSame($run, AmlaScreeningMatch::query()->count());
+            $this->assertTrue($screener->pendingRescreens()->isNotEmpty(), "run {$run} saved its place and stopped");
+        }
+
+        $screener->run(Carbon::parse('2026-11-21 09:13:00'), 1);
+        $this->assertSame(3, AmlaScreeningMatch::query()->count());
+        $this->assertTrue($screener->pendingRescreens()->isEmpty());
+    }
+
+    public function test_a_minute_with_nothing_changed_reads_no_watchlist_entries(): void
+    {
+        $this->upload($this->screener(), 'internal', $this->csvList([['I-1', 'individual', 'Ana Reyes', '', '', '']]), 'v1.csv')->assertCreated();
+        Carbon::setTestNow('2026-11-21 09:00:00');
+        Artisan::call('amla:screen');
+        Carbon::setTestNow('2026-11-21 09:05:00');
+        Artisan::call('amla:screen');
+
+        Carbon::setTestNow('2026-11-21 09:06:00');
+        DB::enableQueryLog();
+        Artisan::call('amla:screen');
+        $reads = collect(DB::getQueryLog())->filter(fn (array $query) => str_contains($query['query'], 'amla_watchlist_entries'));
+        DB::disableQueryLog();
+
+        $this->assertCount(0, $reads, 'no change, so the name index is not rebuilt');
+    }
+
+    public function test_a_cleared_match_is_looked_at_again_once_the_members_details_change(): void
+    {
+        Carbon::setTestNow('2026-11-21 09:00:00');
+        $member = $this->member(['first_name' => 'Ana', 'middle_name' => null, 'last_name' => 'Reyes', 'birthdate' => '1980-02-02']);
+        $this->upload($this->screener(), 'internal', $this->csvList([['I-1', 'individual', 'Ana Reyes', '', '1980', '']]), 'v1.csv')->assertCreated();
+        Artisan::call('amla:screen');
+        $match = AmlaScreeningMatch::query()->sole();
+        $this->actingAs($this->screener())->postJson("/api/amla/screening/matches/{$match->id}/clear", ['reason' => 'Different person.'])->assertOk();
+
+        Carbon::setTestNow('2026-11-21 09:05:00');
+        Artisan::call('amla:screen');
+        $this->assertSame(1, AmlaScreeningMatch::query()->count(), 'unchanged details: the cleared match stands');
+
+        Carbon::setTestNow('2026-11-21 09:06:00');
+        $member->forceFill(['birthdate' => '1981-02-02'])->save();
+        Carbon::setTestNow('2026-11-21 09:07:00');
+        Artisan::call('amla:screen');
+
+        $this->assertSame(['cleared', 'pending'], AmlaScreeningMatch::query()->orderBy('id')->pluck('status')->all());
     }
 }

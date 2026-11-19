@@ -92,10 +92,17 @@ class HoldDesk
 
     /**
      * Hold money on an account for a legal order (AMLA design decision 5): a
-     * legal hold with no end date, up to the balance not already held. It
-     * reads only as a legal hold; the order that placed it is recorded on the
-     * AMLA side (AmlaOrderHold), and only that order's release lifts it. The
-     * caller runs it inside the order's transaction.
+     * legal hold with no end date. It reads only as a legal hold; the order
+     * that placed it is recorded on the AMLA side (AmlaOrderHold), and only
+     * that order's release lifts it. The caller runs it inside the order's
+     * transaction.
+     *
+     * Order holds stack on top of every other hold (AMLA-B5 review): only
+     * other legal orders' holds count against the balance, so an order can be
+     * recorded over money a staff hold or a member's withdrawal request
+     * already reserves, and that money stays held when the other hold is
+     * released or expires. The available balance floors at ₱0.00
+     * (AvailableBalance) while holds add up to more than the balance.
      *
      * @throws ValidationException
      */
@@ -108,11 +115,13 @@ class HoldDesk
         }
 
         $today = now()->toDateString();
-        $held = SavingsMath::centavos(SavingsHold::query()->where('account_id', $account->id)->holding($today)->sum('amount'));
-        $free = max(0, SavingsMath::signedCentavos($account->ledger_balance) - $held);
+        $ordered = SavingsMath::centavos(SavingsHold::query()->where('account_id', $account->id)->holding($today)
+            ->whereIn('id', AmlaOrderHold::query()->select('savings_hold_id'))
+            ->sum('amount'));
+        $free = max(0, SavingsMath::signedCentavos($account->ledger_balance) - $ordered);
 
         if ($centavos > $free) {
-            Refuse::field('amount', Refuse::peso($centavos).' is more than the '.Refuse::peso($free)." on {$account->account_number} not already held.");
+            Refuse::field('amount', Refuse::peso($centavos).' is more than the '.Refuse::peso($free)." on {$account->account_number} not already held by another legal order.");
         }
 
         return SavingsHold::query()->create([

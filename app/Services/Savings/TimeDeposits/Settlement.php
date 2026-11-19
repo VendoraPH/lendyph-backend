@@ -2,6 +2,7 @@
 
 namespace App\Services\Savings\TimeDeposits;
 
+use App\Models\AmlaOrder;
 use App\Models\SavingsAccount;
 use App\Models\SavingsApproval;
 use App\Models\SavingsTransaction;
@@ -344,13 +345,18 @@ class Settlement
 
     /**
      * Only a running placement can be broken early: one already settled is a
-     * 409, a matured one a 422 (settle it instead).
+     * 409, a matured one a 422 (settle it instead). A member under a legal
+     * order can't break one early at all (AMLA design decision 5, review).
      *
      * @throws ValidationException
      */
     public function assertCanPreterminate(TimeDeposit $deposit): void
     {
         $this->assertOpen($deposit);
+
+        if (AmlaOrder::memberIsUnderOrder((int) $deposit->borrower_id)) {
+            $this->refuse('time_deposit', "{$deposit->certificate_number} belongs to a member whose funds are under a legal order, so it can't be pre-terminated until the order is lifted.");
+        }
 
         if ($deposit->status !== 'active') {
             $this->refuse('time_deposit', "{$deposit->certificate_number} has matured, so it can't be pre-terminated. Settle it instead.");
@@ -367,7 +373,8 @@ class Settlement
      * - Into the account named at placement: refused on `payout_method` when
      *   there is none.
      * Either way a closed or frozen account is refused; a dormant one can
-     * receive it.
+     * receive it. While the member is under a legal order, only a payout into
+     * their own savings is allowed: nothing leaves the cooperative.
      *
      * @throws ValidationException
      */
@@ -378,6 +385,10 @@ class Settlement
         }
 
         if ($method !== 'savings') {
+            if (AmlaOrder::memberIsUnderOrder((int) $deposit->borrower_id)) {
+                $this->refuse('payout_method', "{$deposit->certificate_number} belongs to a member whose funds are under a legal order, so it can only roll over or be paid into the member's own savings until the order is lifted.");
+            }
+
             return null;
         }
 

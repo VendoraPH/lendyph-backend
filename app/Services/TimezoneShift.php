@@ -342,6 +342,7 @@ class TimezoneShift
         // Added 2026-11-21 with AMLA screening and orders (AMLA-B5), for the same
         // reason. `amla_orders.received_on` and `return_due_on` are DATEs.
         'amla_order_holds' => ['created_at'],
+        'amla_order_release_requests' => ['created_at', 'decided_at', 'updated_at'],
         'amla_orders' => ['created_at', 'released_at', 'updated_at'],
         'amla_screening_cursors' => ['created_at', 'updated_at', 'watermark'],
         'amla_screening_matches' => ['created_at', 'decided_at', 'updated_at'],

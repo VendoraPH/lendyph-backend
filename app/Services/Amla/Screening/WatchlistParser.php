@@ -12,8 +12,8 @@ use SimpleXMLElement;
  * source. A file that can't be read is refused in words, with each problem
  * row named, and nothing is kept.
  *
- * The XML is read with network access off and no document type allowed, so
- * a file can't pull in outside entities or expand itself.
+ * The XML must be UTF-8, and is read with network access off and no document
+ * type allowed, so a file can't pull in outside entities or expand itself.
  */
 final class WatchlistParser
 {
@@ -21,6 +21,9 @@ final class WatchlistParser
     public const CSV_COLUMNS = ['reference', 'type', 'full_name', 'aliases', 'birth_year', 'nationality'];
 
     public const MAX_ENTRIES = 100_000;
+
+    /** The widest birth-year range kept, in years. */
+    public const MAX_RANGE_YEARS = 50;
 
     /** How many row problems are listed before the rest are counted. */
     private const MAX_ERRORS = 20;
@@ -32,6 +35,19 @@ final class WatchlistParser
      */
     public function un(string $xml): array
     {
+        /*
+         * UTF-8 only, checked before anything else, so a UTF-16 or UTF-32
+         * file can't carry a document type past the text check below
+         * (AMLA-B5 review). The UN publishes its list in UTF-8.
+         */
+        $xml = (string) preg_replace('/^\xEF\xBB\xBF/', '', $xml);
+        $declared = preg_match('/^\s*<\?xml[^>]*\bencoding\s*=\s*["\']([^"\']+)["\']/i', $xml, $encoding) === 1 ? strtolower($encoding[1]) : 'utf-8';
+
+        if (str_starts_with($xml, "\xFE\xFF") || str_starts_with($xml, "\xFF\xFE") || str_contains($xml, "\0")
+            || ! mb_check_encoding($xml, 'UTF-8') || ! in_array($declared, ['utf-8', 'utf8'], true)) {
+            self::refuse(['The UN list must be UTF-8 XML.']);
+        }
+
         if (preg_match('/<!DOCTYPE/i', $xml) === 1) {
             self::refuse(['The file declares its own document type, which a UN list never does, so it isn\'t read.']);
         }
@@ -65,11 +81,15 @@ final class WatchlistParser
             $years = [];
 
             foreach ($person->INDIVIDUAL_DATE_OF_BIRTH ?? [] as $birth) {
-                foreach ([(string) $birth->DATE, (string) $birth->YEAR, (string) $birth->FROM_YEAR, (string) $birth->TO_YEAR] as $value) {
+                foreach ([(string) $birth->DATE, (string) $birth->YEAR] as $value) {
                     if (preg_match('/^(\d{4})/', trim($value), $year) === 1) {
                         $years[] = (int) $year[1];
                     }
                 }
+
+                $from = preg_match('/^(\d{4})/', trim((string) $birth->FROM_YEAR), $start) === 1 ? (int) $start[1] : null;
+                $to = preg_match('/^(\d{4})/', trim((string) $birth->TO_YEAR), $end) === 1 ? (int) $end[1] : null;
+                array_push($years, ...self::range($from ?? $to, $to ?? $from));
             }
 
             $entries[] = [
@@ -155,8 +175,9 @@ final class WatchlistParser
                 $rowErrors[] = "Row {$line}: the type must be individual or entity.";
             }
 
-            if ($birthYear !== '' && preg_match('/^\d{4}$/', $birthYear) !== 1) {
-                $rowErrors[] = "Row {$line}: the birth year must be four digits.";
+            if ($birthYear !== '' && (preg_match('/^(\d{4})(?:\s*-\s*(\d{4}))?$/', $birthYear, $parts) !== 1
+                || (isset($parts[2]) && self::range((int) $parts[1], (int) $parts[2]) === []))) {
+                $rowErrors[] = "Row {$line}: the birth year must be four digits, or a range such as 1960-1965.";
             }
 
             if ($rowErrors !== []) {
@@ -170,7 +191,7 @@ final class WatchlistParser
                 'kind' => mb_strtolower($type),
                 'full_name' => mb_substr($name, 0, 255),
                 'aliases' => array_values(array_filter(array_map('trim', explode('|', $aliases)), fn (string $alias) => $alias !== '')),
-                'birth_years' => $birthYear === '' ? [] : [(int) $birthYear],
+                'birth_years' => $birthYear === '' ? [] : (isset($parts[2]) ? self::range((int) $parts[1], (int) $parts[2]) : [(int) $parts[1]]),
                 'nationalities' => $nationality === '' ? [] : [$nationality],
             ];
         }
@@ -272,6 +293,22 @@ final class WatchlistParser
         }
 
         return array_values(array_unique($texts));
+    }
+
+    /**
+     * Every year from one to another, both included: a listed range such as
+     * 1960–1965 (AMLA-B5 review). Empty when either is missing, the range runs
+     * backwards, or it spans more than MAX_RANGE_YEARS.
+     *
+     * @return list<int>
+     */
+    private static function range(?int $from, ?int $to): array
+    {
+        if ($from === null || $to === null || $to < $from || $to - $from > self::MAX_RANGE_YEARS) {
+            return [];
+        }
+
+        return range($from, $to);
     }
 
     /**

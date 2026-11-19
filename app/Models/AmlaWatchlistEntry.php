@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Services\Amla\Screening\NameNormaliser;
 use App\Traits\AmlaKeptForever;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
@@ -45,10 +46,26 @@ class AmlaWatchlistEntry extends Model
         ];
     }
 
-    /** @return list<string> the listed name and every alias */
+    /**
+     * The listed name and every alias, plus each one's form without its
+     * middle names (first and last word), as people are often written
+     * (AMLA-B5 review).
+     *
+     * @return list<string>
+     */
     public function names(): array
     {
-        return array_values(array_filter([$this->full_name, ...$this->aliases], fn ($name) => trim((string) $name) !== ''));
+        $names = array_values(array_filter([$this->full_name, ...$this->aliases], fn ($name) => trim((string) $name) !== ''));
+
+        foreach ($names as $name) {
+            $words = NameNormaliser::words($name);
+
+            if (count($words) >= 3) {
+                $names[] = $words[0].' '.$words[count($words) - 1];
+            }
+        }
+
+        return array_values(array_unique($names));
     }
 
     public function version(): BelongsTo

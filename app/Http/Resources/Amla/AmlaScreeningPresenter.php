@@ -148,6 +148,15 @@ final class AmlaScreeningPresenter
             $data['required_action'] = $order->required_action;
             $data['details'] = $order->details;
             $data['responsible_officer'] = AmlaPresenter::user($order->responsibleOfficer);
+            $pending = $order->releaseRequests()->where('status', 'pending')->with('requester')->latest('id')->first();
+            $data['pending_release'] = $pending === null ? null : [
+                'id' => (int) $pending->id,
+                'requested_by' => AmlaPresenter::user($pending->requester),
+                'requested_at' => $pending->created_at,
+                'reason' => $pending->reason,
+                'release_reference' => $pending->release_reference,
+            ];
+            $data['release_requested_by'] = AmlaPresenter::user($order->releaseRequester);
             $data['released_by'] = AmlaPresenter::user($order->releaser);
             $data['released_at'] = $order->released_at;
             $data['release_reason'] = $order->release_reason;

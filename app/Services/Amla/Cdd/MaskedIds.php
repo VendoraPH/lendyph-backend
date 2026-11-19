@@ -9,13 +9,20 @@ use App\Rules\UniqueWalkInIdNumber;
 
 /**
  * A subject's IDs as the CDD ID picker shows them (AMLA-B5, from the AMLA-F3a
- * report): a fixed type and the last four characters only. A member's valid
+ * report): a fixed type and the last four characters only (a number of four
+ * characters or fewer is masked whole). A member's valid
  * IDs come from their documents, each ID once (front and back are one ID: the
  * same type and number, the lowest document id kept); a walk-in's is the ID on
  * its record. The full number never leaves the server.
  */
 final class MaskedIds
 {
+    /**
+     * How many last characters show. A number no longer than this is masked
+     * whole, so a short ID is never shown in full (AMLA-B5 review).
+     */
+    public const SHOWN = 4;
+
     /** @return list<array{document_id: int|null, id_type: string, id_type_words: string, id_number_masked: string|null}> */
     public static function of(Borrower|GCashNonMember $subject): array
     {
@@ -57,7 +64,11 @@ final class MaskedIds
             'document_id' => $documentId,
             'id_type' => $type,
             'id_type_words' => IdTypes::words($type),
-            'id_number_masked' => $normalised === '' ? null : '****'.mb_substr($normalised, -4),
+            'id_number_masked' => match (true) {
+                $normalised === '' => null,
+                mb_strlen($normalised) <= self::SHOWN => '****',
+                default => '****'.mb_substr($normalised, -self::SHOWN),
+            },
         ];
     }
 }
