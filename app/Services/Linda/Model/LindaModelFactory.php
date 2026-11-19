@@ -20,4 +20,17 @@ final class LindaModelFactory
             default => new NoneModel,
         };
     }
+
+    /**
+     * The model that writes open answers for a driver, or null when it has
+     * none (the none driver, or an unknown one).
+     */
+    public static function writer(string $driver): ?LindaWriter
+    {
+        return match ($driver) {
+            'fake' => app(FakeModel::class),
+            'anthropic' => app()->bound(AnthropicModel::class) ? app(AnthropicModel::class) : AnthropicModel::fromConfig(),
+            default => null,
+        };
+    }
 }

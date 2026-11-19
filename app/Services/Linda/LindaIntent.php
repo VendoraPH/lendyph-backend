@@ -5,9 +5,9 @@ namespace App\Services\Linda;
 /**
  * What a Linda question is about.
  *
- * Exactly the names of the frontend's `LindaIntent` union
- * (lendyph-frontend src/types/linda.ts), so a reply never carries a name the
- * panel doesn't know. The deterministic matcher answers five of them; the
+ * The names of the frontend's `LindaIntent` union (lendyph-frontend
+ * src/types/linda.ts), plus round 3's own, which the union accepts as plain
+ * strings and the panel treats alike. The deterministic matcher answers five of them; the
  * model may choose any.
  */
 enum LindaIntent: string
@@ -28,11 +28,16 @@ enum LindaIntent: string
     case CollectionEfficiency = 'collection_efficiency';
     case PortfolioSummary = 'portfolio_summary';
     case GeneralLendingSummary = 'general_lending_summary';
+    case SavingsSummary = 'savings_summary';
+    case ShareCapitalSummary = 'share_capital_summary';
+    case CdaSummary = 'cda_summary';
+    case HowTo = 'how_to';
+    case OpenQuestion = 'open_question';
     case UnsupportedQuestion = 'unsupported_question';
 
     /**
      * Whether a question of this kind is read for a period at all. Overdue
-     * accounts and active loans are as of today, so any period words a
+     * accounts, active loans and the portfolio are as of today, so any period words a
      * question or the model gives them are ignored, never refused or called
      * unclear; an unsupported question has no period either, and nor does a
      * lookup (a member, a loan or a receipt), which is about one record.
@@ -40,7 +45,8 @@ enum LindaIntent: string
     public function takesPeriod(): bool
     {
         return match ($this) {
-            self::OverdueAccounts, self::LoanSummary, self::UnsupportedQuestion,
+            self::OverdueAccounts, self::LoanSummary, self::PortfolioSummary, self::SavingsSummary, self::ShareCapitalSummary,
+            self::CdaSummary, self::HowTo, self::UnsupportedQuestion,
             self::BorrowerLookup, self::LoanDetails, self::TransactionLookup => false,
             default => true,
         };
@@ -87,8 +93,26 @@ enum LindaIntent: string
         return match ($this) {
             self::CollectionSummary, self::CollectionDetails, self::DisbursementSummary,
             self::BranchPerformance, self::OfficerPerformance, self::CollectionEfficiency,
-            self::GeneralLendingSummary => true,
+            self::GeneralLendingSummary, self::IncomeSummary, self::ExpenseSummary, self::OpenQuestion => true,
             default => false,
         };
+    }
+
+    /**
+     * The intents a model may return: every one, except open_question while
+     * open questions (LINDA_OPEN_QUESTIONS) are off, so with the switch off
+     * the model is asked exactly as before.
+     *
+     * @return list<self>
+     */
+    public static function offered(): array
+    {
+        return array_values(array_filter(self::cases(), fn (self $intent) => $intent !== self::OpenQuestion || self::openQuestionsOn()));
+    }
+
+    /** Whether open questions (`linda.open_questions`) are on. */
+    public static function openQuestionsOn(): bool
+    {
+        return (bool) config('linda.open_questions', false);
     }
 }

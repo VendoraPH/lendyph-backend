@@ -8,6 +8,7 @@ use App\Services\Linda\LindaAnswerer;
 use App\Services\Linda\LindaIntent;
 use App\Services\Linda\LindaPeriod;
 use App\Services\Linda\LindaReply;
+use App\Services\Linda\LindaWording;
 use App\Services\LoanListTotals;
 use App\Services\ReportService;
 
@@ -393,6 +394,14 @@ class LindaRound2AnswersTest extends LindaAnswersTestCase
     {
         foreach ([$this->answerer()->notYet(LindaIntent::IncomeSummary)->answer, $this->answerer()->unmatched()->answer] as $text) {
             foreach (['payments', 'collection efficiency', 'branch and officer performance', 'a member, a loan or a receipt'] as $phrase) {
+                $this->assertStringContainsString($phrase, $text);
+            }
+        }
+
+        // Round 3: shorter than round 2's, and naming the new topics.
+        $this->assertLessThan(283, mb_strlen(LindaWording::notYet()));
+        foreach ([LindaWording::notYet(), $this->answerer()->unmatched()->answer] as $text) {
+            foreach (['members', 'the portfolio', 'income', 'expenses', 'savings', 'share capital', 'CDA', 'page'] as $phrase) {
                 $this->assertStringContainsString($phrase, $text);
             }
         }
