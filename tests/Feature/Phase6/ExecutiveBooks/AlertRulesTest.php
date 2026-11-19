@@ -7,16 +7,19 @@ use App\Models\Borrower;
 use App\Models\Branch;
 use App\Models\DashboardSetting;
 use App\Models\Loan;
+use App\Models\LoanApprovalStep;
 use App\Models\LoanProduct;
 use App\Models\PortfolioDailySnapshot;
 use App\Models\PortfolioSnapshotLine;
 use App\Models\Role;
 use App\Models\ShareCapitalLedger;
 use App\Models\User;
+use App\Services\LoanApprovalChainService;
 use App\Services\LoanService;
 use App\Services\RepaymentService;
 use App\Services\ReportService;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Tests\TestCase;
 use Tests\Traits\PostsJournals;
@@ -269,9 +272,101 @@ class AlertRulesTest extends TestCase
         $this->assertSame('requires_configuration', $this->rule('control_difference')['state'], 'No chart.');
 
         $this->seedChartOfAccounts();
+        Cache::flush();
         $rule = $this->rule('control_difference');
         $this->assertSame('requires_configuration', $rule['state'], 'Opening balances not finalised.');
         $this->assertSame('The opening balances have not been finalised yet.', $rule['detail']);
+        $this->assertSame(
+            ['trial_balance' => 'clear', 'books_vs_records' => 'requires_configuration', 'share_capital' => 'requires_configuration'],
+            collect($rule['controls'])->pluck('state', 'key')->all(),
+            'The trial balance needs no opening balances, so it still runs.',
+        );
+    }
+
+    private function readyBooks(): void
+    {
+        $this->seedChartOfAccounts();
+        AccountingOpeningBalance::query()->create(['as_of' => '2026-08-31', 'created_by' => $this->admin->id])
+            ->forceFill(['status' => AccountingOpeningBalance::STATUS_FINALISED, 'finalised_at' => now()])->save();
+    }
+
+    public function test_the_share_capital_check_reads_the_totals_so_an_unbranched_opening_line_is_not_a_difference(): void
+    {
+        $this->readyBooks();
+        $member = Borrower::factory()->create(['branch_id' => $this->branch->id]);
+        // Share capital held before the books: in the main branch's subledger,
+        // and in the books on the opening balances, which carry no branch.
+        ShareCapitalLedger::create(['borrower_id' => $member->id, 'date' => '2026-08-01', 'description' => 'Share capital', 'credit' => 400, 'debit' => 0, 'created_by' => $this->admin->id]);
+        $this->postSimpleJournal('1010', '3060', 40000, ['date' => '2026-08-31', 'branch_id' => null, 'source' => 'opening_balance']);
+
+        $control = $this->getJson('/api/dashboard/executive/share-capital-control')->assertOk()->json('data');
+        $this->assertSame(40000, collect($control['rows'])->firstWhere('branch_id', null)['difference']);
+        $this->assertSame(-40000, collect($control['rows'])->firstWhere('branch_id', $this->branch->id)['difference']);
+        $this->assertSame(0, $control['totals']['difference']);
+
+        $rule = $this->rule('control_difference');
+        $this->assertSame('clear', $rule['state']);
+        $this->assertSame('0.00', collect($rule['controls'])->firstWhere('key', 'share_capital')['difference']);
+    }
+
+    public function test_without_share_capital_access_its_check_reads_no_access(): void
+    {
+        $this->readyBooks();
+        $member = Borrower::factory()->create(['branch_id' => $this->branch->id]);
+        ShareCapitalLedger::create(['borrower_id' => $member->id, 'date' => '2026-11-02', 'description' => 'Share capital', 'credit' => 1000, 'debit' => 0, 'created_by' => $this->admin->id]);
+        $this->assertSame('needs_attention', $this->rule('control_difference')['state'], 'Unbooked share capital, for the admin.');
+
+        $this->actingAs($this->userWith(['dashboard:analytics', 'accounting:view', 'branches:view_all']));
+        $rule = $this->rule('control_difference');
+
+        $this->assertSame('clear', $rule['state']);
+        $this->assertSame(
+            ['key' => 'share_capital', 'label' => 'Share capital against the books', 'difference' => null, 'state' => 'no_access'],
+            collect($rule['controls'])->firstWhere('key', 'share_capital'),
+        );
+    }
+
+    public function test_the_cache_never_serves_a_figure_to_a_caller_who_cannot_read_it(): void
+    {
+        $this->waitingLoan('2026-11-10 09:00:00');
+        $this->threshold('approval_wait_days', 2);
+        $this->assertSame(1, $this->rule('approval_wait')['value'], 'The admin fills the cache.');
+
+        $this->actingAs($this->userWith(['dashboard:analytics', 'reports:view', 'branches:view_all']));
+        $rule = $this->rule('approval_wait');
+
+        $this->assertSame('no_access', $rule['state'], 'Same scope and filters, so the same cache entry, read after it.');
+        $this->assertNull($rule['value']);
+        $this->assertArrayNotHasKey('oldest_days', $rule);
+
+        $other = Branch::factory()->create();
+        $this->actingAs($this->userWith(['dashboard:analytics', 'loans:view'], $other));
+        $this->assertSame(0, $this->rule('approval_wait')['value'], 'Another scope is another entry.');
+    }
+
+    public function test_a_loan_sent_back_to_its_submitter_is_not_waiting_for_approval(): void
+    {
+        $loan = $this->waitingLoan('2026-11-10 09:00:00');
+        $this->threshold('approval_wait_days', 2);
+        $pending = LoanApprovalStep::query()->where('loan_id', $loan->id)->where('status', LoanApprovalStep::STATUS_PENDING)->firstOrFail();
+        $submit = LoanApprovalStep::query()->where('loan_id', $loan->id)->where('kind', LoanApprovalStep::KIND_SUBMIT)->firstOrFail();
+        app(LoanApprovalChainService::class)->sendBack($loan->fresh(), $pending, $submit->step_order, $this->admin, 'Please complete the documents.');
+
+        $rule = $this->rule('approval_wait');
+
+        $this->assertSame('clear', $rule['state']);
+        $this->assertSame(0, $rule['value']);
+        $this->assertSame(1, $rule['returned_to_submitter']);
+    }
+
+    public function test_par30_rise_does_not_compare_an_officer_s_loans_with_the_whole_book(): void
+    {
+        $officer = $this->userWith(['loans:view']);
+
+        $rule = $this->rule('par30_rise', self::PERIOD."&officer_id={$officer->id}");
+
+        $this->assertSame('no_data', $rule['state']);
+        $this->assertNull($rule['value']);
     }
 
     public function test_a_rule_whose_source_the_caller_cannot_read_is_no_access(): void

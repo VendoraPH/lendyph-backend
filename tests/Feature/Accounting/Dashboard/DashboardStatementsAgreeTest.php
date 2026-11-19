@@ -66,7 +66,7 @@ class DashboardStatementsAgreeTest extends TestCase
             ->assertOk()->json('data');
 
         $whole = $statement('2025-12-01', '2026-01-31');
-        $this->assertSame(['from' => '2025-12-01', 'to' => '2026-01-31', 'income' => 190000, 'expenses' => 25000, 'net_income' => 165000, 'interest_income' => 120000, 'penalty_income' => 70000, 'fee_income' => 0, 'income_basis' => 'cash', 'interest_income_label' => 'Interest income (cash basis)'], $dashboard['period']);
+        $this->assertSame(['from' => '2025-12-01', 'to' => '2026-01-31', 'income' => 190000, 'expenses' => 25000, 'net_income' => 165000, 'interest_income' => 120000, 'penalty_income' => 70000, 'fee_income' => 0, 'income_basis' => 'cash', 'interest_income_label' => 'Interest income (cash basis)', 'fee_income_label' => 'Fee income (loan and savings fees)'], $dashboard['period']);
         $this->assertSame($whole['total_income'], $dashboard['period']['income']);
         $this->assertSame($whole['total_expenses'], $dashboard['period']['expenses']);
         $this->assertSame($whole['net_income'], $dashboard['period']['net_income']);

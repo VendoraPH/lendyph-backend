@@ -26,10 +26,14 @@ use RuntimeException;
  *   trial balance's rule and figure.
  * - `difference` = books − subledger; a row is reconciled at ₱0.00.
  *
+ * Until the books are ready (BooksState: the opening balances finalised)
+ * and while no account is set for the role, `books`, `difference` and
+ * `is_reconciled` read null: a missing opening balance is not a difference.
+ *
  * Every branch in scope has a row (₱0.00 when idle). With every branch in
  * scope (`branches:view_all`), a last "No branch" row holds journals with no
  * branch (opening balances) and subledger rows whose member has no branch.
- * Without the account mapped, the book figures read null. Integer centavos.
+ * Integer centavos.
  * Reads only.
  */
 final class ShareCapitalControl
@@ -42,9 +46,12 @@ final class ShareCapitalControl
      */
     public function build(string $asOf, ?array $branchIds): array
     {
+        $booksState = BooksState::current();
         $account = $this->account();
         $subledger = $this->subledger($asOf, $branchIds);
-        $books = $account === null ? null : $this->books($asOf, $branchIds, (int) $account->id);
+        $books = $account === null || $booksState['state'] !== BooksState::READY
+            ? null
+            : $this->books($asOf, $branchIds, (int) $account->id);
 
         $rows = [];
         foreach ($this->branches($branchIds, [...array_keys($subledger), ...array_keys($books ?? [])]) as $branch) {
@@ -65,7 +72,7 @@ final class ShareCapitalControl
 
         return [
             'as_of' => $asOf,
-            'books_state' => BooksState::current(),
+            'books_state' => $booksState,
             'account' => $account === null ? null : [
                 'id' => (int) $account->id,
                 'code' => (string) $account->code,

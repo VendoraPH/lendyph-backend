@@ -48,7 +48,7 @@ class DashboardPeriodAndTrendTest extends TestCase
             'penalty_income' => 0,
             'fee_income' => 0,
             'income_basis' => 'cash',
-            'interest_income_label' => 'Interest income (cash basis)',
+            'interest_income_label' => 'Interest income (cash basis)', 'fee_income_label' => 'Fee income (loan and savings fees)',
         ], $dashboard['period']);
         $this->assertSame($dashboard['income_mtd'], $dashboard['period']['income']);
         $this->assertSame($dashboard['expenses_mtd'], $dashboard['period']['expenses']);

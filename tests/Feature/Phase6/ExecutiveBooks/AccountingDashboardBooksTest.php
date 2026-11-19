@@ -60,6 +60,8 @@ class AccountingDashboardBooksTest extends TestCase
         $this->assertSame(36500, $period['fee_income']);
         $this->assertSame('cash', $period['income_basis']);
         $this->assertSame('Interest income (cash basis)', $period['interest_income_label']);
+        $this->assertSame('Fee income (loan and savings fees)', $period['fee_income_label']);
+        $this->assertSame([], $this->dashboard()['income_roles_shared']);
         $this->assertSame(298500 - 40000, $period['net_income']);
     }
 
@@ -75,6 +77,23 @@ class AccountingDashboardBooksTest extends TestCase
         $this->assertSame($line('4020'), $period['penalty_income']);
         $this->assertSame($line('4030') + $line('4040') + $line('4080'), $period['fee_income']);
         $this->assertSame($statement['net_income'], $period['net_income']);
+    }
+
+    public function test_interest_income_equals_the_executive_dashboard_card(): void
+    {
+        $other = Branch::factory()->create();
+        $this->postIncome();
+        $this->postSimpleJournal('1010', '4010', 99900, ['date' => '2026-09-20', 'branch_id' => $other->id]);
+
+        foreach (['', "&branch_id={$this->branch->id}", "&branch_id={$other->id}"] as $branch) {
+            $period = $this->dashboard('as_of=2026-09-30&from=2026-09-01'.$branch)['period'];
+            $card = $this->getJson('/api/dashboard/executive/overview?preset=custom&date_from=2026-09-01&date_to=2026-09-30'.$branch)
+                ->assertOk()->json('data.cards.interest_income');
+
+            $this->assertSame('ready', $card['state'], $branch);
+            $this->assertEquals($period['interest_income'] / 100, $card['value'], $branch);
+            $this->assertSame($period['interest_income_label'], $card['label'], $branch);
+        }
     }
 
     public function test_each_month_carries_the_same_figures(): void
@@ -101,6 +120,11 @@ class AccountingDashboardBooksTest extends TestCase
 
         $this->assertSame(250000, $period['interest_income']);
         $this->assertSame(0, $period['penalty_income'], 'Its account is the interest account, already counted.');
+        $this->assertSame(
+            [['role' => 'penalty_income', 'figure' => 'penalty_income', 'counted_in' => 'interest_income', 'account_id' => $this->account('4010')]],
+            $this->dashboard()['income_roles_shared'],
+            'Said, not hidden.',
+        );
     }
 
     public function test_the_figures_follow_the_branch_scope(): void
@@ -130,6 +154,10 @@ class AccountingDashboardBooksTest extends TestCase
         $this->postSimpleJournal('1020', '3010', 150000, ['date' => '2026-09-01']);
         $this->postSimpleJournal('1030', '3010', 50000, ['date' => '2026-09-01']);
 
+        $this->assertNull($this->dashboard()['cash_total'], 'A position, so not before the opening balances are finalised.');
+
+        AccountingOpeningBalance::query()->create(['as_of' => '2026-08-31', 'created_by' => $this->admin->id])
+            ->forceFill(['status' => AccountingOpeningBalance::STATUS_FINALISED, 'finalised_at' => now()])->save();
         $dashboard = $this->dashboard();
 
         $this->assertSame(2700000, $dashboard['cash_total']);

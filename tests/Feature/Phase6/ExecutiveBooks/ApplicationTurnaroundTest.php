@@ -91,6 +91,15 @@ class ApplicationTurnaroundTest extends TestCase
         $this->assertEquals(['loans' => 3, 'average_days' => 8.0, 'median_days' => 8.0, 'not_measured' => 0], $data['submitted_to_released']);
     }
 
+    public function test_an_even_count_takes_the_mean_of_the_two_middle_loans(): void
+    {
+        // 2.0 days to approve: 1.0, 2.0, 2.5 and 4.0.
+        $this->loan('2026-11-06 08:00', '2026-11-08 08:00');
+
+        // Median (2.0 + 2.5) ÷ 2 = 2.25, average 9.5 ÷ 4 = 2.375, each half up.
+        $this->assertEquals(['loans' => 4, 'average_days' => 2.4, 'median_days' => 2.3, 'not_measured' => 0], $this->turnaround()['submitted_to_approved']);
+    }
+
     public function test_a_loan_missing_an_end_is_not_measured_never_estimated(): void
     {
         $imported = $this->loan('2026-11-06 08:00', '2026-11-07 08:00', '2026-11-08 08:00');
@@ -178,5 +187,11 @@ class ApplicationTurnaroundTest extends TestCase
         $this->getJson('/api/dashboard/executive/turnaround?preset=custom&from=2026-11-10&to=2026-11-01')
             ->assertUnprocessable()
             ->assertJsonPath('errors.preset.0', 'The end date can\'t be before the start date.');
+
+        foreach (['preset[]=custom', 'preset=custom&from[]=2026-11-01&to=2026-11-15', 'preset=custom&from=2026-11-01&to[]=x'] as $query) {
+            $this->getJson('/api/dashboard/executive/turnaround?'.$query)
+                ->assertUnprocessable()
+                ->assertJsonPath('errors.preset.0', 'Pick one of the listed periods.');
+        }
     }
 }

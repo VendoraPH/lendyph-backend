@@ -8,10 +8,12 @@ use App\Models\DashboardSetting;
 use App\Services\Dashboard\AlertRules;
 use App\Services\Dashboard\ApplicationTurnaround;
 use App\Services\Dashboard\DashboardPeriod;
+use App\Services\Dashboard\ExecutiveCacheKey;
 use App\Services\Dashboard\ExecutiveTrends;
 use App\Services\Dashboard\LoanScope;
 use App\Services\Dashboard\ShareCapitalControl;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Validation\ValidationException;
 use InvalidArgumentException;
 
@@ -21,9 +23,16 @@ use InvalidArgumentException;
  * (ExecutiveBooksRequest); each endpoint also needs its sources'
  * permissions, checked here. Figures come from the reports' and the books'
  * own services; nothing here adds them up.
+ *
+ * Figures are cached for CACHE_SECONDS per endpoint, day, period, branch
+ * scope and filters (ExecutiveCacheKey, as EB-D1's cards); thresholds and
+ * every permission are applied after the cache, so one caller's figures never
+ * reach a caller who may not read them.
  */
 class ExecutiveBooksController extends Controller
 {
+    public const CACHE_SECONDS = 300;
+
     /** The alert figures each dashboard filter narrows (AlertRules). */
     private const ATTENTION_FILTERS_APPLIED_TO = [
         'product_id' => ['par30_rise', 'collection_efficiency', 'overdue_share', 'approval_wait', 'release_wait'],
@@ -40,9 +49,14 @@ class ExecutiveBooksController extends Controller
     {
         $this->authorize('reports:view');
         $period = $request->period();
+        $filters = $request->reportFilters();
 
         try {
-            $months = $trends->months($period, $request->reportFilters());
+            $months = Cache::remember(
+                ExecutiveCacheKey::for('trends', $period, $request->branchScope(), $filters),
+                self::CACHE_SECONDS,
+                fn (): array => $trends->months($period, $filters),
+            );
         } catch (InvalidArgumentException $refusal) {
             throw ValidationException::withMessages(['preset' => [$refusal->getMessage()]]);
         }
@@ -62,7 +76,16 @@ class ExecutiveBooksController extends Controller
     public function attention(ExecutiveBooksRequest $request, AlertRules $alerts): JsonResponse
     {
         $period = $request->period();
-        $rules = $alerts->evaluate($request->user(), $period, $request->reportFilters(), $request->branchScope());
+        $filters = $request->reportFilters();
+        $scope = $request->branchScope();
+        // The comparison day is a setting, so it is part of the key.
+        $compareDays = DashboardSetting::current()->par30_compare_days;
+        $figures = Cache::remember(
+            ExecutiveCacheKey::for("attention:{$compareDays}", $period, $scope, $filters),
+            self::CACHE_SECONDS,
+            fn (): array => $alerts->figures($period, $filters, $scope, $compareDays),
+        );
+        $rules = $alerts->evaluate($request->user(), $figures);
 
         return response()->json(['data' => [
             'period' => $period->toArray(),
@@ -104,7 +127,12 @@ class ExecutiveBooksController extends Controller
         $this->authorize('share_capital:view');
 
         $asOf = $request->validated('as_of') ?? DashboardPeriod::today()->toDateString();
+        $scope = $request->branchScope();
 
-        return response()->json(['data' => $control->build($asOf, $request->branchScope())]);
+        return response()->json(['data' => Cache::remember(
+            ExecutiveCacheKey::for("share-capital-control:{$asOf}", DashboardPeriod::resolve('today'), $scope, []),
+            self::CACHE_SECONDS,
+            fn (): array => $control->build($asOf, $scope),
+        )]);
     }
 }

@@ -54,7 +54,7 @@ class DashboardBranchScopeTest extends TestCase
 
         $dashboard = $this->getJson('/api/accounting/dashboard?as_of=2026-09-30')->assertOk()->json('data');
 
-        $this->assertSame(['from' => '2026-09-01', 'to' => '2026-09-30', 'income' => 10000, 'expenses' => 1000, 'net_income' => 9000, 'interest_income' => 10000, 'penalty_income' => 0, 'fee_income' => 0, 'income_basis' => 'cash', 'interest_income_label' => 'Interest income (cash basis)'], $dashboard['period']);
+        $this->assertSame(['from' => '2026-09-01', 'to' => '2026-09-30', 'income' => 10000, 'expenses' => 1000, 'net_income' => 9000, 'interest_income' => 10000, 'penalty_income' => 0, 'fee_income' => 0, 'income_basis' => 'cash', 'interest_income_label' => 'Interest income (cash basis)', 'fee_income_label' => 'Fee income (loan and savings fees)'], $dashboard['period']);
         $this->assertSame(10000 - 1000 - 3000, collect($dashboard['cash_accounts'])->firstWhere('account_code', '1010')['balance']);
         $this->assertSame(3000 - 100 + 200, $dashboard['loans_receivable_gross']);
         $this->assertSame(200, $dashboard['unearned_restructure_income']);

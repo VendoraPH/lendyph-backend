@@ -2,6 +2,7 @@
 
 namespace Tests\Feature\Phase6\ExecutiveBooks;
 
+use App\Models\AccountingOpeningBalance;
 use App\Models\Borrower;
 use App\Models\Branch;
 use App\Models\Role;
@@ -9,6 +10,7 @@ use App\Models\ShareCapitalLedger;
 use App\Models\User;
 use App\Services\Accounting\TrialBalanceBuilder;
 use App\Services\ReportService;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Tests\TestCase;
 use Tests\Traits\PostsJournals;
@@ -35,6 +37,8 @@ class ShareCapitalControlTest extends TestCase
         parent::setUp();
         $this->seedAndLogin();
         $this->seedChartOfAccounts();
+        AccountingOpeningBalance::query()->create(['as_of' => '2026-08-31', 'created_by' => $this->admin->id])
+            ->forceFill(['status' => AccountingOpeningBalance::STATUS_FINALISED, 'finalised_at' => now()])->save();
         $this->other = Branch::factory()->create(['name' => 'Tagum']);
         $this->here = Borrower::factory()->create(['branch_id' => $this->branch->id]);
         $this->there = Borrower::factory()->create(['branch_id' => $this->other->id]);
@@ -177,18 +181,48 @@ class ShareCapitalControlTest extends TestCase
         }
     }
 
-    public function test_the_books_state_is_carried_and_an_unmapped_account_reads_no_books_figure(): void
+    public function test_until_the_books_are_ready_no_book_figure_is_sent(): void
     {
-        $this->assertSame('requires_configuration', $this->control()['books_state']['state']);
+        AccountingOpeningBalance::query()->delete();
 
-        DB::table('accounting_account_mappings')->where('role', 'share_capital')->delete();
         $control = $this->control();
 
+        $this->assertSame('requires_configuration', $control['books_state']['state']);
+        $this->assertSame('3060', $control['account']['code']);
+        foreach ([...$control['rows'], $control['totals']] as $row) {
+            $this->assertNull($row['books']);
+            $this->assertNull($row['difference']);
+            $this->assertNull($row['is_reconciled'], 'A missing opening balance is not a difference.');
+        }
+        $this->assertNull($control['is_reconciled']);
+        $this->assertSame(255025, $control['totals']['subledger']);
+    }
+
+    public function test_an_unmapped_account_reads_no_books_figure(): void
+    {
+        DB::table('accounting_account_mappings')->where('role', 'share_capital')->delete();
+
+        $control = $this->control();
+
+        $this->assertSame('ready', $control['books_state']['state']);
         $this->assertNull($control['account']);
         $this->assertNull($control['rows'][0]['books']);
         $this->assertNull($control['rows'][0]['difference']);
         $this->assertNull($control['rows'][0]['is_reconciled']);
         $this->assertNull($control['is_reconciled']);
         $this->assertSame(255025, $control['totals']['subledger']);
+    }
+
+    public function test_the_figures_are_cached_per_as_of_date(): void
+    {
+        $this->assertSame(175025, collect($this->control()['rows'])->firstWhere('branch_id', $this->branch->id)['books']);
+
+        $this->postSimpleJournal('1010', '3060', 1000, ['date' => '2026-09-07']);
+
+        $this->assertSame(175025, collect($this->control()['rows'])->firstWhere('branch_id', $this->branch->id)['books'], 'Cached for five minutes.');
+        $this->assertSame(176025, collect($this->control('as_of=2026-09-29')['rows'])->firstWhere('branch_id', $this->branch->id)['books'], 'Another date is its own entry.');
+
+        Cache::flush();
+        $this->assertSame(176025, collect($this->control()['rows'])->firstWhere('branch_id', $this->branch->id)['books']);
     }
 }

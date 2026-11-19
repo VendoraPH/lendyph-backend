@@ -57,6 +57,9 @@ class ExecutiveBooksRequest extends FormRequest
     public function messages(): array
     {
         return [
+            'preset.string' => 'Pick one of the listed periods.',
+            'from.string' => 'Pick a start date as YYYY-MM-DD.',
+            'to.string' => 'Pick an end date as YYYY-MM-DD.',
             'as_of.date_format' => 'Pick a date as YYYY-MM-DD.',
             'as_of.before_or_equal' => 'The date can\'t be after today.',
         ];
@@ -66,12 +69,20 @@ class ExecutiveBooksRequest extends FormRequest
     public function after(): array
     {
         return [function (Validator $validator): void {
+            $preset = $this->input('preset') ?? 'this_month';
+            $from = $this->input('from');
+            $to = $this->input('to');
+
+            // Only text is read as a period: a list (`preset[]=x`) is refused
+            // in words by the string rules, never cast.
+            if (! is_string($preset) || ($from !== null && ! is_string($from)) || ($to !== null && ! is_string($to))) {
+                $validator->errors()->add('preset', 'Pick one of the listed periods.');
+
+                return;
+            }
+
             try {
-                $this->period = DashboardPeriod::resolve(
-                    (string) ($this->input('preset') ?? 'this_month'),
-                    $this->filled('from') ? (string) $this->input('from') : null,
-                    $this->filled('to') ? (string) $this->input('to') : null,
-                );
+                $this->period = DashboardPeriod::resolve($preset, $from === '' ? null : $from, $to === '' ? null : $to);
             } catch (InvalidArgumentException $refusal) {
                 $validator->errors()->add('preset', $refusal->getMessage());
             }

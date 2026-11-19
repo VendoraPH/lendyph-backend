@@ -47,7 +47,12 @@ use Illuminate\Support\Facades\DB;
  *   by deferred interest recognised from 1210: shown beside it, never added
  *   to it. An account mapped to two roles counts once, under the first.
  * - `cash_total` is every money account (cash, bank and e-wallets), the
- *   three cash cards added once here so the browser never adds them.
+ *   three cash cards added once here so the browser never adds them; null
+ *   until the books are ready (BooksState).
+ * - `fee_income` is processing, service and other fees: other fees (4080)
+ *   also take savings excess-withdrawal fees, so it reads "Fee income (loan
+ *   and savings fees)". `income_roles_shared` lists any role whose account is
+ *   already counted under another figure, which therefore reads ₱0.00.
  * - `books_state` is {@see BooksState}: "Requires configuration" until the
  *   opening balances are finalised, "Books not set up" without a chart.
  *
@@ -77,6 +82,8 @@ final class AccountingDashboardBuilder
     ];
 
     public const INTEREST_INCOME_LABEL = 'Interest income (cash basis)';
+
+    public const FEE_INCOME_LABEL = 'Fee income (loan and savings fees)';
 
     /** @var array<int, string>|null account id => the income figure it counts in, for one build */
     private ?array $incomeAccounts = null;
@@ -112,20 +119,23 @@ final class AccountingDashboardBuilder
         $period = $from === $monthStart
             ? ['from' => $from, 'to' => $monthToDate['to'], ...array_intersect_key($monthToDate, array_flip(['income', 'expenses', 'net_income', ...array_keys(self::INCOME_ROLES)]))]
             : $this->period($from, $asOf, $branchId);
-        $period = [...$period, 'income_basis' => 'cash', 'interest_income_label' => self::INTEREST_INCOME_LABEL];
+        $period = [...$period, 'income_basis' => 'cash', 'interest_income_label' => self::INTEREST_INCOME_LABEL, 'fee_income_label' => self::FEE_INCOME_LABEL];
 
         $currentPeriod = $this->currentPeriod($asOfDate->toDateString());
         $cashOnHand = $this->sumByCashKind($signed, $chart, ['cash']);
         $cashInBank = $this->sumByCashKind($signed, $chart, ['bank']);
         $eWallets = $this->sumByCashKind($signed, $chart, ['gcash', 'maya', 'wallet']);
+        $booksState = BooksState::current();
 
         return [
             'as_of' => $asOf,
-            'books_state' => BooksState::current(),
+            'books_state' => $booksState,
             'cash_on_hand' => $cashOnHand,
             'cash_in_bank' => $cashInBank,
             'e_wallets' => $eWallets,
-            'cash_total' => $cashOnHand + $cashInBank + $eWallets,
+            // A position, so null until the books are ready: without the
+            // opening balances it would read the cash moved since, not held.
+            'cash_total' => $booksState['state'] === BooksState::READY ? $cashOnHand + $cashInBank + $eWallets : null,
             'loans_receivable_net' => $receivables['net'],
             'loans_receivable_gross' => $receivables['gross'],
             'allowance_for_credit_losses' => $receivables['allowance'],
@@ -143,6 +153,7 @@ final class AccountingDashboardBuilder
             'open_period' => $currentPeriod !== null && $currentPeriod['status'] === 'open' ? $currentPeriod['name'] : null,
             'current_period' => $currentPeriod,
             'period' => $period,
+            'income_roles_shared' => self::sharedIncomeRoles(),
             'cash_accounts' => $this->cashAccounts($signed, $chart),
             'past_due' => $this->pastDue($branchId),
             'months' => array_map(
@@ -340,6 +351,32 @@ final class AccountingDashboardBuilder
         }
 
         return $accounts;
+    }
+
+    /**
+     * The roles whose account is already counted under another figure (an
+     * account set for both interest and penalty income, say), so that figure
+     * reads ₱0.00: listed rather than hidden.
+     *
+     * @return list<array{role: string, figure: string, counted_in: string, account_id: int}>
+     */
+    private static function sharedIncomeRoles(): array
+    {
+        $mapping = AccountingAccountMapping::resolved();
+        $accounts = self::incomeAccounts();
+        $shared = [];
+
+        foreach (self::INCOME_ROLES as $figure => $roles) {
+            foreach ($roles as $role) {
+                $accountId = $mapping[$role] ?? null;
+
+                if ($accountId !== null && $accounts[$accountId] !== $figure) {
+                    $shared[] = ['role' => $role, 'figure' => $figure, 'counted_in' => $accounts[$accountId], 'account_id' => $accountId];
+                }
+            }
+        }
+
+        return $shared;
     }
 
     /**
