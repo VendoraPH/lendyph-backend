@@ -30,6 +30,7 @@ use App\Services\AmortizationBalanceService;
 use App\Services\AutoPayService;
 use App\Services\BranchAccess;
 use App\Services\Branches\BranchWriteGuard;
+use App\Services\Branches\MemberLock;
 use App\Services\CollateralAttacher;
 use App\Services\CollateralWriteTransaction;
 use App\Services\ContactVisibility;
@@ -616,11 +617,13 @@ DESC,
     public function store(StoreLoanRequest $request, BranchWriteGuard $branches): JsonResponse
     {
         // Booked in the member's branch, which must take new loans (Phase 6
-        // MB-BE2), checked again holding the branch's lock (BranchWriteGuard).
+        // MB-BE2), checked again holding the branch's lock (BranchWriteGuard),
+        // and written holding the member's branch lock, so a transfer can't
+        // move the member around it (MB-BE4).
         $loan = $branches->whileTakingNew(
             (int) Borrower::query()->whereKey($request->validated('borrower_id'))->value('branch_id'),
             BranchWriteGuard::LOANS,
-            fn () => $this->loanService->createLoan($request->validated(), $request->user()),
+            fn (): Loan => MemberLock::whileHeld($request->validated('borrower_id'), fn (): Loan => $this->loanService->createLoan($request->validated(), $request->user())),
         );
         $loan->load('borrower', 'loanProduct', 'branch', 'coMakers', 'createdByUser');
 
