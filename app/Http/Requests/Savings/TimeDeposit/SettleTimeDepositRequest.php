@@ -16,9 +16,11 @@ use Illuminate\Validation\Rule;
  */
 class SettleTimeDepositRequest extends FormRequest
 {
+    use FindsTheTimeDepositFirst;
+
     public function authorize(): bool
     {
-        return (bool) $this->user()?->can('savings:transact');
+        return $this->mayActOnTheTimeDeposit('savings:transact');
     }
 
     /** @return array<string, mixed> */

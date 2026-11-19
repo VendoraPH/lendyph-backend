@@ -26,16 +26,7 @@ class BranchStatusRequest extends FormRequest
             throw (new ModelNotFoundException)->setModel(Branch::class, [$branch->id]);
         }
 
-        return self::mayChangeStatus($this);
-    }
-
-    /**
-     * Whether the caller may change a branch's status: the rule this request
-     * and UpdateBranchRequest's `is_active` switch share.
-     */
-    public static function mayChangeStatus(FormRequest $request): bool
-    {
-        return $request->user()->can('branches:manage') && $request->user()->can(BranchAccess::VIEW_ALL);
+        return $this->user()->can('branches:manage') && $this->user()->can(BranchAccess::VIEW_ALL);
     }
 
     /** @throws AuthorizationException */

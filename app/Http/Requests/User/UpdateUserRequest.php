@@ -6,6 +6,7 @@ use App\Http\Requests\Concerns\MasksUserExistence;
 use App\Http\Requests\Concerns\ResolvesBranchAssignment;
 use App\Models\User;
 use App\Rules\AssignableRole;
+use App\Rules\BranchTakesNew;
 use App\Services\BranchAccess;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Rule;
@@ -77,7 +78,7 @@ class UpdateUserRequest extends FormRequest
             'mobile_number' => ['nullable', 'string', 'max:20'],
             // Within the caller's own branches unless they hold
             // `branches:view_all` (BranchAccess).
-            'branch_id' => ['sometimes', $this->assignableBranchRule()],
+            'branch_id' => ['bail', 'sometimes', $this->assignableBranchRule(), BranchTakesNew::openOnly($this->user())],
             /**
              * `min:1` rather than allowing `[]`. Clearing every branch is not
              * an edit this endpoint has ever offered — `branch_id` is
@@ -87,7 +88,7 @@ class UpdateUserRequest extends FormRequest
              * later; it is not a side effect of adding a second branch.
              */
             'branch_ids' => ['sometimes', 'array', 'min:1'],
-            'branch_ids.*' => ['integer', $this->assignableBranchRule()],
+            'branch_ids.*' => ['bail', 'integer', $this->assignableBranchRule(), BranchTakesNew::openOnly($this->user())],
             'role' => ['sometimes', 'string', 'exists:roles,name', new AssignableRole($this->user())],
         ];
     }

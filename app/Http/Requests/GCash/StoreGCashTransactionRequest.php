@@ -4,6 +4,8 @@ namespace App\Http\Requests\GCash;
 
 use App\Http\Requests\Concerns\ExcludesRejectedBorrowers;
 use App\Http\Requests\GCash\Concerns\HasGCashQuoteRules;
+use App\Rules\BranchTakesNew;
+use App\Rules\MemberBranchTakesNew;
 use App\Services\BranchAccess;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Rule;
@@ -32,10 +34,14 @@ class StoreGCashTransactionRequest extends FormRequest
     {
         return [
             'borrower_id' => [
+                'bail',
                 'required_without:gcash_non_member_id',
                 'nullable',
                 'integer',
                 $this->nonRejectedBorrowerRule(),
+                // A member's GCash posts in the member's branch, and members
+                // stay in a branch after it closes (Phase 6 MB-BE2).
+                MemberBranchTakesNew::openOnly($this->user()),
             ],
             'gcash_non_member_id' => [
                 'required_without:borrower_id',
@@ -46,8 +52,9 @@ class StoreGCashTransactionRequest extends FormRequest
             ...$this->quoteRules(),
             // A walk-in transaction's branch: one of the caller's. See after().
             'branch_id' => [
-                'nullable', 'integer',
+                'bail', 'nullable', 'integer',
                 app(BranchAccess::class)->constrainBranchExists(Rule::exists('branches', 'id'), $this->user()),
+                BranchTakesNew::openOnly($this->user()),
             ],
             'is_pending' => ['nullable', 'boolean'],
             'remarks' => ['nullable', 'string', 'max:2000'],

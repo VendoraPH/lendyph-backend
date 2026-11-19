@@ -4,7 +4,9 @@ namespace App\Http\Requests\Savings\Account;
 
 use App\Http\Requests\Savings\SavingsRules;
 use App\Models\SavingsAccount;
+use App\Rules\MemberBranchTakesNew;
 use App\Services\BranchAccess;
+use App\Services\Branches\BranchWriteGuard;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Rule;
 
@@ -31,7 +33,7 @@ class OpenSavingsAccountRequest extends FormRequest
     public function rules(): array
     {
         return [
-            'borrower_id' => ['required', 'integer', app(BranchAccess::class)->constrainExists(Rule::exists('borrowers', 'id'), $this->user())],
+            'borrower_id' => ['bail', 'required', 'integer', app(BranchAccess::class)->constrainExists(Rule::exists('borrowers', 'id'), $this->user()), new MemberBranchTakesNew(BranchWriteGuard::SAVINGS_ACCOUNTS, $this->user())],
             'product_id' => ['required', 'integer', Rule::exists('savings_products', 'id')],
             'opened_at' => $this->businessDate(),
             'initial_deposit' => ['required', ...SavingsRules::money('opening deposit')],

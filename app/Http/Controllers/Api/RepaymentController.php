@@ -9,6 +9,7 @@ use App\Http\Resources\RepaymentResource;
 use App\Models\Loan;
 use App\Models\Repayment;
 use App\Services\BranchAccess;
+use App\Services\Branches\BranchWriteGuard;
 use App\Services\LikePattern;
 use App\Services\RepaymentService;
 use Illuminate\Http\JsonResponse;
@@ -365,12 +366,19 @@ class RepaymentController extends Controller
             new OA\Response(response: 422, description: 'Already voided, or validation error. Also refused (errors.repayment) when the payment was made before the loan was extended, restructured or given more terms: a period it paid was closed by that adjustment, or one was applied at or after the payment was recorded. Penalty waivers and balance adjustments do not count. Nothing is written; correct the loan with a balance adjustment instead'),
         ],
     )]
-    public function void(VoidRepaymentRequest $request, Repayment $repayment): JsonResponse
+    public function void(VoidRepaymentRequest $request, Repayment $repayment, BranchWriteGuard $branches): JsonResponse
     {
-        $repayment = $this->repaymentService->voidRepayment(
-            $repayment,
-            $request->void_reason,
-            $request->user(),
+        // A void would reopen a closed branch's loan, so a closed branch's
+        // payments stay as they are (Phase 6 MB-BE2), checked holding the
+        // branch's lock (BranchWriteGuard) around the unchanged service.
+        $repayment = $branches->whileOpen(
+            (int) $repayment->loan()->value('branch_id'),
+            BranchWriteGuard::PAYMENT_VOIDS,
+            fn () => $this->repaymentService->voidRepayment(
+                $repayment,
+                $request->void_reason,
+                $request->user(),
+            ),
         );
 
         $repayment->load('loan.borrower', 'loan.loanProduct', 'loan.amortizationSchedules', 'receivedByUser', 'voidedByUser', 'shareCapitalLedgerEntries');
