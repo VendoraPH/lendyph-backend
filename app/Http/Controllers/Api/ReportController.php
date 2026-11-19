@@ -11,6 +11,8 @@ use App\Http\Resources\RepaymentResource;
 use App\Models\AmortizationSchedule;
 use App\Models\Borrower;
 use App\Models\Loan;
+use App\Models\LoanProduct;
+use App\Models\User;
 use App\Services\BranchAccess;
 use App\Services\ContactVisibility;
 use App\Services\Dashboard\MetricCatalog;
@@ -480,7 +482,7 @@ class ReportController extends Controller
     {
         $this->authorize('reports:view');
 
-        return response()->json(['data' => $this->reportService->dailyCollection($this->reportFilters())]);
+        return response()->json(['data' => $this->reportData('daily-collection', $this->reportService->dailyCollection(...))]);
     }
 
     #[OA\Get(
@@ -894,11 +896,11 @@ class ReportController extends Controller
     {
         $this->authorize('reports:export');
 
-        $query = $this->reportService
-            ->releasesQuery($this->reportFilters([
-                'status' => ['nullable', 'string', Rule::in(Loan::EVER_RELEASED_STATUSES)],
-            ]))
-            ->with('borrower', 'loanProduct');
+        $filters = $this->reportFilters([
+            'status' => ['nullable', 'string', Rule::in(Loan::EVER_RELEASED_STATUSES)],
+        ]);
+        $query = $this->reportService->releasesQuery($filters)->with('borrower', 'loanProduct');
+        [$preamble, $headers] = $this->exportFilterNote('releases', $filters, (clone $query)->exists());
 
         return $this->streamCsv('releases.csv', [
             'Loan #', 'Member', 'Product', 'Principal', 'Interest Rate', 'Term', 'Released', 'Status',
@@ -911,7 +913,7 @@ class ReportController extends Controller
             $l->term.' '.$l->term_unit->value,
             $l->released_at?->toDateString() ?? '',
             $l->status,
-        ]));
+        ]), $preamble, $headers);
     }
 
     #[OA\Get(
@@ -927,11 +929,11 @@ class ReportController extends Controller
 
         // Same builder as the preview, so the CSV cannot include voided
         // receipts the screen excluded.
-        $query = $this->reportService
-            ->repaymentsQuery($this->reportFilters([
-                'status' => ['nullable', 'string', 'in:posted,voided'],
-            ]))
-            ->with('loan.borrower');
+        $filters = $this->reportFilters([
+            'status' => ['nullable', 'string', 'in:posted,voided'],
+        ]);
+        $query = $this->reportService->repaymentsQuery($filters)->with('loan.borrower');
+        [$preamble, $headers] = $this->exportFilterNote('repayments', $filters, (clone $query)->exists());
 
         return $this->streamCsv('repayments.csv', [
             'Receipt #', 'Member', 'Loan #', 'Date', 'Amount', 'Insurance Premium', 'Method', 'Status',
@@ -945,7 +947,46 @@ class ReportController extends Controller
             $r->insurance_applied,
             $r->method ?? 'cash',
             $r->status,
-        ]));
+        ]), $preamble, $headers);
+    }
+
+    /**
+     * How an export was narrowed by the executive dashboard's filters, so a
+     * filtered file never passes for the whole report: a first line in words
+     * ("Filtered by: loan product Salary Loan, collected by Ana Reyes") and an
+     * `X-Filters-Applied` header with the filter keys. Neither is sent when no
+     * such filter applied, so an unfiltered export is unchanged.
+     *
+     * A staff member is named only when the export has rows, which the caller
+     * can already see with that person on them (the loan's officer, the
+     * payment's recorder); otherwise "user #id", so an id can't be used to
+     * look up a name outside the caller's branches.
+     *
+     * @param  array<string, mixed>  $filters
+     * @return array{0: list<list<string>>, 1: array<string, string>}
+     */
+    private function exportFilterNote(string $report, array $filters, bool $hasRows): array
+    {
+        $applied = MetricCatalog::filtersApplied($report, $filters)['filters_applied'];
+
+        if ($applied === []) {
+            return [[], []];
+        }
+
+        $person = function (int $id) use ($hasRows): string {
+            $user = $hasRows ? User::query()->find($id, ['id', 'first_name', 'last_name']) : null;
+            $name = $user === null ? '' : trim($user->first_name.' '.$user->last_name);
+
+            return $name !== '' ? $name : "user #{$id}";
+        };
+
+        $parts = array_map(fn (string $filter): string => match ($filter) {
+            'product_id' => 'loan product '.(LoanProduct::query()->whereKey($filters['product_id'])->value('name') ?? "#{$filters['product_id']}"),
+            'officer_id' => 'account officer '.$person((int) $filters['officer_id']),
+            'collector_id' => 'collected by '.$person((int) $filters['collector_id']),
+        }, $applied);
+
+        return [[['Filtered by: '.implode(', ', $parts)]], ['X-Filters-Applied' => implode(',', $applied)]];
     }
 
     /**

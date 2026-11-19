@@ -10,22 +10,79 @@ namespace App\Services\Dashboard;
  *
  * self::REPORTS says, per report endpoint (`/api/reports/<key>`), which
  * filters every figure follows (`full`) and which only some figures follow
- * (`partial`, filter => figures), for the response's `filters_applied` and
- * `filters_applied_to` (LoanScope::applied()). A report not listed honours
- * the branch filter only.
+ * (`partial`, filter => the response paths it changes, `*` for each row of a
+ * list, a block's path covering everything in it), for the response's
+ * `filters_applied` and `filters_applied_to` (LoanScope::applied()). Every
+ * total built from a narrowed figure is listed with it. A report not listed
+ * honours the branch filter only.
  */
 final class MetricCatalog
 {
     private const LOAN_FILTERS = ['branch_id', 'product_id', 'officer_id'];
 
-    /** Every figure a report's loan cash holds: the product and officer filters narrow these in Cash Flow. */
-    private const CASH_FLOW_LOAN_FIGURES = [
+    /**
+     * Cash Flow's repayment cash and every total built from it, as response
+     * paths (`*` is each `by_branch` row): what the collector filter narrows,
+     * and part of what product and officer narrow. Share capital
+     * (`share_capital`, `inflows.share_capital_credit`, a row's
+     * `inflow_share_capital`) has no loan and stays whole, so a total that
+     * adds it is part filtered.
+     */
+    private const CASH_FLOW_RECEIPT_FIGURES = [
         'inflows.repayments',
+        'inflows.total',
+        'net_movement',
+        'by_branch.*.inflow_principal',
+        'by_branch.*.inflow_interest',
+        'by_branch.*.inflow_penalty',
+        'by_branch.*.inflow_insurance',
+        'by_branch.*.inflow_overpayment',
+        'by_branch.*.inflow_repayments',
+        'by_branch.*.inflow_total',
+        'by_branch.*.repayment_count',
+        'by_branch.*.net_movement',
+        'by_branch_totals.inflow_repayments',
+        'by_branch_totals.inflow_total',
+        'by_branch_totals.net_movement',
+    ];
+
+    /** Cash Flow's release figures and the totals built from them: the rest of what product and officer narrow. */
+    private const CASH_FLOW_RELEASE_FIGURES = [
         'outflows.releases',
+        'outflows.total',
         'non_cash.principal_released',
         'non_cash.total_deductions',
-        'by_branch.inflow',
-        'by_branch.outflow',
+        'by_branch.*.outflow_net_proceeds',
+        'by_branch.*.outflow_total',
+        'by_branch.*.release_count',
+        'by_branch.*.total_deductions',
+        'by_branch_totals.outflow_net_proceeds',
+        'by_branch_totals.outflow_total',
+    ];
+
+    /** Cash Flow's loan cash: every figure the product and officer filters narrow. */
+    private const CASH_FLOW_LOAN_FIGURES = [...self::CASH_FLOW_RECEIPT_FIGURES, ...self::CASH_FLOW_RELEASE_FIGURES];
+
+    /**
+     * Income by Loan's figures built from receipts: which loans are listed
+     * (`data`, a loan with only receipts by someone else drops out), their
+     * totals, and the page counts that follow the listed loans.
+     */
+    private const INCOME_BY_LOAN_RECEIPT_FIGURES = [
+        'data',
+        'totals.count',
+        'totals.payments',
+        'totals.interest_income',
+        'totals.penalty_income',
+        'totals.total_income',
+        'meta.totals.count',
+        'meta.totals.payments',
+        'meta.totals.interest_income',
+        'meta.totals.penalty_income',
+        'meta.totals.total_income',
+        'meta.total',
+        'meta.to',
+        'meta.last_page',
     ];
 
     /**
@@ -44,17 +101,18 @@ final class MetricCatalog
             'partial' => [
                 'product_id' => self::CASH_FLOW_LOAN_FIGURES,
                 'officer_id' => self::CASH_FLOW_LOAN_FIGURES,
-                'collector_id' => ['inflows.repayments', 'by_branch.inflow'],
+                'collector_id' => self::CASH_FLOW_RECEIPT_FIGURES,
             ],
         ],
         'income' => [
             'full' => self::LOAN_FILTERS,
-            'partial' => ['collector_id' => ['interest_income', 'penalty_income']],
+            'partial' => ['collector_id' => ['interest_income', 'penalty_income', 'total']],
         ],
         'income/by-loan' => [
             'full' => self::LOAN_FILTERS,
-            'partial' => ['collector_id' => ['interest_income', 'penalty_income', 'payments']],
+            'partial' => ['collector_id' => self::INCOME_BY_LOAN_RECEIPT_FIGURES],
         ],
+        'daily-collection' => ['full' => ['branch_id'], 'partial' => []],
         'disbursements' => ['full' => self::LOAN_FILTERS, 'partial' => []],
         'releases' => ['full' => self::LOAN_FILTERS, 'partial' => []],
         'borrowers/released' => ['full' => self::LOAN_FILTERS, 'partial' => []],
@@ -123,12 +181,11 @@ final class MetricCatalog
             'permissions' => $reports,
             'has_history' => $history,
         ];
+        $late = fn (int $days): string => $days === 1 ? '1 day or more' : "more than {$days} days";
         $par = fn (int $days): array => $balance(
             "Portfolio at Risk {$days}",
-            $days === 1
-                ? 'The unpaid principal of every collectible loan with a period 1 day or more past its due date, as a share of the gross loan portfolio. The whole unpaid principal of each such loan counts, not just the late period. Grace is not applied.'
-                : "The unpaid principal of every collectible loan whose oldest unpaid period is more than {$days} days past its due date, as a share of the gross loan portfolio. The whole unpaid principal of each such loan counts, not just the late period. Grace is not applied.",
-            "Unpaid principal of loans more than {$days} days past due ÷ gross loan portfolio × 100",
+            "Over every loan ever released in the scope (released, ongoing, completed, defaulted or restructured): the unpaid principal of the loans whose oldest period still marked unpaid is {$late($days)} past its due date, as a share of those loans' unpaid principal (`par_portfolio_principal`, the Loan Balance Summary's `outstanding.principal`). It equals the gross loan portfolio unless a completed or restructured loan still has a period marked unpaid. The whole unpaid principal of each late loan counts, not just the late period. Grace is not applied. A period marked unpaid counts as the oldest even when nothing is left owing on it.",
+            "Unpaid principal of loans {$late($days)} past due ÷ par_portfolio_principal × 100",
             'percent',
         );
 
@@ -152,7 +209,7 @@ final class MetricCatalog
             ),
             'past_due_amount' => $balance(
                 'Past Due Amount',
-                'What the collectible loans\' periods past their due date and the loan\'s grace still owe (principal, interest and penalty), as of today: the Past Due Loans page\'s figure.',
+                'What the collectible loans\' periods past their due date and the loan\'s grace still owe (principal, interest and penalty), as of today. Release dates never narrow it, so without a product or officer filter it is the Past Due Loans page\'s figure.',
                 'Sum of the unpaid principal, interest and penalty on periods past due date + grace',
             ),
             'par_1' => $par(1),
@@ -161,7 +218,7 @@ final class MetricCatalog
             'par_90' => $par(90),
             'aging_by_loan' => $balance(
                 'Loan Aging',
-                'Each collectible loan in one bucket by its oldest unpaid period (current, 1–30, 31–60, 61–90, 91–120 and over 120 days past its due date), with the loans and their unpaid principal in each and each bucket\'s share of the gross loan portfolio.',
+                'Each collectible loan (released, ongoing or defaulted) in one bucket by its oldest period with something left owing (current, 1–30, 31–60, 61–90, 91–120 and over 120 days past its due date), with the loans and their unpaid principal in each and each bucket\'s share of the gross loan portfolio. Unlike PAR, a period marked unpaid with nothing left owing is passed over, and completed and restructured loans are not aged.',
                 'Bucket principal ÷ gross loan portfolio × 100',
                 'money',
                 false,

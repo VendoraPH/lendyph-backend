@@ -40,6 +40,12 @@ class ProductOutstandingShareTest extends TestCase
         $this->assertEquals(0, $rows[$paidOff->loan_product_id]['outstanding_share']);
 
         $this->assertSame(4, $report['outstanding_share_named']);
+        $this->assertSame([
+            $loans[60000]->loan_product_id,
+            $loans[50000]->loan_product_id,
+            $loans[40000]->loan_product_id,
+            $loans[30000]->loan_product_id,
+        ], $report['named_product_ids'], 'Largest first; the browser ranks nothing.');
         $this->assertEquals([
             'product_count' => 2,
             'product_ids' => [$loans[20000]->loan_product_id, $loans[10000]->loan_product_id],
@@ -58,6 +64,7 @@ class ProductOutstandingShareTest extends TestCase
         $report = $this->getJson('/api/reports/portfolio-by-product')->assertOk()->json('data');
 
         $this->assertEquals(100, $report['products'][0]['outstanding_share']);
+        $this->assertSame([$report['products'][0]['product_id']], $report['named_product_ids']);
         $this->assertEquals([
             'product_count' => 0,
             'product_ids' => [],
@@ -73,6 +80,7 @@ class ProductOutstandingShareTest extends TestCase
         $report = $this->getJson('/api/reports/portfolio-by-product')->assertOk()->json('data');
 
         $this->assertSame([], $report['products']);
+        $this->assertSame([], $report['named_product_ids']);
         $this->assertNull($report['other']['outstanding_share']);
     }
 }

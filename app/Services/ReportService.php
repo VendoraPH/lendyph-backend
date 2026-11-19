@@ -1240,6 +1240,13 @@ class ReportService
             $scope,
         );
 
+        // Past due is as of today over the whole book: release dates never
+        // narrow it (product and officer do), so unfiltered it is the Past Due
+        // Loans page's figure.
+        $pastDue = filled($filters['date_from'] ?? null) || filled($filters['date_to'] ?? null)
+            ? app(PortfolioOutstanding::class)->totals(self::branchScope($filters), null, null, $scope)
+            : $collectible;
+
         // Also from the bare due date. This block feeds the balance summary's
         // `overdue` figures alongside the PAR ratio below and is read with
         // them, so the two must be struck the same way. See the note on
@@ -1330,11 +1337,16 @@ class ReportService
             'par_30' => $risk['par_30'],
             'par_60' => $risk['par_60'],
             'par_90' => $risk['par_90'],
+            // The PAR ratios' denominator: the unpaid principal of the same
+            // ever-released loans (`outstanding.principal`), not the
+            // collectible-only `outstanding_principal`.
+            'par_portfolio_principal' => $risk['portfolio_principal'],
             // What the collectible loans' periods past their due date AND grace
-            // still owe, and how many loans: the Past Due Loans page's figures
+            // still owe, and how many loans, as of today whatever the release
+            // dates: unfiltered, the Past Due Loans page's figures
             // (GET /reports/due-past-due?past_due_only=1 `past_due_amount`).
-            'past_due_amount' => $collectible['overdue_amount'],
-            'past_due_loan_count' => $collectible['overdue_count'],
+            'past_due_amount' => $pastDue['overdue_amount'],
+            'past_due_loan_count' => $pastDue['overdue_count'],
             'aging_by_loan' => $agingByLoan,
             // `total` is principal + interest + penalty, the composition the
             // three lines above it make up; `balance` is the headline figure,
@@ -2865,6 +2877,11 @@ class ReportService
             'par_threshold_days' => self::PAR_THRESHOLD_DAYS,
             'products' => $products,
             'outstanding_share_named' => self::OUTSTANDING_SHARE_NAMED,
+            // The products the share names, largest first; the rest are `other`.
+            'named_product_ids' => array_column(
+                array_slice($this->rankedByPrincipal($products), 0, self::OUTSTANDING_SHARE_NAMED),
+                'product_id',
+            ),
             'other' => $this->otherProductsShare($products, $grandOutstandingPrincipal),
             'totals' => [
                 'product_count' => count($products),
@@ -2896,12 +2913,7 @@ class ReportService
      */
     private function otherProductsShare(array $products, float $grandOutstandingPrincipal): array
     {
-        $owing = array_values(array_filter($products, fn (array $product): bool => $product['outstanding_principal'] > 0));
-
-        usort($owing, fn (array $a, array $b): int => [$b['outstanding_principal'], $a['product_name'], $a['product_id']]
-            <=> [$a['outstanding_principal'], $b['product_name'], $b['product_id']]);
-
-        $rest = array_slice($owing, self::OUTSTANDING_SHARE_NAMED);
+        $rest = array_slice($this->rankedByPrincipal($products), self::OUTSTANDING_SHARE_NAMED);
         $principal = self::sumOfFigures(array_column($rest, 'outstanding_principal'));
 
         return [
@@ -2912,6 +2924,22 @@ class ReportService
             'total_outstanding' => self::sumOfFigures(array_column($rest, 'total_outstanding')),
             'outstanding_share' => self::sharePercent($principal, $grandOutstandingPrincipal),
         ];
+    }
+
+    /**
+     * The products with unpaid principal, largest first, then by name and id.
+     *
+     * @param  list<array<string, mixed>>  $products
+     * @return list<array<string, mixed>>
+     */
+    private function rankedByPrincipal(array $products): array
+    {
+        $owing = array_values(array_filter($products, fn (array $product): bool => $product['outstanding_principal'] > 0));
+
+        usort($owing, fn (array $a, array $b): int => [$b['outstanding_principal'], $a['product_name'], $a['product_id']]
+            <=> [$a['outstanding_principal'], $b['product_name'], $b['product_id']]);
+
+        return $owing;
     }
 
     // ── Officer / Branch Performance ─────────────────────────────────────

@@ -127,6 +127,77 @@ class PortfolioRiskTest extends TestCase
         $this->assertEquals($this->summary()['outstanding_principal'], $aging['totals']['principal']);
     }
 
+    public function test_par_states_its_own_denominator(): void
+    {
+        $this->bookOfLateLoans();
+
+        $summary = $this->summary();
+
+        $this->assertEquals(540000, $summary['par_portfolio_principal']);
+        $this->assertSame($summary['outstanding']['principal'], $summary['par_portfolio_principal']);
+    }
+
+    public function test_par_1_equals_the_aging_buckets_past_current_beside_completed_and_restructured_loans(): void
+    {
+        $this->bookOfLateLoans();
+
+        $completed = $this->createReleasedLoan();
+        app(RepaymentService::class)->processRepayment($completed->fresh(), 70800, now()->toDateString(), $this->admin);
+        $this->assertSame('completed', $completed->fresh()->status);
+
+        // A restructure closes the source loan's open periods.
+        $restructured = $this->createReleasedLoan();
+        $this->dueDaysAgo($restructured, 1, 45);
+        DB::table('amortization_schedules')->where('loan_id', $restructured->id)->update([
+            'principal_paid' => DB::raw('principal_due'),
+            'interest_paid' => DB::raw('interest_due'),
+            'status' => 'paid',
+        ]);
+        DB::table('loans')->where('id', $restructured->id)->update(['status' => 'restructured']);
+
+        $summary = $this->summary();
+        $pastCurrent = collect($summary['aging_by_loan']['buckets'])->reject(fn (array $bucket) => $bucket['bucket'] === 'current');
+
+        $this->assertEquals(480000, $summary['par_1']['amount']);
+        $this->assertEquals($pastCurrent->sum('principal'), $summary['par_1']['amount']);
+        $this->assertSame($pastCurrent->sum('loans'), $summary['par_1']['loans']);
+    }
+
+    /**
+     * Where the two rules part, each is the documented one: PAR measures every
+     * ever-released loan from its oldest period still marked unpaid; the aging
+     * measures collectible loans from their oldest period with something left
+     * owing (PortfolioRisk's docblock).
+     */
+    public function test_par_and_the_aging_differ_only_where_their_documented_rules_do(): void
+    {
+        // A completed loan with a stray unpaid period: in PAR, not in the aging.
+        $stray = $this->createReleasedLoan();
+        $this->dueDaysAgo($stray, 1, 10);
+        DB::table('loans')->where('id', $stray->id)->update(['status' => 'completed']);
+
+        // A period marked partial with nothing left owing, 40 days ago, before
+        // an owing period 10 days ago: PAR dates the loan from the first, the
+        // aging from the second.
+        $marked = $this->createReleasedLoan();
+        $this->dueDaysAgo($marked, 1, 40);
+        $this->dueDaysAgo($marked, 2, 10);
+        DB::table('amortization_schedules')->where('loan_id', $marked->id)->where('period_number', 1)->update([
+            'principal_paid' => DB::raw('principal_due'),
+            'interest_paid' => DB::raw('interest_due'),
+            'status' => 'partial',
+        ]);
+
+        $summary = $this->summary();
+        $buckets = collect($summary['aging_by_loan']['buckets'])->keyBy('bucket');
+
+        $this->assertEquals(['amount' => 110000, 'ratio' => 100.0, 'loans' => 2], $summary['par_1']);
+        $this->assertEquals(['amount' => 50000, 'ratio' => 45.45, 'loans' => 1], $summary['par_30']);
+        $this->assertSame(1, $buckets['1_30']['loans'], 'The marked loan, by its owing period; the completed loan is not aged.');
+        $this->assertSame(0, $buckets['31_60']['loans']);
+        $this->assertEquals(50000, $summary['aging_by_loan']['totals']['principal']);
+    }
+
     public function test_past_due_is_the_past_due_loans_page_s_own_figure(): void
     {
         $this->bookOfLateLoans();
@@ -141,6 +212,19 @@ class PortfolioRiskTest extends TestCase
         $this->assertSame(7, $summary['past_due_loan_count']);
         $this->assertSame($page->json('totals.past_due_amount'), $summary['past_due_amount']);
         $this->assertSame($pageLoans->count(), $summary['past_due_loan_count']);
+    }
+
+    public function test_past_due_is_as_of_today_whatever_the_release_dates(): void
+    {
+        $this->bookOfLateLoans();
+
+        $summary = $this->getJson('/api/reports/loan-balance-summary?date_from=2020-01-01&date_to=2020-12-31')->assertOk()->json('data');
+        $page = $this->getJson('/api/reports/due-past-due?past_due_only=1&per_page=1')->assertOk();
+
+        $this->assertSame(0, $summary['portfolio']['loan_count'], 'No loan was released in 2020.');
+        $this->assertEquals(82600, $summary['past_due_amount']);
+        $this->assertSame($page->json('totals.past_due_amount'), $summary['past_due_amount']);
+        $this->assertSame(7, $summary['past_due_loan_count']);
     }
 
     private function bookOfLateLoans(): void

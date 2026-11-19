@@ -6,6 +6,7 @@ use App\Models\Loan;
 use App\Services\Accounting\LoanAgingBuilder;
 use App\Services\RepaymentService;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\DB;
 use Tests\TestCase;
 use Tests\Traits\SetupLendyPH;
 
@@ -54,7 +55,14 @@ class LoanAgingRowsTest extends TestCase
         $loan->amortizationSchedules()->where('period_number', 1)->update(['due_date' => '2026-10-01']);
         $this->createReleasedLoan(['principal_amount' => 30000]);
 
+        DB::flushQueryLog();
+        DB::enableQueryLog();
         $totals = app(LoanAgingBuilder::class)->bucketTotals('2026-11-19');
+        $queries = DB::getQueryLog();
+        DB::disableQueryLog();
+
+        $this->assertCount(1, $queries, 'One grouped query.');
+        $this->assertSame(1, substr_count($queries[0]['query'], 'from `amortization_schedules`'), 'The schedules are read once.');
 
         $this->assertSame(['current', '1_30', '31_60', '61_90', '91_120', 'over_120'], array_keys($totals));
         $this->assertSame(['loans' => 1, 'principal' => 3000000], $totals['current']);

@@ -6,10 +6,19 @@ use Symfony\Component\HttpFoundation\StreamedResponse;
 
 trait CsvExportTrait
 {
-    protected function streamCsv(string $filename, array $headers, iterable $rows): StreamedResponse
+    /**
+     * @param  list<list<string>>  $preamble  lines written before the column names, such as a note of the filters applied
+     * @param  array<string, string>  $responseHeaders  extra HTTP headers
+     */
+    protected function streamCsv(string $filename, array $headers, iterable $rows, array $preamble = [], array $responseHeaders = []): StreamedResponse
     {
-        return response()->streamDownload(function () use ($headers, $rows) {
+        return response()->streamDownload(function () use ($headers, $rows, $preamble) {
             $handle = fopen('php://output', 'w');
+
+            foreach ($preamble as $line) {
+                fputcsv($handle, array_map(self::sanitizeCsvCell(...), $line));
+            }
+
             fputcsv($handle, $headers);
 
             foreach ($rows as $row) {
@@ -21,6 +30,7 @@ trait CsvExportTrait
             fclose($handle);
         }, $filename, [
             'Content-Type' => 'text/csv',
+            ...$responseHeaders,
         ]);
     }
 

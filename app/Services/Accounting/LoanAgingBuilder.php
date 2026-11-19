@@ -74,10 +74,13 @@ final class LoanAgingBuilder
 
     /**
      * The loans in each bucket and their unpaid principal, in integer
-     * centavos, every bucket listed (youngest first), in one grouped query.
-     * The principal is each loan's periods' principal still unpaid, the
-     * figure a loan row's `outstanding_principal` reads, so the buckets add up
-     * to LoanListTotals' `outstanding_principal` for the same loans.
+     * centavos, every bucket listed (youngest first), in one grouped query
+     * that reads the schedules once. The loans are self::filtered()'s (no
+     * filters): collectible, in the branch scope, with a period left owing or
+     * the premium owed, aged by their oldest owing period. The principal is
+     * each loan's periods' principal still unpaid, the figure a loan row's
+     * `outstanding_principal` reads, so the buckets add up to LoanListTotals'
+     * `outstanding_principal` for the same loans.
      *
      * @param  int|list<int>|null  $branchId  the branch scope (null: every branch)
      * @param  Builder<Loan>|null  $loans  a starting query, such as one narrowed by product
@@ -85,18 +88,40 @@ final class LoanAgingBuilder
      */
     public function bucketTotals(string $asOf, int|array|null $branchId = null, ?Builder $loans = null): array
     {
-        $aged = $this->ageOnly($asOf, $branchId, [], $loans);
+        $remaining = AmortizationSchedule::remainingTotalSql();
+        $unpaid = implode(', ', array_fill(0, count(AmortizationSchedule::UNPAID_STATUSES), '?'));
 
-        $principal = DB::table('amortization_schedules')
-            ->whereIn('amortization_schedules.loan_id', DB::query()->fromSub(clone $aged, 'aged_ids')->select('aged_ids.id'))
+        // Per loan, in one pass over its schedules: the oldest period left
+        // owing (self::filtered()'s `oldest_unpaid_due`) and the principal
+        // still unpaid on all its periods (LoanListTotals' rule).
+        $perLoan = DB::table('amortization_schedules')
+            ->join('loans', 'loans.id', '=', 'amortization_schedules.loan_id')
+            ->whereIn('loans.status', Loan::COLLECTIBLE_STATUSES)
+            ->when($branchId !== null, fn (QueryBuilder $q) => $q->whereIn('loans.branch_id', (array) $branchId))
             ->groupBy('amortization_schedules.loan_id')
-            ->selectRaw('amortization_schedules.loan_id, SUM('.AmortizationSchedule::remainingPrincipalSql().') as principal');
+            ->selectRaw(
+                "amortization_schedules.loan_id,
+                MIN(CASE WHEN amortization_schedules.status IN ({$unpaid}) AND {$remaining} > 0 THEN amortization_schedules.due_date END) as oldest_unpaid_due,
+                SUM(".AmortizationSchedule::remainingPrincipalSql().') as principal',
+                AmortizationSchedule::UNPAID_STATUSES,
+            );
 
-        $rows = DB::query()
-            ->fromSub($aged, 'aged')
-            ->leftJoinSub($principal, 'loan_principal', 'loan_principal.loan_id', '=', 'aged.id')
-            ->groupBy('aged.bucket')
-            ->selectRaw('aged.bucket, COUNT(*) as loan_count, COALESCE(SUM(loan_principal.principal), 0) as principal')
+        $base = (clone ($loans ?? Loan::query()))->toBase();
+        $base->columns = null;
+        $base->bindings['select'] = [];
+
+        $rows = $base->reorder()
+            ->whereIn('loans.status', Loan::COLLECTIBLE_STATUSES)
+            ->when($branchId !== null, fn (QueryBuilder $q) => $q->whereIn('loans.branch_id', (array) $branchId))
+            ->leftJoinSub($perLoan, 'loan_aging', 'loan_aging.loan_id', '=', 'loans.id')
+            ->where(fn (QueryBuilder $q) => $q
+                ->whereNotNull('loan_aging.oldest_unpaid_due')
+                ->orWhere('loans.insurance_remaining_balance', '>', 0))
+            ->groupBy('bucket')
+            ->selectRaw(
+                $this->bucketSql().' as bucket, COUNT(*) as loan_count, COALESCE(SUM(loan_aging.principal), 0) as principal',
+                $this->asOfTimes(5, $asOf),
+            )
             ->get()
             ->keyBy('bucket');
 
