@@ -5,8 +5,10 @@ namespace App\Services;
 use App\Enums\PaymentMethod;
 use App\Models\Loan;
 use App\Models\PortfolioDailySnapshot;
+use App\Models\PortfolioSnapshotLine;
 use App\Models\Repayment;
 use Carbon\Carbon;
+use Closure;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Cache;
@@ -62,16 +64,17 @@ class DashboardService
 
         $overdueLoansCount = $collectible['overdue_count'];
 
-        // Cache sparklines for 10 minutes (22 queries → 0 on cache hit). v5:
-        // the portfolio points read the unpaid principal, and the points are per
-        // branch scope, so points cached under the old key's rule are not
-        // served after a deploy. The day is in the key so points
-        // cached before midnight are not served as the next day's; the scope
-        // is in it so one branch's points are never served to another.
-        $cacheKey = 'dashboard:sparklines:v5:'.Carbon::today()->toDateString().':'.self::scopeKey($branchIds);
+        // Cache sparklines for 10 minutes. v6: past points come from the
+        // snapshots for every caller (a branch user's from their branches'
+        // lines) and the Active Loans points too, so points cached under the
+        // old key's rule are not served after a deploy. The day is in the key
+        // so points cached before midnight are not served as the next day's;
+        // the scope is in it so one branch's points are never served to
+        // another.
+        $cacheKey = 'dashboard:sparklines:v6:'.Carbon::today()->toDateString().':'.self::scopeKey($branchIds);
         $sparklines = Cache::remember($cacheKey, 600, fn () => [
-            'portfolio' => $this->pastPortfolioSparkline($branchIds),
-            'active_loans' => $this->activeLoansSparkline($branchIds),
+            'portfolio' => $this->pastWeeklySparkline($branchIds, 'outstanding_principal', fn (float $v): float => round($v / 1000, 0)),
+            'active_loans' => $this->pastWeeklySparkline($branchIds, 'active_loan_count', fn (float $v): int => (int) $v),
             'collected' => $this->collectionsSparkline($branchIds),
             'overdue' => $this->pastOverdueSparkline($branchIds),
         ]);
@@ -80,6 +83,7 @@ class DashboardService
         // two always agree.
         $sparklines['overdue'][] = ['v' => $overdueLoansCount];
         $sparklines['portfolio'][] = ['v' => round($totalPortfolio / 1000, 0)];
+        $sparklines['active_loans'][] = ['v' => $activeLoansCount];
 
         return [
             'total_portfolio' => $totalPortfolio,
@@ -410,58 +414,75 @@ class DashboardService
     }
 
     /**
-     * The Total Portfolio sparkline's six past weeks, in thousands: the
-     * outstanding principal in the last daily snapshot of each week, oldest
-     * first, by the card's rule (collectible loans, LoanListTotals). A week with
-     * no snapshot has no point, nothing being recalculated for a day that
-     * passed. This week's point is the card's live figure, added
-     * by stats(). As with the overdue sparkline, snapshots are the whole
-     * organisation's, so a branch user gets no past points (decision B2).
+     * The Total Portfolio and Active Loans sparklines' six past weeks: the
+     * figure in the last daily snapshot of each week, oldest first, through
+     * `$format`. A week with no snapshot has no point, nothing being
+     * recalculated for a day that passed. This week's point is the card's live
+     * figure, added by stats().
+     *
+     * `outstanding_principal` is the card's rule (collectible loans,
+     * LoanListTotals); `active_loan_count` is released and ongoing loans as
+     * they stood that day, so a loan completed since still counts in the week
+     * it was active (Phase 6 EB-B; it used to count today's loans backwards).
      *
      * @param  list<int>|null  $branchIds
-     * @return array<int, array{v: float|null}>
+     * @param  Closure(float): (float|int)  $format
+     * @return array<int, array{v: float|int|null}>
      */
-    private function pastPortfolioSparkline(?array $branchIds): array
+    private function pastWeeklySparkline(?array $branchIds, string $figure, Closure $format): array
     {
-        if ($branchIds !== null) {
-            return array_fill(0, 6, ['v' => null]);
-        }
-
         $thisWeek = Carbon::now()->startOfWeek();
+        $values = $this->snapshotValues($branchIds, $figure, $thisWeek->copy()->subWeeks(6), $thisWeek->copy()->subDay());
 
-        $snapshots = PortfolioDailySnapshot::query()
-            ->whereBetween('snapshot_date', [$thisWeek->copy()->subWeeks(6)->toDateString(), $thisWeek->copy()->subDay()->toDateString()])
-            ->orderBy('snapshot_date')
-            ->get(['snapshot_date', 'outstanding_principal']);
+        return collect(range(6, 1))->map(function (int $weeksAgo) use ($values, $thisWeek, $format): array {
+            $start = $thisWeek->copy()->subWeeks($weeksAgo)->toDateString();
+            $end = $thisWeek->copy()->subWeeks($weeksAgo)->endOfWeek()->toDateString();
+            $last = $values->filter(fn ($value, string $day): bool => $day >= $start && $day <= $end)->last();
 
-        return collect(range(6, 1))->map(function (int $weeksAgo) use ($snapshots, $thisWeek): array {
-            $start = $thisWeek->copy()->subWeeks($weeksAgo);
-            $end = $start->copy()->endOfWeek();
-            $last = $snapshots->last(fn (PortfolioDailySnapshot $s): bool => $s->snapshot_date->betweenIncluded($start, $end));
-
-            return ['v' => $last === null ? null : round((float) $last->outstanding_principal / 1000, 0)];
+            return ['v' => $last === null ? null : $format((float) $last)];
         })->values()->all();
     }
 
     /**
-     * Active loans (released and ongoing, the card's statuses) released by
-     * the end of each of the last seven weeks; this week's point equals the
-     * card. It used to count `released` only, so it read low beside the card
-     * as soon as a loan took its first payment and became `ongoing`.
+     * One figure per snapshot day from `$from` to `$to`, by day (Y-m-d),
+     * oldest first; a day with no usable snapshot has no key (no backfill).
+     *
+     * - The whole organisation (`$branchIds` null) reads each day's own row;
+     *   a figure the row never held (recorded before Phase 6 EB-B) has no key.
+     * - A branch user reads their branches' snapshot lines, on the days that
+     *   have lines (`line_count` set), added up; a day with lines but none in
+     *   their branches reads 0. They never read another branch's figure, and
+     *   the organisation row is never theirs.
      *
      * @param  list<int>|null  $branchIds
+     * @return Collection<string, float|int>
      */
-    private function activeLoansSparkline(?array $branchIds): array
+    private function snapshotValues(?array $branchIds, string $figure, Carbon $from, Carbon $to): Collection
     {
-        return collect(range(6, 0))->map(function ($weeksAgo) use ($branchIds) {
-            $end = Carbon::now()->startOfWeek()->subWeeks($weeksAgo)->endOfWeek();
-            $value = $this->loans($branchIds)
-                ->whereIn('status', self::ACTIVE_STATUSES)
-                ->where('released_at', '<=', $end)
-                ->count();
+        $days = PortfolioDailySnapshot::query()
+            ->whereBetween('snapshot_date', [$from->toDateString(), $to->toDateString()])
+            ->when($branchIds !== null, fn ($q) => $q->whereNotNull('line_count'), fn ($q) => $q->whereNotNull($figure))
+            ->orderBy('snapshot_date')
+            ->get(['snapshot_date', $figure]);
 
-            return ['v' => $value];
-        })->toArray();
+        if ($branchIds === null) {
+            return $days->mapWithKeys(fn (PortfolioDailySnapshot $day) => [$day->snapshot_date->toDateString() => $day->{$figure}]);
+        }
+
+        $sums = PortfolioSnapshotLine::query()
+            ->toBase()
+            ->whereIn('snapshot_date', $days->map(fn (PortfolioDailySnapshot $day) => $day->snapshot_date->toDateString())->all())
+            ->whereIn('branch_id', $branchIds)
+            ->groupBy('snapshot_date')
+            ->selectRaw("snapshot_date, COALESCE(SUM({$figure}), 0) as figure")
+            ->pluck('figure', 'snapshot_date')
+            ->mapWithKeys(fn ($value, $day) => [Carbon::parse($day)->toDateString() => $value]);
+
+        return $days->mapWithKeys(function (PortfolioDailySnapshot $day) use ($sums): array {
+            $date = $day->snapshot_date->toDateString();
+
+            return [$date => $sums[$date] ?? 0];
+        });
     }
 
     /**
@@ -487,10 +508,9 @@ class DashboardService
      * `overdue_loans_count`, or null when no snapshot was recorded for it (no
      * backfill). stats() adds today's point from the live card.
      *
-     * The snapshots are organisation-wide (they record no branch), so a
-     * caller without `branches:view_all` gets null for every past point and
-     * only their own live today point (decision B2): a branch user never
-     * reads another branch's count through the sparkline.
+     * A caller without `branches:view_all` reads their own branches' snapshot
+     * lines (Phase 6 EB-B), never another branch's count: a day recorded
+     * before the lines has no point for them (self::snapshotValues()).
      *
      * @param  list<int>|null  $branchIds
      * @return array<int, array{v: int|null}>
@@ -498,19 +518,13 @@ class DashboardService
     private function pastOverdueSparkline(?array $branchIds): array
     {
         $today = Carbon::today();
+        $counts = $this->snapshotValues($branchIds, 'overdue_loans_count', $today->copy()->subDays(6), $today->copy()->subDay());
 
-        if ($branchIds !== null) {
-            return array_fill(0, 6, ['v' => null]);
-        }
+        return collect(range(6, 1))->map(function (int $daysAgo) use ($counts, $today): array {
+            $count = $counts[$today->copy()->subDays($daysAgo)->toDateString()] ?? null;
 
-        $counts = PortfolioDailySnapshot::query()
-            ->whereBetween('snapshot_date', [$today->copy()->subDays(6)->toDateString(), $today->copy()->subDay()->toDateString()])
-            ->get(['snapshot_date', 'overdue_loans_count'])
-            ->mapWithKeys(fn (PortfolioDailySnapshot $snapshot) => [$snapshot->snapshot_date->toDateString() => $snapshot->overdue_loans_count]);
-
-        return collect(range(6, 1))->map(fn (int $daysAgo) => [
-            'v' => $counts[$today->copy()->subDays($daysAgo)->toDateString()] ?? null,
-        ])->values()->all();
+            return ['v' => $count === null ? null : (int) $count];
+        })->values()->all();
     }
 
     /**
