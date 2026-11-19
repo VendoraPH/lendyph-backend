@@ -4,6 +4,7 @@ namespace App\Http\Resources\Amla;
 
 use App\Enums\PaymentMethod;
 use App\Models\AmlaAlert;
+use App\Models\AmlaChangeRequest;
 use App\Models\AmlaCtrCandidate;
 use App\Models\AmlaEvent;
 use App\Models\AmlaRuleVersion;
@@ -26,6 +27,9 @@ use Illuminate\Support\Collection;
  */
 final class AmlaDetectionPresenter
 {
+    /** What a record with no branch reads: it belongs to the whole cooperative (multi-branch decision 6). */
+    public const ORGANISATION_WIDE = 'Organisation-wide';
+
     public function __construct(private readonly DetectionRules $rules) {}
 
     /** @return array<string, mixed> */
@@ -118,12 +122,22 @@ final class AmlaDetectionPresenter
                 'priority' => $entry['priority'],
                 'priority_words' => AmlaAlert::PRIORITY_WORDS[$entry['priority']] ?? ucfirst($entry['priority']),
                 'params' => $entry['params'],
+                'parameters' => array_map(fn (string $name, string $kind) => [
+                    'name' => $name,
+                    'label' => DetectionRules::PARAMETER_LABELS[$name] ?? ucfirst(str_replace('_', ' ', $name)),
+                    'kind' => $kind,
+                    'value' => $entry['params'][$name] ?? null,
+                ], array_keys($rule->parameters()), array_values($rule->parameters())),
                 'availability' => $rule->unavailable() ?? 'Available',
             ];
         }
 
+        $base = $version->request_id === null ? null : AmlaChangeRequest::query()->find($version->request_id)?->payload;
+
         return [
             'version' => (int) $version->version,
+            'base_version' => is_array($base) && isset($base['base_version']) ? (int) $base['base_version'] : null,
+            'pending_change_request_id' => self::pendingChange(),
             'to_verify' => (bool) $version->to_verify,
             'effective_at' => $version->effective_at?->toIso8601String(),
             'note' => DetectionRules::NOTE,
@@ -169,7 +183,7 @@ final class AmlaDetectionPresenter
     /** @return array{id: int|null, name: string} */
     private static function branch(?Branch $branch, ?int $branchId): array
     {
-        return ['id' => $branchId, 'name' => $branch?->name ?? ($branchId === null ? 'Head office' : Finding::NOT_AVAILABLE)];
+        return ['id' => $branchId, 'name' => $branch?->name ?? ($branchId === null ? self::ORGANISATION_WIDE : Finding::NOT_AVAILABLE)];
     }
 
     private static function channel(?string $channel): string
@@ -187,5 +201,13 @@ final class AmlaDetectionPresenter
     public static function seesCases(?User $viewer): bool
     {
         return $viewer !== null && $viewer->can(AmlaAccess::CASES) && $viewer->can(BranchAccess::VIEW_ALL);
+    }
+
+    /** The detection rules change waiting for approval, if any (one waits at a time). */
+    private static function pendingChange(): ?int
+    {
+        $id = AmlaChangeRequest::query()->where('pending_key', AmlaChangeRequest::DETECTION_RULES)->value('id');
+
+        return $id === null ? null : (int) $id;
     }
 }

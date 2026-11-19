@@ -57,7 +57,7 @@ final class AmlaCasePresenter
             'status' => $case->status,
             'status_words' => AmlaCase::STATUS_WORDS[$case->status] ?? $case->status,
             'subject' => self::subject($case->borrower, $case->walkIn),
-            'branch' => ['id' => $case->branch_id, 'name' => $case->branch?->name ?? ($case->branch_id === null ? 'Head office' : Finding::NOT_AVAILABLE)],
+            'branch' => ['id' => $case->branch_id, 'name' => $case->branch?->name ?? ($case->branch_id === null ? AmlaDetectionPresenter::ORGANISATION_WIDE : Finding::NOT_AVAILABLE)],
             'assigned_to' => AmlaPresenter::user($case->assignee),
             'opened_by' => AmlaPresenter::user($case->opener),
             'decision' => $case->decision,

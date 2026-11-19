@@ -61,6 +61,26 @@ final class CddWorklist
     }
 
     /**
+     * Every subject in scope with its profile and its state worked out now,
+     * for the AMLA reports and the dashboard counts.
+     *
+     * @param  array<string, mixed>  $filters  `branch_id` only
+     * @return list<array{subject: Borrower|GCashNonMember, profile: AmlaProfile|null, state: array<string, mixed>}>
+     */
+    public function subjects(User $user, array $filters = []): array
+    {
+        $all = [];
+
+        foreach ($this->keys($user, array_intersect_key($filters, ['branch_id' => true]))->chunk(self::CHUNK) as $chunk) {
+            foreach ($this->loaded($chunk) as $entry) {
+                $all[] = $entry;
+            }
+        }
+
+        return $all;
+    }
+
+    /**
      * The subjects in scope as [type, id], ordered by name.
      *
      * @param  array<string, mixed>  $filters
@@ -98,6 +118,15 @@ final class CddWorklist
      */
     private function rowsFor(Collection $keys): array
     {
+        return array_map(fn (array $entry) => AmlaCddPresenter::row($entry['subject'], $entry['profile'], $entry['state']), $this->loaded($keys));
+    }
+
+    /**
+     * @param  Collection<int, array{0: string, 1: int, 2: string}>  $keys
+     * @return list<array{subject: Borrower|GCashNonMember, profile: AmlaProfile|null, state: array<string, mixed>}>
+     */
+    private function loaded(Collection $keys): array
+    {
         $memberIds = $keys->where(0, AmlaProfile::MEMBER)->pluck(1)->all();
         $walkInIds = $keys->where(0, AmlaProfile::WALK_IN)->pluck(1)->all();
 
@@ -121,7 +150,7 @@ final class CddWorklist
             }
 
             $profile = $type === AmlaProfile::MEMBER ? $memberProfiles->get($id) : $walkInProfiles->get($id);
-            $rows[] = AmlaCddPresenter::row($subject, $profile, $this->state->of($subject, $profile));
+            $rows[] = ['subject' => $subject, 'profile' => $profile, 'state' => $this->state->of($subject, $profile)];
         }
 
         return $rows;

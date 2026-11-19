@@ -8,10 +8,10 @@ use App\Services\Amla\Detection\DetectionRule;
 use App\Services\Amla\Detection\Finding;
 
 /**
- * L. Relevant watchlist matches: a restricted, critical alert for a possible
- * sanctions or watchlist match, never confirmed by itself. It waits for
- * watchlist screening (AMLA-B5): until then there is nothing to match, so it
- * raises nothing.
+ * L. Relevant watchlist matches: possible sanctions or watchlist matches are
+ * found and reviewed in watchlist screening (AmlaScreeningMatch), restricted
+ * to head office and never confirmed by themselves. They aren't raised again
+ * as monitoring alerts, so this rule raises nothing.
  */
 final class WatchlistMatch extends DetectionRule
 {
@@ -37,7 +37,7 @@ final class WatchlistMatch extends DetectionRule
 
     public function unavailable(): ?string
     {
-        return 'Not available yet: watchlist screening (AMLA-B5) isn\'t built, so there is nothing to match.';
+        return 'Not raised here: watchlist matches are found and reviewed in watchlist screening, never as monitoring alerts.';
     }
 
     public function evaluate(AmlaEvent $trigger, DetectionContext $context): ?Finding

@@ -3,6 +3,7 @@
 namespace App\Services\Savings\Api;
 
 use App\Http\Resources\Savings\SavingsUserRef;
+use App\Models\AmlaOrderHold;
 use App\Models\Borrower;
 use App\Models\SavingsAccount;
 use App\Models\SavingsApproval;
@@ -214,6 +215,10 @@ class Presenter
     {
         $holds = $this->models($holds);
         $holds->loadMissing(['creator', 'releaser']);
+        // A hold placed under a legal order is lifted only by that order's
+        // release, so staff are never offered Release on it; nothing here
+        // names the order or where it is kept.
+        $underOrder = AmlaOrderHold::query()->whereIn('savings_hold_id', $holds->pluck('id'))->pluck('savings_hold_id')->flip();
 
         return $holds->map(fn (SavingsHold $h) => [
             'id' => $h->id,
@@ -228,6 +233,7 @@ class Presenter
             'release_reason' => $h->release_reason,
             'created_by' => SavingsUserRef::from($h->creator),
             'released_by' => SavingsUserRef::from($h->releaser),
+            'can_release' => $h->status === SavingsHold::STATUS_ACTIVE && ! $underOrder->has($h->id),
         ])->values()->all();
     }
 
