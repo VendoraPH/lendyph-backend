@@ -181,6 +181,7 @@ class UserController extends Controller
                     new OA\Property(property: 'password_confirmation', type: 'string', example: 'password123'),
                     new OA\Property(property: 'branch_id', type: 'integer', nullable: true, example: 1, description: 'Legacy single-branch shape. Required only when `branch_ids` is absent.'),
                     new OA\Property(property: 'branch_ids', type: 'array', items: new OA\Items(type: 'integer'), example: [1, 2], description: 'Every branch this user is assigned to. Required only when `branch_id` is absent; wins over it when both are sent.'),
+                    new OA\Property(property: 'primary_branch_id', type: 'integer', nullable: true, example: 2, description: 'The chosen primary branch: one of the assigned branches, or null for Organisation-wide (only for a role that sees all branches). Absent: the first assigned branch.'),
                     new OA\Property(property: 'role', type: 'string', example: 'loan_officer'),
                 ],
             ),
@@ -202,7 +203,7 @@ class UserController extends Controller
         $branchIds = $request->branchAssignment() ?? [];
 
         $user = User::create([
-            ...$request->safe()->except('role', 'branch_ids'),
+            ...$request->safe()->except('role', 'branch_ids', 'primary_branch_id'),
             'branch_id' => $request->primaryBranchId(),
         ]);
 
@@ -292,6 +293,7 @@ class UserController extends Controller
                     new OA\Property(property: 'mobile_number', type: 'string'),
                     new OA\Property(property: 'branch_id', type: 'integer', description: 'Legacy single-branch shape.'),
                     new OA\Property(property: 'branch_ids', type: 'array', items: new OA\Items(type: 'integer'), description: 'Replaces the whole branch assignment. At least one id.'),
+                    new OA\Property(property: 'primary_branch_id', type: 'integer', nullable: true, description: 'The chosen primary branch: one of the user\'s branches after this save, or null for Organisation-wide (only for a user who sees all branches). Absent: unchanged while it stays assigned.'),
                     new OA\Property(property: 'role', type: 'string'),
                 ],
             ),
@@ -319,9 +321,12 @@ class UserController extends Controller
         $branchIds = $request->branchAssignment($user);
         $previousBranchIds = $branchIds === null ? [] : $this->assignedBranchIds($user);
 
+        // `primary_branch_id` (Phase 6 MB-BE6) sets the column on its own; the
+        // Auditable `updated` row describes the change in words
+        // (User::describeAuditEvent()).
         $user->update([
-            ...$request->safe()->except('role', 'branch_ids'),
-            ...$branchIds === null ? [] : ['branch_id' => $request->primaryBranchId($user)],
+            ...$request->safe()->except('role', 'branch_ids', 'primary_branch_id'),
+            ...$branchIds === null && ! $request->has('primary_branch_id') ? [] : ['branch_id' => $request->primaryBranchId($user)],
         ]);
 
         if ($branchIds !== null) {
