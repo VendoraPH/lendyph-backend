@@ -7,8 +7,8 @@ use App\Models\OriginationDocument;
 use App\Models\OriginationDocumentVersion;
 use App\Models\User;
 use App\Services\AuditLogService;
+use App\Services\LoanWriteTransaction;
 use Illuminate\Database\Eloquent\Builder;
-use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Validation\ValidationException;
 use Symfony\Component\HttpFoundation\StreamedResponse;
@@ -62,7 +62,7 @@ final class DocumentReview
 
     public function decide(OriginationDocument $document, string $to, User $user, ?string $text): OriginationDocument
     {
-        return DB::transaction(function () use ($document, $to, $user, $text): OriginationDocument {
+        return LoanWriteTransaction::run(function () use ($document, $to, $user, $text): OriginationDocument {
             // The document first, then its application: the order the file
             // store takes them in on an upload, so the two never deadlock.
             /** @var OriginationDocument $locked */

@@ -32,6 +32,9 @@ final class StaffProcessing
     /** A follow-up information request may also come while one is open. */
     private const INFORMATION_FROM = ['submitted', 'document_verification', 'under_assessment', 'additional_info_required'];
 
+    /** Document statuses an information request asks for again. */
+    private const RESETTABLE = ['uploaded', 'pending_verification', 'verified', 'rejected'];
+
     public const OFFICER_REFUSED = 'That staff member can\'t be assigned to this application.';
 
     public const MEMBER_REFUSED = 'That member can\'t be linked to this application.';
@@ -132,7 +135,8 @@ final class StaffProcessing
     /**
      * Ask the applicant for more: moves the application to Additional
      * Information Required (or keeps it there for a follow-up), asks again
-     * for the named documents, and logs the message.
+     * for the named documents (clearing any verification, one audit row
+     * each), and logs the message. A lock collision answers 409, never 500.
      *
      * @param  list<string>  $documentTypes
      */
@@ -144,17 +148,26 @@ final class StaffProcessing
             ]);
         }
 
-        return DB::transaction(function () use ($application, $user, $version, $message, $documentTypes): OriginationApplicantMessage {
+        return LoanWriteTransaction::run(function () use ($application, $user, $version, $message, $documentTypes): OriginationApplicantMessage {
+            // The documents first, then the application: the order uploads
+            // and document decisions take them in, so they never deadlock.
+            $documents = $documentTypes === [] ? collect() : OriginationDocument::query()
+                ->where('application_id', $application->id)
+                ->whereIn('type', $documentTypes)
+                ->whereIn('status', self::RESETTABLE)
+                ->orderBy('id')
+                ->lockForUpdate()
+                ->get();
+
             $current = $application->status === 'additional_info_required'
                 ? $this->lockAt($application, $version)
                 : $this->transitions->move($application, 'additional_info_required', ApplicationTransitions::ACTOR_STAFF, $user, null, $version);
 
-            if ($documentTypes !== []) {
-                OriginationDocument::query()
-                    ->where('application_id', $current->id)
-                    ->whereIn('type', $documentTypes)
-                    ->whereIn('status', ['uploaded', 'pending_verification', 'verified', 'rejected'])
-                    ->update(['status' => 'replacement_requested', 'updated_at' => now()]);
+            foreach ($documents as $document) {
+                $from = $document->status;
+                $document->forceFill(['status' => 'replacement_requested', 'verified_by' => null, 'verified_at' => null])->save();
+
+                AuditLogService::log('origination_document_replacement_requested', $document, ['status' => $from], ['status' => 'replacement_requested', 'application_id' => $current->id], 'Asked an online applicant for a new copy of a document.');
             }
 
             if ($application->status === 'additional_info_required') {

@@ -20,7 +20,8 @@ use App\Services\ContactVisibility;
  *   show members' records;
  * - an applicant's contacts and address lines: `borrowers:view` and the
  *   application's branch (ContactVisibility, the round fz rule); otherwise
- *   they're masked.
+ *   they're masked. The same rule opens a document's file (download) and
+ *   shows its file names, since an ID or a bill shows both.
  *
  * Another branch's application or document answers 404 (route binding).
  */
@@ -29,6 +30,8 @@ final class StaffAccess
     public const VIEW_REFUSAL = 'You don\'t have access to online applications.';
 
     public const UPDATE_REFUSAL = 'Working on online applications needs the permission to update online applications.';
+
+    public const DOWNLOAD_REFUSAL = 'Documents can show an applicant\'s address and contacts, so downloading them needs the permission to view members.';
 
     public const MATCHES_REFUSAL = 'Member matches show members\' records, so they need the permission to view members.';
 

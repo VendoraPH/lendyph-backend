@@ -28,6 +28,7 @@ class DocumentController extends Controller
     public function __construct(
         private readonly DocumentPresenter $presenter,
         private readonly DocumentReview $review,
+        private readonly StaffAccess $access,
     ) {}
 
     #[OA\Get(
@@ -45,7 +46,7 @@ class DocumentController extends Controller
 
         $page = $query()
             ->when(filled($filters['status'] ?? null), fn (Builder $q) => $q->where('origination_documents.status', $filters['status']))
-            ->with(['currentVersion', 'versions', 'verifier', 'application:id,reference_number,applicant_name,branch_id,loan_product_id,status'])
+            ->with(['currentVersion', 'versions', 'verifier', 'application:id,reference_number,applicant_name,branch_id,loan_product_id,status,version'])
             ->orderBy('origination_documents.updated_at')
             ->orderBy('origination_documents.id')
             ->paginate($request->perPage());
@@ -62,12 +63,12 @@ class DocumentController extends Controller
         $required = [];
 
         return response()->json([
-            'data' => $page->getCollection()->map(function (OriginationDocument $document) use (&$required) {
+            'data' => $page->getCollection()->map(function (OriginationDocument $document) use (&$required, $request) {
                 $application = $document->application;
                 $required[$application->loan_product_id ?? 0] ??= $this->presenter->requiredTypes($application->loan_product_id);
 
                 return [
-                    ...$this->presenter->present($document, $required[$application->loan_product_id ?? 0]),
+                    ...$this->presenter->present($document, $required[$application->loan_product_id ?? 0], $this->access->canSeeContacts($request->user(), $application)),
                     'application_id' => $application->id,
                     'reference_number' => $application->reference_number,
                     'applicant_name' => (string) $application->applicant_name,
@@ -113,18 +114,20 @@ class DocumentController extends Controller
     #[OA\Get(
         path: '/api/loan-origination/documents/{document}/download',
         summary: 'Download a document',
-        description: 'The current file, or `?version=<public id>`, as an attachment, never cached. Audited by ids only.',
+        description: 'The current file, or `?version=<public id>`, as an attachment, never cached. Needs borrowers:view and the application\'s branch, since a document shows the applicant\'s address and contacts. Audited by ids only.',
         tags: ['Loan Origination'],
         security: [['sanctum' => []]],
         parameters: [new OA\Parameter(name: 'document', in: 'path', required: true, schema: new OA\Schema(type: 'integer'))],
-        responses: [new OA\Response(response: 200, description: 'The file'), new OA\Response(response: 404, description: 'No such document or file, or another branch\'s')],
+        responses: [new OA\Response(response: 200, description: 'The file'), new OA\Response(response: 403, description: 'Missing loan_origination:view, or contacts masked for the caller'), new OA\Response(response: 404, description: 'No such document or file, or another branch\'s')],
     )]
     public function download(Request $request, int $document): StreamedResponse
     {
         abort_unless(StaffAccess::canView($request->user()), 403, StaffAccess::VIEW_REFUSAL);
         $version = $request->query('version');
+        $found = $this->find($request, $document);
+        abort_unless($this->access->canSeeContacts($request->user(), $found->application), 403, StaffAccess::DOWNLOAD_REFUSAL);
 
-        return $this->review->download($this->find($request, $document), is_string($version) && $version !== '' ? $version : null)
+        return $this->review->download($found, is_string($version) && $version !== '' ? $version : null)
             ?? abort(404, 'This document has no file to download.');
     }
 
@@ -134,7 +137,11 @@ class DocumentController extends Controller
         $application = OriginationApplication::query()->find($document->application_id);
 
         return response()->json(['success' => true, 'data' => [
-            ...$this->presenter->present($document, $this->presenter->requiredTypes($application?->loan_product_id)),
+            ...$this->presenter->present(
+                $document,
+                $this->presenter->requiredTypes($application?->loan_product_id),
+                $application !== null && $this->access->canSeeContacts($request->user(), $application),
+            ),
             'application_id' => $document->application_id,
             'application_version' => $application?->version,
         ]]);

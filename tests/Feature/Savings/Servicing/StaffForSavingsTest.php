@@ -49,7 +49,10 @@ class StaffForSavingsTest extends TestCase
         }
         $this->assertStringNotContainsString('rosa@example.test', $response->getContent());
 
-        $this->getJson('/api/staff?for=savings&search=Rosa')->assertOk()->assertJsonPath('data.0.full_name', 'Rosa Reyes');
+        // A name holding "rosa" that sorts before Rosa Reyes, as a Faker
+        // surname like "Prosacco" can: the search must find her, not rank her first.
+        User::factory()->create(['branch_id' => $this->branch->id, 'first_name' => 'Ana', 'last_name' => 'Prosacco']);
+        $this->assertContains('Rosa Reyes', array_column($this->getJson('/api/staff?for=savings&search=Rosa')->assertOk()->json('data'), 'full_name'));
     }
 
     public function test_without_for_savings_the_loan_rule_is_unchanged(): void

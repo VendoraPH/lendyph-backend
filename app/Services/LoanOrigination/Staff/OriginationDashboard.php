@@ -38,6 +38,8 @@ use Illuminate\Support\Facades\DB;
  *   applications became, so it reads as the executive dashboard does.
  * - `previous` holds the KPIs for the period of the same length just before.
  * - Money is a two-decimal string.
+ * - `amount_approved` and `turnaround` are loan figures, so they read null
+ *   for a caller without `loans:view`.
  */
 final class OriginationDashboard
 {
@@ -71,12 +73,13 @@ final class OriginationDashboard
         $previousStart = $start->copy()->subDays($days);
 
         $statuses = $this->statusCounts($branchIds, $start, $end);
+        $loans = $viewer->can('loans:view');
 
         return [
             'period' => ['from' => $start->toDateString(), 'to' => $end->copy()->subDay()->toDateString()],
             'previous_period' => ['from' => $previousStart->toDateString(), 'to' => $start->copy()->subDay()->toDateString()],
-            'kpis' => $this->kpis($branchIds, $start, $end, $statuses),
-            'previous' => $this->kpis($branchIds, $previousStart, $start),
+            'kpis' => $this->kpis($branchIds, $start, $end, $loans, $statuses),
+            'previous' => $this->kpis($branchIds, $previousStart, $start, $loans),
             'trends' => $this->trends($branchIds, $start, $end),
             'by_status' => collect(OriginationApplication::STATUSES)->map(fn (string $status) => [
                 'status' => $status,
@@ -86,7 +89,7 @@ final class OriginationDashboard
             'by_product' => $this->byProduct($branchIds, $start, $end),
             'decisions' => $this->decisions($branchIds, $start, $end),
             'stage_times' => $this->stageTimes($branchIds, $start, $end),
-            'turnaround' => $this->turnaround->build(
+            'turnaround' => ! $loans ? null : $this->turnaround->build(
                 $start->toDateString(),
                 $end->copy()->subDay()->toDateString(),
                 $branchIds,
@@ -108,7 +111,7 @@ final class OriginationDashboard
      * @param  array<string, int>|null  $statuses
      * @return array<string, int|string|float|null>
      */
-    private function kpis(?array $branchIds, Carbon $start, Carbon $end, ?array $statuses = null): array
+    private function kpis(?array $branchIds, Carbon $start, Carbon $end, bool $loans, ?array $statuses = null): array
     {
         $statuses ??= $this->statusCounts($branchIds, $start, $end);
         $total = array_sum($statuses);
@@ -135,7 +138,7 @@ final class OriginationDashboard
         $approved = (int) ($decided['approved'] ?? 0);
         $rejected = (int) ($decided['rejected'] ?? 0);
 
-        $amountApproved = DB::table('loans')
+        $amountApproved = ! $loans ? null : DB::table('loans')
             ->whereIn('loans.id', $this->base($branchIds)->whereNotNull('loan_id')->select('loan_id'))
             ->where('loans.approved_at', '>=', $start)->where('loans.approved_at', '<', $end)
             ->sum('loans.principal_amount');
@@ -153,7 +156,7 @@ final class OriginationDashboard
         return [
             ...$kpis,
             'amount_requested' => $this->pesos($submitted->requested ?? '0'),
-            'amount_approved' => $this->pesos($amountApproved),
+            'amount_approved' => $amountApproved === null ? null : $this->pesos($amountApproved),
             'avg_processing_hours' => $processing === null ? null : $this->oneDecimal((float) $processing / 3600),
             'completion_rate' => $total === 0 ? null : $this->oneDecimal($startedSubmitted * 100 / $total),
             'approval_rate' => $approved + $rejected === 0 ? null : $this->oneDecimal($approved * 100 / ($approved + $rejected)),

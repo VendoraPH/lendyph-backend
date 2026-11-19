@@ -88,6 +88,7 @@ it('measures turnaround only on the loans online applications became, through Ap
     $loan = Loan::factory()->create(['branch_id' => $this->main->id, 'status' => 'released', 'approved_at' => Carbon::parse('2026-11-10 09:00', 'Asia/Manila'), 'released_at' => Carbon::parse('2026-11-12 09:00', 'Asia/Manila')]);
     Loan::factory()->create(['branch_id' => $this->main->id, 'status' => 'released', 'approved_at' => Carbon::parse('2026-11-10 09:00', 'Asia/Manila'), 'released_at' => Carbon::parse('2026-11-11 09:00', 'Asia/Manila')]);
     lo3Application('converted', ['loan_id' => $loan->id, 'started_at' => now()->subDays(12), 'submitted_at' => now()->subDays(12)]);
+    $this->user = lo3Staff($this->main, 'loan_origination:view', 'loans:view');
 
     $turnaround = lo3Dashboard($this)->json('data.turnaround');
 

@@ -44,6 +44,25 @@ final class ApplicantMessages
     }
 
     /**
+     * The message as the applicant's side (tracking) may show it: what it
+     * says and when, never who wrote it, the channel or the delivery log.
+     *
+     * @return array{kind: string, kind_label: string, body: string, document_types: list<string>, created_at: ?string}
+     */
+    public static function forApplicant(OriginationApplicantMessage $message): array
+    {
+        return [
+            'kind' => $message->kind,
+            'kind_label' => OriginationApplicantMessage::KIND_LABELS[$message->kind] ?? 'Message',
+            'body' => (string) $message->body,
+            'document_types' => array_values(array_map('strval', $message->document_types ?? [])),
+            'created_at' => $message->created_at?->toIso8601String(),
+        ];
+    }
+
+    /**
+     * The message as staff read it, with its author.
+     *
      * @return array<string, mixed>
      */
     public static function present(OriginationApplicantMessage $message): array

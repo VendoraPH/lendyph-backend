@@ -14,8 +14,9 @@ require_once __DIR__.'/StaffFixtures.php';
  * queue lists submitted applications' files in the caller's branches, with
  * per-status counts. Verify, reject and request-replacement are staff writes
  * (`loan_origination:update`) on an application still under review. A
- * download streams the stored file as an attachment, never cached, audited
- * by ids only. Another branch's document answers 404.
+ * download (which also needs `borrowers:view` and the branch) streams the
+ * stored file as an attachment, never cached, audited by ids only. Another
+ * branch's document answers 404.
  */
 uses(TestCase::class);
 
@@ -81,7 +82,7 @@ it('refuses document decisions without loan_origination:update, on a closed appl
 
     $elsewhere = lo3Document(lo3Application('submitted', ['branch_id' => $this->other->id]));
     $this->actingAs($user)->postJson("/api/loan-origination/documents/{$elsewhere->id}/verify")->assertNotFound();
-    $this->actingAs(lo3Staff($this->main, 'loan_origination:view'))->getJson("/api/loan-origination/documents/{$elsewhere->id}/download")->assertNotFound();
+    $this->actingAs(lo3Staff($this->main, 'loan_origination:view', 'borrowers:view'))->getJson("/api/loan-origination/documents/{$elsewhere->id}/download")->assertNotFound();
 });
 
 it('downloads the current file as an attachment, never cached, audited by ids only', function () {
@@ -89,7 +90,7 @@ it('downloads the current file as an attachment, never cached, audited by ids on
     $document = lo3Document($application, 'government_id', 'uploaded', "%PDF-1.4\n% the id\n");
     $before = AuditLog::query()->max('id') ?? 0;
 
-    $response = $this->actingAs(lo3Staff($this->main, 'loan_origination:view'))
+    $response = $this->actingAs(lo3Staff($this->main, 'loan_origination:view', 'borrowers:view'))
         ->get("/api/loan-origination/documents/{$document->id}/download", ['Accept' => 'application/json'])->assertOk();
 
     expect($response->streamedContent())->toBe("%PDF-1.4\n% the id\n")
@@ -108,6 +109,6 @@ it('answers 404 for a document without a stored file', function () {
     $document = lo3Document($application);
     Storage::disk('private')->delete($document->currentVersion->path);
 
-    $this->actingAs(lo3Staff($this->main, 'loan_origination:view'))
+    $this->actingAs(lo3Staff($this->main, 'loan_origination:view', 'borrowers:view'))
         ->getJson("/api/loan-origination/documents/{$document->id}/download")->assertNotFound();
 });

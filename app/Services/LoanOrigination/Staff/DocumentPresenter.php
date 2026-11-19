@@ -59,10 +59,13 @@ final class DocumentPresenter
     }
 
     /**
+     * File names are shown only with $fileNames (the contacts rule): an
+     * applicant's file name can hold their name or address.
+     *
      * @param  list<string>  $requiredTypes
      * @return array<string, mixed>
      */
-    public function present(OriginationDocument $document, array $requiredTypes = []): array
+    public function present(OriginationDocument $document, array $requiredTypes = [], bool $fileNames = false): array
     {
         $current = $document->currentVersion;
 
@@ -74,7 +77,7 @@ final class DocumentPresenter
             'required' => in_array($document->type, $requiredTypes, true),
             'status' => $document->status,
             'status_label' => OriginationDocument::STATUS_LABELS[$document->status] ?? $document->status,
-            'file_name' => $current?->file_name,
+            'file_name' => $fileNames ? $current?->file_name : null,
             'mime_type' => $current?->mime_type,
             'size_bytes' => $current?->size_bytes,
             'uploaded_at' => $current?->uploaded_at?->toIso8601String(),
@@ -89,7 +92,7 @@ final class DocumentPresenter
                 'id' => $version->id,
                 'public_id' => $version->public_id,
                 'version' => $version->version,
-                'file_name' => $version->file_name,
+                'file_name' => $fileNames ? $version->file_name : null,
                 'uploaded_at' => $version->uploaded_at?->toIso8601String(),
                 'scan_label' => $version->scanLabel(),
                 'current' => $version->id === $document->current_version_id,

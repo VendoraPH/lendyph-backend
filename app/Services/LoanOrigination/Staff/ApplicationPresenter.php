@@ -115,7 +115,7 @@ final class ApplicationPresenter
                 array_values(array_diff($required, $handedIn)),
             )),
             'documents' => $application->documents->sortBy('id')
-                ->map(fn (OriginationDocument $d) => $this->documents->present($d, $required))->values()->all(),
+                ->map(fn (OriginationDocument $d) => $this->documents->present($d, $required, $contacts))->values()->all(),
             'assessment' => null,
             'notes' => $application->notes->sortBy('id')->map(fn (OriginationNote $note) => [
                 'id' => $note->id,

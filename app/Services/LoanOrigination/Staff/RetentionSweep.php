@@ -32,7 +32,10 @@ use Illuminate\Support\Facades\Schema;
  * saved meanwhile (409) is skipped and picked up the next night. Erasure is
  * the model's eraseForRetention(): a legal hold blocks it (skipped and
  * listed), and converted applications are never touched (they stay with
- * their loan). Each erasure writes a system audit row holding ids, the final
+ * their loan, as is any application that has a loan id: one whose loan was
+ * rejected or voided after the hand-off reads rejected or withdrawn but stays
+ * with that loan). Its staff notices go with it, since they name the
+ * applicant. Each erasure writes a system audit row holding ids, the final
  * status and the decision date only, so the counts survive the erasure.
  *
  * 5. LO-B2's applicant codes (`origination_otp_challenges`) are deleted
@@ -84,7 +87,7 @@ final class RetentionSweep
         );
 
         $this->each(
-            OriginationApplication::query()->where('status', 'expired')->where('decided_at', '<', $now->copy()->subDays(self::EXPIRED_ERASE_AFTER_DAYS)),
+            OriginationApplication::query()->where('status', 'expired')->whereNull('loan_id')->where('decided_at', '<', $now->copy()->subDays(self::EXPIRED_ERASE_AFTER_DAYS)),
             function (OriginationApplication $a) use ($dryRun, &$result): void {
                 $this->erase($a, $dryRun, $result);
             },
@@ -92,6 +95,10 @@ final class RetentionSweep
 
         $this->each(
             OriginationApplication::query()->whereIn('status', ['rejected', 'withdrawn'])
+                // A handed-off application whose loan was later rejected or
+                // voided reads rejected or withdrawn too, but stays with its
+                // loan, as a converted one does.
+                ->whereNull('loan_id')
                 ->where('decided_at', '<', $now->copy()->subDays(max(1, (int) $settings->retention_days))),
             function (OriginationApplication $a) use ($dryRun, &$result): void {
                 $this->erase($a, $dryRun, $result);
@@ -206,6 +213,11 @@ final class RetentionSweep
 
             return;
         }
+
+        DB::table('notifications')
+            ->whereIn('type', OriginationStaffNotices::TYPES)
+            ->where('data->data->application_id', (int) $application->id)
+            ->delete();
 
         AuditLogService::log('origination_erased', $application, $summary, null, 'Erased an online application at the end of its retention period.', asSystem: true);
         $result['erased'][] = (int) $application->id;

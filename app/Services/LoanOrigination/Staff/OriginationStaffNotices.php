@@ -32,7 +32,9 @@ use Throwable;
  * Every recipient is active, holds `loan_origination:view` or `update`, can
  * see the application's branch, and is never the person who acted. Sent
  * after the surrounding write commits (a rolled-back move tells no one); a
- * failure is logged and never fails the move.
+ * failure is logged and never fails the move. They name the applicant, so
+ * the retention erasure deletes an application's notices with it
+ * (RetentionSweep).
  */
 final class OriginationStaffNotices
 {
@@ -41,6 +43,9 @@ final class OriginationStaffNotices
     public const ASSIGNED = 'origination_application_assigned';
 
     public const DECIDED = 'origination_application_decided';
+
+    /** Every type above, so an erased application's notices can be found. */
+    public const TYPES = [self::SUBMITTED, self::ASSIGNED, self::DECIDED];
 
     /** The loan outcomes an application follows that its officer hears about. */
     private const LOAN_OUTCOMES = ['approved', 'rejected', 'converted', 'withdrawn'];
