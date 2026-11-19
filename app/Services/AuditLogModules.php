@@ -57,6 +57,13 @@ use App\Models\LoanAdjustment;
 use App\Models\LoanApprovalStep;
 use App\Models\LoanLedgerEntry;
 use App\Models\LoanProduct;
+use App\Models\OriginationApplication;
+use App\Models\OriginationDocument;
+use App\Models\OriginationLink;
+use App\Models\OriginationNotice;
+use App\Models\OriginationProductSetting;
+use App\Models\OriginationRuleRevision;
+use App\Models\OriginationSetting;
 use App\Models\PenaltyConfig;
 use App\Models\PortalAnnouncement;
 use App\Models\PortalCode;
@@ -232,6 +239,16 @@ class AuditLogModules
         // Penalty configurations (Phase 4, Settings → Penalties). Its brackets
         // and products are written on the configuration's own rows.
         PenaltyConfig::class => 'penalties',
+        // Loan origination (Phase 6): online application settings, rule
+        // revisions, notices and links, and the applications and their
+        // documents, whose rows hold ids only.
+        OriginationSetting::class => 'loan_origination',
+        OriginationProductSetting::class => 'loan_origination',
+        OriginationRuleRevision::class => 'loan_origination',
+        OriginationNotice::class => 'loan_origination',
+        OriginationLink::class => 'loan_origination',
+        OriginationApplication::class => 'loan_origination',
+        OriginationDocument::class => 'loan_origination',
         // Settings → Linda's model change. System, so the Audit Trail's module
         // filter needs no new entry; the row's description names the change.
         LindaSetting::class => self::UNMAPPED,

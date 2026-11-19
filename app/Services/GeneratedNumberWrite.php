@@ -70,6 +70,9 @@ final class GeneratedNumberWrite
     /** Member Portal requests, `REQ-YYYYMMDD-NNNNNN`. */
     public const PORTAL_REQUEST_REFERENCE_INDEX = 'portal_requests_reference_unique';
 
+    /** Online loan applications, `OA-YYYY-NNNNNN` (LoanOrigination\ApplicationReference). */
+    public const ORIGINATION_REFERENCE_INDEX = 'origination_applications_reference_number_unique';
+
     public const MEMBER_CONFLICT = 'Another member was created at the same moment. Submit again.';
 
     public const CO_MAKER_CONFLICT = 'Another co-maker was created at the same moment. Submit again.';
@@ -95,6 +98,7 @@ final class GeneratedNumberWrite
         self::MEDIATION_CASE_NUMBER_INDEX,
         self::MEMBERSHIP_NUMBER_INDEX,
         self::PORTAL_REQUEST_REFERENCE_INDEX,
+        self::ORIGINATION_REFERENCE_INDEX,
     ];
 
     private const BACKOFF_MILLISECONDS = 20;
