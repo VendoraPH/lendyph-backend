@@ -211,6 +211,88 @@ class ApprovalStepMinimumTest extends TestCase
     }
 
     /**
+     * Review finding (Medium): a restructure is measured by the larger of its
+     * new principal and the amount restructured (`restructure_outstanding`),
+     * so writing a large balance off into a small loan can't skip a step.
+     */
+    public function test_a_restructure_is_measured_by_the_amount_restructured(): void
+    {
+        $this->saveChain('65000.00');
+
+        $restructure = $this->restructureOf($this->createReleasedLoan(), 40000);
+        $this->assertGreaterThanOrEqual(65000, (float) $restructure->restructure_outstanding);
+
+        app(LoanService::class)->submitForReview($restructure, $this->admin);
+
+        $this->assertSame(
+            ['processor', 'first', 'head-office', 'release'],
+            $restructure->approvalSteps()->orderBy('step_order')->pluck('step_id')->all(),
+        );
+    }
+
+    public function test_a_reopened_restructure_keeps_the_step_the_amount_restructured_needs(): void
+    {
+        $this->saveChain('65000.00');
+
+        $restructure = $this->restructureOf($this->createReleasedLoan(), 40000);
+        app(LoanService::class)->submitForReview($restructure, $this->admin);
+
+        foreach (['manager', 'bod1'] as $role) {
+            $step = $this->pendingStep($restructure);
+            $this->actingAs($this->userWithRole($role))
+                ->patchJson("/api/loans/{$restructure->id}/approval-steps/{$step->id}/approve")
+                ->assertOk();
+        }
+        $this->assertSame('approved', $restructure->fresh()->status);
+
+        app(LoanService::class)->sendBackApproved($restructure->fresh(), $this->admin, 'Source paid down');
+
+        $submit = $this->pendingStep($restructure);
+        $this->actingAs($this->admin)
+            ->patchJson("/api/loans/{$restructure->id}/approval-steps/{$submit->id}/approve")
+            ->assertOk();
+
+        $round = $restructure->approvalSteps()->max('round');
+        $this->assertSame(
+            ['processor', 'first', 'head-office', 'release'],
+            $restructure->approvalSteps()->where('round', $round)->orderBy('step_order')->pluck('step_id')->all(),
+        );
+    }
+
+    /**
+     * Review finding: a draft's forward candidates read the chain as seeding
+     * will leave it, so the last approval step (where a restructure's creator
+     * can't be picked) is the right one. Nothing is written.
+     */
+    public function test_a_drafts_forward_candidates_follow_the_left_out_steps(): void
+    {
+        $this->saveChain('900000.00');
+
+        $creator = $this->userWithRole('manager');
+        $creator->givePermissionTo('loans:write_off');
+        $restructure = app(LoanService::class)->restructure($source = $this->createReleasedLoan(), [
+            'borrower_id' => $source->borrower_id,
+            'loan_product_id' => $source->loan_product_id,
+            'principal_amount' => 40000,
+            'start_date' => now()->toDateString(),
+            'remarks' => 'Write the rest off.',
+        ], $creator);
+        $other = $this->userWithRole('manager');
+        $auditRows = AuditLog::query()->count();
+
+        $users = collect($this->actingAs($this->admin)
+            ->getJson("/api/loans/{$restructure->id}/approval/forward-candidates")
+            ->assertOk()
+            ->assertJsonPath('data.next_step.name', 'First Review')
+            ->json('data.users'))->pluck('id');
+
+        $this->assertTrue($users->contains($other->id));
+        $this->assertFalse($users->contains($creator->id), 'With Head Office left out, First Review is the last approval, which the creator never takes.');
+        $this->assertNull($restructure->fresh()->approval_chain);
+        $this->assertSame($auditRows, AuditLog::query()->count());
+    }
+
+    /**
      * @return list<array<string, mixed>>
      */
     private function chain(): array
@@ -223,10 +305,10 @@ class ApprovalStepMinimumTest extends TestCase
         ];
     }
 
-    private function saveChain(): void
+    private function saveChain(string $minimum = '50000.00'): void
     {
         $steps = $this->chain();
-        $steps[2]['min_principal'] = '50000.00';
+        $steps[2]['min_principal'] = $minimum;
 
         $this->putJson('/api/settings/approval-workflow', ['type' => 'normal', 'steps' => $steps])->assertOk();
     }
@@ -253,6 +335,17 @@ class ApprovalStepMinimumTest extends TestCase
         $service->submitForReview($loan, $this->admin);
 
         return $loan->fresh();
+    }
+
+    private function restructureOf(Loan $source, int $principal): Loan
+    {
+        return app(LoanService::class)->restructure($source, [
+            'borrower_id' => $source->borrower_id,
+            'loan_product_id' => $source->loan_product_id,
+            'principal_amount' => $principal,
+            'start_date' => now()->toDateString(),
+            'remarks' => 'Write the rest off.',
+        ], $this->admin)->fresh();
     }
 
     private function userWithRole(string $role): User

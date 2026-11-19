@@ -143,6 +143,31 @@ class UserBranchHistoryTest extends TestCase
     }
 
     /**
+     * Review finding: a branch-limited caller reads only their own branches'
+     * names; every other branch reads "Another branch".
+     */
+    public function test_a_scoped_caller_reads_other_branches_as_another_branch(): void
+    {
+        $target = User::factory()->inBranches($this->third, $this->second)->create();
+
+        $this->putJson("/api/users/{$target->id}", ['branch_ids' => [$this->second->id]])->assertOk();
+
+        $caller = $this->scopedCaller(['users:view'], $this->second);
+        $response = $this->actingAs($caller)->getJson("/api/users/{$target->id}/branch-history")->assertOk();
+
+        $this->assertSame([
+            'Branches changed from Second, Another branch to Second.',
+            'Primary branch changed from Another branch to Second.',
+            'Primary branch set to Another branch.',
+        ], array_column($response->json('data'), 'description'));
+        $this->assertStringNotContainsString('Third', $response->getContent());
+
+        $this->actingAs($this->admin)
+            ->getJson("/api/users/{$target->id}/branch-history")
+            ->assertJsonPath('data.1.description', 'Primary branch changed from Third to Second.');
+    }
+
+    /**
      * @param  list<string>  $permissions
      */
     private function scopedCaller(array $permissions, Branch $branch): User

@@ -7,6 +7,7 @@ use App\Models\Loan;
 use App\Models\LoanApprovalStep;
 use App\Models\User;
 use App\Services\Approvals\StepMinimum;
+use Brick\Math\BigDecimal;
 use Illuminate\Auth\Access\AuthorizationException;
 use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Database\Eloquent\ModelNotFoundException;
@@ -696,7 +697,11 @@ class LoanApprovalChainService
                 throw new AuthorizationException('You can\'t submit this loan for approval.');
             }
 
-            $chain = $this->chainFor($loan);
+            // The chain as seeding will leave it (steps whose minimum is above
+            // the loan's amount left out), so `last_approve` is right. Nothing
+            // is written or audited here.
+            $amount = $this->principalOf($loan);
+            $chain = array_values(array_filter($this->chainFor($loan), fn (array $step): bool => StepMinimum::applies($step, $amount)));
             $next = $chain[1] ?? null;
 
             if ($next === null) {
@@ -1071,9 +1076,9 @@ class LoanApprovalChainService
                     ], $leftOut),
                 ],
                 description: count($leftOut) === 1
-                    ? "Loan {$loan->application_number}: step {$phrases[0]} left out, because the principal of ".StepMinimum::pesos($principal)." is below its minimum of {$minimums[0]}."
+                    ? "Loan {$loan->application_number}: step {$phrases[0]} left out, because the {$this->amountWords($loan)} of ".StepMinimum::pesos($principal)." is below its minimum of {$minimums[0]}."
                     : "Loan {$loan->application_number}: steps ".implode(', ', array_map(fn (string $name, string $minimum): string => "{$name} (from {$minimum})", $phrases, $minimums))
-                        .' left out, because the principal of '.StepMinimum::pesos($principal).' is below their minimums.',
+                        .' left out, because the '.$this->amountWords($loan).' of '.StepMinimum::pesos($principal).' is below their minimums.',
                 userId: $actor?->id,
             );
         }
@@ -1134,7 +1139,7 @@ class LoanApprovalChainService
             auditable: $loan,
             oldValues: ['round' => $submit->round, 'step_ids' => $later->pluck('step_id')->all()],
             newValues: ['round' => $submit->round, 'step_ids' => array_column($kept, 'id'), 'principal' => $this->principalOf($loan)],
-            description: "Loan {$loan->application_number} re-submitted with a principal of ".StepMinimum::pesos($this->principalOf($loan))
+            description: "Loan {$loan->application_number} re-submitted with {$this->amountWords($loan)} ".StepMinimum::pesos($this->principalOf($loan))
                 .': its approval steps after Submit are now '.implode(', ', array_map(fn (array $step): string => '"'.$step['name'].'"', $kept)).'.',
             userId: $user->id,
         );
@@ -1160,7 +1165,7 @@ class LoanApprovalChainService
         foreach ($chain as $configured) {
             if (! in_array($configured['id'], $inRound, true) && StepMinimum::applies($configured, $principal)) {
                 throw ValidationException::withMessages([
-                    'approval' => ['The principal is now '.StepMinimum::pesos($principal).", so the \"{$configured['name']}\" step (from "
+                    'approval' => ['The '.$this->amountWords($loan).' is now '.StepMinimum::pesos($principal).", so the \"{$configured['name']}\" step (from "
                         .StepMinimum::pesos($configured[StepMinimum::KEY]).') applies. Send the loan back to the Submit step so its approval chain is set again.'],
                 ]);
             }
@@ -1168,12 +1173,34 @@ class LoanApprovalChainService
     }
 
     /**
-     * The principal as stored now, read past the model so an edit made since
-     * the loan was loaded counts.
+     * The amount a step's minimum is compared with, as stored now, read past
+     * the model so an edit made since the loan was loaded counts.
+     *
+     * A restructure is measured by the larger of its new principal and the
+     * amount restructured (`restructure_outstanding`): writing a large balance
+     * off into a small loan must not skip the step that balance needs
+     * (permission review, Medium; Arvin's standard pick).
      */
     private function principalOf(Loan $loan): string
     {
-        return (string) (DB::table('loans')->where('id', $loan->getKey())->value('principal_amount') ?? '0');
+        $row = DB::table('loans')->where('id', $loan->getKey())
+            ->first(['principal_amount', 'source_loan_id', 'restructure_outstanding']);
+
+        $principal = BigDecimal::of((string) ($row?->principal_amount ?? '0'));
+
+        if ($row?->source_loan_id !== null && $row?->restructure_outstanding !== null) {
+            $principal = BigDecimal::max($principal, BigDecimal::of((string) $row->restructure_outstanding));
+        }
+
+        return (string) $principal->toScale(2);
+    }
+
+    /**
+     * What principalOf() measures, in words.
+     */
+    private function amountWords(Loan $loan): string
+    {
+        return $loan->source_loan_id !== null ? 'amount restructured' : 'principal';
     }
 
     /**

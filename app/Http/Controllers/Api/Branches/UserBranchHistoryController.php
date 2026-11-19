@@ -21,7 +21,7 @@ class UserBranchHistoryController extends Controller
     #[OA\Get(
         path: '/api/users/{user}/branch-history',
         summary: "A user's branch history",
-        description: 'Branch assignments (`kind` branches: `from` and `to` are lists of branch names) and primary-branch changes (`kind` primary: `from` and `to` are a branch name or "Organisation-wide"; `from` is null when the user was created), read from audit rows, newest first, each with a `description` in words, `by` (the person, or "System") and `at`. Needs `users:view` and the caller\'s reach; otherwise 404, like the rest of user management.',
+        description: 'Branch assignments (`kind` branches: `from` and `to` are lists of branch names) and primary-branch changes (`kind` primary: `from` and `to` are a branch name or "Organisation-wide"; `from` is null when the user was created), read from audit rows, newest first, each with a `description` in words (a caller without `branches:view_all` reads branches outside their own as "Another branch"), `by` (the person, or "System") and `at`. Needs `users:view` and the caller\'s reach; otherwise 404, like the rest of user management.',
         tags: ['Users'],
         security: [['sanctum' => []]],
         parameters: [
@@ -36,6 +36,6 @@ class UserBranchHistoryController extends Controller
     )]
     public function show(UserBranchHistoryRequest $request, User $user): AnonymousResourceCollection
     {
-        return JsonResource::collection($this->history->for($user, (int) ($request->validated('per_page') ?? 25)));
+        return JsonResource::collection($this->history->for($user, $request->user(), (int) ($request->validated('per_page') ?? 25)));
     }
 }

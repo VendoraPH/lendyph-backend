@@ -6,10 +6,14 @@ use App\Models\AuditLog;
 use App\Models\Borrower;
 use App\Models\Branch;
 use App\Models\Collateral;
+use App\Models\InterbranchTransfer;
 use App\Models\Loan;
 use App\Models\LoanApprovalStep;
 use App\Models\Role;
+use App\Models\SavingsAccount;
+use App\Models\SavingsTransaction;
 use App\Models\User;
+use App\Services\AuditBranch;
 use App\Services\AuditLogService;
 use Illuminate\Database\Eloquent\Model;
 use Tests\TestCase;
@@ -59,6 +63,30 @@ class AuditBranchTest extends TestCase
         $collateral = Collateral::factory()->create(['borrower_id' => $member->id]);
 
         $this->assertSame($this->north->id, $this->rowFor($collateral, 'created')->branch_id);
+    }
+
+    public function test_a_branch_records_itself(): void
+    {
+        $this->assertSame($this->north->id, $this->rowFor($this->north, 'created')->branch_id);
+    }
+
+    public function test_an_interbranch_transfer_records_its_source_branch(): void
+    {
+        $transfer = new InterbranchTransfer;
+        $transfer->forceFill(['id' => 987654, 'source_branch_id' => $this->north->id, 'destination_branch_id' => $this->branch->id]);
+
+        $this->assertSame($this->north->id, AuditBranch::of($transfer));
+    }
+
+    public function test_a_savings_transaction_records_its_accounts_branch(): void
+    {
+        $member = Borrower::factory()->create(['branch_id' => $this->north->id]);
+        $accountId = SavingsAccount::factory()->create(['borrower_id' => $member->id, 'branch_id' => $this->north->id])->id;
+
+        $transaction = new SavingsTransaction;
+        $transaction->forceFill(['id' => 987654, 'account_id' => $accountId]);
+
+        $this->assertSame($this->north->id, AuditBranch::of($transaction));
     }
 
     public function test_a_record_with_no_branch_records_none(): void

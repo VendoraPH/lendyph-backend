@@ -2,6 +2,9 @@
 
 namespace App\Services;
 
+use App\Models\Branch;
+use App\Models\InterbranchTransfer;
+use App\Models\SavingsTransaction;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\DB;
 
@@ -9,7 +12,9 @@ use Illuminate\Support\Facades\DB;
  * The branch an audit row records (Phase 6 MB-BE6, multi-branch decision 12).
  *
  * One rule for every new row, in this order:
- *   1. the audited record's own `branch_id`;
+ *   1. the audited record's own `branch_id`; a branch is its own branch, an
+ *      interbranch transfer records its source branch, and a savings
+ *      transaction its account's branch (permission review);
  *   2. else its loan's branch (`loan_id`);
  *   3. else its member's branch (`borrower_id`);
  *   4. else none.
@@ -29,7 +34,12 @@ final class AuditBranch
 
         $attributes = $record->getAttributes();
 
-        $own = self::id($attributes['branch_id'] ?? null);
+        $own = match (true) {
+            $record instanceof Branch => self::id($record->getKey()),
+            $record instanceof InterbranchTransfer => self::id($attributes['source_branch_id'] ?? null),
+            $record instanceof SavingsTransaction => self::accountBranch($attributes['account_id'] ?? null),
+            default => self::id($attributes['branch_id'] ?? null),
+        };
         if ($own !== null) {
             return $own;
         }
@@ -48,6 +58,13 @@ final class AuditBranch
         return $memberId === null
             ? null
             : self::id(DB::table('borrowers')->where('id', $memberId)->value('branch_id'));
+    }
+
+    private static function accountBranch(mixed $accountId): ?int
+    {
+        $accountId = self::id($accountId);
+
+        return $accountId === null ? null : self::id(DB::table('savings_accounts')->where('id', $accountId)->value('branch_id'));
     }
 
     private static function id(mixed $value): ?int

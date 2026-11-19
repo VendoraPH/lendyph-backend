@@ -5,6 +5,7 @@ namespace App\Services\Users;
 use App\Models\AuditLog;
 use App\Models\Branch;
 use App\Models\User;
+use App\Services\BranchAccess;
 use Illuminate\Contracts\Pagination\LengthAwarePaginator;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Collection;
@@ -21,7 +22,9 @@ use Illuminate\Support\Collection;
  *     the system correction that put branchless staff in the main branch).
  *
  * Branches read by their current name; a branch that no longer exists reads
- * "Branch #id".
+ * "Branch #id". A caller without `branches:view_all` reads only their own
+ * branches by name; any other branch reads "Another branch" (permission
+ * review), so the history never names a branch they can't see.
  */
 final class UserBranchHistory
 {
@@ -29,7 +32,9 @@ final class UserBranchHistory
 
     private const ASSIGNMENT_ACTIONS = ['branches_assigned', 'branches_changed'];
 
-    public function for(User $user, int $perPage): LengthAwarePaginator
+    public const HIDDEN_BRANCH = 'Another branch';
+
+    public function for(User $user, User $caller, int $perPage): LengthAwarePaginator
     {
         $page = AuditLog::query()
             ->with('user:id,first_name,last_name')
@@ -44,7 +49,7 @@ final class UserBranchHistory
             ->orderByDesc('id')
             ->paginate(min(max($perPage, 1), 100));
 
-        $names = $this->branchNames($page->getCollection());
+        $names = $this->branchNames($page->getCollection(), app(BranchAccess::class)->for($caller));
 
         $page->setCollection($page->getCollection()->map(fn (AuditLog $row): array => $this->entry($row, $names)));
 
@@ -126,10 +131,14 @@ final class UserBranchHistory
     }
 
     /**
+     * The names the caller may read, keyed by id: every branch for a caller
+     * who sees all, else only their own; the rest read "Another branch".
+     *
      * @param  Collection<int, AuditLog>  $rows
+     * @param  list<int>|null  $visible  the caller's branches, null for all
      * @return Collection<int, string>
      */
-    private function branchNames(Collection $rows): Collection
+    private function branchNames(Collection $rows, ?array $visible): Collection
     {
         $ids = $rows->flatMap(fn (AuditLog $row): array => [
             $row->old_values['branch_id'] ?? null,
@@ -138,8 +147,12 @@ final class UserBranchHistory
             ...(is_array($row->new_values['branch_ids'] ?? null) ? $row->new_values['branch_ids'] : []),
         ])->filter(fn (mixed $id): bool => is_numeric($id))->map(fn (mixed $id): int => (int) $id)->unique()->values();
 
-        return $ids->isEmpty()
+        $names = $ids->isEmpty()
             ? collect()
             : Branch::query()->whereIn('id', $ids)->pluck('name', 'id')->mapWithKeys(fn ($name, $id) => [(int) $id => (string) $name]);
+
+        return $visible === null
+            ? $names
+            : $ids->mapWithKeys(fn (int $id): array => [$id => in_array($id, $visible, true) ? $names->get($id, 'Branch #'.$id) : self::HIDDEN_BRANCH]);
     }
 }

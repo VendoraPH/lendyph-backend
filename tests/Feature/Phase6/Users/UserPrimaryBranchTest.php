@@ -210,6 +210,56 @@ class UserPrimaryBranchTest extends TestCase
         $this->assertSame($this->third->id, $user->fresh()->branch_id);
     }
 
+    public function test_a_branch_limited_admin_sets_a_primary_branch_within_their_branches(): void
+    {
+        $admin = $this->branchAdmin([$this->second, $this->third]);
+        $user = User::factory()->inBranches($this->second, $this->third)->create();
+
+        $this->actingAs($admin)
+            ->putJson("/api/users/{$user->id}", ['primary_branch_id' => $this->third->id])
+            ->assertOk();
+        $this->assertSame($this->third->id, $user->fresh()->branch_id);
+
+        $this->actingAs($admin)
+            ->putJson("/api/users/{$user->id}", ['primary_branch_id' => $this->branch->id])
+            ->assertStatus(422)
+            ->assertJsonValidationErrors('primary_branch_id');
+
+        $this->actingAs($admin)
+            ->putJson("/api/users/{$user->id}", ['primary_branch_id' => null])
+            ->assertStatus(422)
+            ->assertJsonValidationErrors('primary_branch_id');
+    }
+
+    /**
+     * Review finding: like their branches, a user who doesn't see every
+     * branch can't change their own primary branch.
+     */
+    public function test_a_branch_limited_user_cannot_change_their_own_primary_branch(): void
+    {
+        $admin = $this->branchAdmin([$this->second, $this->third]);
+
+        $this->actingAs($admin)
+            ->putJson("/api/users/{$admin->id}", ['primary_branch_id' => $this->third->id])
+            ->assertStatus(422)
+            ->assertJsonValidationErrors(['primary_branch_id' => 'You cannot change your own primary branch. Another administrator has to do it for you.']);
+
+        $this->assertSame($this->second->id, $admin->fresh()->branch_id);
+    }
+
+    /**
+     * @param  list<Branch>  $branches
+     */
+    private function branchAdmin(array $branches): User
+    {
+        $role = Role::create(['name' => 'mb6_branch_admin', 'guard_name' => 'web']);
+        $role->givePermissionTo(['users:view', 'users:create', 'users:update', 'loans:view']);
+        $user = User::factory()->inBranches(...$branches)->create();
+        $user->assignRole($role);
+
+        return $user;
+    }
+
     /**
      * @param  list<Branch>  $branches
      */

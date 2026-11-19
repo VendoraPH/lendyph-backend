@@ -259,14 +259,22 @@ class UpdateUserRequest extends FormRequest
     {
         $callerBranches = app(BranchAccess::class)->for($actor);
 
-        if ($callerBranches === null || ! $this->changesBranchAssignment($target)) {
+        if ($callerBranches === null || (int) $target->id !== (int) $actor->id) {
             return;
         }
 
-        if ((int) $target->id === (int) $actor->id) {
+        if ($this->changesBranchAssignment($target)) {
             $validator->errors()->add(
                 'branch_ids',
                 'You cannot change your own branches. Another administrator has to do it for you.',
+            );
+        }
+
+        // Their primary branch too (Phase 6 MB-BE6, permission review).
+        if ($this->changesPrimaryBranch($target)) {
+            $validator->errors()->add(
+                'primary_branch_id',
+                'You cannot change your own primary branch. Another administrator has to do it for you.',
             );
         }
     }
