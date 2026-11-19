@@ -5,6 +5,7 @@ namespace Tests\Feature\Phase6\Amla;
 use App\Exceptions\AmlaRecordIsAppendOnlyException;
 use App\Models\AmlaCalendarEntry;
 use App\Models\AmlaCalendarYear;
+use App\Models\AmlaChangeRequest;
 use App\Models\User;
 use App\Services\Amla\Foundation\Deadlines;
 use App\Services\Amla\Foundation\WorkingDayCalendar;
@@ -74,6 +75,8 @@ class AmlaCalendarTest extends TestCase
 
     public function test_a_ctr_is_due_on_the_fifth_working_day_after_and_is_provisional_until_every_year_is_confirmed(): void
     {
+        $before = $this->outsideAmlaCounts();
+
         foreach (['2026-12-24', '2026-12-25', '2026-12-30', '2026-12-31', '2027-01-01'] as $date) {
             $this->holiday($date);
         }
@@ -89,6 +92,7 @@ class AmlaCalendarTest extends TestCase
 
         $this->approved(['type' => 'calendar_confirm_year', 'year' => 2027]);
         $this->assertFalse(app(Deadlines::class)->due('ctr', '2026-12-22')['provisional']);
+        $this->assertNothingWrittenOutsideAmla($before);
     }
 
     public function test_an_str_is_due_the_next_working_day(): void
@@ -130,7 +134,14 @@ class AmlaCalendarTest extends TestCase
         $this->assertSame('Holiday', $data['entries'][0]['kind_words']);
         $this->assertSame('Proclamation No. 1', $data['entries'][0]['source']);
         $this->assertSame($this->checker->id, $data['entries'][0]['approved_by']['id']);
-        $this->assertCount(1, $data['pending']);
+        $this->assertArrayNotHasKey('pending', $data, 'a viewer without the settings key never sees who asked for what, or why');
+
+        $pending = $this->actingAs($this->settingsHolder())->getJson('/api/amla/calendar?year=2026')->assertOk()->json('data.pending');
+        $this->assertCount(1, $pending);
+        $this->assertSame('Rizal Day.', $pending[0]['reason']);
+
+        $this->actingAs($this->amlaUser(['amla:view', 'amla:settings']))->getJson('/api/amla/calendar?year=2026')->assertOk()
+            ->assertJsonMissingPath('data.pending');
     }
 
     public function test_an_entry_is_removed_only_through_an_approved_change_and_its_row_stays(): void
@@ -173,5 +184,23 @@ class AmlaCalendarTest extends TestCase
         $this->actingAs($this->maker)->postJson('/api/amla/change-requests', [
             'type' => 'calendar_add', 'reason' => 'x', 'date' => '2026-02-30', 'kind' => 'party',
         ])->assertUnprocessable()->assertJsonValidationErrors(['date', 'kind', 'name', 'source']);
+    }
+
+    public function test_a_stale_copy_of_a_removed_entry_can_never_remove_it_again(): void
+    {
+        $this->holiday('2026-12-28');
+        $this->holiday('2026-12-29');
+        [$first, $second] = AmlaCalendarEntry::query()->orderBy('id')->get()->all();
+        $stale = AmlaCalendarEntry::query()->findOrFail($first->id);
+        $removal = AmlaChangeRequest::query()->where('type', 'calendar_add')->orderBy('id')->firstOrFail();
+
+        $first->forceFill(['active_marker' => null, 'removal_request_id' => $removal->id, 'removed_at' => now()])->save();
+
+        try {
+            $stale->forceFill(['active_marker' => null, 'removal_request_id' => $second->request_id, 'removed_at' => now()->addMinute()])->save();
+            $this->fail('A stale copy removed the entry a second time.');
+        } catch (AmlaRecordIsAppendOnlyException) {
+            $this->assertSame($removal->id, $first->fresh()->removal_request_id);
+        }
     }
 }

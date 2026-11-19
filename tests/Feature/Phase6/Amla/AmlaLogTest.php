@@ -139,8 +139,10 @@ class AmlaLogTest extends TestCase
     {
         $auditor = $this->amlaUser(['amla:audit', 'branches:view_all']);
         app(AmlaLog::class)->record('change_requested', $this->admin, 'change_request', 7, ['type' => 'settings']);
+        $before = $this->outsideAmlaCounts();
 
         $response = $this->actingAs($auditor)->getJson('/api/amla/log')->assertOk();
+        $this->assertNothingWrittenOutsideAmla($before);
 
         $first = $response->json('data.0');
         $this->assertSame('log_viewed', $first['action']);

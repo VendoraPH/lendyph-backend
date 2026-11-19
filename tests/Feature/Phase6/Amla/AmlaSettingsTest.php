@@ -6,7 +6,6 @@ use App\Exceptions\AmlaRecordIsAppendOnlyException;
 use App\Models\AmlaChangeRequest;
 use App\Models\AmlaLogEntry;
 use App\Models\AmlaSettingsVersion;
-use App\Models\AuditLog;
 use App\Services\Amla\Foundation\AmlaSettings;
 use Illuminate\Support\Carbon;
 use Tests\TestCase;
@@ -77,7 +76,7 @@ class AmlaSettingsTest extends TestCase
     {
         $maker = $this->settingsHolder();
         $checker = $this->settingsHolder();
-        $audit = AuditLog::query()->count();
+        $before = $this->outsideAmlaCounts();
 
         $request = $this->actingAs($maker)->postJson('/api/amla/change-requests', [
             'type' => 'settings',
@@ -112,7 +111,7 @@ class AmlaSettingsTest extends TestCase
         $approved = AmlaLogEntry::query()->where('action', 'change_approved')->firstOrFail();
         $this->assertEquals(['from' => '500000.00', 'to' => '600000.00'], $approved->details['changed']['ctr_threshold']);
         $this->assertSame(2, $approved->details['settings_version']);
-        $this->assertSame($audit, AuditLog::query()->count(), 'AMLA writes nothing to the main audit trail');
+        $this->assertNothingWrittenOutsideAmla($before);
     }
 
     public function test_the_version_in_force_at_a_moment_is_the_last_one_approved_by_then(): void
@@ -168,6 +167,7 @@ class AmlaSettingsTest extends TestCase
     {
         $maker = $this->settingsHolder();
         $other = $this->settingsHolder();
+        $before = $this->outsideAmlaCounts();
 
         $first = $this->actingAs($maker)->postJson('/api/amla/change-requests', [
             'type' => 'settings', 'reason' => 'One.', 'values' => ['str_deadline_working_days' => 2],
@@ -184,6 +184,7 @@ class AmlaSettingsTest extends TestCase
         $this->actingAs($maker)->postJson("/api/amla/change-requests/{$second}/withdraw")->assertOk()->assertJsonPath('data.status', 'withdrawn');
 
         $this->assertSame(1, app(AmlaSettings::class)->current()->version);
+        $this->assertNothingWrittenOutsideAmla($before);
     }
 
     public function test_versions_and_decided_requests_are_never_changed_or_deleted(): void
@@ -238,5 +239,82 @@ class AmlaSettingsTest extends TestCase
         $this->assertSame([2, 1], array_column($versions, 'version'));
         $this->assertSame('system_default', $versions[1]['source']);
         $this->assertSame('approved_change', $versions[0]['source']);
+    }
+
+    public function test_changing_only_the_source_of_a_verified_setting_is_recorded_from_and_to(): void
+    {
+        $first = $this->actingAs($this->settingsHolder())->postJson('/api/amla/change-requests', [
+            'type' => 'settings', 'reason' => 'Confirmed.', 'verified' => ['ctr_threshold' => 'Counsel memo, 2026-12-01'],
+        ])->json('data.id');
+        $this->actingAs($this->settingsHolder())->postJson("/api/amla/change-requests/{$first}/approve")->assertOk();
+
+        $maker = $this->settingsHolder();
+        $request = $this->actingAs($maker)->postJson('/api/amla/change-requests', [
+            'type' => 'settings', 'reason' => 'Newer memo.', 'verified' => ['ctr_threshold' => 'Counsel memo, 2027-01-10'],
+        ])->assertCreated()->json('data');
+
+        $this->assertSame('AMLA settings: CTR threshold', $request['summary']);
+        $this->assertEquals(['from' => 'Counsel memo, 2026-12-01', 'to' => 'Counsel memo, 2027-01-10'], $request['payload']['sources_changed']['ctr_threshold']);
+
+        $this->actingAs($this->settingsHolder())->postJson("/api/amla/change-requests/{$request['id']}/approve")->assertOk();
+
+        $approved = AmlaLogEntry::query()->where('action', 'change_approved')->orderByDesc('id')->firstOrFail();
+        $this->assertEquals(['from' => 'Counsel memo, 2026-12-01', 'to' => 'Counsel memo, 2027-01-10'], $approved->details['sources_changed']['ctr_threshold']);
+        $this->assertSame('Counsel memo, 2027-01-10', app(AmlaSettings::class)->current()->sources['ctr_threshold']);
+    }
+
+    public function test_the_model_refuses_a_maker_approving_or_rejecting_and_anyone_else_withdrawing(): void
+    {
+        $other = $this->settingsHolder();
+
+        foreach ([
+            ['status' => 'approved', 'decided_by' => $this->admin->id],
+            ['status' => 'rejected', 'decided_by' => $this->admin->id],
+            ['status' => 'withdrawn', 'decided_by' => $other->id],
+        ] as $decision) {
+            $request = $this->pendingRequest();
+
+            try {
+                $request->forceFill([...$decision, 'decided_at' => now()])->save();
+                $this->fail("A {$decision['status']} decision by the wrong person was written.");
+            } catch (AmlaRecordIsAppendOnlyException) {
+                $this->assertSame('pending', $request->fresh()->status);
+            }
+        }
+
+        $request = $this->pendingRequest();
+        $request->forceFill(['status' => 'approved', 'decided_by' => $other->id, 'decided_at' => now()])->save();
+        $this->assertSame('approved', $request->fresh()->status);
+    }
+
+    public function test_a_stale_copy_of_a_decided_request_can_never_decide_it_again(): void
+    {
+        $other = $this->settingsHolder();
+        $request = $this->pendingRequest();
+        $stale = AmlaChangeRequest::query()->findOrFail($request->id);
+
+        $request->forceFill(['status' => 'withdrawn', 'decided_by' => $this->admin->id, 'decided_at' => now()])->save();
+
+        try {
+            $stale->forceFill(['status' => 'approved', 'decided_by' => $other->id, 'decided_at' => now()])->save();
+            $this->fail('A stale copy decided the request a second time.');
+        } catch (AmlaRecordIsAppendOnlyException) {
+            $this->assertSame('withdrawn', $request->fresh()->status);
+            $this->assertSame($this->admin->id, $request->fresh()->decided_by);
+        }
+
+        $rejected = $this->pendingRequest();
+        $staleRejected = AmlaChangeRequest::query()->findOrFail($rejected->id);
+        $rejected->forceFill(['status' => 'rejected', 'decided_by' => $other->id, 'decided_at' => now()])->save();
+
+        $this->expectException(AmlaRecordIsAppendOnlyException::class);
+        $staleRejected->forceFill(['status' => 'withdrawn', 'decided_by' => $this->admin->id, 'decided_at' => now()])->save();
+    }
+
+    private function pendingRequest(): AmlaChangeRequest
+    {
+        return AmlaChangeRequest::query()->create([
+            'type' => 'settings', 'status' => 'pending', 'payload' => ['values' => []], 'reason' => 'x', 'requested_by' => $this->admin->id,
+        ]);
     }
 }

@@ -4,6 +4,7 @@ namespace Tests\Feature\Phase6\Amla;
 
 use App\Models\Role;
 use App\Models\User;
+use Illuminate\Support\Facades\DB;
 use Spatie\Permission\PermissionRegistrar;
 
 /**
@@ -25,6 +26,27 @@ trait AmlaTestHelpers
         app(PermissionRegistrar::class)->forgetCachedPermissions();
 
         return $user;
+    }
+
+    /**
+     * The row counts AMLA must never change: the main audit trail and staff
+     * notices (AMLA design §3.6, §4.14). Take them before an AMLA flow and
+     * assert they are the same after it; later AMLA slices copy this.
+     *
+     * @return array{audit_logs: int, notifications: int}
+     */
+    protected function outsideAmlaCounts(): array
+    {
+        return [
+            'audit_logs' => DB::table('audit_logs')->count(),
+            'notifications' => DB::table('notifications')->count(),
+        ];
+    }
+
+    /** @param  array{audit_logs: int, notifications: int}  $before */
+    protected function assertNothingWrittenOutsideAmla(array $before): void
+    {
+        $this->assertSame($before, $this->outsideAmlaCounts(), 'AMLA wrote to the main audit trail or sent a staff notice.');
     }
 
     /** A head-office settings holder: `amla:settings`, `amla:view` and `branches:view_all`. */

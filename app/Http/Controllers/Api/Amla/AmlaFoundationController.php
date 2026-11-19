@@ -95,7 +95,7 @@ class AmlaFoundationController extends Controller
     #[OA\Get(
         path: '/api/amla/calendar',
         summary: 'AMLA working-day calendar for a year',
-        description: 'Needs `amla:view`. `year` defaults to this Manila year. The days in force that aren\'t working days (holidays, AMLC non-reporting days, facility suspensions) with their source and approver, whether the year is confirmed (`provisional` when not), and the calendar changes waiting for approval for that year.',
+        description: 'Needs `amla:view`. `year` defaults to this Manila year. The days in force that aren\'t working days (holidays, AMLC non-reporting days, facility suspensions) with their source and approver, whether the year is confirmed (`provisional` when not), and, for `amla:settings` holders with `branches:view_all` only, the calendar changes waiting for approval for that year (`pending`).',
         tags: ['AMLA'],
         security: [['sanctum' => []]],
         parameters: [new OA\Parameter(name: 'year', in: 'query', required: false, schema: new OA\Schema(type: 'integer', example: 2026))],
@@ -112,22 +112,28 @@ class AmlaFoundationController extends Controller
             ->orderBy('date')->orderBy('kind')
             ->get();
 
-        $pending = AmlaChangeRequest::query()
-            ->where('status', AmlaChangeRequest::PENDING)
-            ->whereIn('type', [AmlaChangeRequest::CALENDAR_ADD, AmlaChangeRequest::CALENDAR_REMOVE, AmlaChangeRequest::CALENDAR_CONFIRM_YEAR])
-            ->with('requester', 'decider')
-            ->orderBy('id')
-            ->get()
-            ->filter(fn (AmlaChangeRequest $change) => ChangeRequests::calendarYear($change) === $year);
-
-        return response()->json(['success' => true, 'data' => [
+        $data = [
             'year' => $year,
             'confirmed' => $confirmed !== null,
             'confirmed_at' => $confirmed?->confirmed_at,
             'provisional' => $confirmed === null,
             'entries' => $entries->map(fn (AmlaCalendarEntry $entry) => AmlaPresenter::calendarEntry($entry))->values(),
-            'pending' => $pending->map(fn (AmlaChangeRequest $change) => AmlaPresenter::changeRequest($change))->values(),
-        ]]);
+        ];
+
+        // Who asked for what, and why, is for the settings holders who decide it.
+        if ($this->access->allowsHeadOffice($request->user(), AmlaAccess::SETTINGS)) {
+            $data['pending'] = AmlaChangeRequest::query()
+                ->where('status', AmlaChangeRequest::PENDING)
+                ->whereIn('type', [AmlaChangeRequest::CALENDAR_ADD, AmlaChangeRequest::CALENDAR_REMOVE, AmlaChangeRequest::CALENDAR_CONFIRM_YEAR])
+                ->with('requester', 'decider')
+                ->orderBy('id')
+                ->get()
+                ->filter(fn (AmlaChangeRequest $change) => ChangeRequests::calendarYear($change) === $year)
+                ->map(fn (AmlaChangeRequest $change) => AmlaPresenter::changeRequest($change))
+                ->values();
+        }
+
+        return response()->json(['success' => true, 'data' => $data]);
     }
 
     #[OA\Get(

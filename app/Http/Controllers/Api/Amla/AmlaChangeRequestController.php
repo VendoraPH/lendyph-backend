@@ -20,6 +20,10 @@ use OpenApi\Attributes as OA;
  * §4.13). Every endpoint needs `amla:settings` and `branches:view_all`. A
  * change applies only when a second holder approves it; the maker can't
  * approve or reject it, only withdraw it. Each step writes the AMLA log.
+ *
+ * A request is looked up by id only after the permission check (no route
+ * model binding), so a caller without access gets the same 403 for an id
+ * that exists and one that doesn't.
  */
 class AmlaChangeRequestController extends Controller
 {
@@ -66,11 +70,11 @@ class AmlaChangeRequestController extends Controller
         parameters: [new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer'))],
         responses: [new OA\Response(response: 200, description: 'The request'), new OA\Response(response: 403, description: 'Missing permission or head-office access, in words'), new OA\Response(response: 404, description: 'Not found')],
     )]
-    public function show(Request $request, AmlaChangeRequest $changeRequest): JsonResponse
+    public function show(Request $request, int $id): JsonResponse
     {
         $this->access->authorizeHeadOffice($request->user(), AmlaAccess::SETTINGS);
 
-        return $this->respond($changeRequest);
+        return $this->respond(AmlaChangeRequest::query()->findOrFail($id));
     }
 
     #[OA\Post(
@@ -97,9 +101,9 @@ class AmlaChangeRequestController extends Controller
         parameters: [new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer'))],
         responses: [new OA\Response(response: 200, description: 'Approved'), new OA\Response(response: 403, description: 'Missing permission, head-office access, or the maker'), new OA\Response(response: 409, description: 'No longer pending, or the settings moved on')],
     )]
-    public function approve(DecideAmlaChangeRequestRequest $request, AmlaChangeRequest $changeRequest): JsonResponse
+    public function approve(DecideAmlaChangeRequestRequest $request, int $id): JsonResponse
     {
-        $change = $this->changes->approve($request->user(), $changeRequest, $request->validated('note'));
+        $change = $this->changes->approve($request->user(), AmlaChangeRequest::query()->findOrFail($id), $request->validated('note'));
 
         return $this->respond($change, 'The change is approved and in force.');
     }
@@ -113,9 +117,9 @@ class AmlaChangeRequestController extends Controller
         parameters: [new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer'))],
         responses: [new OA\Response(response: 200, description: 'Rejected'), new OA\Response(response: 403, description: 'Missing permission, head-office access, or the maker'), new OA\Response(response: 409, description: 'No longer pending'), new OA\Response(response: 422, description: 'No note')],
     )]
-    public function reject(RejectAmlaChangeRequestRequest $request, AmlaChangeRequest $changeRequest): JsonResponse
+    public function reject(RejectAmlaChangeRequestRequest $request, int $id): JsonResponse
     {
-        $change = $this->changes->reject($request->user(), $changeRequest, (string) $request->validated('note'));
+        $change = $this->changes->reject($request->user(), AmlaChangeRequest::query()->findOrFail($id), (string) $request->validated('note'));
 
         return $this->respond($change, 'The change is rejected.');
     }
@@ -129,9 +133,9 @@ class AmlaChangeRequestController extends Controller
         parameters: [new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer'))],
         responses: [new OA\Response(response: 200, description: 'Withdrawn'), new OA\Response(response: 403, description: 'Missing permission, head-office access, or not the maker'), new OA\Response(response: 409, description: 'No longer pending')],
     )]
-    public function withdraw(DecideAmlaChangeRequestRequest $request, AmlaChangeRequest $changeRequest): JsonResponse
+    public function withdraw(DecideAmlaChangeRequestRequest $request, int $id): JsonResponse
     {
-        $change = $this->changes->withdraw($request->user(), $changeRequest, $request->validated('note'));
+        $change = $this->changes->withdraw($request->user(), AmlaChangeRequest::query()->findOrFail($id), $request->validated('note'));
 
         return $this->respond($change, 'The change is withdrawn.');
     }

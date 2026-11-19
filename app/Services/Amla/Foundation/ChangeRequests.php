@@ -20,7 +20,8 @@ use Illuminate\Validation\ValidationException;
  * (`pending_key`, unique while pending).
  *
  * - settings: the full next values, built on the version current when asked
- *   for; approving adds the next version, in force from approval.
+ *   for, with what changed: values, sources (`sources_changed`, from and to)
+ *   and verification. Approving adds the next version, in force from approval.
  * - calendar_add: a holiday, AMLC non-reporting day or facility suspension,
  *   with its source.
  * - calendar_remove: takes an entry out of force; its row stays.
@@ -168,13 +169,32 @@ final class ChangeRequests
         return match ($request->type) {
             AmlaChangeRequest::SETTINGS => 'AMLA settings: '.implode(', ', array_map(
                 fn (string $key) => AmlaSettings::DEFINITIONS[$key]['short'] ?? $key,
-                array_keys([...($payload['changed'] ?? []), ...array_flip($payload['verified'] ?? []), ...array_flip($payload['unverified'] ?? [])]),
+                self::settingsKeysTouched($payload),
             )),
             AmlaChangeRequest::CALENDAR_ADD => sprintf('Add %s (%s) on %s', $payload['name'], AmlaCalendarEntry::KINDS[$payload['kind']] ?? $payload['kind'], self::dateWords($payload['date'])),
             AmlaChangeRequest::CALENDAR_REMOVE => sprintf('Remove %s (%s) on %s', $payload['name'], AmlaCalendarEntry::KINDS[$payload['kind']] ?? $payload['kind'], self::dateWords($payload['date'])),
             AmlaChangeRequest::CALENDAR_CONFIRM_YEAR => "Confirm the {$payload['year']} AMLA calendar",
             default => $request->type,
         };
+    }
+
+    /**
+     * The settings a settings request touches, in DEFINITIONS order: a value
+     * changed, newly confirmed, marked to verify again, or given a new source.
+     *
+     * @param  array<string, mixed>  $payload
+     * @return list<string>
+     */
+    private static function settingsKeysTouched(array $payload): array
+    {
+        $touched = [
+            ...array_keys((array) ($payload['changed'] ?? [])),
+            ...array_keys((array) ($payload['sources_changed'] ?? [])),
+            ...(array) ($payload['verified'] ?? []),
+            ...(array) ($payload['unverified'] ?? []),
+        ];
+
+        return array_values(array_intersect(array_keys(AmlaSettings::DEFINITIONS), $touched));
     }
 
     /**
@@ -228,7 +248,18 @@ final class ChangeRequests
             unset($sources[$key]);
         }
 
-        if ($changed === [] && $toVerify === $current->to_verify && $sources == $current->sources) {
+        $sourcesChanged = [];
+
+        foreach (array_keys(AmlaSettings::DEFINITIONS) as $key) {
+            $from = $current->sources[$key] ?? null;
+            $to = $sources[$key] ?? null;
+
+            if ($from !== $to) {
+                $sourcesChanged[$key] = ['from' => $from, 'to' => $to];
+            }
+        }
+
+        if ($changed === [] && $toVerify === $current->to_verify && $sourcesChanged === []) {
             throw ValidationException::withMessages(['values' => 'This changes nothing in the current AMLA settings.']);
         }
 
@@ -238,6 +269,7 @@ final class ChangeRequests
             'to_verify' => $toVerify,
             'sources' => (object) $sources,
             'changed' => (object) $changed,
+            'sources_changed' => (object) $sourcesChanged,
             'verified' => array_values(array_intersect($verified, $current->to_verify)),
             'unverified' => array_values(array_diff($unverified, $current->to_verify)),
         ], AmlaChangeRequest::SETTINGS, $duplicate];
@@ -351,6 +383,7 @@ final class ChangeRequests
         return [
             'settings_version' => $version->version,
             'changed' => $payload['changed'] ?? [],
+            'sources_changed' => $payload['sources_changed'] ?? [],
             'verified' => $payload['verified'] ?? [],
             'unverified' => $payload['unverified'] ?? [],
         ];

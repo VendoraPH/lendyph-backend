@@ -11,9 +11,9 @@ use Illuminate\Support\Carbon;
  * A maker-checker request to change the AMLA settings or calendar (AMLA
  * design §4.13): nothing applies until a second `amla:settings` holder
  * approves it. Its type, payload, reason and maker never change. The only
- * change ever written is its one decision, from pending to approved,
- * rejected or withdrawn, and it's written only while the stored row is still
- * pending. Never deleted.
+ * change ever written is its one decision, from pending to approved or
+ * rejected (never by the maker) or withdrawn (only by the maker), and it's
+ * written only while the stored row is still pending. Never deleted.
  *
  * @property int $id
  * @property string $type
@@ -72,12 +72,26 @@ class AmlaChangeRequest extends Model
         return $this->status === self::PENDING;
     }
 
-    /** Only the decision of a request that is still pending, and nothing else. */
+    /**
+     * Only the decision of a request that is still pending, and nothing else.
+     * A second guard behind ChangeRequests: an approval or rejection is never
+     * by the maker, and a withdrawal is only by the maker.
+     */
     protected function amlaAllowsUpdate(): bool
     {
-        return $this->getOriginal('status') === self::PENDING
-            && in_array($this->status, [self::APPROVED, self::REJECTED, self::WITHDRAWN], true)
-            && array_diff(array_keys($this->getDirty()), self::DECISION_COLUMNS) === [];
+        if ($this->getOriginal('status') !== self::PENDING
+            || array_diff(array_keys($this->getDirty()), self::DECISION_COLUMNS) !== []
+            || $this->decided_by === null) {
+            return false;
+        }
+
+        $byMaker = (int) $this->decided_by === (int) $this->getOriginal('requested_by');
+
+        return match ($this->status) {
+            self::APPROVED, self::REJECTED => ! $byMaker,
+            self::WITHDRAWN => $byMaker,
+            default => false,
+        };
     }
 
     /** @return array<string, mixed> */
