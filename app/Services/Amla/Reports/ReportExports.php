@@ -6,17 +6,22 @@ use App\Models\AmlaExport;
 use App\Models\User;
 use App\Services\Amla\Foundation\AmlaLog;
 use App\Services\SignedFileLink;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 
 /**
  * Makes an AMLA report export on the server, keeps it on the private disk
- * for the user who asked, writes the AMLA log, and answers with a signed
+ * for the user who asked until its link expires (then pruneExpired() deletes
+ * the file, keeping the record), writes the AMLA log, and answers with a signed
  * link (SignedFileLink, bound to that user). Writes AMLA tables only.
  */
 final class ReportExports
 {
     public const DISK = 'private';
+
+    /** Minutes after the link's expiry before its file is deleted. */
+    public const PRUNE_GRACE_MINUTES = 5;
 
     public function __construct(
         private readonly AmlaReports $reports,
@@ -49,6 +54,31 @@ final class ReportExports
         ]);
 
         return $export;
+    }
+
+    /**
+     * Delete the files of exports whose signed link has expired (the link
+     * lives SignedFileLink::TTL_MINUTES and nothing makes a new one), so a
+     * report's decrypted contents never sit on disk for good. The export's
+     * record and checksum stay.
+     *
+     * @return int files deleted
+     */
+    public function pruneExpired(): int
+    {
+        $disk = Storage::disk(self::DISK);
+        $deleted = 0;
+        $paths = AmlaExport::query()->where('created_at', '<', Carbon::now()->subMinutes(SignedFileLink::TTL_MINUTES + self::PRUNE_GRACE_MINUTES))
+            ->orderBy('id')->pluck('file_path');
+
+        foreach ($paths as $path) {
+            if ($disk->exists($path)) {
+                $disk->delete($path);
+                $deleted++;
+            }
+        }
+
+        return $deleted;
     }
 
     public function link(AmlaExport $export): string

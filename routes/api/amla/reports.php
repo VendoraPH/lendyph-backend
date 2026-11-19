@@ -17,7 +17,7 @@ use Illuminate\Support\Facades\Route;
 Route::prefix('amla')->name('amla.')->middleware('throttle:amla')->group(function () {
     Route::get('/compliance-reports', [AmlaComplianceReportController::class, 'index'])->name('compliance-reports.index');
     Route::get('/compliance-reports/{report}', [AmlaComplianceReportController::class, 'show'])->where('report', '[a-z_]{3,40}')->name('compliance-reports.show');
-    Route::post('/compliance-reports/{report}/exports', [AmlaComplianceReportController::class, 'export'])->where('report', '[a-z_]{3,40}')->name('compliance-reports.export');
+    Route::post('/compliance-reports/{report}/exports', [AmlaComplianceReportController::class, 'export'])->where('report', '[a-z_]{3,40}')->middleware('throttle:exports')->name('compliance-reports.export');
     Route::get('/exports/{id}/download', [AmlaComplianceReportController::class, 'download'])->where('id', '[0-9]{1,18}')->middleware('signed')->name('exports.download');
     Route::get('/dashboard/counts', [AmlaComplianceReportController::class, 'counts'])->name('dashboard.counts');
 });

@@ -9,6 +9,7 @@ use App\Services\Amla\Foundation\AmlaLog;
 use App\Services\Amla\Reports\ComplianceReport;
 use App\Services\Amla\Reports\ReportFilters;
 use App\Services\Amla\Reports\ReportNames;
+use Illuminate\Validation\ValidationException;
 
 /**
  * Report 9, Compliance audit and history: AMLA's own log for the period
@@ -18,7 +19,22 @@ use App\Services\Amla\Reports\ReportNames;
  */
 final class AuditHistory extends ComplianceReport
 {
-    public const MAX_ROWS = 5000;
+    /** The most entries one report holds (`amla.audit_report_max_rows`); a bigger period is refused, never cut short. */
+    public static function maxRows(): int
+    {
+        return (int) config('amla.audit_report_max_rows', 5000);
+    }
+
+    public function assertFits(ReportFilters $filters): void
+    {
+        $count = AmlaLogEntry::query()->whereBetween('created_at', $filters->moments())->count();
+
+        if ($count > self::maxRows()) {
+            throw ValidationException::withMessages(['from' => sprintf(
+                'Narrow the dates: this period has %s entries, and one report holds at most %s.', number_format($count), number_format(self::maxRows()),
+            )]);
+        }
+    }
 
     public function key(): string
     {
@@ -58,7 +74,7 @@ final class AuditHistory extends ComplianceReport
     public function rows(User $viewer, ReportFilters $filters): array
     {
         return AmlaLogEntry::query()->with('user')->whereBetween('created_at', $filters->moments())
-            ->orderBy('id')->limit(self::MAX_ROWS)->get()
+            ->orderBy('id')->get()
             ->map(fn (AmlaLogEntry $entry) => [
                 'at' => $entry->created_at?->format('M j, Y g:i A'),
                 'action' => AmlaLog::actionWords($entry->action),

@@ -53,6 +53,7 @@ final class AmlaReports
 
     public function build(ComplianceReport $report, User $user, ReportFilters $filters): ReportTable
     {
+        $report->assertFits($filters);
         $rows = $report->rows($user, $filters);
 
         return new ReportTable($report, $filters, $report->columns(), $rows, $report->totals($rows));

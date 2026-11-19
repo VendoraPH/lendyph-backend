@@ -64,9 +64,10 @@ class AmlaComplianceReportController extends Controller
         ]]);
     }
 
-    #[OA\Post(path: '/api/amla/compliance-reports/{report}/exports', summary: 'Export an AMLA report', description: 'Needs the report\'s keys. `format` (pdf, xlsx, csv) and the report\'s filters. Made on the server, DRAFT while its period is open, logged; answers a signed download link bound to the caller.', tags: ['AMLA'], security: [['sanctum' => []]], responses: [new OA\Response(response: 201, description: 'The export')])]
+    #[OA\Post(path: '/api/amla/compliance-reports/{report}/exports', summary: 'Export an AMLA report', description: 'Needs `amla:export` and the report\'s keys. `format` (pdf, xlsx, csv) and the report\'s filters. Made on the server, DRAFT while its period is open, logged; answers a signed download link bound to the caller.', tags: ['AMLA'], security: [['sanctum' => []]], responses: [new OA\Response(response: 201, description: 'The export')])]
     public function export(Request $request, string $report, ReportExports $exports): JsonResponse
     {
+        $this->access->authorize($request->user(), AmlaAccess::EXPORT);
         [$found, $filters] = $this->open($request, $report, ['format' => ['required', 'in:pdf,xlsx,csv']]);
         $export = $exports->make($request->user(), $found, $filters, (string) $request->input('format'));
 
@@ -76,7 +77,7 @@ class AmlaComplianceReportController extends Controller
         ]], 201);
     }
 
-    #[OA\Get(path: '/api/amla/exports/{id}/download', summary: 'Download an AMLA report export', description: 'Signed, and re-checked: only the user it was made for, whose credentials haven\'t changed and who still holds the report\'s keys (403, logged, otherwise). Logged.', tags: ['AMLA'], security: [['sanctum' => []]], responses: [new OA\Response(response: 200, description: 'The file')])]
+    #[OA\Get(path: '/api/amla/exports/{id}/download', summary: 'Download an AMLA report export', description: 'Signed, and re-checked: only the user it was made for, whose credentials haven\'t changed, who still holds `amla:export`, the report\'s keys (and head office) and the exported branch (403, logged, otherwise). The file is swept once its link expires (404). Logged.', tags: ['AMLA'], security: [['sanctum' => []]], responses: [new OA\Response(response: 200, description: 'The file')])]
     public function download(Request $request, int $id, ReportExports $exports): StreamedResponse
     {
         $user = $request->user();
@@ -88,11 +89,21 @@ class AmlaComplianceReportController extends Controller
             $this->access->refuse($user, 'export_link_not_yours', 'This download link is no longer valid for you. Export the report again.');
         }
 
+        if (! $user->can(AmlaAccess::EXPORT)) {
+            $this->access->refuse($user, 'export_key_missing', 'Downloading an export needs '.AmlaAccess::words(AmlaAccess::EXPORT).'.');
+        }
+
         if (! $report->canSee($user)) {
             $this->access->refuse($user, 'export_report_not_allowed', 'This report needs '.AmlaAccess::words($report->permissions()).($report->headOffice() ? ' and head-office access' : '').'.');
         }
 
-        abort_unless(Storage::disk(ReportExports::DISK)->exists($export->file_path), 404);
+        $branchId = $export->filters['branch_id'] ?? null;
+
+        if ($branchId !== null && ! $this->branches->canSee($user, (int) $branchId)) {
+            $this->access->refuse($user, 'export_branch_not_allowed', 'This export is of a branch you no longer have access to.');
+        }
+
+        abort_unless(Storage::disk(ReportExports::DISK)->exists($export->file_path), 404, 'This export has expired. Export the report again.');
         $this->log->record('amla_report_export_downloaded', $user, 'amla_export', $export->id, ['report' => $export->report_key, 'format' => $export->format]);
 
         return Storage::disk(ReportExports::DISK)->download($export->file_path, $exports->downloadName($export), [

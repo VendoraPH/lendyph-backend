@@ -46,7 +46,7 @@ class AmlaReportExportTest extends TestCase
         $member = $this->member();
         $this->event($member, '1000.00');
         $this->event($member, '2500.50', ['direction' => 'out', 'kind' => 'savings_withdrawal']);
-        $officer = $this->amlaUser(['amla:alerts']);
+        $officer = $this->amlaUser(['amla:alerts', 'amla:export']);
         $this->actingAs($officer);
         $outside = $this->outsideAmlaCounts();
 
@@ -71,8 +71,8 @@ class AmlaReportExportTest extends TestCase
 
     public function test_the_signed_link_is_rechecked_against_the_user_it_was_made_for(): void
     {
-        $owner = $this->amlaUser(['amla:alerts']);
-        $other = $this->amlaUser(['amla:alerts']);
+        $owner = $this->amlaUser(['amla:alerts', 'amla:export']);
+        $other = $this->amlaUser(['amla:alerts', 'amla:export']);
         $url = $this->actingAs($owner)->export('transaction_monitoring', 'csv')['download_url'];
 
         $this->actingAs($other)->get($url, ['Accept' => 'application/json'])->assertForbidden();
@@ -82,7 +82,7 @@ class AmlaReportExportTest extends TestCase
         app(PermissionRegistrar::class)->forgetCachedPermissions();
         $this->actingAs($owner->fresh())->get($url, ['Accept' => 'application/json'])->assertForbidden();
 
-        $second = $this->amlaUser(['amla:alerts']);
+        $second = $this->amlaUser(['amla:alerts', 'amla:export']);
         $again = $this->actingAs($second)->export('transaction_monitoring', 'csv')['download_url'];
         User::query()->whereKey($second->id)->update(['file_link_version' => 7]);
         $this->actingAs($second->fresh())->get($again, ['Accept' => 'application/json'])->assertForbidden();
@@ -95,13 +95,13 @@ class AmlaReportExportTest extends TestCase
         $other = Branch::factory()->create();
         $mine = $this->ctrCandidate();
         $theirs = $this->ctrCandidate($this->member($other->id));
-        $url = $this->actingAs($this->amlaUser(['amla:ctr']))->export('covered_transactions', 'csv', ['from' => '2026-11-01', 'to' => '2026-11-30'])['download_url'];
+        $url = $this->actingAs($this->amlaUser(['amla:ctr', 'amla:export']))->export('covered_transactions', 'csv', ['from' => '2026-11-01', 'to' => '2026-11-30'])['download_url'];
 
         $body = $this->get($url)->assertOk()->streamedContent();
         $this->assertStringContainsString($mine->reference, $body);
         $this->assertStringNotContainsString($theirs->reference, $body);
 
-        $this->actingAs($this->amlaUser(['amla:cases']))->postJson('/api/amla/compliance-reports/case_register/exports', ['format' => 'csv'])->assertForbidden();
-        $this->actingAs($this->amlaUser(['amla:ctr']))->postJson('/api/amla/compliance-reports/covered_transactions/exports', ['format' => 'docx'])->assertUnprocessable();
+        $this->actingAs($this->amlaUser(['amla:cases', 'amla:export']))->postJson('/api/amla/compliance-reports/case_register/exports', ['format' => 'csv'])->assertForbidden();
+        $this->actingAs($this->amlaUser(['amla:ctr', 'amla:export']))->postJson('/api/amla/compliance-reports/covered_transactions/exports', ['format' => 'docx'])->assertUnprocessable();
     }
 }

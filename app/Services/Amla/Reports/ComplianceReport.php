@@ -5,6 +5,7 @@ namespace App\Services\Amla\Reports;
 use App\Models\User;
 use App\Services\Amla\Events\PesoAmount;
 use App\Services\BranchAccess;
+use Illuminate\Validation\ValidationException;
 
 /**
  * One of the ten AMLA reports (task §16; AMLA-B7). It reads AMLA's own
@@ -57,6 +58,14 @@ abstract class ComplianceReport
     {
         return null;
     }
+
+    /**
+     * Refuse, in words, a request too big for one report (422) before it is
+     * built. Nothing by default.
+     *
+     * @throws ValidationException
+     */
+    public function assertFits(ReportFilters $filters): void {}
 
     public function canSee(User $user): bool
     {

@@ -3,6 +3,7 @@
 namespace App\Services\Amla\Reports\Builders;
 
 use App\Enums\PaymentMethod;
+use App\Models\AmlaAlert;
 use App\Models\AmlaEvent;
 use App\Models\Branch;
 use App\Models\User;
@@ -17,7 +18,8 @@ use Illuminate\Support\Facades\DB;
 /**
  * Report 3, Transaction monitoring: the period's customer transactions
  * (transaction date), by branch and channel: how many, money in, out and net,
- * how many were screened, are still unscreened or were flagged by an alert,
+ * how many were screened, are still unscreened or were flagged by an alert
+ * the viewer may open,
  * the alert categories and the rule versions used. Internal movements are
  * left out, as they are never new funds.
  */
@@ -70,8 +72,12 @@ final class TransactionMonitoring extends ComplianceReport
             ->get(['id', 'branch_id', 'channel', 'direction', 'amount']);
         $ids = $events->pluck('id')->all();
         $screened = DB::table('amla_event_screenings')->whereIn('event_id', $ids)->pluck('rule_version', 'event_id');
+        // Only alerts the viewer may open count as flags: a cross-branch (rule J)
+        // alert is head office's, and a branch user never learns of it here.
+        $visibleAlerts = $this->scope->constrainAlerts(AmlaAlert::query(), $viewer)->select('amla_alerts.id');
         $flags = DB::table('amla_alert_events')->join('amla_alerts', 'amla_alerts.id', '=', 'amla_alert_events.alert_id')
-            ->whereIn('amla_alert_events.event_id', $ids)->get(['amla_alert_events.event_id', 'amla_alerts.rule_code'])->groupBy('event_id');
+            ->whereIn('amla_alert_events.event_id', $ids)->whereIn('amla_alerts.id', $visibleAlerts)
+            ->get(['amla_alert_events.event_id', 'amla_alerts.rule_code'])->groupBy('event_id');
         $branches = Branch::query()->whereIn('id', $events->pluck('branch_id')->filter()->unique())->pluck('name', 'id');
         $rows = [];
 

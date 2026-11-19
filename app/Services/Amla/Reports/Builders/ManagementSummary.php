@@ -11,6 +11,7 @@ use App\Models\AmlaReport;
 use App\Models\AmlaScreeningMatch;
 use App\Models\User;
 use App\Services\Amla\Cases\FilingDeadlines;
+use App\Services\Amla\Cases\Filings;
 use App\Services\Amla\Cdd\CddWorklist;
 use App\Services\Amla\Foundation\AmlaAccess;
 use App\Services\Amla\Reports\ComplianceReport;
@@ -20,7 +21,9 @@ use Carbon\CarbonImmutable;
 /**
  * Report 10, AMLA management summary: the whole cooperative's figures for
  * the period and as of today, for management. Aggregates only: no names,
- * no case notes and never an STR narrative. Head office only.
+ * no case notes and never an STR narrative. Head office only; the case
+ * figures also need `amla:cases`, and the CTR and STR filing figures their
+ * reading keys, as the dashboard counts gate them.
  */
 final class ManagementSummary extends ComplianceReport
 {
@@ -78,10 +81,12 @@ final class ManagementSummary extends ComplianceReport
             ['metric' => 'Unscreened', 'value' => (string) ($monitored - $screened)],
             ['metric' => 'Alerts raised in the period', 'value' => (string) AmlaAlert::query()->whereBetween('created_at', $moments)->count()],
             ['metric' => 'Open alerts', 'value' => (string) AmlaAlert::query()->whereIn('status', AmlaAlert::WORKABLE)->count()],
-            ['metric' => 'Open investigations', 'value' => (string) AmlaCase::query()->whereIn('status', AmlaCase::ACTIVE)->count()],
-            ['metric' => 'Resolved cases in the period', 'value' => (string) AmlaCase::query()->whereBetween('closed_at', $moments)->count()],
-            ['metric' => 'CTR filing status', 'value' => $byStatus(AmlaReport::CTR)],
-            ['metric' => 'STR filing status', 'value' => $byStatus(AmlaReport::STR)],
+            ...($viewer->can(AmlaAccess::CASES) ? [
+                ['metric' => 'Open investigations', 'value' => (string) AmlaCase::query()->whereIn('status', AmlaCase::ACTIVE)->count()],
+                ['metric' => 'Resolved cases in the period', 'value' => (string) AmlaCase::query()->whereBetween('closed_at', $moments)->count()],
+            ] : []),
+            ...($viewer->canAny(Filings::CTR_READ) ? [['metric' => 'CTR filing status', 'value' => $byStatus(AmlaReport::CTR)]] : []),
+            ...($viewer->canAny(Filings::STR_READ) ? [['metric' => 'STR filing status', 'value' => $byStatus(AmlaReport::STR)]] : []),
             ['metric' => 'Missed deadlines', 'value' => (string) $missed],
             ['metric' => 'KYC completion', 'value' => $verified.' of '.count($subjects).' customers verified'],
             ['metric' => 'Outstanding watchlist reviews', 'value' => (string) AmlaScreeningMatch::query()->where('status', AmlaScreeningMatch::PENDING)->count()],
