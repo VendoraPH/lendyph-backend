@@ -11,10 +11,14 @@ return new class extends Migration
      * money account to another's through 1190 Interbranch Clearing.
      *
      * - `amount` is integer centavos, like every accounting table.
-     * - The four journal columns link the transfer to the two legs it posted
-     *   (dispatch in the source branch on approval, receipt in the destination
-     *   on receipt) and to their reversals. Each journal also carries the
-     *   transfer number as its reference.
+     * - The journal columns link the transfer to the legs it posted (dispatch
+     *   in the source branch on approval, receipt in the destination on
+     *   receipt) and to the dispatch's reversal (only a transfer still in
+     *   transit can be reversed). Each journal also carries the transfer
+     *   number as its reference.
+     * - `clearing_account_id` is the account the dispatch debited, stored at
+     *   approval, so the receipt credits that same account even if the
+     *   `interbranch_clearing` role is re-pointed in between.
      * - `transfer_number` (IBT-000001) is set from the id right after insert,
      *   so two saves can never take the same number.
      *
@@ -31,6 +35,7 @@ return new class extends Migration
             $table->foreignId('destination_branch_id')->constrained('branches')->restrictOnDelete();
             $table->foreignId('from_account_id')->constrained('accounting_accounts')->restrictOnDelete();
             $table->foreignId('to_account_id')->constrained('accounting_accounts')->restrictOnDelete();
+            $table->foreignId('clearing_account_id')->nullable()->constrained('accounting_accounts')->restrictOnDelete();
             $table->unsignedBigInteger('amount');
             $table->string('purpose', 500);
             $table->string('reference', 64)->nullable();
@@ -50,7 +55,6 @@ return new class extends Migration
             $table->timestamp('reversed_at')->nullable();
             $table->string('reversal_reason', 500)->nullable();
             $table->foreignId('dispatch_reversal_journal_id')->nullable()->constrained('accounting_journals')->restrictOnDelete();
-            $table->foreignId('receipt_reversal_journal_id')->nullable()->constrained('accounting_journals')->restrictOnDelete();
             $table->timestamps();
 
             $table->index(['source_branch_id', 'status']);

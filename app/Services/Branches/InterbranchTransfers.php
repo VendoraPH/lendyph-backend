@@ -30,11 +30,16 @@ use Symfony\Component\HttpKernel\Exception\HttpException;
  * - **Approve** (`:approve`): never by the maker, super_admin included, and
  *   only by someone who can see the source branch. Posts, in the source
  *   branch, Dr 1190 Interbranch Clearing / Cr the money account. In transit.
- * - **Receive** (`:receive`): by someone who can see the destination branch.
- *   Posts, in the destination branch, Dr the money account / Cr 1190.
- * - **Reverse** (`:approve`, with a reason): reverses each posted leg through
- *   JournalPoster::reverse(), the receipt first, so the pair links to its
- *   mirror. A received transfer needs access to both branches.
+ * - **Receive** (`:receive`): by someone who can see the destination branch
+ *   and is neither the maker nor the approver, super_admin included. Posts,
+ *   in the destination branch, Dr the money account / Cr the clearing
+ *   account the dispatch debited (stored at approval, so re-pointing the
+ *   role in between never splits the pair across two accounts).
+ * - **Reverse** (`:approve`, with a reason): only while in transit, never by
+ *   the maker (super_admin included), by someone who can see the source.
+ *   Reverses the dispatch through JournalPoster::reverse(), linked to its
+ *   mirror. A received transfer can't be reversed (422): the money goes back
+ *   as a new transfer from the destination to the source.
  * - **Reject** (a checker, with a note) and **cancel** (the maker) close a
  *   pending transfer; nothing was posted.
  *
@@ -56,6 +61,16 @@ class InterbranchTransfers
 
     public const MAKER_CANNOT_APPROVE = 'You made this transfer, so someone else has to approve it.';
 
+    public const MAKER_CANNOT_RECEIVE = 'You made this transfer, so someone else has to receive it.';
+
+    public const APPROVER_CANNOT_RECEIVE = 'You approved this transfer, so someone else has to receive it.';
+
+    public const MAKER_CANNOT_REVERSE = 'You made this transfer, so someone else has to reverse it.';
+
+    public const SOURCE_CLOSED = 'The source branch is closed, so no money can move out of it.';
+
+    public const DESTINATION_CLOSED = 'The destination branch is closed, so no money can move into it.';
+
     public function __construct(
         private JournalPoster $poster,
         private TrialBalanceBuilder $trialBalance,
@@ -72,10 +87,7 @@ class InterbranchTransfers
         $this->requireMoneyAccount((int) $data['to_account_id'], 'to_account_id');
 
         $transfer = DB::transaction(function () use ($data, $maker): InterbranchTransfer {
-            $this->lockBranches((int) $data['source_branch_id'], (int) $data['destination_branch_id'], [
-                (int) $data['source_branch_id'] => 'source_branch_id',
-                (int) $data['destination_branch_id'] => 'destination_branch_id',
-            ]);
+            $this->lockBranches((int) $data['source_branch_id'], (int) $data['destination_branch_id'], onCreate: true);
 
             $transfer = new InterbranchTransfer([...$data, 'created_by' => $maker->id]);
             $transfer->status = InterbranchTransfer::STATUS_PENDING;
@@ -138,6 +150,7 @@ class InterbranchTransfers
                 'approved_by' => $approver->id,
                 'approved_at' => now(),
                 'dispatch_journal_id' => $journal->id,
+                'clearing_account_id' => $clearing->id,
             ])->save();
 
             $this->audit('interbranch_transfer_approved', $locked, ['status' => InterbranchTransfer::STATUS_PENDING], [
@@ -160,9 +173,19 @@ class InterbranchTransfers
         return DB::transaction(function () use ($transfer, $receiver): InterbranchTransfer {
             $locked = $this->lock($transfer);
             $this->assertStatus($locked, InterbranchTransfer::STATUS_IN_TRANSIT, 'in transit');
+            if ($locked->created_by === $receiver->id) {
+                throw new HttpException(403, self::MAKER_CANNOT_RECEIVE);
+            }
+
+            if ($locked->approved_by === $receiver->id) {
+                throw new HttpException(403, self::APPROVER_CANNOT_RECEIVE);
+            }
+
             $this->assertSees($receiver, $locked->destination_branch_id, 'Receiving posts in %s\'s books, so it needs access to that branch.');
 
-            $clearing = $this->requirePostingRole(self::CLEARING_ROLE, 'An interbranch transfer');
+            // The account the dispatch debited, never whatever the role
+            // points at now: the pair must net to zero on one account.
+            $clearingId = $locked->clearing_account_id;
             $to = $this->requireMoneyAccount($locked->to_account_id, 'to_account_id');
 
             $journal = $this->post($locked, $locked->destination_branch_id, sprintf(
@@ -172,7 +195,7 @@ class InterbranchTransfers
                 $locked->purpose,
             ), [
                 ['account_id' => $to->id, 'debit' => $locked->amount, 'credit' => 0],
-                ['account_id' => $clearing->id, 'debit' => 0, 'credit' => $locked->amount],
+                ['account_id' => $clearingId, 'debit' => 0, 'credit' => $locked->amount],
             ], $receiver);
 
             $locked->forceFill([
@@ -201,42 +224,41 @@ class InterbranchTransfers
     {
         return DB::transaction(function () use ($transfer, $by, $reason): InterbranchTransfer {
             $locked = $this->lock($transfer);
-            $was = $locked->status;
 
-            if (! in_array($was, [InterbranchTransfer::STATUS_IN_TRANSIT, InterbranchTransfer::STATUS_RECEIVED], true)) {
-                throw LoanWriteTransaction::conflict("This transfer can't be reversed: it is ".strtolower(InterbranchTransfer::STATUS_LABELS[$was]).'. Reload it.');
+            if ($locked->status === InterbranchTransfer::STATUS_RECEIVED) {
+                throw ValidationException::withMessages(['transfer' => [sprintf(
+                    "A received transfer can't be reversed. To send the money back, make a new transfer from %s to %s.",
+                    $this->branchName($locked->destination_branch_id),
+                    $this->branchName($locked->source_branch_id),
+                )]]);
+            }
+
+            $this->assertStatus($locked, InterbranchTransfer::STATUS_IN_TRANSIT, 'in transit');
+
+            if ($locked->created_by === $by->id) {
+                throw new HttpException(403, self::MAKER_CANNOT_REVERSE);
             }
 
             $this->assertSees($by, $locked->source_branch_id, 'Reversing posts in %s\'s books, so it needs access to that branch.');
 
-            if ($was === InterbranchTransfer::STATUS_RECEIVED) {
-                $this->assertSees($by, $locked->destination_branch_id, 'Reversing a received transfer posts in %s\'s books too, so it needs access to that branch.');
-            }
+            $mirror = $this->poster->reverse(AccountingJournal::query()->findOrFail($locked->dispatch_journal_id), now()->toDateString(), $reason, $by->id);
 
-            $today = now()->toDateString();
-            $columns = ['status' => InterbranchTransfer::STATUS_REVERSED, 'reversed_by' => $by->id, 'reversed_at' => now(), 'reversal_reason' => $reason];
-            $numbers = [];
+            $locked->forceFill([
+                'status' => InterbranchTransfer::STATUS_REVERSED,
+                'reversed_by' => $by->id,
+                'reversed_at' => now(),
+                'reversal_reason' => $reason,
+                'dispatch_reversal_journal_id' => $mirror->id,
+            ])->save();
 
-            if ($locked->receipt_journal_id !== null) {
-                $mirror = $this->poster->reverse(AccountingJournal::query()->findOrFail($locked->receipt_journal_id), $today, $reason, $by->id);
-                $columns['receipt_reversal_journal_id'] = $mirror->id;
-                $numbers[] = $mirror->journal_no;
-            }
-
-            $mirror = $this->poster->reverse(AccountingJournal::query()->findOrFail($locked->dispatch_journal_id), $today, $reason, $by->id);
-            $columns['dispatch_reversal_journal_id'] = $mirror->id;
-            $numbers[] = $mirror->journal_no;
-
-            $locked->forceFill($columns)->save();
-
-            $this->audit('interbranch_transfer_reversed', $locked, ['status' => $was], [
+            $this->audit('interbranch_transfer_reversed', $locked, ['status' => InterbranchTransfer::STATUS_IN_TRANSIT], [
                 'status' => $locked->status,
                 'reversal_reason' => $reason,
             ], sprintf(
-                'Interbranch transfer %s of %s was reversed (%s posted). Reason: %s',
+                'Interbranch transfer %s of %s was reversed before it was received (%s posted). Reason: %s',
                 $locked->transfer_number,
                 Money::format($locked->amount),
-                implode(' and ', $numbers),
+                $mirror->journal_no,
                 $reason,
             ), $by);
 
@@ -328,21 +350,20 @@ class InterbranchTransfers
      * which locks its branch for update, waits for this step, and this step
      * for it), then a refusal when either is closed.
      *
-     * @param  array<int, string>  $fields  branch id => the request field to blame
+     * The wording names neither branch: the maker may not be able to see the
+     * destination (as BranchTakesNew never names one).
+     *
+     * @param  bool  $onCreate  blame the request fields rather than `branch`
      *
      * @throws ValidationException
      */
-    private function lockBranches(int $sourceId, int $destinationId, array $fields = []): void
+    private function lockBranches(int $sourceId, int $destinationId, bool $onCreate = false): void
     {
         $branches = Branch::query()->whereIn('id', [$sourceId, $destinationId])->orderBy('id')->sharedLock()->get()->keyBy('id');
 
-        foreach ([$sourceId, $destinationId] as $id) {
-            $branch = $branches->get($id);
-
-            if ($branch !== null && $branch->status === Branch::STATUS_CLOSED) {
-                throw ValidationException::withMessages([
-                    $fields[$id] ?? 'branch' => ["{$branch->name} is closed, so no money can move to or from it."],
-                ]);
+        foreach ([[$sourceId, 'source_branch_id', self::SOURCE_CLOSED], [$destinationId, 'destination_branch_id', self::DESTINATION_CLOSED]] as [$id, $field, $message]) {
+            if ($branches->get($id)?->status === Branch::STATUS_CLOSED) {
+                throw ValidationException::withMessages([$onCreate ? $field : 'branch' => [$message]]);
             }
         }
     }

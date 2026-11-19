@@ -44,6 +44,7 @@ class InterbranchClearingBackfillTest extends TestCase
 
         $this->seedChartOfAccounts();
         $this->assertSame($this->account('1190'), AccountingAccountMapping::resolved()['interbranch_clearing']);
+        $this->assertSame('financing', AccountingAccount::where('code', '1190')->value('cash_flow_category'));
     }
 
     public function test_the_migration_adds_and_maps_1190_with_system_audit_rows_and_a_second_run_changes_nothing(): void
@@ -53,7 +54,7 @@ class InterbranchClearingBackfillTest extends TestCase
         $this->migration()->up();
 
         $account = AccountingAccount::where('code', '1190')->sole();
-        $this->assertSame(['Interbranch Clearing', 'asset', 'debit', 'investing', '1000', false, false, null], [
+        $this->assertSame(['Interbranch Clearing', 'asset', 'debit', 'financing', '1000', false, false, null], [
             $account->name, $account->type, $account->normal_balance, $account->cash_flow_category, $account->parent?->code,
             (bool) $account->is_contra, (bool) $account->is_group, $account->cash_kind,
         ]);

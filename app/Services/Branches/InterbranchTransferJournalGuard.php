@@ -17,7 +17,7 @@ use WeakMap;
  * does for savings entries.
  *
  * Transfer journals carry no postable (the transfer number is their
- * reference), so they are found through the transfer's four journal columns:
+ * reference), so they are found through the transfer's journal columns:
  * one query per page of journals (self::preload()), never one per row.
  */
 final class InterbranchTransferJournalGuard

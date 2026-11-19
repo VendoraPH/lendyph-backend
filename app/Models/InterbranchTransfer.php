@@ -18,8 +18,9 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
  * Statuses: pending approval, then in transit (approved: the source branch
  * has posted Dr 1190 / Cr its money account), then received (the destination
  * posted Dr its money account / Cr 1190). A pending transfer can be rejected
- * by a checker or cancelled by its maker; one in transit or received can be
- * reversed, which reverses each posted leg.
+ * by a checker or cancelled by its maker. Only a transfer still in transit
+ * can be reversed (its dispatch journal is reversed); a received one goes
+ * back as a new transfer from the destination to the source.
  *
  * @property int $id
  * @property string|null $transfer_number
@@ -28,6 +29,7 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
  * @property int $destination_branch_id
  * @property int $from_account_id
  * @property int $to_account_id
+ * @property int|null $clearing_account_id the account the dispatch debited, stored at approval
  * @property int $amount centavos
  * @property string $purpose
  * @property string|null $reference
@@ -41,7 +43,6 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
  * @property int|null $reversed_by
  * @property string|null $reversal_reason
  * @property int|null $dispatch_reversal_journal_id
- * @property int|null $receipt_reversal_journal_id
  */
 class InterbranchTransfer extends Model
 {
@@ -70,7 +71,7 @@ class InterbranchTransfer extends Model
     ];
 
     /** The columns that name a journal this transfer posted. */
-    public const JOURNAL_COLUMNS = ['dispatch_journal_id', 'receipt_journal_id', 'dispatch_reversal_journal_id', 'receipt_reversal_journal_id'];
+    public const JOURNAL_COLUMNS = ['dispatch_journal_id', 'receipt_journal_id', 'dispatch_reversal_journal_id'];
 
     protected $fillable = [
         'source_branch_id',
@@ -91,6 +92,7 @@ class InterbranchTransfer extends Model
             'destination_branch_id' => 'integer',
             'from_account_id' => 'integer',
             'to_account_id' => 'integer',
+            'clearing_account_id' => 'integer',
             'created_by' => 'integer',
             'approved_by' => 'integer',
             'received_by' => 'integer',
@@ -99,7 +101,6 @@ class InterbranchTransfer extends Model
             'dispatch_journal_id' => 'integer',
             'receipt_journal_id' => 'integer',
             'dispatch_reversal_journal_id' => 'integer',
-            'receipt_reversal_journal_id' => 'integer',
             'approved_at' => 'datetime',
             'received_at' => 'datetime',
             'rejected_at' => 'datetime',
@@ -126,6 +127,11 @@ class InterbranchTransfer extends Model
     public function toAccount(): BelongsTo
     {
         return $this->belongsTo(AccountingAccount::class, 'to_account_id');
+    }
+
+    public function clearingAccount(): BelongsTo
+    {
+        return $this->belongsTo(AccountingAccount::class, 'clearing_account_id');
     }
 
     public function creator(): BelongsTo
@@ -168,11 +174,6 @@ class InterbranchTransfer extends Model
         return $this->belongsTo(AccountingJournal::class, 'dispatch_reversal_journal_id');
     }
 
-    public function receiptReversalJournal(): BelongsTo
-    {
-        return $this->belongsTo(AccountingJournal::class, 'receipt_reversal_journal_id');
-    }
-
     /** Everything the resource reads, in a fixed number of queries. */
     public function scopeWithDetails(Builder $query): Builder
     {
@@ -181,6 +182,7 @@ class InterbranchTransfer extends Model
             'destinationBranch:id,name,code',
             'fromAccount:id,code,name',
             'toAccount:id,code,name',
+            'clearingAccount:id,code,name',
             'creator:id,first_name,last_name',
             'approver:id,first_name,last_name',
             'receiver:id,first_name,last_name',
@@ -189,7 +191,6 @@ class InterbranchTransfer extends Model
             'dispatchJournal:id,journal_no',
             'receiptJournal:id,journal_no',
             'dispatchReversalJournal:id,journal_no',
-            'receiptReversalJournal:id,journal_no',
         ]);
     }
 

@@ -36,6 +36,7 @@ class InterbranchTransferResource extends JsonResource
             'destination_branch' => self::branch($transfer->destinationBranch),
             'from_account' => self::account($transfer->fromAccount),
             'to_account' => self::account($transfer->toAccount),
+            'clearing_account' => self::account($transfer->clearingAccount),
             'amount' => $transfer->amount,
             'purpose' => $transfer->purpose,
             'reference' => $transfer->reference,
@@ -56,7 +57,6 @@ class InterbranchTransferResource extends JsonResource
             'dispatch_journal' => self::journal($transfer->dispatchJournal),
             'receipt_journal' => self::journal($transfer->receiptJournal),
             'dispatch_reversal_journal' => self::journal($transfer->dispatchReversalJournal),
-            'receipt_reversal_journal' => self::journal($transfer->receiptReversalJournal),
             'actions' => self::actions($transfer, $request->user()),
         ];
     }
@@ -72,19 +72,17 @@ class InterbranchTransferResource extends JsonResource
         $seesSource = $access->canSee($user, $transfer->source_branch_id);
         $seesDestination = $access->canSee($user, $transfer->destination_branch_id);
         $pending = $transfer->status === InterbranchTransfer::STATUS_PENDING;
+        $inTransit = $transfer->status === InterbranchTransfer::STATUS_IN_TRANSIT;
         $isMaker = $transfer->created_by === $user->id;
-        $checker = $pending && ! $isMaker && $seesSource && $user->can('interbranch_transfers:approve');
+        $checker = ! $isMaker && $seesSource && $user->can('interbranch_transfers:approve');
 
         return [
-            'can_approve' => $checker,
-            'can_reject' => $checker,
+            'can_approve' => $pending && $checker,
+            'can_reject' => $pending && $checker,
             'can_cancel' => $pending && $isMaker && $user->can('interbranch_transfers:create'),
-            'can_receive' => $transfer->status === InterbranchTransfer::STATUS_IN_TRANSIT && $seesDestination && $user->can('interbranch_transfers:receive'),
-            'can_reverse' => $user->can('interbranch_transfers:approve') && $seesSource && match ($transfer->status) {
-                InterbranchTransfer::STATUS_IN_TRANSIT => true,
-                InterbranchTransfer::STATUS_RECEIVED => $seesDestination,
-                default => false,
-            },
+            'can_receive' => $inTransit && ! $isMaker && $transfer->approved_by !== $user->id
+                && $seesDestination && $user->can('interbranch_transfers:receive'),
+            'can_reverse' => $inTransit && $checker,
         ];
     }
 

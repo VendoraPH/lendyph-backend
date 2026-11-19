@@ -23,7 +23,7 @@ return new class extends Migration
 
     private const ROLE = 'interbranch_clearing';
 
-    private const ACCOUNT = ['code' => '1190', 'name' => 'Interbranch Clearing', 'type' => 'asset', 'parent' => '1000', 'is_contra' => false, 'normal_balance' => 'debit', 'cash_flow_category' => 'investing'];
+    private const ACCOUNT = ['code' => '1190', 'name' => 'Interbranch Clearing', 'type' => 'asset', 'parent' => '1000', 'is_contra' => false, 'normal_balance' => 'debit', 'cash_flow_category' => 'financing'];
 
     private const PURPOSE = 'money moved between branches';
 

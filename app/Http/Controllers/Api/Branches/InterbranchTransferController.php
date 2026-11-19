@@ -139,13 +139,13 @@ class InterbranchTransferController extends Controller
     #[OA\Post(
         path: '/api/interbranch-transfers/{interbranchTransfer}/receive',
         summary: 'Receive: Dr the money account / Cr 1190, in the destination branch',
-        description: 'Needs access to the destination branch. Idempotency-Key required.',
+        description: 'Needs access to the destination branch, by someone who neither made nor approved it (super_admin included). Credits the clearing account the approval debited. Idempotency-Key required.',
         tags: ['Branches'],
         security: [['sanctum' => []]],
         parameters: [new OA\Parameter(name: 'interbranchTransfer', in: 'path', required: true, schema: new OA\Schema(type: 'integer'))],
         responses: [
             new OA\Response(response: 200, description: '{data}'),
-            new OA\Response(response: 403, description: 'No access to the destination branch, or missing interbranch_transfers:receive'),
+            new OA\Response(response: 403, description: 'The maker or the approver, no access to the destination branch, or missing interbranch_transfers:receive'),
             new OA\Response(response: 409, description: 'Not in transit'),
             new OA\Response(response: 422, description: 'In words: a closed period (errors.date)'),
         ],
@@ -162,15 +162,15 @@ class InterbranchTransferController extends Controller
     #[OA\Post(
         path: '/api/interbranch-transfers/{interbranchTransfer}/reverse',
         summary: 'Reverse a transfer that has posted',
-        description: 'Posts a linked reversal of each leg (the receipt first), dated today. Needs access to the source branch, and to the destination once received. Idempotency-Key required.',
+        description: 'Only while in transit, never by the maker (super_admin included). Posts a linked reversal of the dispatch, dated today, in the source branch. A received transfer is refused (422): send the money back with a new transfer. Idempotency-Key required.',
         tags: ['Branches'],
         security: [['sanctum' => []]],
         parameters: [new OA\Parameter(name: 'interbranchTransfer', in: 'path', required: true, schema: new OA\Schema(type: 'integer'))],
         requestBody: new OA\RequestBody(required: true, content: new OA\JsonContent(required: ['reason'], properties: [new OA\Property(property: 'reason', type: 'string', maxLength: 300)])),
         responses: [
             new OA\Response(response: 200, description: '{data}'),
-            new OA\Response(response: 403, description: 'No access to a branch it posts in, or missing interbranch_transfers:approve'),
-            new OA\Response(response: 409, description: 'Not in transit or received'),
+            new OA\Response(response: 403, description: 'The maker, no access to the source branch, or missing interbranch_transfers:approve'),
+            new OA\Response(response: 409, description: 'Not in transit'),
             new OA\Response(response: 422, description: 'In words: a closed period (errors.date)'),
         ],
     )]
@@ -223,11 +223,11 @@ class InterbranchTransferController extends Controller
     #[OA\Get(
         path: '/api/interbranch-transfers/in-transit',
         summary: 'Transfers in transit and each branch\'s interbranch clearing balance',
-        description: 'Oldest first, each with its age in days. Branch balances (centavos) add up to total_clearing_balance; difference (clearing less in transit) is for branches:view_all only.',
+        description: 'Oldest first, each with its age in days. Each branch\'s net interbranch position (centavos: sent less received, on every account transfers clear through) adds up to total_clearing_balance; difference (clearing less in transit) is for branches:view_all only.',
         tags: ['Branches'],
         security: [['sanctum' => []]],
         responses: [
-            new OA\Response(response: 200, description: '{data: {as_of, clearing_account, transfers, branches, total_clearing_balance, total_in_transit, difference}}'),
+            new OA\Response(response: 200, description: '{data: {as_of, clearing_accounts, transfers, branches, total_clearing_balance, total_in_transit, difference}}'),
             new OA\Response(response: 403, description: 'Needs interbranch_transfers:view'),
         ],
     )]

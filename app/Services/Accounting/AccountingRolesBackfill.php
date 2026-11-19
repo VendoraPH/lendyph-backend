@@ -66,7 +66,7 @@ class AccountingRolesBackfill
         'loan_adjustments' => ['code' => '1180', 'name' => 'Loan Adjustments Clearing', 'type' => 'asset', 'parent' => '1000', 'is_contra' => false, 'normal_balance' => 'debit', 'cash_flow_category' => 'investing'],
         'unearned_restructure_income' => ['code' => '1210', 'name' => 'Unearned Interest and Penalty – Restructured Loans', 'type' => 'asset', 'parent' => '1000', 'is_contra' => true, 'normal_balance' => 'credit', 'cash_flow_category' => 'investing'],
         'suspense' => ['code' => '2390', 'name' => 'Suspense Account', 'type' => 'liability', 'parent' => '2000', 'is_contra' => false, 'normal_balance' => 'credit', 'cash_flow_category' => 'financing'],
-        'interbranch_clearing' => ['code' => '1190', 'name' => 'Interbranch Clearing', 'type' => 'asset', 'parent' => '1000', 'is_contra' => false, 'normal_balance' => 'debit', 'cash_flow_category' => 'investing'],
+        'interbranch_clearing' => ['code' => '1190', 'name' => 'Interbranch Clearing', 'type' => 'asset', 'parent' => '1000', 'is_contra' => false, 'normal_balance' => 'debit', 'cash_flow_category' => 'financing'],
     ];
 
     /** The existing account `net_surplus` points at: [code, name, type]. */

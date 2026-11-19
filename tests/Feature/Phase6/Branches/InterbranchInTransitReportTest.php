@@ -29,6 +29,8 @@ class InterbranchInTransitReportTest extends TestCase
 
     private User $checker;
 
+    private User $receiver;
+
     protected function setUp(): void
     {
         parent::setUp();
@@ -37,7 +39,10 @@ class InterbranchInTransitReportTest extends TestCase
         $this->north = Branch::factory()->create(['name' => 'North Branch', 'code' => 'NOR']);
         $this->south = Branch::factory()->create(['name' => 'South Branch', 'code' => 'SOU']);
         $this->checker = User::factory()->inBranches($this->branch, $this->north, $this->south)->create();
-        $this->checker->givePermissionTo(['interbranch_transfers:view', 'interbranch_transfers:approve', 'interbranch_transfers:receive', BranchAccess::VIEW_ALL]);
+        $this->checker->givePermissionTo(['interbranch_transfers:view', 'interbranch_transfers:approve', BranchAccess::VIEW_ALL]);
+        // Never the approver: the receiver is a third person.
+        $this->receiver = User::factory()->inBranches($this->branch, $this->north, $this->south)->create();
+        $this->receiver->givePermissionTo(['interbranch_transfers:view', 'interbranch_transfers:receive', BranchAccess::VIEW_ALL]);
     }
 
     public function test_the_in_transit_totals_add_up(): void
@@ -47,7 +52,7 @@ class InterbranchInTransitReportTest extends TestCase
         Carbon::setTestNow();
         $this->sent($this->north, $this->south, 30_000);
         $received = $this->sent($this->branch, $this->south, 50_000);
-        $this->actingAs($this->checker);
+        $this->actingAs($this->receiver);
         $this->money("/api/interbranch-transfers/{$received}/receive")->assertOk();
 
         $data = $this->getJson('/api/interbranch-transfers/in-transit')->assertOk()->json('data');
@@ -56,9 +61,9 @@ class InterbranchInTransitReportTest extends TestCase
         $this->assertSame(3, $data['transfers'][0]['age_days']);
         $this->assertSame(0, $data['transfers'][1]['age_days']);
         $this->assertSame(130_000, $data['total_in_transit']);
-        $this->assertSame('1190', $data['clearing_account']['code']);
+        $this->assertSame(['1190'], array_column($data['clearing_accounts'], 'code'));
 
-        $balances = collect($data['branches'])->pluck('clearing_balance', 'branch_name')->all();
+        $balances = collect($data['branches'])->pluck('net_interbranch_position', 'branch_name')->all();
         $this->assertSame([
             $this->branch->name => 150_000,
             'North Branch' => 30_000,
@@ -82,7 +87,7 @@ class InterbranchInTransitReportTest extends TestCase
         $data = $this->getJson('/api/interbranch-transfers/in-transit')->assertOk()->json('data');
         $this->assertCount(1, $data['transfers']);
         $this->assertSame(['South Branch'], array_column($data['branches'], 'branch_name'));
-        $this->assertSame(array_sum(array_column($data['branches'], 'clearing_balance')), $data['total_clearing_balance']);
+        $this->assertSame(array_sum(array_column($data['branches'], 'net_interbranch_position')), $data['total_clearing_balance']);
         $this->assertNull($data['difference']);
 
         $nobody = User::factory()->inBranches($this->south)->create();
@@ -103,6 +108,18 @@ class InterbranchInTransitReportTest extends TestCase
             'end_date' => now()->endOfMonth()->toDateString(),
             'statement_balance' => 12_345,
         ]);
+        // South's older month didn't reconcile, but its latest one did: only
+        // the latest reconciliation of each branch and account counts.
+        foreach ([[now()->subMonths(2), 99_999], [now()->subMonth(), 0]] as [$month, $statement]) {
+            AccountingReconciliation::create([
+                'accounting_account_id' => $this->account('1010'),
+                'branch_id' => $this->south->id,
+                'period' => $month->format('Y-m'),
+                'start_date' => $month->copy()->startOfMonth()->toDateString(),
+                'end_date' => $month->copy()->endOfMonth()->toDateString(),
+                'statement_balance' => $statement,
+            ]);
+        }
 
         $this->actingAs($this->admin);
         $this->getJson('/api/branch-counts')->assertOk()->assertExactJson(['data' => [
@@ -140,9 +157,9 @@ class InterbranchInTransitReportTest extends TestCase
 
         $this->postJson("/api/branches/{$this->south->id}/closure", ['effective_on' => now()->toDateString(), 'reason' => 'x'])
             ->assertUnprocessable()
-            ->assertJsonPath('errors.branch.0', "This branch can't be closed yet: 1 pending approval or request, 1 transfer in transit and 1 assigned user.");
+            ->assertJsonPath('errors.branch.0', "This branch can't be closed yet: 1 pending approval or request, 1 transfer in transit and 2 assigned users.");
 
-        $this->actingAs($this->checker);
+        $this->actingAs($this->receiver);
         $this->money("/api/interbranch-transfers/{$id}/receive")->assertOk();
         $this->actingAs($this->admin);
         $checklist = collect($this->getJson("/api/branches/{$this->south->id}/closure")->json('data.checklist'))->keyBy('key');
