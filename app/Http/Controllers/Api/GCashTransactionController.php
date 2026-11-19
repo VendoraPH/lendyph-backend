@@ -7,6 +7,7 @@ use App\Http\Requests\GCash\PreviewGCashTransactionRequest;
 use App\Http\Requests\GCash\StoreGCashTransactionRequest;
 use App\Http\Resources\GCashTransactionResource;
 use App\Models\GCashTransaction;
+use App\Services\Branches\MemberLock;
 use App\Services\GCashService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -130,7 +131,7 @@ class GCashTransactionController extends Controller
     )]
     public function store(StoreGCashTransactionRequest $request): JsonResponse
     {
-        $tx = $this->gcash->createTransaction($request->validated(), $request->user());
+        $tx = MemberLock::whileHeld($request->validated('borrower_id'), fn (): GCashTransaction => $this->gcash->createTransaction($request->validated(), $request->user()));
         $tx->load(['borrower', 'nonMember', 'transactor']);
 
         return (new GCashTransactionResource($tx))

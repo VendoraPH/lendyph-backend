@@ -13,6 +13,7 @@ use App\Models\Borrower;
 use App\Models\SavingsProduct;
 use App\Models\TimeDeposit;
 use App\Services\BranchAccess;
+use App\Services\Branches\MemberLock;
 use App\Services\Savings\IdempotentWrite;
 use App\Services\Savings\SavingsMath;
 use App\Services\Savings\TimeDeposits\Placement;
@@ -189,11 +190,11 @@ class SavingsTimeDepositController extends Controller
         $data = $request->validated();
         $user = $request->user();
 
-        return $this->idempotent->run($request, function () use ($placement, $data, $user): JsonResponse {
+        return MemberLock::whileHeld($data['borrower_id'], fn (): JsonResponse => $this->idempotent->run($request, function () use ($placement, $data, $user): JsonResponse {
             $deposit = $placement->place($data, $user);
 
             return response()->json(['success' => true, 'data' => $this->presenter->present($deposit->fresh())], 201);
-        });
+        }));
     }
 
     #[OA\Post(

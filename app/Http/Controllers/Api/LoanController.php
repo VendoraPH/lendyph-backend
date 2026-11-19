@@ -28,6 +28,7 @@ use App\Models\Loan;
 use App\Services\AmortizationBalanceService;
 use App\Services\AutoPayService;
 use App\Services\BranchAccess;
+use App\Services\Branches\MemberLock;
 use App\Services\CollateralAttacher;
 use App\Services\CollateralWriteTransaction;
 use App\Services\ContactVisibility;
@@ -613,7 +614,7 @@ DESC,
     )]
     public function store(StoreLoanRequest $request): JsonResponse
     {
-        $loan = $this->loanService->createLoan($request->validated(), $request->user());
+        $loan = MemberLock::whileHeld($request->validated('borrower_id'), fn (): Loan => $this->loanService->createLoan($request->validated(), $request->user()));
         $loan->load('borrower', 'loanProduct', 'branch', 'coMakers', 'createdByUser');
 
         return (new LoanResource($loan))

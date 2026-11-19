@@ -26,10 +26,12 @@ use Illuminate\Validation\ValidationException;
  * - a portal request still open;
  * - a GCash Cash In not yet paid (the new branch couldn't mark it paid).
  *
- * The check runs under the member's row lock and reads those records with
- * locking reads, so a loan or account written for the member at the same
- * moment is either seen (the transfer waits for it) or written after the move
- * (its creator then reads the new branch). The destination is read under a
+ * The transfer holds the member's branch lock (MemberLock), which loan
+ * creation, time deposit placement and member GCash creation also take, so
+ * none of those copies the old branch around a move. Inside it, the check
+ * runs under the member's row lock and reads those records with locking
+ * reads, so a record written for the member by any other path at the same
+ * moment is seen too (the transfer waits for it). The destination is read under a
  * shared lock: a suspended or closed branch can't receive a member (MB-BE1).
  *
  * The move writes one audit row on the member, naming both branches in words,
@@ -53,7 +55,7 @@ final class MemberTransfer
     /** @throws ValidationException */
     public function transfer(Borrower $borrower, int $toBranchId, string $reason): Borrower
     {
-        return DB::transaction(function () use ($borrower, $toBranchId, $reason): Borrower {
+        return MemberLock::whileHeld($borrower->getKey(), fn (): Borrower => DB::transaction(function () use ($borrower, $toBranchId, $reason): Borrower {
             /** @var Borrower $member */
             $member = Borrower::query()->whereKey($borrower->getKey())->lockForUpdate()->firstOrFail();
 
@@ -103,7 +105,7 @@ final class MemberTransfer
             );
 
             return $member;
-        });
+        }));
     }
 
     /**
