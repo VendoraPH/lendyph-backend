@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Models\AmlaProfile;
 use App\Models\Borrower;
 use App\Models\CsvImportRow;
 use App\Models\LindaQuestion;
@@ -42,6 +43,12 @@ class BorrowerPurgeService
 {
     public const HAS_PORTAL_ACCOUNT = 'This member has a member portal account, so the record can\'t be deleted. Turn off portal access instead.';
 
+    /**
+     * The refusal for a member whose records must be kept (AMLA design §4.17).
+     * Generic on purpose: it never says which records, so it tips nobody off.
+     */
+    public const RECORDS_KEPT = 'This member\'s records must be kept, so the record can\'t be deleted.';
+
     public function __construct(private readonly CsvImportRowRedactor $redactor) {}
 
     /**
@@ -64,6 +71,14 @@ class BorrowerPurgeService
         if (PortalUser::query()->where('borrower_id', $borrower->getKey())->exists()) {
             throw ValidationException::withMessages([
                 'borrower' => [self::HAS_PORTAL_ACCOUNT],
+            ]);
+        }
+
+        // AMLA records are kept forever and restrict the delete. Refused in
+        // words that don't say why, before anything is touched.
+        if (AmlaProfile::query()->where('borrower_id', $borrower->getKey())->exists()) {
+            throw ValidationException::withMessages([
+                'borrower' => [self::RECORDS_KEPT],
             ]);
         }
 

@@ -5,8 +5,10 @@ namespace App\Services\Amla\Foundation;
 use App\Models\AmlaCalendarEntry;
 use App\Models\AmlaCalendarYear;
 use App\Models\AmlaChangeRequest;
+use App\Models\AmlaRiskRuleVersion;
 use App\Models\AmlaSettingsVersion;
 use App\Models\User;
+use App\Services\Amla\Cdd\RiskRules;
 use Carbon\CarbonImmutable;
 use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\DB;
@@ -27,6 +29,7 @@ use Illuminate\Validation\ValidationException;
  * - calendar_remove: takes an entry out of force; its row stays.
  * - calendar_confirm_year: confirms a year's calendar, so its deadlines are
  *   no longer provisional.
+ * - risk_rules: the next AML risk rules version (AMLA-B4), still "to verify".
  *
  * Every step writes the AMLA log, never the main audit trail. Callers check
  * `amla:settings` and head-office access first (AmlaAccess).
@@ -39,6 +42,7 @@ final class ChangeRequests
         AmlaChangeRequest::CALENDAR_ADD => 'Add a calendar day',
         AmlaChangeRequest::CALENDAR_REMOVE => 'Remove a calendar day',
         AmlaChangeRequest::CALENDAR_CONFIRM_YEAR => 'Confirm a calendar year',
+        AmlaChangeRequest::RISK_RULES => 'AML risk rules',
     ];
 
     /** @var array<string, string> */
@@ -80,6 +84,7 @@ final class ChangeRequests
                 AmlaChangeRequest::CALENDAR_ADD => $this->calendarAddPayload($input),
                 AmlaChangeRequest::CALENDAR_REMOVE => $this->calendarRemovePayload($input),
                 AmlaChangeRequest::CALENDAR_CONFIRM_YEAR => $this->confirmYearPayload($input),
+                AmlaChangeRequest::RISK_RULES => $this->riskRulesPayload($input),
             };
 
             try {
@@ -120,6 +125,7 @@ final class ChangeRequests
                 AmlaChangeRequest::CALENDAR_ADD => $this->applyCalendarAdd($locked),
                 AmlaChangeRequest::CALENDAR_REMOVE => $this->applyCalendarRemove($locked),
                 AmlaChangeRequest::CALENDAR_CONFIRM_YEAR => $this->applyConfirmYear($locked),
+                AmlaChangeRequest::RISK_RULES => $this->applyRiskRules($locked, $checker),
             };
 
             $this->decide($locked, AmlaChangeRequest::APPROVED, $checker, $note);
@@ -174,6 +180,10 @@ final class ChangeRequests
             AmlaChangeRequest::CALENDAR_ADD => sprintf('Add %s (%s) on %s', $payload['name'], AmlaCalendarEntry::KINDS[$payload['kind']] ?? $payload['kind'], self::dateWords($payload['date'])),
             AmlaChangeRequest::CALENDAR_REMOVE => sprintf('Remove %s (%s) on %s', $payload['name'], AmlaCalendarEntry::KINDS[$payload['kind']] ?? $payload['kind'], self::dateWords($payload['date'])),
             AmlaChangeRequest::CALENDAR_CONFIRM_YEAR => "Confirm the {$payload['year']} AMLA calendar",
+            AmlaChangeRequest::RISK_RULES => 'AMLA risk rules: '.implode(', ', array_map(
+                fn (string $section) => str_replace('_', ' ', $section),
+                (array) ($payload['changed_sections'] ?? []),
+            )),
             default => $request->type,
         };
     }
@@ -330,6 +340,32 @@ final class ChangeRequests
         return [['year' => $year], $key, $duplicate];
     }
 
+    /**
+     * A new risk rules version (AMLA-B4), built on the version current when
+     * asked for. The definition is checked by the request (RiskRules).
+     *
+     * @param  array<string, mixed>  $input
+     * @return array{0: array<string, mixed>, 1: string, 2: ValidationException}
+     */
+    private function riskRulesPayload(array $input): array
+    {
+        $duplicate = ValidationException::withMessages(['definition' => 'A change to the AMLA risk rules is already waiting for approval.']);
+
+        if (AmlaChangeRequest::query()->where('pending_key', AmlaChangeRequest::RISK_RULES)->exists()) {
+            throw $duplicate;
+        }
+
+        $current = app(RiskRules::class)->current();
+        $definition = RiskRules::normalise((array) $input['definition']);
+        $changed = RiskRules::changedSections(RiskRules::normalise($current->definition), $definition);
+
+        if ($changed === []) {
+            throw ValidationException::withMessages(['definition' => 'This changes nothing in the current AMLA risk rules.']);
+        }
+
+        return [['base_version' => $current->version, 'definition' => $definition, 'changed_sections' => $changed], AmlaChangeRequest::RISK_RULES, $duplicate];
+    }
+
     /** The request, re-read under a row lock; 409 unless it is still pending. */
     private function lockPending(AmlaChangeRequest $request): AmlaChangeRequest
     {
@@ -438,6 +474,34 @@ final class ChangeRequests
         }
 
         return ['calendar_year' => $confirmed->year];
+    }
+
+    /** @return array<string, mixed> what the log records as applied */
+    private function applyRiskRules(AmlaChangeRequest $request, User $checker): array
+    {
+        $payload = $request->payload;
+        $stale = 'The AMLA risk rules changed after this was asked for. Reject it and ask again from the current rules.';
+        $latest = AmlaRiskRuleVersion::query()->orderByDesc('version')->lockForUpdate()->firstOrFail();
+
+        abort_unless($latest->version === (int) $payload['base_version'], 409, $stale);
+
+        try {
+            $version = AmlaRiskRuleVersion::query()->create([
+                'version' => $latest->version + 1,
+                'definition' => RiskRules::normalise($payload['definition']),
+                'to_verify' => true,
+                'effective_at' => now(),
+                'request_id' => $request->id,
+                'created_by' => $request->requested_by,
+                'approved_by' => $checker->id,
+            ]);
+        } catch (QueryException $exception) {
+            abort_if($this->isDuplicate($exception), 409, $stale);
+
+            throw $exception;
+        }
+
+        return ['risk_rule_version' => $version->version, 'changed_sections' => $payload['changed_sections'] ?? []];
     }
 
     private function isDuplicate(QueryException $exception): bool

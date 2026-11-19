@@ -47,6 +47,8 @@ class AmlaAccessTest extends TestCase
             'change requests' => ['GET', '/api/amla/change-requests', ['amla:settings'], true],
             'ask for a change' => ['POST', '/api/amla/change-requests', ['amla:settings'], true],
             'log' => ['GET', '/api/amla/log', ['amla:audit'], true],
+            'cdd worklist' => ['GET', '/api/amla/cdd/subjects', ['amla:cdd'], false],
+            'risk rules' => ['GET', '/api/amla/risk-rules', ['amla:cdd', 'amla:settings', 'amla:audit'], true],
         ];
     }
 
@@ -87,6 +89,11 @@ class AmlaAccessTest extends TestCase
             'POST api/amla/change-requests/{id}/approve',
             'POST api/amla/change-requests/{id}/reject',
             'POST api/amla/change-requests/{id}/withdraw',
+            'GET api/amla/cdd/{subjectType}/{id}',
+            'PUT api/amla/cdd/{subjectType}/{id}',
+            'POST api/amla/cdd/{subjectType}/{id}/id-verifications',
+            'POST api/amla/cdd/{subjectType}/{id}/risk-assessments',
+            'POST api/amla/cdd/{subjectType}/{id}/reviews',
         ];
 
         $routes = collect(Route::getRoutes()->getRoutes())
@@ -148,6 +155,25 @@ class AmlaAccessTest extends TestCase
 
             foreach (['approve' => [], 'reject' => ['note' => 'x'], 'withdraw' => []] as $action => $body) {
                 $this->actingAs($outsider)->postJson("/api/amla/change-requests/{$probe}/{$action}", $body)->assertForbidden();
+            }
+        }
+    }
+
+    public function test_change_request_ids_are_bounded_so_an_oversized_id_never_reaches_the_controller(): void
+    {
+        $holder = $this->settingsHolder();
+
+        $this->actingAs($holder)->getJson('/api/amla/change-requests/123456789012345678')->assertNotFound();
+
+        foreach (['', '/approve', '/reject', '/withdraw'] as $suffix) {
+            $method = $suffix === '' ? 'GET' : 'POST';
+            $this->actingAs($holder)->json($method, '/api/amla/change-requests/12345678901234567890'.$suffix, ['note' => 'x'])->assertNotFound();
+            $this->actingAs($holder)->json($method, '/api/amla/change-requests/1234567890123456789'.$suffix, ['note' => 'x'])->assertNotFound();
+        }
+
+        foreach (Route::getRoutes()->getRoutes() as $route) {
+            if (str_starts_with($route->uri(), 'api/amla') && str_contains($route->uri(), '{id}')) {
+                $this->assertSame('[0-9]{1,18}', $route->wheres['id'] ?? null, $route->uri());
             }
         }
     }

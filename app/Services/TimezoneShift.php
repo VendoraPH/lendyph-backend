@@ -319,6 +319,14 @@ class TimezoneShift
         'amla_change_requests' => ['created_at', 'decided_at', 'updated_at'],
         'amla_log_entries' => ['created_at'],
         'amla_settings_versions' => ['created_at', 'effective_at'],
+        // Added 2026-11-20 with AMLA CDD and risk (AMLA-B4), for the same
+        // reason. Review and expiry dates are DATEs.
+        'amla_id_verifications' => ['created_at'],
+        'amla_profile_changes' => ['created_at'],
+        'amla_profiles' => ['created_at', 'edd_required_since', 'updated_at'],
+        'amla_reviews' => ['created_at'],
+        'amla_risk_assessments' => ['created_at'],
+        'amla_risk_rule_versions' => ['created_at', 'effective_at'],
         // A column added to a table the shift covers. Listed here, not in
         // COLUMNS, because it was added after the one-shot shift ran, and
         // because the shift reads COLUMNS on a fresh database before this
