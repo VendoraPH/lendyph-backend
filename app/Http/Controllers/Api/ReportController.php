@@ -15,6 +15,7 @@ use App\Services\BranchAccess;
 use App\Services\ContactVisibility;
 use App\Services\ReportService;
 use Carbon\Carbon;
+use Illuminate\Auth\Access\AuthorizationException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
 use Illuminate\Http\Resources\Json\JsonResource;
@@ -26,6 +27,8 @@ use Symfony\Component\HttpFoundation\StreamedResponse;
 class ReportController extends Controller
 {
     use CsvExportTrait;
+
+    public const SHARE_CAPITAL_REFUSAL = 'The Share Capital report shows members\' share capital, so it needs the permission to view share capital as well as the permission to view reports.';
 
     public function __construct(private ReportService $reportService) {}
 
@@ -741,7 +744,7 @@ class ReportController extends Controller
     #[OA\Get(
         path: '/api/reports/share-capital',
         summary: 'Share Capital Report',
-        description: 'Opening balance, period credits and debits, closing balance, monthly movement, per-member holdings and subscription totals. Omit date_from to report from inception. `by_member` requires the reports:export permission; without it the field is null and `by_member_omitted` explains why, while every aggregate figure is unchanged.',
+        description: 'Opening balance, period credits and debits, closing balance, monthly movement, per-member holdings and subscription totals. Omit date_from to report from inception. Needs reports:view and share_capital:view (Phase 6 decision 10); without share_capital:view it answers 403 in words. `by_member` also requires the reports:export permission; without it the field is null and `by_member_omitted` explains why, while every aggregate figure is unchanged.',
         tags: ['Reports'],
         security: [['sanctum' => []]],
         parameters: [
@@ -750,11 +753,21 @@ class ReportController extends Controller
             new OA\Parameter(name: 'as_of_date', in: 'query', required: false, description: 'Legacy as-of parameter; superseded by date_to.', schema: new OA\Schema(type: 'string', format: 'date')),
             new OA\Parameter(name: 'branch_id', in: 'query', required: false, description: 'The ledger has no branch column, so this filters on the member\'s branch.', schema: new OA\Schema(type: 'integer')),
         ],
-        responses: [new OA\Response(response: 200, description: 'Share capital movement and balances')],
+        responses: [
+            new OA\Response(response: 200, description: 'Share capital movement and balances'),
+            new OA\Response(response: 403, description: 'Missing reports:view or share_capital:view'),
+        ],
     )]
     public function shareCapital(): JsonResponse
     {
         $this->authorize('reports:view');
+
+        // Decision 10: every figure here is members' share capital, so the
+        // totals and the roster both need `share_capital:view`, as
+        // GET /share-capital/ledger does. Withholding them would leave nothing.
+        if (! request()->user()?->can('share_capital:view')) {
+            throw new AuthorizationException(self::SHARE_CAPITAL_REFUSAL);
+        }
 
         // `by_member` is the whole membership roster with each member's
         // balance. `reports:view` is held by every seeded role, so gate the

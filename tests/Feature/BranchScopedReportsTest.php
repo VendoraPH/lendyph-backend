@@ -2,6 +2,7 @@
 
 namespace Tests\Feature;
 
+use App\Http\Requests\Branch\UpdateBranchRequest;
 use App\Models\AuditLog;
 use App\Models\Branch;
 use App\Models\GCashNonMember;
@@ -491,8 +492,12 @@ class BranchScopedReportsTest extends TestCase
 
         $this->assertSame('Far Branch', $this->far->fresh()->name);
 
+        // Their own branch is visible but, without branches:view_all, not
+        // editable (Phase 6 D3): 403 in words, never 404.
         $this->actingAs($editor);
-        $this->putJson("/api/branches/{$this->branch->id}", ['address' => 'New address'])->assertOk();
+        $this->putJson("/api/branches/{$this->branch->id}", ['address' => 'New address'])
+            ->assertForbidden()
+            ->assertJsonPath('message', UpdateBranchRequest::COMPANY_WIDE_REFUSAL);
 
         $this->actingAs($this->admin);
         $this->putJson("/api/branches/{$this->far->id}", ['name' => 'Far Branch (HQ edit)'])->assertOk();
@@ -566,6 +571,8 @@ class BranchScopedReportsTest extends TestCase
             'reports:view', 'reports:export', 'dashboard:view', 'payments:view',
             'accounting:view', 'audit_logs:view', 'audit_logs:export', 'gcash:view',
             'loans:view', 'borrowers:view', 'chart_of_accounts:view', 'cash_accounts:view',
+            // The Share Capital report needs it (Phase 6 decision 10).
+            'share_capital:view',
         ]);
 
         return $role;

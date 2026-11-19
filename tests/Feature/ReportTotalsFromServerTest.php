@@ -270,7 +270,9 @@ class ReportTotalsFromServerTest extends TestCase
     public function test_share_capital_member_totals_are_withheld_with_the_members(): void
     {
         $collector = User::factory()->create(['branch_id' => $this->north->id]);
-        $collector->givePermissionTo('reports:view');
+        // Decision 10: the report itself needs share_capital:view; the roster
+        // still follows reports:export.
+        $collector->givePermissionTo(['reports:view', 'share_capital:view']);
         $this->actingAs($collector);
 
         $data = $this->getJson('/api/reports/share-capital?date_from=2026-08-01&date_to=2026-09-30')->assertOk()->json('data');

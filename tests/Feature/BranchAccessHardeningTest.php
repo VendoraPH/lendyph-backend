@@ -479,7 +479,7 @@ class BranchAccessHardeningTest extends TestCase
 
             $this->putJson("/api/borrowers/{$member->id}", ['branch_id' => $second->id])
                 ->assertUnprocessable()
-                ->assertJsonValidationErrors(['branch_id' => "Close or move this member's open loans first."]);
+                ->assertJsonValidationErrors(['branch_id' => "This member can't move to another branch while they have 1 loan application not yet released. Loans, savings and time deposits stay in the branch where they were opened, so the member keeps that branch until these are closed."]);
         }
 
         $closed = Borrower::factory()->create(['branch_id' => $this->branch->id]);
@@ -496,7 +496,7 @@ class BranchAccessHardeningTest extends TestCase
 
         $this->putJson("/api/borrowers/{$loan->borrower_id}", ['branch_id' => $second->id])
             ->assertUnprocessable()
-            ->assertJsonValidationErrors(['branch_id' => "Close or move this member's open loans first."]);
+            ->assertJsonValidationErrors(['branch_id' => "This member can't move to another branch while they have 1 loan still being paid. Loans, savings and time deposits stay in the branch where they were opened, so the member keeps that branch until these are closed."]);
 
         $idle = Borrower::factory()->create(['branch_id' => $this->branch->id]);
         $this->putJson("/api/borrowers/{$idle->id}", ['branch_id' => $second->id])->assertOk();
