@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Api\Traits\RespondsWithValidIds;
 use App\Http\Controllers\Controller;
+use App\Http\Requests\Borrower\ApproveRegistrationRequest;
 use App\Http\Requests\Borrower\RejectBorrowerRequest;
 use App\Http\Requests\Borrower\StoreBorrowerRequest;
 use App\Http\Requests\Borrower\UpdateBorrowerRequest;
@@ -628,22 +629,31 @@ Approve a borrower whose status is `pending` (public-registration review).
 - The share-capital pledge and `borrower_code` are already created at submission time, so no extra setup runs here.
 - Requires at least one valid ID (`type=valid_id` document) on file — returns 422 otherwise.
 - Returns 422 if the borrower is not currently `pending`. Use `/reactivate` to re-activate a previously-active member — keeping the two distinct preserves the audit distinction between "approved an application" and "reactivated a member".
+- `branch_id` (optional): the member's branch, one of the caller's (any branch with `branches:view_all`). Required (422) when the registration has no branch; when it already has one, it may only repeat it (422 otherwise), so approval never moves a member.
 DESC,
         tags: ['Borrowers'],
         security: [['sanctum' => []]],
         parameters: [
             new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer')),
         ],
+        requestBody: new OA\RequestBody(
+            required: false,
+            content: new OA\JsonContent(
+                properties: [
+                    new OA\Property(property: 'branch_id', type: 'integer', nullable: true, description: 'The member\'s branch, one of the caller\'s. Required when the registration has none; otherwise it must repeat the registration\'s branch.'),
+                ],
+            ),
+        ),
         responses: [
             new OA\Response(response: 200, description: 'Registration approved; updated borrower returned'),
             new OA\Response(response: 401, description: 'Unauthenticated'),
             new OA\Response(response: 403, description: 'Forbidden'),
-            new OA\Response(response: 422, description: 'Borrower is not in pending status, or has no valid ID on file'),
+            new OA\Response(response: 404, description: 'Not found, or in a branch the caller can\'t see'),
+            new OA\Response(response: 422, description: 'Borrower is not in pending status, has no valid ID on file, has no branch and none was chosen, or the chosen branch isn\'t the caller\'s or differs from the registration\'s'),
         ],
     )]
-    public function approveRegistration(Request $request, Borrower $borrower): BorrowerResource
+    public function approveRegistration(ApproveRegistrationRequest $request, Borrower $borrower): BorrowerResource
     {
-        $this->authorize('borrowers:approve');
 
         if ($borrower->status !== 'pending') {
             throw ValidationException::withMessages([
@@ -660,9 +670,27 @@ DESC,
             ]);
         }
 
+        // Phase 6 FX-1 (D7): a member always leaves review with a branch. A
+        // registration with none takes the reviewer's pick; one that has a
+        // branch keeps it, since approval is not a member move.
+        $branchId = $request->validated('branch_id');
+
+        if ($borrower->branch_id === null && $branchId === null) {
+            throw ValidationException::withMessages([
+                'branch_id' => 'Choose the branch this member belongs to before approving the registration.',
+            ]);
+        }
+
+        if ($borrower->branch_id !== null && $branchId !== null && (int) $branchId !== (int) $borrower->branch_id) {
+            throw ValidationException::withMessages([
+                'branch_id' => 'This registration already belongs to '.($borrower->branch?->name ?? 'another branch').'. Approve it there; moving a member is done from the member\'s record.',
+            ]);
+        }
+
         // Approval makes the applicant a member today (CDA design §1): the
         // membership date and number, where neither is set yet.
         $borrower->update([
+            'branch_id' => $borrower->branch_id ?? (int) $branchId,
             'status' => 'active',
             'approved_by' => $request->user()->id,
             'approved_at' => now(),

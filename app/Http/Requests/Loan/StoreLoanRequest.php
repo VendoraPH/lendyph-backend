@@ -6,6 +6,7 @@ use App\Enums\LoanFrequency;
 use App\Http\Requests\Concerns\ExcludesRejectedBorrowers;
 use App\Http\Requests\Concerns\RequiresActiveAccountOfficer;
 use App\Http\Requests\Concerns\ValidatesDeductionAmounts;
+use App\Rules\MemberHasBranch;
 use App\Rules\NotAFormerMember;
 use Illuminate\Foundation\Http\FormRequest;
 
@@ -21,7 +22,7 @@ class StoreLoanRequest extends FormRequest
     public function rules(): array
     {
         return [
-            'borrower_id' => ['required', $this->nonRejectedBorrowerRule(), new NotAFormerMember],
+            'borrower_id' => ['required', $this->nonRejectedBorrowerRule(), new NotAFormerMember, new MemberHasBranch],
             'co_maker_ids' => ['nullable', 'array'],
             // MEMBER ids only — all the loan form's co-maker picker sends —
             // never a co-maker record id: the two are separate sequences, so a

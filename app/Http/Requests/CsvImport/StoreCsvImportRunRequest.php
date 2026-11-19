@@ -2,8 +2,10 @@
 
 namespace App\Http\Requests\CsvImport;
 
+use App\Services\BranchAccess;
 use App\Services\CsvImport\CsvImportUploadService;
 use Illuminate\Foundation\Http\FormRequest;
+use Illuminate\Validation\Rule;
 
 /**
  * Opening a CSV migration run: what the client is about to send, declared up
@@ -65,8 +67,16 @@ class StoreCsvImportRunRequest extends FormRequest
              * created the members. There is no per-row answer available either:
              * a legacy export has no concept of this system's branches, so the
              * admin answers once, here, before anything is written.
+             *
+             * One of the caller's own branches (Phase 6 FX-1, D8), like every
+             * other field that places members or loans in a branch; any branch
+             * with `branches:view_all`.
              */
-            'branch_id' => ['required', 'integer', 'exists:branches,id'],
+            'branch_id' => [
+                'required',
+                'integer',
+                app(BranchAccess::class)->constrainBranchExists(Rule::exists('branches', 'id'), $this->user()),
+            ],
 
             /**
              * The date the extract represents, not the date it was uploaded.
@@ -96,6 +106,7 @@ class StoreCsvImportRunRequest extends FormRequest
 
         return [
             'branch_id.required' => 'Choose the branch these members and loans belong to. Every imported loan needs one, and the file cannot supply it.',
+            'branch_id.exists' => 'Choose one of your own branches for this import.',
             'files.*.size_bytes.max' => "That file is larger than the {$maxMb} MB import limit.",
             'files.*.sha256.regex' => 'Each file needs a SHA-256 digest as 64 hexadecimal characters.',
             'as_of_date.before_or_equal' => 'The as-of date is the date the extract was taken; it cannot be in the future.',
