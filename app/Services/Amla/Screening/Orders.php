@@ -27,8 +27,11 @@ use Illuminate\Validation\ValidationException;
  * holder asks, a different one approves (AmlaOrderReleaseRequest), and only
  * that approval releases the holds. Nothing is placed or released by itself.
  *
- * Accounts are locked in id order, as every savings write does, and the
- * whole order is one transaction: a hold that doesn't fit refuses the order.
+ * Accounts are locked in id order before the order row, as every savings
+ * write and a payout into savings do, and the whole order is one
+ * transaction: a hold that doesn't fit refuses the order. Each legal order
+ * freezes independently: its holds stack on every other hold, other
+ * orders' included.
  */
 final class Orders
 {
@@ -61,6 +64,9 @@ final class Orders
         $holds = collect($input['holds'])->sortBy(fn (array $hold) => (int) $hold['account_id'])->values();
 
         return DB::transaction(function () use ($user, $input, $memberId, $holds) {
+            // The accounts first, in id order, then the order row: the lock order a payout into savings uses.
+            $this->locks->accounts($holds->pluck('account_id')->map(fn ($id) => (int) $id)->unique()->values());
+
             $order = AmlaOrder::query()->create([
                 'reference' => trim($input['reference']),
                 'authority' => $input['authority'],
@@ -153,13 +159,28 @@ final class Orders
     public function approveReleaseLocked(User $checker, int $orderId, ?string $note): AmlaOrder
     {
         return DB::transaction(function () use ($checker, $orderId, $note) {
-            $this->locks->accounts(AmlaOrderHold::query()->where('order_id', $orderId)->pluck('account_id')->unique()->sort()->values());
+            $lockedAccounts = AmlaOrderHold::query()->where('order_id', $orderId)->pluck('account_id')->map(fn ($id) => (int) $id)->unique()->sort()->values();
+            $this->locks->accounts($lockedAccounts);
             $order = $this->lockedActive($orderId);
             $request = $this->lockedWaiting($order);
 
             abort_if($request->requested_by === $checker->id, 403, self::ASKER_CANNOT_APPROVE);
 
-            foreach (AmlaOrderHold::query()->where('order_id', $order->id)->orderBy('account_id')->orderBy('id')->get() as $link) {
+            /*
+             * Re-read the links under the order lock: a payout that linked a
+             * new hold between the first read and the lock is seen here. If it
+             * names an account this release didn't lock first, stop with 409
+             * rather than leave that hold behind or lock out of order.
+             */
+            $links = AmlaOrderHold::query()->where('order_id', $order->id)->orderBy('account_id')->orderBy('id')->lockForUpdate()->get();
+
+            abort_if(
+                $links->pluck('account_id')->map(fn ($id) => (int) $id)->diff($lockedAccounts)->isNotEmpty(),
+                409,
+                'The order\'s holds changed while it was being released. Approve it again.',
+            );
+
+            foreach ($links as $link) {
                 $hold = SavingsHold::query()->find($link->savings_hold_id);
 
                 if ($hold !== null && $hold->status === SavingsHold::STATUS_ACTIVE) {

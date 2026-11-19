@@ -146,4 +146,21 @@ class AmlaOrderTimeDepositTest extends TestCase
 
         return $hold;
     }
+
+    public function test_a_payout_into_savings_under_two_orders_is_held_for_each(): void
+    {
+        $savings = $this->savingsAccount();
+        $first = $this->underOrder();
+        $second = $this->underOrder();
+        Carbon::setTestNow(Carbon::parse('2027-02-08 10:00:00', 'Asia/Manila'));
+
+        $this->idem("/api/savings/time-deposits/{$this->deposit->id}/settle", [
+            'date' => '2027-02-08', 'action' => 'payout', 'payout_method' => 'savings', 'payout_account_id' => $savings->id,
+        ])->assertSuccessful();
+
+        $credited = (string) $this->deposit->fresh()->settled_amount;
+        $links = AmlaOrderHold::query()->where('account_id', $savings->id)->orderBy('order_id')->get();
+        $this->assertSame([$first, $second], $links->pluck('order_id')->all());
+        $this->assertSame([$credited, $credited], $links->map(fn (AmlaOrderHold $link) => (string) $link->amount)->all());
+    }
 }

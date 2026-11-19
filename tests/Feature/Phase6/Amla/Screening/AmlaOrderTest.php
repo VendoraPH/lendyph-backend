@@ -11,6 +11,7 @@ use App\Models\Borrower;
 use App\Models\SavingsAccount;
 use App\Models\SavingsHold;
 use App\Models\User;
+use App\Services\Accounting\ChartOfAccountsSeeder;
 use App\Services\Amla\Screening\Orders;
 use App\Services\Savings\AvailableBalance;
 use Illuminate\Support\Carbon;
@@ -231,8 +232,9 @@ class AmlaOrderTest extends TestCase
         ]);
 
         $this->place(['holds' => [['account_id' => $this->account->id, 'amount' => '80000.00']]])->assertCreated();
-        $this->place(['holds' => [['account_id' => $this->account->id, 'amount' => '0.01']]])->assertUnprocessable()
-            ->assertJsonPath('errors.amount.0', '₱0.01 is more than the ₱0.00 on '.$this->account->account_number.' not already held by another legal order.');
+        $this->place(['holds' => [['account_id' => $this->account->id, 'amount' => '80000.00']]])->assertCreated();
+        $this->place(['holds' => [['account_id' => $this->account->id, 'amount' => '80000.01']]])->assertUnprocessable()
+            ->assertJsonPath('errors.amount.0', '₱80,000.01 is more than the ₱80,000.00 balance of '.$this->account->account_number.'.');
 
         $this->actingAs($this->admin)->postJson("/api/savings/holds/{$staff->id}/release", ['reason' => 'Done'])->assertOk();
         $this->assertSame(0, app(AvailableBalance::class)->for($this->account->fresh()));
@@ -240,7 +242,7 @@ class AmlaOrderTest extends TestCase
         Carbon::setTestNow('2026-11-27 01:00:00');
         Artisan::call('savings:expire');
         $this->assertSame(0, app(AvailableBalance::class)->for($this->account->fresh()));
-        $this->assertSame(1, SavingsHold::query()->where('status', 'active')->count());
+        $this->assertSame(2, SavingsHold::query()->where('status', 'active')->count(), 'each order freezes independently');
     }
 
     public function test_a_teller_withdrawal_and_an_account_close_leave_the_orders_money_held(): void
@@ -289,5 +291,31 @@ class AmlaOrderTest extends TestCase
             $this->assertSame(403, $refused->getStatusCode());
             $this->assertSame('active', AmlaOrder::query()->findOrFail($id)->status);
         }
+    }
+
+    public function test_each_order_freezes_independently_so_lifting_one_leaves_the_other_holding(): void
+    {
+        app(ChartOfAccountsSeeder::class)->seed($this->admin->id, 'cooperative');
+        $older = $this->place(['holds' => [['account_id' => $this->account->id, 'amount' => '75000.00']]])->assertCreated()->json('data.id');
+        $newer = $this->place(['reference' => 'Court order 12', 'holds' => [['account_id' => $this->account->id, 'amount' => '75000.00']]])->assertCreated()->json('data.id');
+        $withdraw = fn () => $this->actingAs($this->admin)->postJson("/api/savings/accounts/{$this->account->id}/withdrawals", [
+            'amount' => '10000.00', 'date' => '2026-11-21', 'payment_method' => 'cash',
+        ], ['Idempotency-Key' => (string) Str::uuid()]);
+
+        $withdraw()->assertUnprocessable()->assertJsonValidationErrors(['amount']);
+
+        $this->lift($older);
+        $this->assertSame(500_000, app(AvailableBalance::class)->for($this->account->fresh()), 'the newer order still holds ₱75,000.00 of ₱80,000.00');
+        $withdraw()->assertUnprocessable()->assertJsonValidationErrors(['amount']);
+
+        $this->lift($newer);
+        $withdraw()->assertSuccessful();
+        $this->assertSame('70000.00', $this->account->fresh()->ledger_balance);
+    }
+
+    private function lift(int $id): void
+    {
+        $this->actingAs($this->officer)->postJson("/api/amla/orders/{$id}/release", ['reason' => 'Lifted.', 'release_reference' => "R-{$id}"])->assertStatus(202);
+        $this->actingAs($this->sanctionsOfficer())->postJson("/api/amla/orders/{$id}/release/approve")->assertOk();
     }
 }

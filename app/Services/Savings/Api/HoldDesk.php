@@ -97,12 +97,13 @@ class HoldDesk
      * that order's release lifts it. The caller runs it inside the order's
      * transaction.
      *
-     * Order holds stack on top of every other hold (AMLA-B5 review): only
-     * other legal orders' holds count against the balance, so an order can be
-     * recorded over money a staff hold or a member's withdrawal request
-     * already reserves, and that money stays held when the other hold is
-     * released or expires. The available balance floors at ₱0.00
-     * (AvailableBalance) while holds add up to more than the balance.
+     * Each legal order freezes independently (AMLA-B5 re-review): its holds
+     * stack on top of every other hold, other orders' included, up to the
+     * account's balance. So an order can be recorded over money a staff hold,
+     * a member's withdrawal request or another order already holds, and the
+     * money stays held when any of those is released or expires. The
+     * available balance floors at ₱0.00 (AvailableBalance) while holds add up
+     * to more than the balance.
      *
      * @throws ValidationException
      */
@@ -114,15 +115,13 @@ class HoldDesk
             Refuse::field('account', "{$account->account_number} is closed; nothing can be held on it.");
         }
 
-        $today = now()->toDateString();
-        $ordered = SavingsMath::centavos(SavingsHold::query()->where('account_id', $account->id)->holding($today)
-            ->whereIn('id', AmlaOrderHold::query()->select('savings_hold_id'))
-            ->sum('amount'));
-        $free = max(0, SavingsMath::signedCentavos($account->ledger_balance) - $ordered);
+        $balance = max(0, SavingsMath::signedCentavos($account->ledger_balance));
 
-        if ($centavos > $free) {
-            Refuse::field('amount', Refuse::peso($centavos).' is more than the '.Refuse::peso($free)." on {$account->account_number} not already held by another legal order.");
+        if ($centavos > $balance) {
+            Refuse::field('amount', Refuse::peso($centavos).' is more than the '.Refuse::peso($balance)." balance of {$account->account_number}.");
         }
+
+        $today = now()->toDateString();
 
         return SavingsHold::query()->create([
             'account_id' => $account->id,
