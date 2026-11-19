@@ -8,6 +8,7 @@ use App\Models\OriginationRuleRevision;
 use App\Models\OriginationSetting;
 use App\Models\User;
 use App\Services\LoanOrigination\Files\FileScanner;
+use App\Services\LoanOrigination\Files\MisconfiguredScanner;
 use App\Services\LoanOrigination\Files\NoScanner;
 use Brick\Math\BigDecimal;
 use Brick\Math\RoundingMode;
@@ -29,6 +30,8 @@ use Illuminate\Support\Facades\DB;
 final class OriginationSettings
 {
     public const SCANNER_NONE = 'Not scanned (no virus scanner is set up)';
+
+    public const SCANNER_MISCONFIGURED = 'Not set up correctly: uploads are refused until the server\'s virus scanner setting is fixed';
 
     private const THRESHOLDS = ['max_dti', 'min_coverage', 'min_remaining_income'];
 
@@ -86,7 +89,11 @@ final class OriginationSettings
                 'enabled' => $this->switch->enabled(),
                 'public_url' => $this->switch->publicUrl(),
                 'public_url_problem' => $this->switch->publicUrlProblem(),
-                'scanner' => $this->scanner instanceof NoScanner ? self::SCANNER_NONE : 'ClamAV',
+                'scanner' => match (true) {
+                    $this->scanner instanceof NoScanner => self::SCANNER_NONE,
+                    $this->scanner instanceof MisconfiguredScanner => self::SCANNER_MISCONFIGURED,
+                    default => 'ClamAV',
+                },
             ],
             'updated_by' => SavingsUserRef::from($settings->updater),
             'updated_at' => $settings->updated_at,

@@ -1,9 +1,13 @@
 <?php
 
+use App\Exceptions\OriginationStatusWriteException;
+use App\Models\Branch;
 use App\Models\OriginationApplication;
 use App\Models\OriginationStatusHistory;
+use App\Models\Role;
 use App\Models\User;
 use App\Services\LoanOrigination\ApplicationTransitions;
+use Illuminate\Auth\Access\AuthorizationException;
 use Illuminate\Http\Exceptions\HttpResponseException;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
@@ -22,9 +26,21 @@ function loTransitions(): ApplicationTransitions
     return app(ApplicationTransitions::class);
 }
 
+/** An application already at $status, set straight in the table as a fixture. */
 function loApplication(string $status): OriginationApplication
 {
-    return OriginationApplication::query()->create(['status' => $status]);
+    $application = OriginationApplication::query()->create();
+    DB::table('origination_applications')->where('id', $application->id)->update(['status' => $status]);
+
+    return $application->fresh();
+}
+
+function loStaff(string ...$permissions): User
+{
+    $role = Role::query()->create(['name' => 'spec-lo-t:'.uniqid(), 'guard_name' => 'web']);
+    $role->syncPermissions($permissions);
+
+    return tap(User::factory()->create(['branch_id' => Branch::query()->firstOrFail()->id]), fn (User $u) => $u->assignRole($role));
 }
 
 it('offers staff exactly the moves of the table, with withdrawal from any open status before the hand-off', function () {
@@ -61,6 +77,7 @@ it('names the permissions each staff move needs, rejecting with loans:reject too
     $t = loTransitions();
 
     expect($t->permissionsFor('rejected'))->toBe(['loan_origination:update', 'loans:reject'])
+        ->and($t->permissionsFor('pending_approval'))->toBe(['loan_origination:convert', 'loans:create'])
         ->and($t->permissionsFor('document_verification'))->toBe(['loan_origination:update'])
         ->and($t->permissionsFor('under_assessment'))->toBe(['loan_origination:update']);
 });
@@ -69,10 +86,11 @@ it('moves an application, writes a history row and stamps the decision time', fu
     $user = User::query()->where('username', 'super_admin')->firstOrFail();
     $application = loApplication('submitted');
 
-    $moved = loTransitions()->move($application, 'rejected', ApplicationTransitions::ACTOR_STAFF, $user, 'Income could not be verified.');
+    $moved = loTransitions()->move($application, 'rejected', ApplicationTransitions::ACTOR_STAFF, $user, 'Income could not be verified.', $application->version);
 
     expect($moved->status)->toBe('rejected')
-        ->and($moved->decided_at)->not->toBeNull();
+        ->and($moved->decided_at)->not->toBeNull()
+        ->and($moved->version)->toBe($application->version + 1);
 
     $history = OriginationStatusHistory::query()->where('application_id', $application->id)->sole();
 
@@ -94,7 +112,7 @@ it('refuses a move outside the table with 422 in words and writes nothing', func
     $application = loApplication('submitted');
 
     try {
-        loTransitions()->move($application, 'approved', ApplicationTransitions::ACTOR_STAFF);
+        loTransitions()->move($application, 'approved', ApplicationTransitions::ACTOR_STAFF, null, null, $application->version);
         $this->fail('The move was allowed.');
     } catch (ValidationException $e) {
         expect($e->errors()['to'][0])->toBe('A Submitted application can\'t be moved to Approved.');
@@ -109,7 +127,7 @@ it('answers 409 when the application moved since it was read', function () {
     DB::table('origination_applications')->where('id', $application->id)->update(['status' => 'document_verification']);
 
     try {
-        loTransitions()->move($application, 'rejected', ApplicationTransitions::ACTOR_STAFF);
+        loTransitions()->move($application, 'rejected', ApplicationTransitions::ACTOR_STAFF, loStaff('loan_origination:update', 'loans:reject'), null, $application->version);
         $this->fail('A stale move went through.');
     } catch (HttpResponseException $e) {
         expect($e->getResponse()->getStatusCode())->toBe(409)
@@ -127,4 +145,62 @@ it('reads every status in words', function () {
     foreach (OriginationApplication::STATUSES as $status) {
         expect(ApplicationTransitions::label($status))->not->toContain('_');
     }
+});
+
+it('answers 403 in words unless the staff member holds every permission the move needs', function () {
+    $application = loApplication('submitted');
+
+    foreach ([loStaff('loan_origination:update'), loStaff('loans:reject'), null] as $user) {
+        try {
+            loTransitions()->move($application, 'rejected', ApplicationTransitions::ACTOR_STAFF, $user, null, $application->version);
+            $this->fail('The move went through without its permissions.');
+        } catch (AuthorizationException $e) {
+            expect($e->getMessage())->toBe('Moving an application to Rejected needs the permission to update online applications and the permission to reject loans.');
+        }
+    }
+
+    $moved = loTransitions()->move($application, 'rejected', ApplicationTransitions::ACTOR_STAFF, loStaff('loan_origination:update', 'loans:reject'), null, $application->version);
+    expect($moved->status)->toBe('rejected');
+});
+
+it('needs a user holding the hand-off permissions for the hand-off', function () {
+    $application = loApplication('under_assessment');
+
+    expect(fn () => loTransitions()->move($application, 'pending_approval', ApplicationTransitions::ACTOR_HANDOFF, null, null, $application->version))
+        ->toThrow(AuthorizationException::class, 'Moving an application to For Approval needs the permission to hand applications off and the permission to create loans.')
+        ->and(fn () => loTransitions()->move($application, 'pending_approval', ApplicationTransitions::ACTOR_HANDOFF, loStaff('loan_origination:convert'), null, $application->version))
+        ->toThrow(AuthorizationException::class);
+
+    expect(loTransitions()->move($application, 'pending_approval', ApplicationTransitions::ACTOR_HANDOFF, loStaff('loan_origination:convert', 'loans:create'), null, $application->version)->status)
+        ->toBe('pending_approval');
+});
+
+it('catches a move made on a version the application has since left, even when its status came back', function () {
+    $user = loStaff('loan_origination:update');
+    $application = loApplication('document_verification');
+    $read = $application->version;
+
+    $other = loTransitions()->move($application, 'additional_info_required', ApplicationTransitions::ACTOR_STAFF, $user, null, $read);
+    loTransitions()->move($other, 'document_verification', ApplicationTransitions::ACTOR_STAFF, $user, null, $other->version);
+
+    try {
+        loTransitions()->move($application, 'under_assessment', ApplicationTransitions::ACTOR_STAFF, $user, null, $read);
+        $this->fail('A move on a stale version went through.');
+    } catch (HttpResponseException $e) {
+        expect($e->getResponse()->getStatusCode())->toBe(409);
+    }
+
+    expect($application->fresh()->status)->toBe('document_verification');
+});
+
+it('refuses a status written outside the transition table, by any model path', function () {
+    $application = loApplication('submitted');
+
+    expect(fn () => $application->forceFill(['status' => 'approved'])->save())->toThrow(OriginationStatusWriteException::class)
+        ->and(fn () => OriginationApplication::query()->whereKey($application->id)->update(['status' => 'approved']))->toThrow(OriginationStatusWriteException::class)
+        ->and(fn () => OriginationApplication::query()->create(['status' => 'approved'])->status)->not->toThrow(Throwable::class);
+
+    expect(OriginationApplication::query()->latest('id')->first()->status)->toBe('draft')
+        ->and($application->fresh()->status)->toBe('submitted')
+        ->and((new OriginationApplication)->isFillable('status'))->toBeFalse();
 });

@@ -21,7 +21,7 @@ afterEach(fn () => Carbon::setTestNow());
 
 function loSubmitted(string $at): OriginationApplication
 {
-    return OriginationApplication::query()->create(['status' => 'submitted', 'submitted_at' => Carbon::parse($at, 'Asia/Manila')]);
+    return OriginationApplication::query()->create(['submitted_at' => Carbon::parse($at, 'Asia/Manila')]);
 }
 
 it('numbers applications per submission year, six digits, starting at 1', function () {

@@ -13,13 +13,20 @@ final class ScannerUnavailableException extends RuntimeException
 {
     public const MESSAGE = 'Files can\'t be checked for viruses right now. Try again in a few minutes.';
 
-    public function __construct()
+    public const MISCONFIGURED = 'Files can\'t be accepted right now: the server\'s virus scanner setting isn\'t recognised. Ask your administrator to check it.';
+
+    public function __construct(string $message = self::MESSAGE)
     {
-        parent::__construct(self::MESSAGE);
+        parent::__construct($message);
+    }
+
+    public static function misconfigured(): self
+    {
+        return new self(self::MISCONFIGURED);
     }
 
     public function render(): JsonResponse
     {
-        return response()->json(['success' => false, 'message' => self::MESSAGE], 503);
+        return response()->json(['success' => false, 'message' => $this->getMessage()], 503);
     }
 }

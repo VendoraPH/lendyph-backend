@@ -1,5 +1,6 @@
 <?php
 
+use App\Exceptions\OriginationErasureRefusedException;
 use App\Exceptions\OriginationRecordIsAppendOnlyException;
 use App\Models\Branch;
 use App\Models\OriginationApplication;
@@ -65,7 +66,6 @@ it('seeds one settings row with online applications off and rule revision 1 with
 
 it('stores the draft, mobile and email encrypted and keeps a keyed hash of the mobile', function () {
     $application = OriginationApplication::query()->create([
-        'status' => 'draft',
         'applicant_name' => 'Juana Dela Cruz',
         'mobile' => '09171234567',
         'mobile_hash' => OriginationApplication::mobileHash('0917 123 4567'),
@@ -86,18 +86,18 @@ it('stores the draft, mobile and email encrypted and keeps a keyed hash of the m
 
 it('allows one open draft per mobile, and a new one once the earlier is submitted', function () {
     $hash = OriginationApplication::mobileHash('09171234567');
-    $first = OriginationApplication::query()->create(['status' => 'draft', 'mobile_hash' => $hash]);
+    $first = OriginationApplication::query()->create(['mobile_hash' => $hash]);
 
-    expect(fn () => OriginationApplication::query()->create(['status' => 'incomplete', 'mobile_hash' => $hash]))
+    expect(fn () => OriginationApplication::query()->create(['mobile_hash' => $hash]))
         ->toThrow(UniqueConstraintViolationException::class);
 
     DB::table('origination_applications')->where('id', $first->id)->update(['status' => 'submitted']);
 
-    expect(OriginationApplication::query()->create(['status' => 'draft', 'mobile_hash' => $hash])->exists)->toBeTrue();
+    expect(OriginationApplication::query()->create(['mobile_hash' => $hash])->exists)->toBeTrue();
 });
 
 it('refuses to change or delete notices, consents, notes, status history and rule revisions', function (string $model) {
-    $application = OriginationApplication::query()->create(['status' => 'draft']);
+    $application = OriginationApplication::query()->create();
     $user = User::query()->where('username', 'super_admin')->firstOrFail();
 
     $row = match ($model) {
@@ -135,10 +135,48 @@ it('files the origination records under their own Audit Trail module', function 
 
 it('keeps an application with no branch out of a branch user\'s reach', function () {
     $branch = Branch::query()->firstOrFail();
-    $mine = OriginationApplication::query()->create(['status' => 'submitted', 'branch_id' => $branch->id]);
-    $none = OriginationApplication::query()->create(['status' => 'submitted']);
+    $mine = OriginationApplication::query()->create(['branch_id' => $branch->id]);
+    $none = OriginationApplication::query()->create();
 
     $user = User::factory()->create(['branch_id' => $branch->id]);
 
     expect(OriginationApplication::query()->visibleTo($user)->pluck('id')->all())->toContain($mine->id)->not->toContain($none->id);
+});
+
+it('keys the mobile hash with its own key, derived from the app key, never the app key itself', function () {
+    $raw = (string) config('app.key');
+    $bytes = str_starts_with($raw, 'base64:') ? base64_decode(substr($raw, 7)) : $raw;
+    $derived = hash_hkdf('sha256', $bytes, 32, 'lendyph:loan-origination:mobile-hash');
+
+    expect(OriginationApplication::mobileHash('09171234567'))
+        ->toBe(hash_hmac('sha256', '639171234567', $derived))
+        ->not->toBe(hash_hmac('sha256', 'loan-origination-mobile:639171234567', $raw));
+});
+
+it('gives each application a version that every save moves on', function () {
+    $application = OriginationApplication::query()->create();
+
+    expect($application->fresh()->version)->toBe(0);
+
+    $application->update(['completion_percent' => 40]);
+    expect($application->fresh()->version)->toBe(1);
+});
+
+it('refuses to delete an application except through the retention erasure, which keeps a legal hold', function () {
+    $user = User::query()->where('username', 'super_admin')->firstOrFail();
+    $application = OriginationApplication::query()->create();
+    OriginationNote::query()->create(['application_id' => $application->id, 'user_id' => $user->id, 'body' => 'Called']);
+
+    expect(fn () => $application->delete())->toThrow(OriginationErasureRefusedException::class)
+        ->and(fn () => OriginationApplication::query()->whereKey($application->id)->delete())->toThrow(OriginationErasureRefusedException::class)
+        ->and(OriginationNote::query()->where('application_id', $application->id)->exists())->toBeTrue();
+
+    $application->forceFill(['legal_hold' => true])->save();
+    expect(fn () => $application->eraseForRetention())->toThrow(OriginationErasureRefusedException::class, 'This application is under a legal hold, so it can\'t be erased.');
+
+    $application->forceFill(['legal_hold' => false])->save();
+    $application->eraseForRetention();
+
+    expect(OriginationApplication::query()->whereKey($application->id)->exists())->toBeFalse()
+        ->and(OriginationNote::query()->where('application_id', $application->id)->exists())->toBeFalse();
 });

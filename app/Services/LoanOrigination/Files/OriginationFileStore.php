@@ -26,9 +26,13 @@ use Throwable;
  * - scanned by the FileScanner seam: an infected file is refused; while a
  *   configured scanner can't be reached every file is refused (503); with no
  *   scanner a file is kept as "Not scanned";
- * - a PDF carrying JavaScript, a launch action or embedded files is refused,
- *   its compressed streams included;
+ * - a PDF is checked failing closed: one carrying JavaScript, a launch
+ *   action, embedded files or an XFA form is refused, its compressed streams
+ *   included, and so is one it can't fully read (an encrypted PDF, a stream
+ *   in a format it doesn't decode, a damaged stream, more than 50 MB of
+ *   stream data, or a pattern check that fails);
  * - an image is decoded and re-encoded (GD), so only the picture is kept;
+ *   while GD is missing pictures are refused, never kept as sent;
  * - stored on the private disk under a random name, opened only through
  *   short-lived signed links (LO-B3), never the public disk.
  *
@@ -45,7 +49,7 @@ final class OriginationFileStore
     public const MAX_FILES_PER_APPLICATION = 20;
 
     /** Larger images aren't decoded, so a small file can't expand into gigabytes. */
-    public const MAX_IMAGE_PIXELS = 40_000_000;
+    public const MAX_IMAGE_PIXELS = 24_000_000;
 
     /** File name extensions each kind of content may carry. */
     public const KINDS = [
@@ -66,13 +70,37 @@ final class OriginationFileStore
 
     public const TOO_MANY = 'An application can hold at most 20 files.';
 
+    public const UNCHECKABLE_PDF = 'This PDF is saved in a way that can\'t be checked, so it wasn\'t saved. Save it again as a plain PDF (for example with Print to PDF) and upload that.';
+
+    public const ENCRYPTED_PDF = 'This PDF is password-protected or encrypted, so it can\'t be checked. Upload an unprotected copy.';
+
+    public const PDF_TOO_LARGE = 'This PDF holds too much to check. Upload a smaller copy, or fewer pages.';
+
+    public const PICTURES_UNAVAILABLE = 'Pictures can\'t be accepted on this server right now. Upload the document as a PDF instead.';
+
     /** PDF names that run something or carry other files (decoded from `#xx` escapes first). */
-    private const ACTIVE_PDF_NAMES = '~/(?:JavaScript|JS|Launch|EmbeddedFiles?)(?![A-Za-z0-9])~';
+    private const ACTIVE_PDF_NAMES = '~/(?:JavaScript|JS|Launch|EmbeddedFiles?|XFA)(?![A-Za-z0-9])~';
+
+    private const ENCRYPT_NAME = '~/Encrypt(?![A-Za-z0-9])~';
+
+    /** Filters that hold picture data only, allowed on an image XObject's own stream. */
+    private const IMAGE_FILTERS = ['DCTDecode', 'JPXDecode', 'CCITTFaxDecode', 'JBIG2Decode'];
 
     /** The most decompressed PDF stream bytes read while looking for active content. */
-    private const MAX_INFLATED_BYTES = 50 * 1024 * 1024;
+    public const MAX_INFLATED_BYTES = 50 * 1024 * 1024;
 
-    public function __construct(private readonly FileScanner $scanner) {}
+    /** Compressed bytes inflated per step (at most about 1 MB of output each). */
+    private const INFLATE_STEP = 1024;
+
+    private readonly bool $gdAvailable;
+
+    /**
+     * @param  bool|null  $gdAvailable  whether pictures can be re-encoded; read from the server by default
+     */
+    public function __construct(private readonly FileScanner $scanner, ?bool $gdAvailable = null)
+    {
+        $this->gdAvailable = $gdAvailable ?? function_exists('imagecreatefromstring');
+    }
 
     /**
      * Keep $file as the next version of the application's $type document.
@@ -119,11 +147,11 @@ final class OriginationFileStore
         }
 
         if ($scan === ScanResult::Failed) {
-            throw new ScannerUnavailableException;
+            throw $this->scanner instanceof MisconfiguredScanner ? ScannerUnavailableException::misconfigured() : new ScannerUnavailableException;
         }
 
         $bytes = (string) file_get_contents($path);
-        $bytes = $mime === 'application/pdf' ? $this->plainPdf($bytes) : $this->reencoded($bytes, $mime);
+        $bytes = $mime === 'application/pdf' ? $this->checkedPdf($bytes) : $this->reencoded($bytes, $mime);
 
         return $this->persist($application, $type, [
             'file_name' => $this->cleanName($file->getClientOriginalName(), $type, self::KINDS[$mime]['ext']),
@@ -205,47 +233,248 @@ final class OriginationFileStore
             ->count();
     }
 
-    /** The PDF as sent, once neither its text nor its compressed streams carry active content. */
-    private function plainPdf(string $bytes): string
+    /**
+     * The PDF as sent, once nothing in it is active and every stream was read.
+     *
+     * It fails closed: anything it can't read is refused, never skipped.
+     * Each stream object is found by its `stream` keyword, with its
+     * dictionary between the object header and the keyword:
+     * - no filter: its bytes are checked as they are;
+     * - FlateDecode alone: inflated (the Adler-32 checksum is checked) and
+     *   checked; a predictor is allowed only on a cross-reference stream,
+     *   whose bytes are numbers, not objects;
+     * - a picture filter (DCT, JPX, CCITT, JBIG2) alone, on an image
+     *   XObject: picture data, not objects, so left as it is;
+     * - anything else (ASCIIHex, ASCII85, LZW, run length, a chain of
+     *   filters, a damaged or non-deflate stream) is refused.
+     * Every byte it tries to inflate, and every byte inflated, counts toward
+     * MAX_INFLATED_BYTES.
+     */
+    public function checkedPdf(string $bytes): string
     {
-        if ($this->hasActiveContent($bytes)) {
-            throw UploadRefusedException::because(self::ACTIVE_PDF);
-        }
+        $this->assertNothingActive($bytes);
 
-        $inflated = 0;
+        $budget = self::MAX_INFLATED_BYTES;
+        $offset = 0;
+        $length = strlen($bytes);
 
-        if (preg_match_all('/stream\r?\n(.*?)\r?\nendstream/s', $bytes, $streams)) {
-            foreach ($streams[1] as $stream) {
-                $remaining = self::MAX_INFLATED_BYTES - $inflated;
-                $plain = $remaining > 0 ? @zlib_decode($stream, $remaining) : false;
+        while ($offset < $length) {
+            $found = preg_match('/(?<![A-Za-z])stream\r?\n/', $bytes, $match, PREG_OFFSET_CAPTURE, $offset);
 
-                if ($plain === false) {
-                    continue;
-                }
-
-                $inflated += strlen($plain);
-
-                if ($this->hasActiveContent($plain)) {
-                    throw UploadRefusedException::because(self::ACTIVE_PDF);
-                }
+            if ($found === false) {
+                throw UploadRefusedException::because(self::UNCHECKABLE_PDF);
             }
+
+            if ($found === 0) {
+                break;
+            }
+
+            $keyword = (int) $match[0][1];
+            $dataStart = $keyword + strlen($match[0][0]);
+            $dataEnd = strpos($bytes, 'endstream', $dataStart);
+
+            if ($dataEnd === false) {
+                throw UploadRefusedException::because(self::UNCHECKABLE_PDF);
+            }
+
+            $data = substr($bytes, $dataStart, $dataEnd - $dataStart);
+            $data = str_ends_with($data, "\r\n") ? substr($data, 0, -2) : (str_ends_with($data, "\n") || str_ends_with($data, "\r") ? substr($data, 0, -1) : $data);
+            $dictionary = $this->decodedNames($this->streamDictionary($bytes, $keyword));
+
+            $budget -= strlen($data);
+
+            if ($budget < 0) {
+                throw UploadRefusedException::because(self::PDF_TOO_LARGE);
+            }
+
+            $plain = $this->readStream($dictionary, $data, $budget);
+
+            if ($plain !== null) {
+                $budget -= strlen($plain);
+                $this->assertNothingActive($plain);
+            }
+
+            $offset = $dataEnd + strlen('endstream');
         }
 
         return $bytes;
     }
 
-    private function hasActiveContent(string $content): bool
+    /**
+     * A stream's readable content, or null for picture data and a
+     * cross-reference stream, which hold no objects.
+     *
+     * @throws UploadRefusedException
+     */
+    private function readStream(string $dictionary, string $data, int $budget): ?string
+    {
+        $filters = $this->filters($dictionary);
+
+        if ($filters === []) {
+            return $data;
+        }
+
+        if (count($filters) !== 1) {
+            throw UploadRefusedException::because(self::UNCHECKABLE_PDF);
+        }
+
+        $filter = $filters[0];
+
+        if (in_array($filter, self::IMAGE_FILTERS, true)) {
+            if ($this->matches('~/Subtype\s*/Image(?![A-Za-z0-9])~', $dictionary)) {
+                return null;
+            }
+
+            throw UploadRefusedException::because(self::UNCHECKABLE_PDF);
+        }
+
+        if ($filter !== 'FlateDecode') {
+            throw UploadRefusedException::because(self::UNCHECKABLE_PDF);
+        }
+
+        $predictor = preg_match('~/Predictor\s+(\d+)~', $dictionary, $m);
+
+        if ($predictor === false) {
+            throw UploadRefusedException::because(self::UNCHECKABLE_PDF);
+        }
+
+        $crossReference = $this->matches('~/Type\s*/XRef(?![A-Za-z0-9])~', $dictionary);
+
+        if ($predictor === 1 && (int) $m[1] > 1 && ! $crossReference) {
+            throw UploadRefusedException::because(self::UNCHECKABLE_PDF);
+        }
+
+        if ($budget <= 0) {
+            throw UploadRefusedException::because(self::PDF_TOO_LARGE);
+        }
+
+        $plain = $this->inflate($data, $budget);
+
+        return $crossReference ? null : $plain;
+    }
+
+    /**
+     * A zlib (FlateDecode) stream inflated a kilobyte of input at a time, so
+     * the output never runs far past the budget. A damaged stream, a bad
+     * checksum or a stream that doesn't end is refused.
+     *
+     * @throws UploadRefusedException
+     */
+    private function inflate(string $data, int $budget): string
+    {
+        $context = @inflate_init(ZLIB_ENCODING_DEFLATE);
+        $length = strlen($data);
+
+        if ($context === false || $length === 0) {
+            throw UploadRefusedException::because(self::UNCHECKABLE_PDF);
+        }
+
+        $plain = '';
+
+        for ($at = 0; $at < $length; $at += self::INFLATE_STEP) {
+            $last = $at + self::INFLATE_STEP >= $length;
+            $piece = @inflate_add($context, substr($data, $at, self::INFLATE_STEP), $last ? ZLIB_FINISH : ZLIB_SYNC_FLUSH);
+
+            if ($piece === false) {
+                throw UploadRefusedException::because(self::UNCHECKABLE_PDF);
+            }
+
+            $plain .= $piece;
+
+            if (strlen($plain) > $budget) {
+                throw UploadRefusedException::because(self::PDF_TOO_LARGE);
+            }
+        }
+
+        if (inflate_get_status($context) !== ZLIB_STREAM_END) {
+            throw UploadRefusedException::because(self::UNCHECKABLE_PDF);
+        }
+
+        return $plain;
+    }
+
+    /**
+     * The filter names of a stream's dictionary.
+     *
+     * @return list<string>
+     */
+    private function filters(string $dictionary): array
+    {
+        $found = preg_match('~/Filter\s*(\[[^\]]*\]|/[A-Za-z0-9]+)~', $dictionary, $m);
+
+        if ($found === false) {
+            throw UploadRefusedException::because(self::UNCHECKABLE_PDF);
+        }
+
+        if ($found === 0) {
+            return [];
+        }
+
+        if (preg_match_all('~/([A-Za-z0-9]+)~', $m[1], $names) === false) {
+            throw UploadRefusedException::because(self::UNCHECKABLE_PDF);
+        }
+
+        return $names[1];
+    }
+
+    /** The dictionary of the stream whose `stream` keyword is at $keyword. */
+    private function streamDictionary(string $bytes, int $keyword): string
+    {
+        $window = substr($bytes, max(0, $keyword - 8192), min($keyword, 8192));
+        $found = preg_match_all('/\d+\s+\d+\s+obj\b/', $window, $headers, PREG_OFFSET_CAPTURE);
+
+        if ($found === false || $found === 0) {
+            throw UploadRefusedException::because(self::UNCHECKABLE_PDF);
+        }
+
+        $last = end($headers[0]);
+
+        return substr($window, (int) $last[1] + strlen($last[0]));
+    }
+
+    /** @throws UploadRefusedException */
+    private function assertNothingActive(string $content): void
+    {
+        $decoded = $this->decodedNames($content);
+
+        if ($this->matches(self::ENCRYPT_NAME, $decoded)) {
+            throw UploadRefusedException::because(self::ENCRYPTED_PDF);
+        }
+
+        if ($this->matches(self::ACTIVE_PDF_NAMES, $decoded)) {
+            throw UploadRefusedException::because(self::ACTIVE_PDF);
+        }
+    }
+
+    /** PDF names with their `#xx` escapes decoded (`/Java#53cript` is `/JavaScript`). */
+    private function decodedNames(string $content): string
     {
         $decoded = preg_replace_callback('/#([0-9A-Fa-f]{2})/', fn (array $m) => chr((int) hexdec($m[1])), $content);
 
-        return preg_match(self::ACTIVE_PDF_NAMES, (string) $decoded) === 1;
+        if ($decoded === null) {
+            throw UploadRefusedException::because(self::UNCHECKABLE_PDF);
+        }
+
+        return $decoded;
+    }
+
+    /** A pattern check that refuses the file when the check itself fails. */
+    private function matches(string $pattern, string $subject): bool
+    {
+        $found = preg_match($pattern, $subject);
+
+        if ($found === false) {
+            throw UploadRefusedException::because(self::UNCHECKABLE_PDF);
+        }
+
+        return $found === 1;
     }
 
     /** The picture decoded and written again, so nothing but its pixels is kept. */
     private function reencoded(string $bytes, string $mime): string
     {
-        if (! function_exists('imagecreatefromstring')) {
-            return $bytes;
+        if (! $this->gdAvailable) {
+            throw UploadRefusedException::because(self::PICTURES_UNAVAILABLE);
         }
 
         $size = @getimagesizefromstring($bytes);

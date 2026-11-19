@@ -62,7 +62,7 @@ it('refuses an address with a path, a query or plain http outside local runs', f
 })->with(['https://apply.example.test/path', 'https://apply.example.test?x=1', 'http://apply.example.test', 'javascript:alert(1)']);
 
 it('writes an applicant\'s own action under the applicant actor, naming nobody', function () {
-    $application = OriginationApplication::query()->create(['status' => 'draft']);
+    $application = OriginationApplication::query()->create();
 
     $log = AuditLogService::log('submitted', $application, null, ['status' => 'submitted'], 'Application submitted', asApplicant: true);
 

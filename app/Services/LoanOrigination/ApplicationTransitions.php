@@ -6,8 +6,10 @@ use App\Models\OriginationApplication;
 use App\Models\OriginationStatusHistory;
 use App\Models\User;
 use App\Services\LoanWriteTransaction;
+use Illuminate\Auth\Access\AuthorizationException;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
+use InvalidArgumentException;
 
 /**
  * The server's transition table for online applications (origination audit
@@ -47,6 +49,13 @@ final class ApplicationTransitions
     public const ACTORS = [self::ACTOR_STAFF, self::ACTOR_APPLICANT, self::ACTOR_SYSTEM, self::ACTOR_HANDOFF, self::ACTOR_LOAN];
 
     public const STALE = 'This application changed while you were working on it. Refresh to see its current status.';
+
+    private const PERMISSION_WORDS = [
+        'loan_origination:update' => 'the permission to update online applications',
+        'loans:reject' => 'the permission to reject loans',
+        'loan_origination:convert' => 'the permission to hand applications off',
+        'loans:create' => 'the permission to create loans',
+    ];
 
     public const LABELS = [
         'draft' => 'Draft',
@@ -142,28 +151,55 @@ final class ApplicationTransitions
     }
 
     /**
-     * The permissions a staff move to $to needs: `loan_origination:update`,
-     * and rejecting also `loans:reject` ("Reject keeps its own loans:reject").
+     * The permissions a staff or hand-off move to $to needs:
+     * `loan_origination:update`; rejecting also `loans:reject` ("Reject keeps
+     * its own loans:reject"); the hand-off to For Approval
+     * `loan_origination:convert` and `loans:create` (LO-B4 also asks for
+     * `borrowers:create` when it creates the member).
      *
      * @return list<string>
      */
     public function permissionsFor(string $to): array
     {
-        return $to === 'rejected' ? ['loan_origination:update', 'loans:reject'] : ['loan_origination:update'];
+        return match ($to) {
+            'rejected' => ['loan_origination:update', 'loans:reject'],
+            'pending_approval' => ['loan_origination:convert', 'loans:create'],
+            default => ['loan_origination:update'],
+        };
     }
 
     /**
      * Move $application to $to as $actor: lock, re-check, write history.
      *
+     * A staff or hand-off move needs a user holding every permission in
+     * permissionsFor($to) (403 in words), and the version the client read
+     * ($expectedVersion): a move on any other version answers 409, so a
+     * change made meanwhile is never overwritten, even when the status came
+     * back to what the client saw. Applicant, system and loan moves check the
+     * version the application was read at.
+     *
      * @throws ValidationException 422 when the table doesn't allow the move
+     * @throws AuthorizationException 403 when the user lacks a permission
      */
-    public function move(OriginationApplication $application, string $to, string $actor, ?User $user = null, ?string $note = null): OriginationApplication
-    {
-        return DB::transaction(function () use ($application, $to, $actor, $user, $note): OriginationApplication {
+    public function move(
+        OriginationApplication $application,
+        string $to,
+        string $actor,
+        ?User $user = null,
+        ?string $note = null,
+        ?int $expectedVersion = null,
+    ): OriginationApplication {
+        $byStaff = in_array($actor, [self::ACTOR_STAFF, self::ACTOR_HANDOFF], true);
+
+        if ($byStaff && $expectedVersion === null) {
+            throw new InvalidArgumentException('A staff or hand-off move needs the application version the client read.');
+        }
+
+        return DB::transaction(function () use ($application, $to, $actor, $user, $note, $expectedVersion, $byStaff): OriginationApplication {
             /** @var OriginationApplication $locked */
             $locked = OriginationApplication::query()->whereKey($application->getKey())->lockForUpdate()->firstOrFail();
 
-            if ($locked->status !== $application->status) {
+            if ($locked->status !== $application->status || $locked->version !== ($expectedVersion ?? $application->version)) {
                 throw LoanWriteTransaction::conflict(self::STALE);
             }
 
@@ -175,30 +211,51 @@ final class ApplicationTransitions
                 ]);
             }
 
+            if ($byStaff) {
+                $this->authorize($user, $to);
+            }
+
             $now = now();
-            $locked->status = $to;
 
-            if ($to === 'submitted' && $locked->submitted_at === null) {
-                $locked->submitted_at = $now;
-            }
+            OriginationApplication::withinTransition(function () use ($locked, $to, $now): void {
+                $locked->status = $to;
 
-            if (in_array($to, self::DECISIONS, true)) {
-                $locked->decided_at = $now;
-            }
+                if ($to === 'submitted' && $locked->submitted_at === null) {
+                    $locked->submitted_at = $now;
+                }
 
-            $locked->save();
+                if (in_array($to, self::DECISIONS, true)) {
+                    $locked->decided_at = $now;
+                }
+
+                $locked->save();
+            });
 
             OriginationStatusHistory::query()->create([
                 'application_id' => $locked->id,
                 'from_status' => $from,
                 'to_status' => $to,
                 'actor_type' => $actor,
-                'user_id' => $actor === self::ACTOR_STAFF || $actor === self::ACTOR_HANDOFF ? $user?->id : null,
+                'user_id' => $byStaff ? $user?->id : null,
                 'note' => $note,
             ]);
 
             return $locked;
         });
+    }
+
+    /** @throws AuthorizationException */
+    private function authorize(?User $user, string $to): void
+    {
+        $needed = $this->permissionsFor($to);
+
+        if ($user !== null && collect($needed)->every(fn (string $permission) => $user->can($permission))) {
+            return;
+        }
+
+        $words = array_map(fn (string $permission) => self::PERMISSION_WORDS[$permission] ?? 'another permission', $needed);
+
+        throw new AuthorizationException(sprintf('Moving an application to %s needs %s.', self::label($to), implode(' and ', $words)));
     }
 
     /** "A Submitted application", "An Incomplete application". */

@@ -4,6 +4,7 @@ namespace App\Providers;
 
 use App\Services\LoanOrigination\Files\ClamAvScanner;
 use App\Services\LoanOrigination\Files\FileScanner;
+use App\Services\LoanOrigination\Files\MisconfiguredScanner;
 use App\Services\LoanOrigination\Files\NoScanner;
 use Illuminate\Support\ServiceProvider;
 
@@ -12,18 +13,20 @@ use Illuminate\Support\ServiceProvider;
  * (routes/api/public-apply/) and the staff side. Its rate limiters go here,
  * never in AppServiceProvider, as the portal's go in PortalServiceProvider.
  *
- * The upload scanner is chosen by `loan_origination.scanner.driver`: `none`
- * (the default, files kept as "Not scanned") or `clamav`. An unknown driver
- * falls back to none, so a typo can't take uploads down; the settings screen
- * shows which scanner is in use.
+ * The upload scanner is chosen by `loan_origination.scanner.driver`, read
+ * without regard to case or spaces: `none` (the default, or blank; files are
+ * kept as "Not scanned") or `clamav`. Any other value is a misconfiguration,
+ * never "no scanner": uploads are refused (503) until it is fixed, and the
+ * settings screen says so.
  */
 class LoanOriginationServiceProvider extends ServiceProvider
 {
     public function register(): void
     {
-        $this->app->bind(FileScanner::class, fn (): FileScanner => match (config('loan_origination.scanner.driver')) {
+        $this->app->bind(FileScanner::class, fn (): FileScanner => match (strtolower(trim((string) config('loan_origination.scanner.driver', 'none')))) {
+            '', 'none' => new NoScanner,
             'clamav' => ClamAvScanner::fromConfig(),
-            default => new NoScanner,
+            default => new MisconfiguredScanner,
         });
     }
 
