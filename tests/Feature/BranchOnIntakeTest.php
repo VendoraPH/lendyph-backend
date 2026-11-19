@@ -30,6 +30,8 @@ class BranchOnIntakeTest extends TestCase
 {
     use SetupLendyPH;
 
+    private const NOT_DEACTIVATABLE = 'This registration hasn\'t been approved, so it can\'t be deactivated. Approve or reject it from Registration Review.';
+
     private Branch $far;
 
     protected function setUp(): void
@@ -239,6 +241,62 @@ class BranchOnIntakeTest extends TestCase
             $this->patchJson("/api/borrowers/{$member->id}/reactivate")->assertOk();
 
             $this->assertSame('active', $member->fresh()->status);
+        }
+    }
+
+    public function test_deactivate_refuses_a_pending_or_rejected_registration(): void
+    {
+        foreach (['pending', 'rejected'] as $status) {
+            $applicant = Borrower::factory()->create(['branch_id' => $this->branch->id, 'status' => $status]);
+
+            $this->patchJson("/api/borrowers/{$applicant->id}/deactivate")
+                ->assertUnprocessable()
+                ->assertJsonValidationErrors(['status' => self::NOT_DEACTIVATABLE]);
+
+            $this->assertSame($status, $applicant->fresh()->status);
+        }
+
+        $member = Borrower::factory()->create(['branch_id' => $this->branch->id, 'status' => 'active']);
+        $this->patchJson("/api/borrowers/{$member->id}/deactivate")->assertOk();
+        $this->assertSame('inactive', $member->fresh()->status);
+    }
+
+    public function test_bulk_deactivate_skips_a_pending_or_rejected_registration_and_says_why(): void
+    {
+        $pending = Borrower::factory()->create(['branch_id' => $this->branch->id, 'status' => 'pending']);
+        $rejected = Borrower::factory()->create(['branch_id' => $this->branch->id, 'status' => 'rejected']);
+        $member = Borrower::factory()->create(['branch_id' => $this->branch->id, 'status' => 'active']);
+
+        $response = $this->patchJson('/api/borrowers/bulk-deactivate', ['ids' => [$pending->id, $rejected->id, $member->id]])->assertOk();
+
+        $this->assertSame([$member->id], $response->json('deactivated'));
+        $failed = collect($response->json('failed'))->pluck('reason', 'id')->all();
+        $this->assertSame([$pending->id => self::NOT_DEACTIVATABLE, $rejected->id => self::NOT_DEACTIVATABLE], $failed);
+
+        $this->assertSame('pending', $pending->fresh()->status);
+        $this->assertSame('rejected', $rejected->fresh()->status);
+
+        // So the two-call route round review (deactivate, then reactivate) is shut.
+        $this->patchJson("/api/borrowers/{$pending->id}/reactivate")->assertUnprocessable();
+        $this->assertSame('pending', $pending->fresh()->status);
+    }
+
+    public function test_editing_a_loan_never_describes_another_branchs_former_co_maker(): void
+    {
+        $gone = Borrower::factory()->create([
+            'branch_id' => $this->far->id,
+            'first_name' => 'Zenaida', 'last_name' => 'Quisumbing',
+            'status' => 'withdrawn', 'membership_ended_on' => '2026-10-01',
+        ]);
+        $loan = $this->postJson('/api/loans', $this->loanPayload(Borrower::factory()->create(['branch_id' => $this->branch->id])))
+            ->assertCreated()->json('data.id');
+        $this->actingAs($this->branchUser(['loans:update']));
+
+        $response = $this->putJson("/api/loans/{$loan}", ['co_maker_ids' => [$gone->id]])->assertUnprocessable();
+
+        $this->assertCount(1, $response->json('errors')['co_maker_ids.0']);
+        foreach (['Zenaida', 'Quisumbing', $gone->borrower_code, 'Oct 1, 2026'] as $leak) {
+            $this->assertStringNotContainsString($leak, $response->getContent(), "leaked {$leak}");
         }
     }
 

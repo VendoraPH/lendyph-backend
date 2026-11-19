@@ -35,6 +35,15 @@ class BorrowerController extends Controller
 {
     use RespondsWithValidIds;
 
+    /**
+     * A registration still waiting on, or turned down at, Registration Review.
+     * Only approval makes it a member (borrowers:approve, a valid ID and a
+     * branch), so deactivate and reactivate leave it alone (Phase 6 D7).
+     */
+    private const UNREVIEWED_STATUSES = ['pending', 'rejected'];
+
+    private const NOT_DEACTIVATABLE = 'This registration hasn\'t been approved, so it can\'t be deactivated. Approve or reject it from Registration Review.';
+
     #[OA\Get(
         path: '/api/borrowers',
         summary: 'List borrowers',
@@ -564,18 +573,17 @@ DESC,
             new OA\Response(response: 200, description: 'Borrower deactivated'),
             new OA\Response(response: 401, description: 'Unauthenticated'),
             new OA\Response(response: 403, description: 'Forbidden'),
+            new OA\Response(response: 422, description: 'A pending or rejected registration (approve or reject it from Registration Review), or a former member'),
         ],
     )]
     public function deactivate(Borrower $borrower): JsonResponse
     {
         $this->authorize('borrowers:update');
 
-        // A registration becomes a member only through Registration Review,
-        // which needs borrowers:approve, a valid ID and a branch (Phase 6 D7).
-        if (in_array($borrower->status, ['pending', 'rejected'], true)) {
-            throw ValidationException::withMessages([
-                'status' => 'This registration hasn\'t been approved. Approve it from Registration Review.',
-            ]);
+        // Deactivating a registration would let /reactivate make it a member
+        // without Registration Review (Phase 6 D7).
+        if (in_array($borrower->status, self::UNREVIEWED_STATUSES, true)) {
+            throw ValidationException::withMessages(['status' => self::NOT_DEACTIVATABLE]);
         }
 
         if ($borrower->isFormerMember()) {
@@ -612,7 +620,7 @@ DESC,
 
         // A registration becomes a member only through Registration Review,
         // which needs borrowers:approve, a valid ID and a branch (Phase 6 D7).
-        if (in_array($borrower->status, ['pending', 'rejected'], true)) {
+        if (in_array($borrower->status, self::UNREVIEWED_STATUSES, true)) {
             throw ValidationException::withMessages([
                 'status' => 'This registration hasn\'t been approved. Approve it from Registration Review.',
             ]);
@@ -791,7 +799,7 @@ DESC,
             ),
         ),
         responses: [
-            new OA\Response(response: 200, description: 'Bulk result'),
+            new OA\Response(response: 200, description: 'Bulk result. A pending or rejected registration, or a former member, is listed under `failed` with the reason in words and left unchanged.'),
             new OA\Response(response: 422, description: 'Validation error'),
         ],
     )]
@@ -811,6 +819,12 @@ DESC,
             try {
                 /** @var Borrower $borrower */
                 $borrower = Borrower::visibleTo(request()->user())->findOrFail($id);
+
+                if (in_array($borrower->status, self::UNREVIEWED_STATUSES, true)) {
+                    $failed[] = ['id' => $id, 'reason' => self::NOT_DEACTIVATABLE];
+
+                    continue;
+                }
 
                 if ($borrower->isFormerMember()) {
                     $failed[] = ['id' => $id, 'reason' => MembershipStatus::endedMessage($borrower)];
