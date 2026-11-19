@@ -157,6 +157,8 @@ class AuditLogService
             'action' => $action,
             'auditable_type' => $auditable ? $auditable->getMorphClass() : null,
             'auditable_id' => $auditable?->getKey(),
+            // The audited record's branch (Phase 6 MB-BE6), never the actor's.
+            'branch_id' => AuditBranch::of($auditable),
             'old_values' => $oldValues,
             'new_values' => $newValues,
             'ip_address' => $ipAddress ?? request()->ip(),

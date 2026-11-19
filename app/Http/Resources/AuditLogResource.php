@@ -503,6 +503,10 @@ class AuditLogResource extends JsonResource
             // Legacy fields kept for backward compat
             'auditable_type' => $basename,
             'auditable_id' => $this->auditable_id,
+            // The audited record's branch when the row was written; null on
+            // rows from before Phase 6 MB-BE6 and on records with no branch.
+            'branch_id' => $this->branch_id,
+            'branch_name' => $this->branch_id === null ? null : ($this->resource->branch?->name ?? "Branch #{$this->branch_id}"),
             'old_values' => $oldValues,
             'new_values' => $newValues,
             'ip_address' => $this->ip_address,

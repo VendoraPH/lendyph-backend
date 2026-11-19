@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Models\ApprovalWorkflowSetting;
 use App\Models\CdaSetting;
 use App\Models\Role;
+use App\Services\Approvals\StepMinimum;
 use App\Services\AuditLogService;
 use App\Services\Cda\CdaAccess;
 use App\Services\Cda\Reports\CdaApprovalChain;
@@ -96,7 +97,7 @@ class ApprovalWorkflowController extends Controller
     #[OA\Put(
         path: '/api/settings/approval-workflow',
         summary: 'Save approval workflow chain',
-        description: 'Upserts the chain for the given type. A loan chain must start with a `submit` step and end with a `release` step, and step ids must be unique. The `cda` chain also needs `cda:settings` with `branches:view_all`: 1 to 10 approve-only steps {name, role, status?}, each role an existing active role and each name used once; audited. Reset (DELETE) returns `cda` to a single review. A loan chain that changes is audited too (`loan_approval_chain_updated`: the chain before and after, each step by name and role).',
+        description: 'Upserts the chain for the given type. A loan chain must start with a `submit` step and end with a `release` step, and step ids must be unique. A loan step may carry `min_principal` (pesos, two decimals, at least 0.01; no default): a loan whose principal is below it has that step left out when it is submitted or re-submitted. The Submit step, the first approval step and the Release step cannot carry one (422 in words). The `cda` chain also needs `cda:settings` with `branches:view_all`: 1 to 10 approve-only steps {name, role, status?}, each role an existing active role and each name used once; audited. Reset (DELETE) returns `cda` to a single review. A loan chain that changes is audited too (`loan_approval_chain_updated`: the chain before and after, each step by name and role).',
         tags: ['Settings'],
         security: [['sanctum' => []]],
         requestBody: new OA\RequestBody(
@@ -156,9 +157,12 @@ class ApprovalWorkflowController extends Controller
             'steps.*.role' => ['required', 'string', 'max:100'],
             'steps.*.kind' => ['required', Rule::in(['submit', 'approve', 'release'])],
             'steps.*.status' => ['nullable', 'string', 'max:100'],
+            // Checked and normalised in withMinimums(), in words.
+            'steps.*.min_principal' => ['nullable'],
         ], ['type.required' => self::TYPE_REFUSAL, 'type.in' => self::TYPE_REFUSAL]);
 
         $this->validateChain($validated['steps']);
+        $validated['steps'] = $this->withMinimums($validated['steps']);
 
         $saved = ApprovalWorkflowSetting::where('type', $validated['type'])->first();
         $setting = ApprovalWorkflowSetting::updateOrCreate(
@@ -364,9 +368,51 @@ class ApprovalWorkflowController extends Controller
         }
 
         return implode(', ', array_map(
-            fn (array $step) => ($step['name'] ?? 'A step').' ('.CdaApprovalChain::roleLabel((string) ($step['role'] ?? '')).')',
+            fn (array $step) => ($step['name'] ?? 'A step').' ('.CdaApprovalChain::roleLabel((string) ($step['role'] ?? ''))
+                .(is_string($step[StepMinimum::KEY] ?? null) ? ', from a principal of '.StepMinimum::pesos($step[StepMinimum::KEY]) : '').')',
             array_values(array_filter($steps, 'is_array')),
         ));
+    }
+
+    /**
+     * A loan step's optional minimum principal (Phase 6 MB-BE6): pesos with
+     * two decimals, at least ₱0.01, stored as "50000.00". The Submit step, the
+     * first approval step and the Release step can't carry one, so every loan
+     * keeps at least one approval. A step without one keeps no key, so chains
+     * saved before this change compare equal.
+     *
+     * @param  list<array<string, mixed>>  $steps
+     * @return list<array<string, mixed>>
+     */
+    private function withMinimums(array $steps): array
+    {
+        $errors = [];
+
+        foreach ($steps as $index => $step) {
+            $raw = $step[StepMinimum::KEY] ?? null;
+            unset($steps[$index][StepMinimum::KEY]);
+
+            if ($raw === null || $raw === '') {
+                continue;
+            }
+
+            $refusal = StepMinimum::refusalFor($steps, $index);
+            $minimum = StepMinimum::normalise($raw);
+
+            if ($refusal !== null) {
+                $errors["steps.{$index}.min_principal"] = $refusal;
+            } elseif ($minimum === null) {
+                $errors["steps.{$index}.min_principal"] = "The minimum principal for step \"{$step['name']}\" is an amount in pesos with up to two decimals, at least ₱0.01.";
+            } else {
+                $steps[$index][StepMinimum::KEY] = $minimum;
+            }
+        }
+
+        if ($errors !== []) {
+            throw ValidationException::withMessages($errors);
+        }
+
+        return array_values($steps);
     }
 
     private function resolveType(Request $request): string
