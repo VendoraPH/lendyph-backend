@@ -269,7 +269,9 @@ class WalkInGCashBranchTest extends TestCase
         ])->assertCreated()->json('data.id');
         $tx = GCashTransaction::query()->findOrFail($id);
 
-        $this->assertNull($tx->branch_id);
+        // Stamped with the member's branch when written (Phase 6 MB-BE3), the
+        // branch its journal posts in.
+        $this->assertSame($this->branch->id, $tx->branch_id);
         $this->assertSame($this->branch->id, $this->journalOf($tx)->branch_id);
 
         $this->postJson('/api/gcash/transactions', [

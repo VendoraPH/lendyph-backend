@@ -319,6 +319,9 @@ class TimezoneShift
         'amla_change_requests' => ['created_at', 'decided_at', 'updated_at'],
         'amla_log_entries' => ['created_at'],
         'amla_settings_versions' => ['created_at', 'effective_at'],
+        // Added 2026-11-19 with the executive dashboard's alert thresholds
+        // (Phase 6 EB-C), well after the cutover, for the same reason.
+        'dashboard_settings' => ['created_at', 'updated_at'],
         // A column added to a table the shift covers. Listed here, not in
         // COLUMNS, because it was added after the one-shot shift ran, and
         // because the shift reads COLUMNS on a fresh database before this
