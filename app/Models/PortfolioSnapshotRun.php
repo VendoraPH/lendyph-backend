@@ -11,7 +11,9 @@ use Illuminate\Database\Eloquent\Model;
  * - `succeeded`: the organisation row and its lines were written and add up.
  * - `mismatch`: the lines didn't add up to the organisation row, so only the
  *   row was kept; `checks` holds each figure that differed.
- * - `failed`: nothing was written; `message` says why.
+ * - `failed`: the lines couldn't be worked out, so only the organisation row
+ *   was kept (`line_count` null), or a write failed and the whole day rolled
+ *   back; `message` says why.
  */
 class PortfolioSnapshotRun extends Model
 {
