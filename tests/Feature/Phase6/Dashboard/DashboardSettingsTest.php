@@ -231,6 +231,27 @@ it('stores each value in one form, whatever form it was sent in, and audits it t
         ->and($changes['control_difference_above'])->toBe(['old' => '₱0.00', 'new' => '₱7.10']);
 });
 
+it('stores a signed zero as plain zero, and audits it without a minus', function (mixed $zero) {
+    $this->actingAs(ebcEditor())->putJson('/api/dashboard/settings', [
+        'overdue_share_above' => $zero,
+        'control_difference_above' => $zero,
+        'par30_rise_points' => $zero,
+    ])->assertOk()
+        ->assertJsonPath('data.thresholds.overdue_share_above', '0.00')
+        ->assertJsonPath('data.thresholds.control_difference_above', '0.00')
+        ->assertJsonPath('data.thresholds.par30_rise_points', '0.00');
+
+    $row = AuditLog::query()->where('auditable_type', DashboardSetting::class)->latest('id')->firstOrFail();
+
+    expect($row->new_values['overdue_share_above'])->toBe('0.00')
+        ->and(ebcAuditChanges($row)['overdue_share_above'])->toBe(['old' => '5%', 'new' => '0%'])
+        ->and($row->description)->not->toContain('-');
+})->with([
+    'minus zero' => ['-0'],
+    'minus point zero' => ['-.0'],
+    'JSON minus zero' => [-0.0],
+]);
+
 it('refuses a caller whose only role is switched off, on read and save', function () {
     $user = ebcStaff(['dashboard:analytics', 'dashboard:settings', BranchAccess::VIEW_ALL]);
     DB::table('roles')->whereIn('id', $user->roles->pluck('id'))->update(['is_active' => false]);

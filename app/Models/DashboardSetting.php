@@ -152,7 +152,7 @@ class DashboardSetting extends Model
 
     private static function twoDecimals(string $value): string
     {
-        [$whole, $fraction] = array_pad(explode('.', ltrim(trim($value), '+'), 2), 2, '');
+        [$whole, $fraction] = array_pad(explode('.', ltrim(trim($value), '+-'), 2), 2, '');
         $whole = ltrim($whole, '0');
 
         return ($whole === '' ? '0' : $whole).'.'.str_pad($fraction, 2, '0');
