@@ -185,6 +185,12 @@ final class LindaWording
         return 'Your role doesn\'t have access to that page. Please ask your administrator if you need it.';
     }
 
+    /** The line that ends an open answer, which the model wrote from the reports' figures. */
+    public static function writtenFromFigures(): string
+    {
+        return 'I wrote this from your reports\' figures; the links below open them.';
+    }
+
     public static function cdaNotSetUp(): string
     {
         return 'No CDA reporting year has been opened yet, so there is no deadline or readiness to show.';

@@ -32,6 +32,7 @@ enum LindaIntent: string
     case ShareCapitalSummary = 'share_capital_summary';
     case CdaSummary = 'cda_summary';
     case HowTo = 'how_to';
+    case OpenQuestion = 'open_question';
     case UnsupportedQuestion = 'unsupported_question';
 
     /**
@@ -92,8 +93,26 @@ enum LindaIntent: string
         return match ($this) {
             self::CollectionSummary, self::CollectionDetails, self::DisbursementSummary,
             self::BranchPerformance, self::OfficerPerformance, self::CollectionEfficiency,
-            self::GeneralLendingSummary, self::IncomeSummary, self::ExpenseSummary => true,
+            self::GeneralLendingSummary, self::IncomeSummary, self::ExpenseSummary, self::OpenQuestion => true,
             default => false,
         };
+    }
+
+    /**
+     * The intents a model may return: every one, except open_question while
+     * open questions (LINDA_OPEN_QUESTIONS) are off, so with the switch off
+     * the model is asked exactly as before.
+     *
+     * @return list<self>
+     */
+    public static function offered(): array
+    {
+        return array_values(array_filter(self::cases(), fn (self $intent) => $intent !== self::OpenQuestion || self::openQuestionsOn()));
+    }
+
+    /** Whether open questions (`linda.open_questions`) are on. */
+    public static function openQuestionsOn(): bool
+    {
+        return (bool) config('linda.open_questions', false);
     }
 }

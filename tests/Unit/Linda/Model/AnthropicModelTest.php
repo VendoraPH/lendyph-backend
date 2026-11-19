@@ -9,6 +9,7 @@ use App\Services\Linda\Model\LindaModelRequest;
 use App\Services\Linda\Model\LindaModelUnavailable;
 use App\Services\Linda\Model\LindaPrompt;
 use App\Services\Linda\Model\LindaUnderstanding;
+use App\Services\Linda\Model\LindaWriteRequest;
 use GuzzleHttp\Exception\ConnectException;
 use GuzzleHttp\Exception\ConnectTimeoutException;
 use GuzzleHttp\Exception\NetworkTimeoutException;
@@ -536,5 +537,66 @@ class AnthropicModelTest extends LindaTestCase
             $this->assertStringNotContainsString(self::SDK_TEXT, $e->getMessage());
             $this->assertNull($e->getPrevious());
         }
+    }
+
+    // -----------------------------------------------------------------
+    // Round 3: open answers
+    // -----------------------------------------------------------------
+
+    private function writeRequest(): LindaWriteRequest
+    {
+        $facts = ['as_of' => 'November 16, 2026', 'branches' => 'all branches', 'period' => 'November 1 to 16, 2026', 'topics' => [
+            ['topic' => 'collection_summary', 'title' => 'From November 1 to 16, 2026', 'figures' => [['label' => 'Total Received', 'value' => '₱2,500.00']]],
+        ]];
+
+        return new LindaWriteRequest('Why are collections low?', ['collection_summary'], $facts, 'claude-haiku-5-5');
+    }
+
+    public function test_write_sends_the_facts_as_data_and_reads_the_answer(): void
+    {
+        $writing = $this->model($this->reply(['answer' => ' Collections were ₱2,500.00. ']))->write($this->writeRequest());
+
+        $this->assertSame('Collections were ₱2,500.00.', $writing->text);
+        $this->assertSame(120, $writing->usage->inputTokens);
+
+        $body = $this->sentBody();
+        $this->assertSame(LindaPrompt::writeSystem(), $body['system'][0]['text']);
+        $this->assertSame(['type' => 'ephemeral'], $body['system'][0]['cache_control']);
+        $this->assertSame(LindaPrompt::writeSchema(), $body['output_config']['format']['schema']);
+        $this->assertStringContainsString('"facts":{"as_of":"November 16, 2026"', $body['messages'][0]['content']);
+        $this->assertStringContainsString('"earlier_topics":["collection_summary"]', $body['messages'][0]['content']);
+    }
+
+    /** @return array<string, array{string}> */
+    public static function badWritings(): array
+    {
+        return [
+            'not json' => ['Collections were fine.'],
+            'empty answer' => ['{"answer":"  "}'],
+            'extra key' => ['{"answer":"Fine.","note":"x"}'],
+            'not a string' => ['{"answer":5}'],
+            'too long' => [json_encode(['answer' => str_repeat('a', AnthropicModel::MAX_ANSWER_LENGTH + 1)])],
+        ];
+    }
+
+    #[DataProvider('badWritings')]
+    public function test_a_written_answer_that_does_not_parse_is_bad_output_with_its_usage(string $text): void
+    {
+        try {
+            $this->model($this->reply($text))->write($this->writeRequest());
+            $this->fail('Expected bad_output.');
+        } catch (LindaModelUnavailable $e) {
+            $this->assertSame('bad_output', $e->reason);
+            $this->assertSame(120, $e->usage?->inputTokens);
+        }
+    }
+
+    public function test_open_question_reads_as_unsupported_while_open_questions_are_off(): void
+    {
+        config()->set('linda.open_questions', false);
+        $this->assertSame(LindaIntent::UnsupportedQuestion, $this->model($this->reply($this->answer('open_question')))->understand($this->request())->intent);
+
+        config()->set('linda.open_questions', true);
+        $this->assertSame(LindaIntent::OpenQuestion, $this->model($this->reply($this->answer('open_question')))->understand($this->request())->intent);
     }
 }

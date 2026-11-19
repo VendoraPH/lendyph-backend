@@ -66,7 +66,7 @@ use Throwable;
  * can't be used (`max_tokens`, `bad_output`, including a period or branch
  * over MAX_FIELD_LENGTH characters) carries the usage it was billed.
  */
-final class AnthropicModel implements LindaModel
+final class AnthropicModel implements LindaModel, LindaWriter
 {
     private const BASE_URL = 'https://api.anthropic.com';
 
@@ -78,6 +78,9 @@ final class AnthropicModel implements LindaModel
 
     /** The longest period words or branch name read from the model. */
     public const MAX_FIELD_LENGTH = 100;
+
+    /** The longest open answer read from the model, in characters. */
+    public const MAX_ANSWER_LENGTH = 2000;
 
     /** The SDK reads this to add headers to every request; Linda never sends them. */
     private const CUSTOM_HEADERS_ENV = 'ANTHROPIC_CUSTOM_HEADERS';
@@ -153,6 +156,103 @@ final class AnthropicModel implements LindaModel
 
             throw new LindaModelUnavailable($reason);
         }
+    }
+
+    /**
+     * An open answer (round 3): one Messages call with the write prompt
+     * (LindaPrompt::writeSystem()), the question, the earlier topics and the
+     * facts pack, and structured output ({answer}). Same key, limits,
+     * retries, fallbacks and failure codes as understand().
+     */
+    public function write(#[\SensitiveParameter] LindaWriteRequest $request): LindaWriting
+    {
+        try {
+            $client = $this->checkedClient($request->model);
+            $model = (array) config("linda.models.{$request->model}");
+            $arguments = [
+                'maxTokens' => (int) config('linda.anthropic.write_max_tokens', 600),
+                'messages' => [['role' => 'user', 'content' => LindaPrompt::writeMessage($request->question, $request->topics, $request->facts)]],
+                'model' => $request->model,
+                'outputConfig' => ['effort' => $this->effort, 'format' => ['type' => 'json_schema', 'schema' => LindaPrompt::writeSchema()]],
+                'system' => [['type' => 'text', 'text' => LindaPrompt::writeSystem(), 'cacheControl' => ['type' => 'ephemeral']]],
+                'workspaceID' => $this->workspaceId,
+            ];
+
+            try {
+                $message = ($model['fallbacks'] ?? false) === true
+                    ? $client->beta->messages->create(...$arguments, fallbacks: 'default', betas: [AnthropicBeta::SERVER_SIDE_FALLBACK_2026_07_01])
+                    : $client->messages->create(...$arguments);
+            } catch (JsonException) {
+                throw new LindaModelUnavailable('bad_output');
+            }
+
+            $usage = self::usage($message, $request->model);
+
+            try {
+                if (! in_array($message->stopReason, self::COMPLETE, true)) {
+                    throw new LindaModelUnavailable($message->stopReason === 'max_tokens' ? 'max_tokens' : 'bad_output');
+                }
+
+                return new LindaWriting(self::written(self::text($message)), $usage);
+            } catch (LindaModelUnavailable $e) {
+                throw new LindaModelUnavailable($e->reason, $usage);
+            } catch (Exception) {
+                throw new LindaModelUnavailable('bad_output', $usage);
+            }
+        } catch (LindaModelUnavailable $e) {
+            Log::warning('Linda model call failed.', ['reason' => $e->reason]);
+
+            throw $e;
+        } catch (AnthropicException $e) {
+            $reason = self::reasonFor($e);
+            Log::warning('Linda model call failed.', ['reason' => $reason] + ErrorDigest::context($e));
+
+            throw new LindaModelUnavailable($reason);
+        }
+    }
+
+    /**
+     * The client, once the key, the model's prices and the environment allow
+     * a call.
+     *
+     * @throws LindaModelUnavailable
+     */
+    private function checkedClient(string $requested): Client
+    {
+        if ($this->apiKey === null || trim($this->apiKey) === '') {
+            throw new LindaModelUnavailable('no_key');
+        }
+
+        if (! LindaPrices::knows($requested) || ! is_array(config("linda.models.{$requested}"))) {
+            throw new LindaModelUnavailable('no_prices');
+        }
+
+        if (self::customHeadersSet()) {
+            throw new LindaModelUnavailable('custom_headers');
+        }
+
+        return $this->client();
+    }
+
+    /**
+     * The written answer in the model's JSON.
+     *
+     * @throws LindaModelUnavailable
+     */
+    private static function written(string $text): string
+    {
+        try {
+            $data = json_decode($text, true, 3, JSON_THROW_ON_ERROR);
+        } catch (JsonException) {
+            throw new LindaModelUnavailable('bad_output');
+        }
+
+        if (! is_array($data) || array_keys($data) !== ['answer'] || ! is_string($data['answer'])
+            || trim($data['answer']) === '' || mb_strlen($data['answer']) > self::MAX_ANSWER_LENGTH) {
+            throw new LindaModelUnavailable('bad_output');
+        }
+
+        return trim($data['answer']);
     }
 
     /**
@@ -310,6 +410,11 @@ final class AnthropicModel implements LindaModel
         }
 
         $intent = is_string($data['intent']) ? LindaIntent::tryFrom(strtolower(trim($data['intent']))) : null;
+
+        // Not offered while open questions are off.
+        if ($intent === LindaIntent::OpenQuestion && ! LindaIntent::openQuestionsOn()) {
+            $intent = LindaIntent::UnsupportedQuestion;
+        }
 
         if ($intent === null
             || ! (is_string($data['period']) || $data['period'] === null)

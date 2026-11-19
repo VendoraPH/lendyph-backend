@@ -18,7 +18,7 @@ use App\Services\Linda\LindaText;
  * real model's. It reports fixed usage (1,000 input and 100 output tokens on
  * the requested model) and keeps every request it received.
  */
-final class FakeModel implements LindaModel
+final class FakeModel implements LindaModel, LindaWriter
 {
     /** Fixed usage per call. */
     public const INPUT_TOKENS = 1000;
@@ -66,6 +66,19 @@ final class FakeModel implements LindaModel
 
     /** @var list<LindaModelRequest> */
     public array $requests = [];
+
+    /** @var list<LindaWriteRequest> */
+    public array $writeRequests = [];
+
+    /**
+     * What write() answers, from the request; a fixed sentence when unset.
+     *
+     * @var (\Closure(LindaWriteRequest): string)|null
+     */
+    public ?\Closure $writer = null;
+
+    /** Words that make a question an open question, while open questions are on. */
+    private const OPEN_WORDS = ['why', 'overall', 'compare', 'kahimtang', 'lagay'];
 
     private bool $refuses = false;
 
@@ -123,8 +136,28 @@ final class FakeModel implements LindaModel
         return LindaUnderstanding::fromAnswer($intent, $periodWords, $branch, $followUp, $usage);
     }
 
+    public function write(#[\SensitiveParameter] LindaWriteRequest $request): LindaWriting
+    {
+        $this->writeRequests[] = $request;
+        $usage = new LindaUsage($request->model, self::INPUT_TOKENS, self::OUTPUT_TOKENS);
+
+        if ($this->failure !== null) {
+            throw new LindaModelUnavailable($this->failure, in_array($this->failure, ['max_tokens', 'bad_output'], true) ? $usage : null);
+        }
+
+        return new LindaWriting($this->writer === null ? 'I can only answer from the figures.' : ($this->writer)($request), $usage);
+    }
+
     private static function intent(string $clean): ?LindaIntent
     {
+        if (LindaIntent::openQuestionsOn()) {
+            foreach (self::OPEN_WORDS as $word) {
+                if (preg_match('/(?<![\pL\pN])'.$word.'(?![\pL\pN])/u', $clean) === 1) {
+                    return LindaIntent::OpenQuestion;
+                }
+            }
+        }
+
         foreach (self::RULES as [$intent, $keywords]) {
             foreach ($keywords as $keyword) {
                 if (preg_match('/(?<![\pL\pN])'.preg_quote($keyword, '/').'(?![\pL\pN])/u', $clean) === 1) {

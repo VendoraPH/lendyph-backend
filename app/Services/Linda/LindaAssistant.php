@@ -14,6 +14,8 @@ use App\Services\Linda\Model\LindaModelUnavailable;
 use App\Services\Linda\Model\LindaPrices;
 use App\Services\Linda\Model\LindaUnderstanding;
 use App\Services\Linda\Model\LindaUsage;
+use App\Services\Linda\Model\LindaWriteRequest;
+use App\Services\Linda\Model\LindaWriting;
 use Brick\Math\BigDecimal;
 use Brick\Math\RoundingMode;
 use Illuminate\Support\Facades\Log;
@@ -416,6 +418,12 @@ final class LindaAssistant
 
         [$period, $branchName] = LindaFollowUp::carry($intent, $period, $understanding->branchName, $understanding->followUp, $history->earlier, $user);
 
+        if ($intent === LindaIntent::OpenQuestion) {
+            return LindaIntent::openQuestionsOn()
+                ? $this->openAnswer($log, $started, $user, $question, $period, $this->asTyped($branchName, $question, $history), $history)
+                : $this->finish($log, $started, $this->answerer->notYet($intent, $user));
+        }
+
         return $this->answered($log, $started, $user, $intent, $period, $this->asTyped($branchName, $question, $history), $question);
     }
 
@@ -453,6 +461,143 @@ final class LindaAssistant
         }
 
         return $this->finish($log, $started, $reply);
+    }
+
+    /**
+     * An open question (round 3, LINDA_OPEN_QUESTIONS): the model writes the
+     * answer from the facts pack (LindaFacts), which the topic answers build
+     * under the caller's permissions and branches. It has already passed
+     * every guard (lookups, the full-name check), and only reaches here once
+     * the model classified it.
+     *
+     * The written answer is shown only when every number in it is in the
+     * pack and it holds no identifier or person's name (a name check that
+     * can't run counts as a name). Otherwise, or when the pack is empty, the
+     * cap is reached or the call fails, the fixed "not yet" reply is shown
+     * instead. The log records `used` or `fell_back`, never text, and books
+     * both calls' usage on the one row.
+     *
+     * @throws LindaHttpError data_unavailable
+     */
+    private function openAnswer(LindaQuestion $log, int $started, User $user, #[\SensitiveParameter] string $question, ?LindaPeriod $period, ?string $branchName, LindaHistory $history): LindaReply
+    {
+        $period ??= LindaPeriod::named('this_month');
+        $log->fill(['intent' => LindaIntent::OpenQuestion->value, 'period_from' => $period->from->toDateString(), 'period_to' => $period->to->toDateString()]);
+
+        try {
+            $pack = app(LindaFacts::class)->build($user, $period, $branchName);
+        } catch (Throwable $e) {
+            Log::warning('Linda answer failed.', ['intent' => LindaIntent::OpenQuestion->value] + ErrorDigest::context($e));
+            $log->fill(['outcome' => self::OUTCOME_ERROR, 'error_code' => LindaHttpError::DATA_UNAVAILABLE]);
+            $this->write($log, $started);
+
+            throw LindaHttpError::dataUnavailable();
+        }
+
+        $facts = $pack['facts'];
+
+        if ($facts['topics'] === [] || LindaFacts::hasIdentifier((string) json_encode($facts, JSON_UNESCAPED_UNICODE)) || $this->budget->reached()) {
+            return $this->fellBack($log, $started, $user);
+        }
+
+        $writing = $this->writeOpen($log, new LindaWriteRequest($question, array_column($history->earlier, 'intent'), $facts, (string) ($log->model ?? $this->settings->model())));
+
+        if ($writing === null || ! LindaFacts::fits($writing->text, $facts) || $this->namesSomeone($writing->text)) {
+            return $this->fellBack($log, $started, $user);
+        }
+
+        $links = [];
+        foreach (LindaFacts::topicsUsed($writing->text, $facts) as $topic) {
+            foreach ($pack['links'][$topic] ?? [] as $link) {
+                $links[$link['url']] = $link;
+            }
+        }
+
+        $log->open_answer = LindaQuestion::OPEN_USED;
+
+        return $this->finish($log, $started, new LindaReply(
+            LindaIntent::OpenQuestion->value,
+            $writing->text."\n\n".LindaWording::writtenFromFigures(),
+            'answered',
+            links: array_slice(array_values($links), 0, 4),
+            answerFunction: class_basename(LindaFacts::class),
+        ));
+    }
+
+    /**
+     * The model's written answer, its usage added to the row; null when the
+     * call failed (its cost booked as understand() books a failed call).
+     */
+    private function writeOpen(LindaQuestion $log, LindaWriteRequest $request): ?LindaWriting
+    {
+        $sent = false;
+
+        try {
+            LindaPrices::worstCaseEstimate($request->model);
+            $writer = LindaModelFactory::writer((string) config('linda.driver'));
+
+            if ($writer === null) {
+                return null;
+            }
+
+            $sent = true;
+            $writing = $writer->write($request);
+            $this->addUsage($log, $writing->usage);
+
+            return $writing;
+        } catch (LindaModelUnavailable $e) {
+            if ($e->usage !== null) {
+                $this->addUsage($log, $e->usage);
+            } elseif ($sent && in_array($e->reason, ['timeout', 'bad_output'], true)) {
+                $this->addWorstCase($log, $request->model);
+            }
+        } catch (Throwable $e) {
+            Log::warning('Linda model call failed.', ['reason' => self::REASON_INTERNAL] + ErrorDigest::context($e));
+
+            if ($sent) {
+                $this->addWorstCase($log, $request->model);
+            }
+        }
+
+        return null;
+    }
+
+    /** Whether a written answer names one of the deployment's people; a check that can't run says yes. */
+    private function namesSomeone(#[\SensitiveParameter] string $text): bool
+    {
+        try {
+            return LindaNameCheck::find($text) !== null;
+        } catch (Throwable) {
+            return true;
+        }
+    }
+
+    private function fellBack(LindaQuestion $log, int $started, User $user): LindaReply
+    {
+        $log->open_answer = LindaQuestion::OPEN_FELL_BACK;
+
+        return $this->finish($log, $started, $this->answerer->notYet(LindaIntent::OpenQuestion, $user));
+    }
+
+    /** A second call's usage, added to the row's tokens and cost. */
+    private function addUsage(LindaQuestion $log, LindaUsage $usage): void
+    {
+        $log->fill([
+            'input_tokens' => (int) $log->input_tokens + $usage->inputTokens,
+            'output_tokens' => (int) $log->output_tokens + $usage->outputTokens,
+            'cache_read_tokens' => (int) $log->cache_read_tokens + $usage->cacheReadTokens,
+            'cache_write_tokens' => (int) $log->cache_write_tokens + $usage->cacheWriteTokens,
+            'cost' => (string) BigDecimal::of((string) ($log->cost ?? '0'))->plus(LindaPrices::cost($usage))->toScale(6, RoundingMode::HalfUp),
+        ]);
+    }
+
+    private function addWorstCase(LindaQuestion $log, string $model): void
+    {
+        try {
+            $log->cost = (string) BigDecimal::of((string) ($log->cost ?? '0'))->plus(LindaPrices::worstCaseEstimate($model))->toScale(6, RoundingMode::HalfUp);
+        } catch (LindaModelUnavailable) {
+            $log->error_code = 'no_prices';
+        }
     }
 
     /**

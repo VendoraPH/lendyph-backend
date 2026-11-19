@@ -17,6 +17,9 @@
 
 return [
     'enabled' => (bool) env('LINDA_ENABLED', false),
+    // Round 3: a question no fixed topic covers may be written by the model
+    // from a pack of summary figures (LindaFacts). Off by default.
+    'open_questions' => (bool) env('LINDA_OPEN_QUESTIONS', false),
     'driver' => env('LINDA_DRIVER', 'none'),
     'model' => env('LINDA_MODEL', 'claude-haiku-5-5'),
     'anthropic' => [
@@ -24,6 +27,7 @@ return [
         'workspace_id' => env('LINDA_ANTHROPIC_WORKSPACE_ID'),
         'effort' => 'low',
         'max_tokens' => 512,
+        'write_max_tokens' => 600,
         'timeout' => 9.0,
         'max_retries' => 1,
     ],
