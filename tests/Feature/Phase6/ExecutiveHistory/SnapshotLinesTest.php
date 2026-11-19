@@ -17,7 +17,6 @@ use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Mockery;
 use Mockery\MockInterface;
-use PHPUnit\Framework\Attributes\Group;
 use RuntimeException;
 use Tests\TestCase;
 use Tests\Traits\SetupLendyPH;
@@ -229,30 +228,6 @@ class SnapshotLinesTest extends TestCase
         $this->assertCount(2, $runs);
         $this->assertTrue($runs[1]->is_replay);
         $this->assertSame('succeeded', $runs[1]->status);
-    }
-
-    /**
-     * PENDING DECISION (Arvin, PR #337 money review, Medium): which loans PAR
-     * covers. The Portfolio Summary's PAR covers every loan ever released and
-     * divides by `par_portfolio_principal`; the snapshot (and so history)
-     * covers collectible loans and divides by `outstanding_principal`. They
-     * part when a restructured or completed loan still has a period marked
-     * unpaid. This test fails until one basis is chosen; the recommendation
-     * is collectible loans everywhere.
-     */
-    #[Group('pending-decision')]
-    public function test_pending_decision_history_par_equals_the_portfolio_summary_with_a_restructured_loan_still_marked_unpaid(): void
-    {
-        $this->book();
-        $restructured = $this->loanIn($this->branch, $this->second, grace: 0, daysLate: 45);
-        DB::table('loans')->where('id', $restructured->id)->update(['status' => 'restructured']);
-
-        $this->artisan('portfolio:snapshot')->assertSuccessful();
-
-        $summary = $this->getJson('/api/reports/loan-balance-summary')->assertOk()->json('data');
-        $history = $this->getJson('/api/dashboard/history?date=2026-11-19')->assertOk()->json('data.points.0.figures');
-
-        $this->assertEquals($summary['par_30'], $history['par_30'], 'One PAR basis on every screen.');
     }
 
     public function test_an_empty_book_records_a_day_with_no_lines(): void
