@@ -43,6 +43,7 @@ class SavingsPermissionsTest extends TestCase
         $this->assertSame(self::NAMES, $this->grants('super_admin'));
         $this->assertSame(self::NAMES, $this->grants('admin'));
         $this->assertSame([], array_filter($this->grantsOfOtherRoles()));
+        $this->assertSame(['savings:view'], $this->grants('compliance_officer'));
     }
 
     public function test_the_migration_grants_the_administrators_with_one_system_audit_row_each(): void
@@ -152,10 +153,15 @@ class SavingsPermissionsTest extends TestCase
             ->permissions()->where('name', 'like', 'savings:%')->orderBy('name')->pluck('name')->all();
     }
 
-    /** @return array<string, list<string>> */
+    /**
+     * Every role but the administrators and the Compliance Officer, whose
+     * read-only `savings:view` (Phase 6 decision 12) is pinned on its own.
+     *
+     * @return array<string, list<string>>
+     */
     private function grantsOfOtherRoles(): array
     {
-        return Role::query()->whereNotIn('name', ['super_admin', 'admin'])->orderBy('name')->get()
+        return Role::query()->whereNotIn('name', ['super_admin', 'admin', 'compliance_officer'])->orderBy('name')->get()
             ->mapWithKeys(fn (Role $role) => [$role->name => $role->permissions()->where('name', 'like', 'savings:%')->pluck('name')->all()])
             ->all();
     }

@@ -57,6 +57,56 @@ class RoleAndPermissionSeeder extends Seeder
     ];
 
     /**
+     * Every Phase 6 permission (plan §2, decision 11): AMLA, the executive
+     * dashboard, branch management, member transfer, inter-branch transfers and
+     * loan origination. admin and super_admin only, through Permission::all()
+     * below; the Compliance Officer holds the `amla:*` ones. Mirrors
+     * 2026_11_19_100000_add_phase6_permissions_and_compliance_officer_role,
+     * which grants them on the already-migrated deployments.
+     *
+     * @var list<string>
+     */
+    public const PHASE6_PERMISSIONS = [
+        'amla:view', 'amla:alerts', 'amla:cases', 'amla:cdd', 'amla:screening', 'amla:sanctions', 'amla:ctr',
+        'amla:str', 'amla:approve', 'amla:export', 'amla:submit', 'amla:settings', 'amla:audit',
+        'dashboard:analytics', 'dashboard:export', 'dashboard:settings',
+        'branches:manage', 'borrowers:transfer',
+        'interbranch_transfers:view', 'interbranch_transfers:create', 'interbranch_transfers:approve', 'interbranch_transfers:receive',
+        'loan_origination:view', 'loan_origination:update', 'loan_origination:assess', 'loan_origination:convert', 'loan_origination:settings',
+    ];
+
+    /**
+     * The Compliance Officer's display name, in order of preference, picked as
+     * the Accountant's is. Mirrors the 2026_11_19_100000 migration.
+     *
+     * @var list<string>
+     */
+    public const COMPLIANCE_OFFICER_DISPLAY_NAMES = ['Compliance Officer', 'Compliance Officer (AMLA)'];
+
+    /**
+     * The Compliance Officer (Phase 6 plan §2, decision 12; AMLA analysis §4,
+     * decision 12): every `amla:*` permission, every branch, member details and
+     * reports, and read-only lending, savings and GCash (the viewer's read-only
+     * list plus `savings:view`). Pointedly WITHOUT `audit_logs:view` (AMLA
+     * keeps its own append-only log, so case activity never reaches the shared
+     * trail), `reports:export` (AMLA has `amla:export`), and any write outside
+     * AMLA. No user is given the role here; the owner assigns it in Users.
+     *
+     * Mirrors 2026_11_19_100000_add_phase6_permissions_and_compliance_officer_role,
+     * which creates the role with this list on already-migrated deployments.
+     *
+     * @var list<string>
+     */
+    public const COMPLIANCE_OFFICER_PERMISSIONS = [
+        'amla:view', 'amla:alerts', 'amla:cases', 'amla:cdd', 'amla:screening', 'amla:sanctions', 'amla:ctr',
+        'amla:str', 'amla:approve', 'amla:export', 'amla:submit', 'amla:settings', 'amla:audit',
+        BranchAccess::VIEW_ALL, 'borrowers:view', 'reports:view',
+        'dashboard:view', 'loans:view', 'loan_adjustments:view', 'payments:view', 'collaterals:view',
+        'fees:view', 'share_capital:view', 'auto_pay:view',
+        'savings:view', 'gcash:view',
+    ];
+
+    /**
      * Seeding writes no audit rows: a fresh database's roles are the baseline,
      * not a change anyone made (Role is Auditable).
      */
@@ -224,6 +274,11 @@ class RoleAndPermissionSeeder extends Seeder
             // 2026_11_16_100000_add_linda_permissions, which grants them on the
             // already-migrated deployments.
             'linda:use', 'linda:settings',
+
+            // Phase 6: self::PHASE6_PERMISSIONS (AMLA, executive dashboard,
+            // branches, member transfer, inter-branch transfers, loan
+            // origination).
+            ...self::PHASE6_PERMISSIONS,
         ];
 
         $guard = 'web';
@@ -243,6 +298,7 @@ class RoleAndPermissionSeeder extends Seeder
             'viewer' => ['description' => 'Read-only access to operational data.'],
             'general_bookkeeper' => ['description' => 'Releases loans after BOD approval in the normal workflow.'],
             'accountant' => ['description' => 'Keeps the books: journals, expenses, reconciliation, period and year-end close, opening balances and the allowance. Assigned by the owner.'],
+            'compliance_officer' => ['description' => 'Anti-money laundering compliance: alerts, cases, due diligence, screening, sanctions, covered and suspicious transaction reports and the AMLA log, with read-only lending, savings and GCash in every branch. Assigned by the owner.'],
 
             // Approval-chain roles. ApprovalWorkflowSetting's default chains
             // have always named these, but until 2026-09-16 none of them
@@ -437,6 +493,25 @@ class RoleAndPermissionSeeder extends Seeder
         }
 
         $accountant->syncPermissions(self::ACCOUNTANT_PERMISSIONS);
+
+        // Compliance Officer: self::COMPLIANCE_OFFICER_PERMISSIONS, its display
+        // name set only while it has none, as the Accountant's is.
+        $complianceOfficer = Role::updateOrCreate(
+            ['name' => 'compliance_officer', 'guard_name' => $guard],
+            ['is_system' => true, 'is_active' => true, 'description' => $systemRoleAttrs['compliance_officer']['description']],
+        );
+
+        if (blank($complianceOfficer->display_name)) {
+            $others = Role::query()->get(['id', 'name', 'display_name']);
+            $label = collect(self::COMPLIANCE_OFFICER_DISPLAY_NAMES)
+                ->first(fn (string $label) => ! UniqueRoleDisplayName::readsAsAnotherRole($others, $label, $complianceOfficer->id));
+
+            if ($label !== null) {
+                $complianceOfficer->update(['display_name' => $label]);
+            }
+        }
+
+        $complianceOfficer->syncPermissions(self::COMPLIANCE_OFFICER_PERMISSIONS);
 
         /**
          * The five READ-ONLY accounting permissions `manager` is granted by
