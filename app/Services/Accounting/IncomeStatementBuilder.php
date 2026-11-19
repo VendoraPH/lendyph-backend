@@ -99,6 +99,31 @@ final class IncomeStatementBuilder
     }
 
     /**
+     * The statement for each journal branch in the range, keyed by branch id,
+     * with the journals that carry no branch under the key `none`: one query
+     * grouped by branch, so each branch's statement is self::build() for that
+     * branch alone and, together with `none`, they add up to self::build()
+     * over the same scope. A branch with no income or expense line has no key.
+     * `$branchId` narrows it as self::build() does (a list never includes
+     * `none`).
+     *
+     * @param  int|list<int>|null  $branchId
+     * @return array<int|string, array{period: array{from: string, to: string}, income: list<array<string, mixed>>, expenses: list<array<string, mixed>>, total_income: int, total_expenses: int, net_income: int}>
+     */
+    public function byJournalBranch(string $from, string $to, int|array|null $branchId = null): array
+    {
+        $rows = $this->movementsQuery($from, $to, $branchId)
+            ->groupBy('j.branch_id')
+            ->addSelect('j.branch_id')
+            ->get()
+            ->groupBy(fn (object $row) => $row->branch_id === null ? 'none' : (int) $row->branch_id);
+
+        return $rows
+            ->map(fn ($branchRows) => self::fromRows($branchRows->map(self::movementRow(...))->all(), $from, $to))
+            ->all();
+    }
+
+    /**
      * Debits and credits per income and expense account over the range.
      *
      * The same status rule as the trial balance: posted AND reversed lines
@@ -109,6 +134,17 @@ final class IncomeStatementBuilder
      * @return list<array{account_id: int, account_code: string, account_name: string, type: string, debit: int, credit: int}>
      */
     private function movements(string $from, string $to, int|array|null $branchId): array
+    {
+        return $this->movementsQuery($from, $to, $branchId)
+            ->get()
+            ->map(self::movementRow(...))
+            ->all();
+    }
+
+    /**
+     * @param  int|list<int>|null  $branchId
+     */
+    private function movementsQuery(string $from, string $to, int|array|null $branchId): Builder
     {
         return DB::table('accounting_journal_lines as l')
             ->join('accounting_journals as j', 'j.id', '=', 'l.accounting_journal_id')
@@ -130,18 +166,23 @@ final class IncomeStatementBuilder
                 'a.type',
                 DB::raw('sum(l.debit) as debit'),
                 DB::raw('sum(l.credit) as credit'),
-            ])
-            ->get()
-            ->map(static fn (object $row): array => [
-                'account_id' => (int) $row->account_id,
-                'account_code' => (string) $row->account_code,
-                'account_name' => (string) $row->account_name,
-                'type' => (string) $row->type,
-                // MySQL returns SUM() as a DECIMAL string.
-                'debit' => (int) $row->debit,
-                'credit' => (int) $row->credit,
-            ])
-            ->all();
+            ]);
+    }
+
+    /**
+     * @return array{account_id: int, account_code: string, account_name: string, type: string, debit: int, credit: int}
+     */
+    private static function movementRow(object $row): array
+    {
+        return [
+            'account_id' => (int) $row->account_id,
+            'account_code' => (string) $row->account_code,
+            'account_name' => (string) $row->account_name,
+            'type' => (string) $row->type,
+            // MySQL returns SUM() as a DECIMAL string.
+            'debit' => (int) $row->debit,
+            'credit' => (int) $row->credit,
+        ];
     }
 
     /**

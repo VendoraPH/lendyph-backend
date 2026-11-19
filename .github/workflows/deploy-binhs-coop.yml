@@ -239,6 +239,9 @@ jobs:
               # Staging only: open questions (Arvin, 2026-11-17, "yes please do"; round 3 #327, #330).
               # The model writes from a pack of summary figures only, every number checked against it.
               export LINDA_OPEN_QUESTIONS=true
+              # Staging only: AMLA monitoring (Phase 6 plan §8, Arvin 2026-11-19 "Yes GO!"): events, detection
+              # and screening collect from now, into AMLA tables only. No outbound channels; screens stay behind their flag.
+              export AMLA_MONITORING_ENABLED=true
               # Linda's AI key, delivered by the step above (staging only). Exported so
               # config:cache bakes it in; never echoed, never on a command line. Without it
               # Linda answers with its matcher only (LINDA_DRIVER stays none).
@@ -485,6 +488,9 @@ jobs:
               # Staging only: open questions (Arvin, 2026-11-17, "yes please do"; round 3 #327, #330).
               # The model writes from a pack of summary figures only, every number checked against it.
               export LINDA_OPEN_QUESTIONS=true
+              # Staging only: AMLA monitoring (Phase 6 plan §8, Arvin 2026-11-19 "Yes GO!"): events, detection
+              # and screening collect from now, into AMLA tables only. No outbound channels; screens stay behind their flag.
+              export AMLA_MONITORING_ENABLED=true
               # Linda's AI key, delivered by the step above (staging only). Exported so
               # config:cache bakes it in; never echoed, never on a command line. Without it
               # Linda answers with its matcher only (LINDA_DRIVER stays none).

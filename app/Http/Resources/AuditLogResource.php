@@ -207,6 +207,7 @@ class AuditLogResource extends JsonResource
         'AccountingReconciliation' => ['statement_balance'],
         'AccountingReconciliationLine' => ['amount'],
         'AccountingYearClose' => ['net_surplus'],
+        'InterbranchTransfer' => ['amount'],
     ];
 
     /**

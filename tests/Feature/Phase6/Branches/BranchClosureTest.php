@@ -83,6 +83,22 @@ class BranchClosureTest extends TestCase
         ], $this->auditRows($this->quiet->id)->map(fn (AuditLog $row) => [$row->action, $row->description])->all());
     }
 
+    public function test_a_branch_waiting_to_close_cannot_become_the_main_office(): void
+    {
+        $this->requestClosure();
+
+        $this->putJson("/api/branches/{$this->quiet->id}/main-office", ['reason' => 'Head office moved'])
+            ->assertUnprocessable()
+            ->assertJsonPath('errors.branch.0', 'A request to close this branch is waiting. Reject or cancel it before making it the main office.');
+
+        $this->assertFalse($this->quiet->fresh()->is_main_office);
+        $this->assertSame('pending', BranchClosure::query()->where('branch_id', $this->quiet->id)->sole()->status);
+
+        // Once the request is cancelled, the move goes ahead.
+        $this->deleteJson("/api/branches/{$this->quiet->id}/closure")->assertOk();
+        $this->putJson("/api/branches/{$this->quiet->id}/main-office", ['reason' => 'Head office moved'])->assertOk();
+    }
+
     public function test_the_person_who_asked_cannot_approve(): void
     {
         $this->requestClosure();
@@ -144,6 +160,7 @@ class BranchClosureTest extends TestCase
             ['key' => 'open_time_deposits', 'label' => 'Open time deposits', 'count' => 1, 'amount' => null, 'clear' => false],
             ['key' => 'money_in_accounts', 'label' => 'Money in its cash and bank accounts', 'count' => 1, 'amount' => '1500.00', 'clear' => false],
             ['key' => 'pending_approvals', 'label' => 'Pending approvals and requests', 'count' => 3, 'amount' => null, 'clear' => false],
+            ['key' => 'transfers_in_transit', 'label' => 'Transfers in transit', 'count' => 0, 'amount' => null, 'clear' => true],
             ['key' => 'assigned_users', 'label' => 'Assigned users', 'count' => 1, 'amount' => null, 'clear' => false],
         ], $data['checklist']);
 

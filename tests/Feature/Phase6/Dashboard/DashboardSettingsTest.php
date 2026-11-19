@@ -73,7 +73,7 @@ it('starts with the approved defaults, in one row', function () {
         ->and(array_column($response->json('data.rules'), 'text'))->toBe([
             'PAR 30 is up 1 point or more on 30 days ago.',
             'Collection Efficiency is below 90%.',
-            'Overdue is above 5% of the portfolio.',
+            'Overdue is above 5% of the outstanding balance.',
             'A loan has waited more than 3 days for approval.',
             'An approved loan has not been released after more than 2 days.',
             'A control check shows any difference.',

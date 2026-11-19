@@ -4,6 +4,7 @@ namespace Tests\Feature\Phase6\Branches;
 
 use App\Models\AuditLog;
 use App\Models\Branch;
+use App\Models\BranchClosure;
 use App\Models\Loan;
 use App\Models\User;
 use App\Services\BranchAccess;
@@ -336,6 +337,50 @@ class BranchCoreTest extends TestCase
         $this->assertNull($this->getJson("/api/branches/{$this->second->id}")->assertOk()->json('data.figures'));
         $listed = collect($this->getJson('/api/branches?include=figures')->assertOk()->json('data'))->firstWhere('id', $this->second->id);
         $this->assertNull($listed['figures']);
+    }
+
+    // Closure requested ---------------------------------------------------
+
+    public function test_the_list_and_the_branch_say_when_a_closure_request_is_waiting(): void
+    {
+        $quiet = Branch::factory()->create(['name' => 'Quiet Branch', 'code' => 'QUI']);
+        BranchClosure::query()->create(['branch_id' => $quiet->id, 'status' => 'pending', 'effective_on' => now()->toDateString(), 'reason' => 'x', 'requested_by' => $this->admin->id]);
+        BranchClosure::query()->create(['branch_id' => $this->second->id, 'status' => 'cancelled', 'effective_on' => now()->toDateString(), 'reason' => 'x', 'requested_by' => $this->admin->id]);
+
+        $listed = collect($this->getJson('/api/branches')->assertOk()->json('data'))->keyBy('id');
+        $this->assertTrue($listed[$quiet->id]['closure_pending']);
+        $this->assertFalse($listed[$this->second->id]['closure_pending']);
+        $this->assertTrue($this->getJson("/api/branches/{$quiet->id}")->assertOk()->json('data.closure_pending'));
+        $this->assertFalse($this->getJson("/api/branches/{$this->second->id}")->assertOk()->json('data.closure_pending'));
+    }
+
+    public function test_closure_pending_is_left_out_for_callers_who_cannot_change_a_status(): void
+    {
+        $user = User::factory()->inBranches($this->second)->create();
+        $user->givePermissionTo(['settings:view', 'branches:manage']);
+        $this->actingAs($user);
+
+        $this->assertArrayNotHasKey('closure_pending', $this->getJson("/api/branches/{$this->second->id}")->assertOk()->json('data'));
+        $this->assertArrayNotHasKey('closure_pending', $this->getJson('/api/branches')->assertOk()->json('data.0'));
+    }
+
+    public function test_the_list_reads_closure_pending_without_a_query_per_branch(): void
+    {
+        $queries = function (): int {
+            DB::flushQueryLog();
+            DB::enableQueryLog();
+            $this->getJson('/api/branches')->assertOk();
+            $count = count(DB::getQueryLog());
+            DB::disableQueryLog();
+
+            return $count;
+        };
+
+        $queries(); // warms the permission cache
+        $few = $queries();
+        Branch::factory()->count(4)->create();
+
+        $this->assertSame($few, $queries());
     }
 
     /** @return Collection<int, AuditLog> */

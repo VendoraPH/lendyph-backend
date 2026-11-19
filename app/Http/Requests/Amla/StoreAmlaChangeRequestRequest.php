@@ -4,6 +4,8 @@ namespace App\Http\Requests\Amla;
 
 use App\Models\AmlaCalendarEntry;
 use App\Models\AmlaChangeRequest;
+use App\Services\Amla\Cdd\RiskRules;
+use App\Services\Amla\Detection\DetectionRules;
 use App\Services\Amla\Foundation\AmlaAccess;
 use App\Services\Amla\Foundation\AmlaSettings;
 use Closure;
@@ -20,6 +22,7 @@ use Illuminate\Validation\Validator;
  * - calendar_add: `date`, `kind`, `name`, `source`.
  * - calendar_remove: `entry_id`.
  * - calendar_confirm_year: `year`.
+ * - risk_rules: `definition`, the whole next rules version (RiskRules).
  */
 class StoreAmlaChangeRequestRequest extends AmlaFormRequest
 {
@@ -54,6 +57,9 @@ class StoreAmlaChangeRequestRequest extends AmlaFormRequest
             ],
             AmlaChangeRequest::CALENDAR_CONFIRM_YEAR => [...$rules,
                 'year' => ['required', 'integer', 'min:2000', 'max:2100'],
+            ],
+            AmlaChangeRequest::RISK_RULES, AmlaChangeRequest::DETECTION_RULES => [...$rules,
+                'definition' => ['required', 'array'],
             ],
             default => $rules,
         };
@@ -96,6 +102,30 @@ class StoreAmlaChangeRequestRequest extends AmlaFormRequest
     /** @return list<Closure> */
     public function after(): array
     {
+        if ($this->input('type') === AmlaChangeRequest::RISK_RULES) {
+            return [function (Validator $validator): void {
+                if ($validator->errors()->isNotEmpty()) {
+                    return;
+                }
+
+                foreach (RiskRules::definitionErrors((array) $this->input('definition')) as $field => $message) {
+                    $validator->errors()->add($field, $message);
+                }
+            }];
+        }
+
+        if ($this->input('type') === AmlaChangeRequest::DETECTION_RULES) {
+            return [function (Validator $validator): void {
+                if ($validator->errors()->isNotEmpty()) {
+                    return;
+                }
+
+                foreach (app(DetectionRules::class)->definitionErrors((array) $this->input('definition')) as $field => $message) {
+                    $validator->errors()->add($field, $message);
+                }
+            }];
+        }
+
         if ($this->input('type') !== AmlaChangeRequest::SETTINGS) {
             return [];
         }

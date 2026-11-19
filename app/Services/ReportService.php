@@ -2538,6 +2538,7 @@ class ReportService
                 'outflow_share_capital' => 'money',
                 'outflow_total' => 'money',
                 'net_movement' => 'money',
+                'principal_released' => 'money',
             ]),
             'generated_at' => now()->toDateTimeString(),
         ];
@@ -2593,7 +2594,8 @@ class ReportService
                 loans.branch_id,
                 COUNT(*) as loan_count,
                 COALESCE(SUM(loans.total_deductions), 0) as total_deductions,
-                COALESCE(SUM(loans.net_proceeds), 0) as net_proceeds
+                COALESCE(SUM(loans.net_proceeds), 0) as net_proceeds,
+                COALESCE(SUM(loans.principal_amount), 0) as principal_released
             ')
             ->get()
             ->keyBy(fn ($row) => (int) $row->branch_id);
@@ -2666,6 +2668,9 @@ class ReportService
                 'release_count' => (int) ($out->loan_count ?? 0),
                 'share_capital_count' => (int) ($members->entry_count ?? 0),
                 'total_deductions' => round((float) ($out->total_deductions ?? 0), 2),
+                // The principal of the loans released, the statement's
+                // non_cash.principal_released for the branch: booked, not cash.
+                'principal_released' => round((float) ($out->principal_released ?? 0), 2),
                 'net_movement' => round($inflowTotal - $outflowTotal, 2),
             ];
         })->all();

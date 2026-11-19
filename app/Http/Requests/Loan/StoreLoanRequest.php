@@ -6,8 +6,10 @@ use App\Enums\LoanFrequency;
 use App\Http\Requests\Concerns\ExcludesRejectedBorrowers;
 use App\Http\Requests\Concerns\RequiresActiveAccountOfficer;
 use App\Http\Requests\Concerns\ValidatesDeductionAmounts;
+use App\Rules\MemberBranchTakesNew;
 use App\Rules\MemberHasBranch;
 use App\Rules\NotAFormerMember;
+use App\Services\Branches\BranchWriteGuard;
 use Illuminate\Foundation\Http\FormRequest;
 
 class StoreLoanRequest extends FormRequest
@@ -24,7 +26,7 @@ class StoreLoanRequest extends FormRequest
         return [
             // `bail`: once the branch-scoped `exists` fails, the rules after it
             // must not read the id unscoped and describe another branch's member.
-            'borrower_id' => ['bail', 'required', 'integer', $this->nonRejectedBorrowerRule(), new NotAFormerMember, new MemberHasBranch],
+            'borrower_id' => ['bail', 'required', 'integer', $this->nonRejectedBorrowerRule(), new NotAFormerMember, new MemberHasBranch, new MemberBranchTakesNew(BranchWriteGuard::LOANS, $this->user())],
             'co_maker_ids' => ['nullable', 'array'],
             // MEMBER ids only — all the loan form's co-maker picker sends —
             // never a co-maker record id: the two are separate sequences, so a

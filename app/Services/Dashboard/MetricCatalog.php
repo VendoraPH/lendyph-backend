@@ -21,6 +21,22 @@ final class MetricCatalog
     private const LOAN_FILTERS = ['branch_id', 'product_id', 'officer_id'];
 
     /**
+     * The books' figures come from the accounting dashboard's sources (the
+     * income statement), `/api/accounting/dashboard`, not a lending report.
+     */
+    public const BOOKS_SOURCE = 'accounting/dashboard';
+
+    /**
+     * Sources outside `/api/reports`, as self::REPORTS describes a report: the
+     * books follow the branch filter only (by journal branch).
+     *
+     * @var array<string, array{full: list<string>, partial: array<string, list<string>>}>
+     */
+    public const OTHER_SOURCES = [
+        self::BOOKS_SOURCE => ['full' => ['branch_id'], 'partial' => []],
+    ];
+
+    /**
      * Cash Flow's repayment cash and every total built from it, as response
      * paths (`*` is each `by_branch` row): what the collector filter narrows,
      * and part of what product and officer narrow. Share capital
@@ -56,7 +72,9 @@ final class MetricCatalog
         'by_branch.*.outflow_total',
         'by_branch.*.release_count',
         'by_branch.*.total_deductions',
+        'by_branch.*.principal_released',
         'by_branch_totals.outflow_net_proceeds',
+        'by_branch_totals.principal_released',
         'by_branch_totals.outflow_total',
     ];
 
@@ -293,8 +311,8 @@ final class MetricCatalog
             ],
             'required_allowance' => [
                 'label' => 'Required Allowance',
-                'definition' => 'The allowance for probable loan losses the provisioning rates require on the past-due buckets, as of today.',
-                'formula' => 'Sum over aging buckets of bucket amount × provisioning rate',
+                'definition' => 'The allowance for probable loan losses the allowance posting books, as of today: the provisioning rates on each past-due loan\'s unpaid principal, in the bucket of its oldest unpaid period, each bucket rounded half up to the centavo.',
+                'formula' => 'Sum over aging buckets of past-due principal × provisioning rate',
                 'unit' => 'money',
                 'date_rule' => 'as_of_today',
                 'source' => 'provisioning',
@@ -311,6 +329,28 @@ final class MetricCatalog
                 'source' => 'share-capital',
                 'filters' => ['branch_id'],
                 'permissions' => ['reports:view', 'share_capital:view'],
+                'has_history' => false,
+            ],
+            'interest_income' => [
+                'label' => 'Interest income (cash basis)',
+                'definition' => 'The interest posted to the books in the period, on the account set for interest income, by journal branch. The books are kept on a cash basis, so this is interest received; it differs from the Income report\'s collected interest by payments that posted no journal and by deferred interest recognised later. It is never added to collected interest.',
+                'formula' => 'Credits less debits on the interest income account in the period',
+                'unit' => 'money',
+                'date_rule' => 'period',
+                'source' => self::BOOKS_SOURCE,
+                'filters' => ['branch_id'],
+                'permissions' => ['accounting:view'],
+                'has_history' => false,
+            ],
+            'net_income' => [
+                'label' => 'Net Income',
+                'definition' => 'Income less expenses posted to the books in the period, by journal branch, the income statement\'s own figure; year-end closing entries are left out. It reads Net Surplus on the cooperative chart of accounts.',
+                'formula' => 'Total income − total expenses on the income statement for the period',
+                'unit' => 'money',
+                'date_rule' => 'period',
+                'source' => self::BOOKS_SOURCE,
+                'filters' => ['branch_id'],
+                'permissions' => ['accounting:view'],
                 'has_history' => false,
             ],
         ];

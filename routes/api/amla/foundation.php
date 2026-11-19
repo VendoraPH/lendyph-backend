@@ -17,7 +17,8 @@ use Illuminate\Support\Facades\Route;
 | limiter (AmlaServiceProvider): a caller holding no `amla:*` key gets 10
 | refusals a minute, so refusals can't flood the log, which is kept forever.
 | Change requests are found by `{id}` only after the permission check, so a
-| caller without access can't tell which ids exist.
+| caller without access can't tell which ids exist. Ids are at most 18
+| digits, so an oversized one never reaches `int $id` (a 500).
 */
 Route::prefix('amla')->name('amla.')->middleware('throttle:amla')->group(function () {
     Route::get('/status', [AmlaFoundationController::class, 'status'])->name('status');
@@ -28,10 +29,10 @@ Route::prefix('amla')->name('amla.')->middleware('throttle:amla')->group(functio
 
     Route::get('/change-requests', [AmlaChangeRequestController::class, 'index'])->name('change-requests.index');
     Route::post('/change-requests', [AmlaChangeRequestController::class, 'store'])->name('change-requests.store');
-    Route::get('/change-requests/{id}', [AmlaChangeRequestController::class, 'show'])->whereNumber('id')->name('change-requests.show');
-    Route::post('/change-requests/{id}/approve', [AmlaChangeRequestController::class, 'approve'])->whereNumber('id')->name('change-requests.approve');
-    Route::post('/change-requests/{id}/reject', [AmlaChangeRequestController::class, 'reject'])->whereNumber('id')->name('change-requests.reject');
-    Route::post('/change-requests/{id}/withdraw', [AmlaChangeRequestController::class, 'withdraw'])->whereNumber('id')->name('change-requests.withdraw');
+    Route::get('/change-requests/{id}', [AmlaChangeRequestController::class, 'show'])->where('id', '[0-9]{1,18}')->name('change-requests.show');
+    Route::post('/change-requests/{id}/approve', [AmlaChangeRequestController::class, 'approve'])->where('id', '[0-9]{1,18}')->name('change-requests.approve');
+    Route::post('/change-requests/{id}/reject', [AmlaChangeRequestController::class, 'reject'])->where('id', '[0-9]{1,18}')->name('change-requests.reject');
+    Route::post('/change-requests/{id}/withdraw', [AmlaChangeRequestController::class, 'withdraw'])->where('id', '[0-9]{1,18}')->name('change-requests.withdraw');
 
     Route::get('/log', [AmlaLogController::class, 'index'])->name('log');
 });

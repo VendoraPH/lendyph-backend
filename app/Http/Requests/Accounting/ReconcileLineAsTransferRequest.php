@@ -2,7 +2,9 @@
 
 namespace App\Http\Requests\Accounting;
 
+use App\Http\Requests\Concerns\RefusesAClosedBranch;
 use Illuminate\Foundation\Http\FormRequest;
+use Illuminate\Validation\Validator;
 
 /**
  * Recording an unmatched statement line as a transfer between the reconciled
@@ -14,6 +16,8 @@ use Illuminate\Foundation\Http\FormRequest;
  */
 class ReconcileLineAsTransferRequest extends FormRequest
 {
+    use RefusesAClosedBranch;
+
     public function authorize(): bool
     {
         $user = $this->user();
@@ -34,5 +38,11 @@ class ReconcileLineAsTransferRequest extends FormRequest
             // books (otherwise a 422 on `line` offers that entry instead).
             'record_anyway' => ['nullable', 'boolean'],
         ];
+    }
+
+    /** Posts into the reconciliation's branch, which a closed branch refuses (Phase 6 MB-BE2). */
+    public function after(): array
+    {
+        return [fn (Validator $validator) => $this->refuseAClosedBranch($validator, $this->route('reconciliation')?->branch_id)];
     }
 }

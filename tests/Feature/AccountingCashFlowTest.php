@@ -91,10 +91,13 @@ class AccountingCashFlowTest extends TestCase
     public function test_no_account_in_the_chart_departs_from_the_rule(): void
     {
         $departures = AccountingAccount::query()
-            // The one stated exception, seeded on purpose (Phase 2, decision 9):
-            // the loan accounts read operating, because lending is this
-            // organisation's operation. Listed by code so a new one fails here.
+            // The stated exceptions, seeded on purpose and listed by code so a
+            // new one fails here: the loan accounts read operating, because
+            // lending is this organisation's operation (Phase 2, decision 9);
+            // and 1190 Interbranch Clearing reads financing, a branch's funding
+            // to and from other branches (Phase 6 MB-BE5).
             ->whereNotIn('code', ChartOfAccountsSeeder::OPERATING_LOAN_ACCOUNT_CODES)
+            ->whereNotIn('code', array_keys(ChartOfAccountsSeeder::CASH_FLOW_CATEGORIES))
             ->get(['code', 'name', 'type', 'cash_kind', 'cash_flow_category'])
             ->reject(fn (AccountingAccount $a): bool => $a->cash_flow_category
                 === CashFlowCategories::defaultFor($a->type, $a->cash_kind))
@@ -105,6 +108,10 @@ class AccountingCashFlowTest extends TestCase
         $this->assertSame(['1110', '1120', '1150', '1160', '1180', '1200', '1210'], ChartOfAccountsSeeder::OPERATING_LOAN_ACCOUNT_CODES);
         foreach (ChartOfAccountsSeeder::OPERATING_LOAN_ACCOUNT_CODES as $code) {
             $this->assertSame('operating', $this->categoryOf($code), $code);
+        }
+        $this->assertSame(['1190' => 'financing'], ChartOfAccountsSeeder::CASH_FLOW_CATEGORIES);
+        foreach (ChartOfAccountsSeeder::CASH_FLOW_CATEGORIES as $code => $category) {
+            $this->assertSame($category, $this->categoryOf($code), $code);
         }
 
         // And the consequence worth naming out loud: Accounts Payable is

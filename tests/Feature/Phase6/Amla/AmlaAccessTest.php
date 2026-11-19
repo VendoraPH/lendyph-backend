@@ -3,9 +3,9 @@
 namespace Tests\Feature\Phase6\Amla;
 
 use App\Models\AmlaLogEntry;
+use App\Providers\AmlaServiceProvider;
 use App\Services\Amla\Foundation\AmlaAccess;
 use App\Services\Amla\Foundation\AmlaMonitoring;
-use Illuminate\Cache\RateLimiting\Limit;
 use Illuminate\Http\Request;
 use Illuminate\Routing\Route as RoutingRoute;
 use Illuminate\Support\Facades\RateLimiter;
@@ -47,6 +47,23 @@ class AmlaAccessTest extends TestCase
             'change requests' => ['GET', '/api/amla/change-requests', ['amla:settings'], true],
             'ask for a change' => ['POST', '/api/amla/change-requests', ['amla:settings'], true],
             'log' => ['GET', '/api/amla/log', ['amla:audit'], true],
+            'cdd worklist' => ['GET', '/api/amla/cdd/subjects', ['amla:cdd'], false],
+            'risk rules' => ['GET', '/api/amla/risk-rules', ['amla:cdd', 'amla:settings', 'amla:audit'], true],
+            'watchlists' => ['GET', '/api/amla/screening/lists', ['amla:screening'], true],
+            'screening matches' => ['GET', '/api/amla/screening/matches', ['amla:screening'], true],
+            'rescreen' => ['POST', '/api/amla/screening/rescreen', ['amla:screening'], true],
+            'orders' => ['GET', '/api/amla/orders', ['amla:sanctions'], true],
+            'record an order' => ['POST', '/api/amla/orders', ['amla:sanctions'], true],
+            'alerts' => ['GET', '/api/amla/alerts', ['amla:alerts'], false],
+            'ctr candidates' => ['GET', '/api/amla/ctr-candidates', ['amla:ctr'], false],
+            'detection rules' => ['GET', '/api/amla/detection-rules', ['amla:view', 'amla:alerts', 'amla:settings'], true],
+            'detection rule versions' => ['GET', '/api/amla/detection-rules/versions', ['amla:settings'], true],
+            'cases' => ['GET', '/api/amla/cases', ['amla:cases'], true],
+            'open a case' => ['POST', '/api/amla/cases', ['amla:cases'], true],
+            'reports' => ['GET', '/api/amla/reports', ['amla:ctr', 'amla:str', 'amla:approve', 'amla:submit', 'amla:export'], false],
+            'report formats' => ['GET', '/api/amla/report-formats', ['amla:ctr', 'amla:str', 'amla:approve', 'amla:submit', 'amla:export'], false],
+            'filing deadlines' => ['GET', '/api/amla/filing-deadlines', ['amla:ctr', 'amla:str', 'amla:approve', 'amla:submit', 'amla:export'], false],
+            'risk downgrades' => ['GET', '/api/amla/risk-downgrades', ['amla:cdd'], false],
         ];
     }
 
@@ -87,6 +104,54 @@ class AmlaAccessTest extends TestCase
             'POST api/amla/change-requests/{id}/approve',
             'POST api/amla/change-requests/{id}/reject',
             'POST api/amla/change-requests/{id}/withdraw',
+            'GET api/amla/cdd/{subjectType}/{id}',
+            'PUT api/amla/cdd/{subjectType}/{id}',
+            'POST api/amla/cdd/{subjectType}/{id}/id-verifications',
+            'POST api/amla/cdd/{subjectType}/{id}/risk-assessments',
+            'POST api/amla/cdd/{subjectType}/{id}/reviews',
+            'GET api/amla/cdd/{subjectType}/{id}/valid-ids',
+            'POST api/amla/screening/lists/{source}/versions',
+            'GET api/amla/screening/matches/{id}',
+            'POST api/amla/screening/matches/{id}/confirm',
+            'POST api/amla/screening/matches/{id}/clear',
+            'GET api/amla/orders/{id}',
+            'POST api/amla/orders/{id}/release',
+            'POST api/amla/orders/{id}/release/approve',
+            'POST api/amla/orders/{id}/release/reject',
+            'POST api/amla/orders/{id}/release/withdraw',
+            'GET api/amla/alerts/{id}',
+            'GET api/amla/ctr-candidates/{id}',
+            'POST api/amla/alerts/{id}/assign',
+            'POST api/amla/alerts/{id}/review',
+            'POST api/amla/alerts/{id}/escalate',
+            'POST api/amla/alerts/{id}/close',
+            'GET api/amla/alerts/{id}/history',
+            'GET api/amla/cases/{id}',
+            'POST api/amla/cases/{id}/assign',
+            'POST api/amla/cases/{id}/notes',
+            'POST api/amla/cases/{id}/evidence',
+            'GET api/amla/cases/{id}/evidence/{evidenceId}',
+            'POST api/amla/cases/{id}/decision',
+            'POST api/amla/cases/{id}/str',
+            'POST api/amla/ctr-candidates/{id}/report',
+            'POST api/amla/ctr-candidates/{id}/not-reportable',
+            'POST api/amla/ctr-candidates/{id}/not-reportable/approve',
+            'POST api/amla/ctr-candidates/{id}/not-reportable/reject',
+            'GET api/amla/reports/{id}/submissions/{submissionId}/evidence',
+            'GET api/amla/compliance-reports',
+            'GET api/amla/compliance-reports/{report}',
+            'POST api/amla/compliance-reports/{report}/exports',
+            'GET api/amla/exports/{id}/download',
+            'GET api/amla/dashboard/counts',
+            'GET api/amla/reports/{id}',
+            'POST api/amla/reports/{id}/approve',
+            'POST api/amla/reports/{id}/return',
+            'POST api/amla/reports/{id}/submissions',
+            'GET api/amla/reports/{id}/export',
+            'GET api/amla/inbox',
+            'POST api/amla/inbox/{id}/read',
+            'POST api/amla/risk-downgrades/{id}/approve',
+            'POST api/amla/risk-downgrades/{id}/reject',
         ];
 
         $routes = collect(Route::getRoutes()->getRoutes())
@@ -152,6 +217,25 @@ class AmlaAccessTest extends TestCase
         }
     }
 
+    public function test_change_request_ids_are_bounded_so_an_oversized_id_never_reaches_the_controller(): void
+    {
+        $holder = $this->settingsHolder();
+
+        $this->actingAs($holder)->getJson('/api/amla/change-requests/123456789012345678')->assertNotFound();
+
+        foreach (['', '/approve', '/reject', '/withdraw'] as $suffix) {
+            $method = $suffix === '' ? 'GET' : 'POST';
+            $this->actingAs($holder)->json($method, '/api/amla/change-requests/12345678901234567890'.$suffix, ['note' => 'x'])->assertNotFound();
+            $this->actingAs($holder)->json($method, '/api/amla/change-requests/1234567890123456789'.$suffix, ['note' => 'x'])->assertNotFound();
+        }
+
+        foreach (Route::getRoutes()->getRoutes() as $route) {
+            if (str_starts_with($route->uri(), 'api/amla') && str_contains($route->uri(), '{id}')) {
+                $this->assertSame('[0-9]{1,18}', $route->wheres['id'] ?? null, $route->uri());
+            }
+        }
+    }
+
     public function test_every_amla_route_is_named_in_the_amla_family_and_throttled(): void
     {
         $routes = collect(Route::getRoutes()->getRoutes())->filter(fn (RoutingRoute $route) => str_starts_with($route->uri(), 'api/amla'));
@@ -182,17 +266,23 @@ class AmlaAccessTest extends TestCase
         $this->assertSame($before + 10, AmlaLogEntry::query()->where('action', 'access_denied')->count());
     }
 
-    public function test_a_caller_holding_an_amla_key_is_not_cut_to_the_refused_bucket(): void
+    public function test_a_caller_holding_an_amla_key_gets_a_bucket_of_their_own_of_30_a_minute(): void
     {
         $viewer = $this->amlaUser(['amla:view']);
+        $other = $this->amlaUser(['amla:view']);
 
-        for ($i = 0; $i < 12; $i++) {
+        for ($i = 0; $i < AmlaServiceProvider::HOLDER_PER_MINUTE; $i++) {
             $this->actingAs($viewer)->getJson('/api/amla/status')->assertOk();
         }
 
+        $this->actingAs($viewer)->getJson('/api/amla/status')->assertTooManyRequests();
+        $this->actingAs($other)->getJson('/api/amla/status')->assertOk();
+
         $request = Request::create('/api/amla/status', 'GET');
         $request->setUserResolver(fn () => $viewer);
-        $this->assertEquals(Limit::none(), RateLimiter::limiter('amla')($request));
+        $limit = RateLimiter::limiter('amla')($request);
+        $this->assertSame(30, $limit->maxAttempts);
+        $this->assertSame('amla:user:User:'.$viewer->id, $limit->key);
 
         $request->setUserResolver(fn () => $this->amlaUser(['loans:view']));
         $limit = RateLimiter::limiter('amla')($request);

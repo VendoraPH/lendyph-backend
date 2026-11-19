@@ -204,6 +204,7 @@ class ReportTotalsFromServerTest extends TestCase
             'outflow_share_capital' => $data['outflows']['share_capital_debit'],
             'outflow_total' => $data['outflows']['total'],
             'net_movement' => $data['net_movement'],
+            'principal_released' => $data['non_cash']['principal_released'],
         ], $data['by_branch_totals']);
         $this->assertEquals(0, $data['by_branch_totals']['inflow_share_capital']);
         $this->assertEquals(1250.45, $data['by_branch_totals']['inflow_total']);

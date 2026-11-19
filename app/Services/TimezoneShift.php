@@ -226,6 +226,11 @@ class TimezoneShift
         // cannot hold a row written by the old UTC application. Same reasoning
         // as the csv_import_* tables above.
         'portfolio_daily_snapshots' => ['created_at'],
+        // Added 2026-11-19 with the executive dashboard's snapshot lines and
+        // run log (Phase 6 EB-B), well after the cutover, so neither table can
+        // hold a row written by the old UTC application.
+        'portfolio_snapshot_lines' => ['created_at'],
+        'portfolio_snapshot_runs' => ['finished_at', 'started_at'],
         // Added 2026-11-08 with payment reminders (Phase 2), well after the
         // cutover completed (2026-08-06 on every deployment), so none of these
         // tables can hold a row written by the old UTC application. Same
@@ -319,6 +324,58 @@ class TimezoneShift
         'amla_change_requests' => ['created_at', 'decided_at', 'updated_at'],
         'amla_log_entries' => ['created_at'],
         'amla_settings_versions' => ['created_at', 'effective_at'],
+        // Added 2026-11-20 with AMLA CDD and risk (AMLA-B4), for the same
+        // reason. Review and expiry dates are DATEs.
+        'amla_id_verifications' => ['created_at'],
+        'amla_profile_changes' => ['created_at'],
+        'amla_profiles' => ['created_at', 'edd_required_since', 'updated_at'],
+        'amla_reviews' => ['created_at'],
+        'amla_risk_assessments' => ['created_at'],
+        'amla_risk_rule_versions' => ['created_at', 'effective_at'],
+        // Phase 6 AMLA-B2 (2026-11-20): transaction events, harvest cursors,
+        // failures and coverage checks, well after the cutover.
+        // `amla_events.occurred_on` and `amla_coverage_checks.day` are DATEs.
+        'amla_coverage_checks' => ['created_at'],
+        'amla_event_failures' => ['created_at', 'last_attempted_at', 'resolved_at'],
+        'amla_events' => ['created_at', 'recorded_at', 'reversed_at'],
+        'amla_harvest_cursors' => ['created_at', 'started_at', 'updated_at', 'watermark'],
+        // Added 2026-11-21 with AMLA screening and orders (AMLA-B5), for the same
+        // reason. `amla_orders.received_on` and `return_due_on` are DATEs.
+        'amla_order_holds' => ['created_at'],
+        'amla_order_release_requests' => ['created_at', 'decided_at', 'updated_at'],
+        'amla_orders' => ['created_at', 'released_at', 'updated_at'],
+        'amla_screening_cursors' => ['created_at', 'updated_at', 'watermark'],
+        'amla_screening_matches' => ['created_at', 'decided_at', 'updated_at'],
+        'amla_watchlist_entries' => ['created_at'],
+        'amla_watchlist_versions' => ['created_at', 'rescreened_at', 'superseded_at'],
+        // Phase 6 AMLA-B3 (2026-11-21): detection rules, CTR candidates, alerts
+        // and the detection cursor, well after the cutover. `occurred_on`,
+        // `window_start` and `window_end` are DATEs.
+        'amla_alert_events' => ['created_at', 'reversal_rerun_at'],
+        'amla_alerts' => ['cleared_at', 'closed_at', 'created_at'],
+        'amla_ctr_candidates' => ['created_at', 'event_reversed_at'],
+        'amla_detection_locks' => ['created_at'],
+        'amla_event_screenings' => ['created_at'],
+        'amla_rule_versions' => ['created_at', 'effective_at'],
+        // Phase 6 AMLA-B6 (2026-11-22): cases, filings, the AMLA inbox and
+        // High-risk downgrades, well after the cutover. Determination,
+        // deadline, submission and occurred-on dates are DATEs. Alerts gain
+        // `closed_at` here too.
+        'amla_alert_actions' => ['created_at'],
+        'amla_case_actions' => ['created_at'],
+        'amla_case_alerts' => ['created_at'],
+        'amla_case_evidence' => ['created_at'],
+        'amla_case_notes' => ['created_at'],
+        'amla_cases' => ['closed_at', 'created_at', 'decided_at', 'updated_at'],
+        'amla_inbox_items' => ['created_at', 'read_at'],
+        'amla_report_formats' => ['created_at'],
+        'amla_report_submissions' => ['created_at'],
+        'amla_reports' => ['approved_at', 'created_at', 'updated_at'],
+        'amla_risk_downgrades' => ['created_at', 'decided_at', 'updated_at'],
+        // Phase 6 AMLA-B7 (2026-11-23): report exports and set-aside asks, well
+        // after the cutover.
+        'amla_ctr_set_asides' => ['created_at', 'decided_at', 'updated_at'],
+        'amla_exports' => ['created_at'],
         // Added 2026-11-19 with the executive dashboard's alert thresholds
         // (Phase 6 EB-C), well after the cutover, for the same reason.
         'dashboard_settings' => ['created_at', 'updated_at'],
@@ -330,6 +387,9 @@ class TimezoneShift
         // Phase 6 MB-BE1 (2026-11-19): closure requests, well after the
         // cutover. `effective_on` is a DATE.
         'branch_closures' => ['created_at', 'decided_at', 'updated_at'],
+        // Phase 6 MB-BE5 (2026-11-20): interbranch transfers, well after the
+        // cutover.
+        'interbranch_transfers' => ['approved_at', 'cancelled_at', 'created_at', 'received_at', 'rejected_at', 'reversed_at', 'updated_at'],
         // The shift's own bookkeeping, written after the cutover by definition.
         'timezone_shifts' => ['completed_at', 'cutover_at', 'started_at'],
     ];

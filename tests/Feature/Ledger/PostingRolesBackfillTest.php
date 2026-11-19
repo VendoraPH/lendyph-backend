@@ -155,12 +155,17 @@ class PostingRolesBackfillTest extends TestCase
         $this->assertSame(['suspense'], array_column($result['skipped'], 'role'));
         $this->assertContains(['role' => 'gcash_service_income', 'code' => '4095', 'name' => 'GCASH SERVICE INCOME'], $result['mapped']);
 
+        // The service also handles roles added after Phase 2 (1190, Phase 6),
+        // which this chart already has and this migration doesn't cover.
+        $phase2 = $result;
+        $phase2['kept'] = array_values(array_filter($result['kept'], fn (array $row): bool => in_array($row['role'], self::ROLES, true)));
+
         Log::spy();
         $this->migration()->up();
 
         $this->assertSame($byService, $this->outcome());
         Log::shouldHaveReceived('info')->withArgs(
-            fn (string $message, array $context): bool => $message === AccountingRolesBackfill::summary($result) && $context === $result,
+            fn (string $message, array $context): bool => $message === AccountingRolesBackfill::summary($phase2) && $context === $phase2,
         )->once();
         Log::shouldHaveReceived('warning')->withArgs(
             fn (string $message, array $context): bool => array_column($context['rows'], 'role') === ['suspense'],

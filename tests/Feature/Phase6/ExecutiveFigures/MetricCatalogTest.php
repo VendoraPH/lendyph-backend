@@ -45,7 +45,7 @@ class MetricCatalogTest extends TestCase
         foreach ([
             'gross_loan_portfolio', 'total_outstanding', 'active_loans', 'active_members', 'loans_released',
             'collections', 'collection_efficiency', 'past_due_amount', 'par_1', 'par_30', 'par_60', 'par_90',
-            'aging_by_loan', 'product_share', 'required_allowance', 'share_capital', 'collected_insurance',
+            'aging_by_loan', 'product_share', 'required_allowance', 'share_capital', 'collected_insurance', 'interest_income', 'net_income',
         ] as $key) {
             $this->assertArrayHasKey($key, MetricCatalog::all(), $key);
         }
@@ -64,7 +64,7 @@ class MetricCatalogTest extends TestCase
     public function test_a_metric_honours_only_what_its_report_honours(): void
     {
         foreach (MetricCatalog::all() as $key => $metric) {
-            $report = MetricCatalog::REPORTS[$metric['source']] ?? null;
+            $report = MetricCatalog::REPORTS[$metric['source']] ?? MetricCatalog::OTHER_SOURCES[$metric['source']] ?? null;
 
             $this->assertNotNull($report, "{$key}: its source is a listed report.");
             $this->assertSame([], array_diff($metric['filters'], [...$report['full'], ...array_keys($report['partial'])]), $key);
@@ -74,6 +74,10 @@ class MetricCatalogTest extends TestCase
     public function test_each_listed_report_is_a_real_route(): void
     {
         $paths = collect(Route::getRoutes()->getRoutes())->map(fn ($route) => $route->uri())->all();
+
+        foreach (array_keys(MetricCatalog::OTHER_SOURCES) as $source) {
+            $this->assertContains("api/{$source}", $paths, $source);
+        }
 
         foreach (array_keys(MetricCatalog::REPORTS) as $report) {
             $this->assertContains("api/reports/{$report}", $paths, $report);

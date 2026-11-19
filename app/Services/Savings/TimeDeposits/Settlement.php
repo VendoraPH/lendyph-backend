@@ -2,12 +2,14 @@
 
 namespace App\Services\Savings\TimeDeposits;
 
+use App\Models\AmlaOrder;
 use App\Models\SavingsAccount;
 use App\Models\SavingsApproval;
 use App\Models\SavingsTransaction;
 use App\Models\TimeDeposit;
 use App\Models\User;
 use App\Services\Accounting\AutomaticPoster;
+use App\Services\Amla\Screening\OrderCredits;
 use App\Services\AuditLogService;
 use App\Services\Savings\ApprovalGate;
 use App\Services\Savings\SavingsLedger;
@@ -344,13 +346,18 @@ class Settlement
 
     /**
      * Only a running placement can be broken early: one already settled is a
-     * 409, a matured one a 422 (settle it instead).
+     * 409, a matured one a 422 (settle it instead). A member under a legal
+     * order can't break one early at all (AMLA design decision 5, review).
      *
      * @throws ValidationException
      */
     public function assertCanPreterminate(TimeDeposit $deposit): void
     {
         $this->assertOpen($deposit);
+
+        if (AmlaOrder::memberIsUnderOrder((int) $deposit->borrower_id)) {
+            $this->refuse('time_deposit', "{$deposit->certificate_number} belongs to a member whose funds are under a legal order, so it can't be pre-terminated until the order is lifted.");
+        }
 
         if ($deposit->status !== 'active') {
             $this->refuse('time_deposit', "{$deposit->certificate_number} has matured, so it can't be pre-terminated. Settle it instead.");
@@ -367,7 +374,8 @@ class Settlement
      * - Into the account named at placement: refused on `payout_method` when
      *   there is none.
      * Either way a closed or frozen account is refused; a dormant one can
-     * receive it.
+     * receive it. While the member is under a legal order, only a payout into
+     * their own savings is allowed: nothing leaves the cooperative.
      *
      * @throws ValidationException
      */
@@ -378,6 +386,10 @@ class Settlement
         }
 
         if ($method !== 'savings') {
+            if (AmlaOrder::memberIsUnderOrder((int) $deposit->borrower_id)) {
+                $this->refuse('payout_method', "{$deposit->certificate_number} belongs to a member whose funds are under a legal order, so it can only roll over or be paid into the member's own savings until the order is lifted.");
+            }
+
             return null;
         }
 
@@ -555,9 +567,15 @@ class Settlement
      * user) is not the member's doing: it doesn't count as their activity and
      * doesn't wake a dormant account. Staff paying it out at the counter does.
      */
+    /**
+     * Pay a time deposit into savings. For a member under a legal order, the
+     * credited amount is held for that order in the same transaction (AMLA-B5
+     * re-review), whoever settles: staff, a checker's approval or the nightly
+     * maturity run.
+     */
     private function creditSavings(TimeDeposit $deposit, SavingsAccount $account, int $centavos, string $date, ?int $userId, string $remarks): SavingsTransaction
     {
-        return $this->ledger->credit($account, 'deposit', $centavos, [
+        $row = $this->ledger->credit($account, 'deposit', $centavos, [
             'date' => $date,
             'method' => 'savings',
             'remarks' => $remarks,
@@ -565,6 +583,10 @@ class Settlement
             'created_by' => $userId,
             'member_activity' => $userId !== null,
         ]);
+
+        app(OrderCredits::class)->holdCredit((int) $deposit->borrower_id, $account->id, $centavos, $userId);
+
+        return $row;
     }
 
     private function tooEarly(TimeDeposit $deposit): string

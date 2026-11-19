@@ -4,8 +4,10 @@ namespace App\Http\Requests\Borrower;
 
 use App\Http\Requests\Borrower\Concerns\HasBorrowerRules;
 use App\Models\Borrower;
+use App\Rules\BranchTakesNew;
 use App\Rules\NoDuplicateBorrower;
 use App\Services\BranchAccess;
+use App\Services\Branches\BranchWriteGuard;
 use Closure;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Rule;
@@ -50,9 +52,13 @@ class UpdateBorrowerRequest extends FormRequest
                 }],
                 // One of the caller's own branches (BranchAccess; any with
                 // `branches:view_all`).
+                // A move into a suspended or closed branch is a new member
+                // there (Phase 6 MB-BE2); keeping the member's own is not.
                 'branch_id' => [
+                    'bail',
                     'sometimes',
                     app(BranchAccess::class)->constrainBranchExists(Rule::exists('branches', 'id'), $this->user()),
+                    BranchTakesNew::activeOnly(BranchWriteGuard::MEMBERS, $this->user(), $this->route('borrower')?->branch_id),
                 ],
             ],
         );
