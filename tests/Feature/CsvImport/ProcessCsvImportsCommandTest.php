@@ -612,9 +612,10 @@ class ProcessCsvImportsCommandTest extends TestCase
     }
 
     /**
-     * The schedule entry itself. Registered every minute and non-overlapping —
-     * without the second, a tick killed mid-chunk would be joined by the next
-     * minute's tick working the same rows.
+     * The schedule entry itself. Registered every minute and non-overlapping,
+     * with a one-minute lock: the command's own database lock keeps two
+     * importers apart, and a longer schedule lock left by a dead tick froze the
+     * run past the import screen's stale warning (ImportLoansStallTest).
      */
     public function test_it_is_scheduled_every_minute_without_overlapping(): void
     {
@@ -629,7 +630,7 @@ class ProcessCsvImportsCommandTest extends TestCase
 
         $this->assertSame('* * * * *', $event->expression);
         $this->assertTrue($event->withoutOverlapping, 'Two importers on the same rows is exactly what this prevents.');
-        $this->assertSame(10, $event->expiresAt);
+        $this->assertSame(1, $event->expiresAt);
     }
 
     /**

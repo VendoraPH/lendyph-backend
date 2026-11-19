@@ -46,7 +46,7 @@
         "expression": "* * * * *",
         "timezone": "Asia/Manila",
         "without_overlapping": true,
-        "expires_at": 10
+        "expires_at": 1
     },
     {
         "command": "imports:redact-rows",
