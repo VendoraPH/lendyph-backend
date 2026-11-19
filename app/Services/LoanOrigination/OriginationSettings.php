@@ -51,6 +51,7 @@ final class OriginationSettings
         return [
             'general' => [
                 'online_applications_enabled' => $settings->online_applications_enabled,
+                'require_approved_member' => $settings->require_approved_member,
                 'default_branch_id' => $settings->default_branch_id,
                 'reference_format' => $settings->referenceFormat(),
                 'draft_expiration_days' => $settings->draft_expiration_days,
@@ -119,6 +120,7 @@ final class OriginationSettings
                 $general = $input['general'];
                 $settings->fill(array_filter([
                     'online_applications_enabled' => $general['online_applications_enabled'] ?? null,
+                    'require_approved_member' => $general['require_approved_member'] ?? null,
                     'reference_prefix' => isset($general['reference_format']) ? explode('-', $general['reference_format'])[0] : null,
                     'draft_expiration_days' => $general['draft_expiration_days'] ?? null,
                 ], fn ($v) => $v !== null));

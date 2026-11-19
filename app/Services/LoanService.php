@@ -3165,4 +3165,48 @@ class LoanService
             ]);
         }
     }
+
+    /**
+     * Create a draft loan and submit it for approval in one loan transaction:
+     * the online application hand-off ("Submit for approval", origination
+     * decision 11; Phase 6 decision 9).
+     *
+     * The loan is the record POST /loans creates (createLoanRecord(), the
+     * caller having validated `$validated` with StoreLoanRequest's rules), and
+     * the submit is submitForReview()'s own statements in its order, run here
+     * because submitForReview() must be the outermost transaction itself
+     * (OriginationHandOffDriftTest keeps the two the same). `$alongside` runs
+     * between them, inside the transaction and holding the new loan, for the
+     * application's own writes (its link to the loan, the copied documents,
+     * the Credit Scoring profile and its move to For Approval), so a failure
+     * anywhere leaves no loan, link or move behind.
+     *
+     * The caller runs this inside BranchWriteGuard::whileTakingNew() for the
+     * member's branch, as LoanController::store() runs createLoan(), and the
+     * 409s are createLoan()'s: another create taking the same application
+     * number, a deadlock or a lock wait timeout. Appended at the end of the
+     * class so no line CollateralIntegrityGuardsTest pins moves.
+     *
+     * @param  array<string, mixed>  $validated  StoreLoanRequest's validated payload
+     * @param  \Closure(Loan): void  $alongside
+     */
+    public function createAndSubmitForHandOff(array $validated, User $user, \Closure $alongside): Loan
+    {
+        $submitter = $user;
+
+        return LoanWriteTransaction::run(function () use ($validated, $user, $alongside, $submitter): Loan {
+            $loan = $this->createLoanRecord($validated, $user);
+
+            $alongside($loan);
+
+            $this->lockLoanInStatus($loan, 'draft');
+            $this->retakeRestructureTerms($loan, 'submission', $submitter ?? auth()->user());
+
+            $loan->update(['status' => 'for_review']);
+
+            app(LoanApprovalChainService::class)->seed($loan, $submitter);
+
+            return $loan;
+        }, racedUniqueIndex: self::APPLICATION_NUMBER_INDEX, conflictMessage: self::APPLICATION_NUMBER_TAKEN);
+    }
 }

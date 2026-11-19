@@ -51,6 +51,7 @@ class UpdateOriginationSettingsRequest extends FormRequest
         return [
             'general' => ['sometimes', 'array'],
             'general.online_applications_enabled' => ['sometimes', 'required', 'boolean'],
+            'general.require_approved_member' => ['sometimes', 'required', 'boolean'],
             'general.default_branch_id' => ['sometimes', 'nullable', 'integer', Rule::exists('branches', 'id')->where('is_active', true)],
             'general.reference_format' => ['sometimes', 'required', 'string', 'regex:/^[A-Z]{2,5}-YYYY-NNNNNN$/'],
             'general.draft_expiration_days' => ['sometimes', 'required', 'integer', 'between:1,365'],
@@ -148,6 +149,7 @@ class UpdateOriginationSettingsRequest extends FormRequest
         };
 
         return [
+            'general.require_approved_member.boolean' => 'Choose whether a loan is released only to an approved member.',
             'general.default_branch_id.exists' => 'Choose an active branch.',
             'general.default_branch_id.integer' => 'Choose an active branch.',
             'general.reference_format.regex' => 'The reference format must read like OA-YYYY-NNNNNN: 2 to 5 capital letters, then -YYYY-NNNNNN.',

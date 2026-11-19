@@ -141,12 +141,27 @@ final class Capacity
             return null;
         }
 
+        return self::proposedPaymentFromRows($rows, (int) $loan->term, $loan->term_unit ?? TermUnit::Months);
+    }
+
+    /**
+     * The same rule on schedule rows already built (each with `due_date` and
+     * `total_due`, principal plus interest): the loan form's preview
+     * (LoanService::formPreview()), for an online application that is not a
+     * loan yet (origination decision 14). proposedPayment() reads its loan's
+     * previewed rows through here, so the two can't differ.
+     *
+     * @param  list<array<string, mixed>>  $rows
+     * @return array{centavos: int, basis: string}|null
+     */
+    public static function proposedPaymentFromRows(array $rows, int $term, TermUnit $termUnit): ?array
+    {
         if ($rows === []) {
             return null;
         }
 
         if (count($rows) === 1) {
-            return self::monthlyEquivalent($loan, Centavos::of($rows[0]['total_due']));
+            return self::monthlyEquivalent($term, $termUnit, Centavos::of($rows[0]['total_due']));
         }
 
         $months = [];
@@ -166,10 +181,10 @@ final class Capacity
      *
      * @return array{centavos: int, basis: string}
      */
-    private static function monthlyEquivalent(Loan $loan, int $totalCentavos): array
+    private static function monthlyEquivalent(int $term, TermUnit $termUnit, int $totalCentavos): array
     {
-        $term = max(0, (int) $loan->term);
-        $inDays = $loan->term_unit === TermUnit::Days;
+        $term = max(0, $term);
+        $inDays = $termUnit === TermUnit::Days;
         $months = $inDays ? $term / LoanTermSchedule::DAYS_PER_MONTH : $term;
 
         if ($months <= 1) {

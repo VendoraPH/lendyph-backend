@@ -6,11 +6,13 @@ use App\Enums\InterestRateFrequency;
 use App\Enums\TermUnit;
 use App\Services\ApprovalAssignees;
 use App\Services\BranchAccess;
+use App\Services\LoanOrigination\Observers\LoanStatusObserver;
 use App\Services\SequenceCode;
 use App\Support\StaffRouteBinding;
 use App\Traits\Auditable;
 use Carbon\Carbon;
 use Closure;
+use Illuminate\Database\Eloquent\Attributes\ObservedBy;
 use Illuminate\Database\Eloquent\Casts\Attribute;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
@@ -20,6 +22,11 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\Relations\MorphMany;
 use Illuminate\Support\Facades\DB;
 
+/**
+ * An application handed off from loan origination follows its loan's status
+ * (LoanStatusObserver).
+ */
+#[ObservedBy([LoanStatusObserver::class])]
 class Loan extends Model
 {
     use Auditable, HasFactory;
