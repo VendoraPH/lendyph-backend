@@ -44,11 +44,13 @@ use App\Models\CreditDecision;
 use App\Models\CreditScorecardRevision;
 use App\Models\CreditScoringSetting;
 use App\Models\CsvImportRun;
+use App\Models\DashboardSetting;
 use App\Models\Document;
 use App\Models\Fee;
 use App\Models\GCashNonMember;
 use App\Models\GCashTier;
 use App\Models\GCashTransaction;
+use App\Models\InterbranchTransfer;
 use App\Models\LindaSetting;
 use App\Models\Loan;
 use App\Models\LoanAdjustment;
@@ -168,6 +170,7 @@ class AuditLogModules
         AccountingYearClose::class => 'accounting',
         AccountingAllowancePosting::class => 'accounting',
         AccountingOpeningBalance::class => 'accounting',
+        InterbranchTransfer::class => 'accounting',
         GCashTransaction::class => 'gcash',
         GCashNonMember::class => 'gcash',
         GCashTier::class => 'gcash',
@@ -249,6 +252,10 @@ class AuditLogModules
         // Settings → Linda's model change. System, so the Audit Trail's module
         // filter needs no new entry; the row's description names the change.
         LindaSetting::class => self::UNMAPPED,
+        // Executive dashboard alert thresholds (Phase 6 EB-C). System, like
+        // Linda's model, so the module filter needs no new entry; the row's
+        // description names the change in words.
+        DashboardSetting::class => self::UNMAPPED,
         // Deliberately system: an import run is housekeeping, not a record
         // any module's screen shows.
         CsvImportRun::class => self::UNMAPPED,

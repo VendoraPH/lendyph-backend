@@ -16,7 +16,10 @@
 */
 
 return [
-    'enabled' => (bool) env('LINDA_ENABLED', false),
+    'enabled' => filter_var(env('LINDA_ENABLED', false), FILTER_VALIDATE_BOOL),
+    // Round 3: a question no fixed topic covers may be written by the model
+    // from a pack of summary figures (LindaFacts). Off by default.
+    'open_questions' => filter_var(env('LINDA_OPEN_QUESTIONS', false), FILTER_VALIDATE_BOOL),
     'driver' => env('LINDA_DRIVER', 'none'),
     'model' => env('LINDA_MODEL', 'claude-haiku-5-5'),
     'anthropic' => [
@@ -24,6 +27,7 @@ return [
         'workspace_id' => env('LINDA_ANTHROPIC_WORKSPACE_ID'),
         'effort' => 'low',
         'max_tokens' => 512,
+        'write_max_tokens' => 600,
         'timeout' => 9.0,
         'max_retries' => 1,
     ],
@@ -53,4 +57,6 @@ return [
     'list_max' => 10,
     'retention_days' => 365,
     'typical_question' => ['cache_read' => 1500, 'input' => 500, 'output' => 300],
+    // An open answer's write call: its prompt, and a facts pack of up to 3 topics with the question.
+    'typical_write' => ['cache_read' => 600, 'input' => 1500],
 ];

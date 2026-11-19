@@ -347,6 +347,32 @@ class LedgerGapsReportTest extends TestCase
         $this->assertArrayNotHasKey($walkIn->id, $this->rowsOf($this->gaps(['branch_id' => $this->branch->id]), 'cash_out'));
     }
 
+    /**
+     * A share capital row and a member's GCash row keep the branch stamped
+     * when they were written (Phase 6 MB-BE3, decision 16), so a member who
+     * moves takes no listed row along.
+     */
+    public function test_a_stamped_row_stays_in_its_branch_after_the_member_moves(): void
+    {
+        $this->seedChartOfAccounts();
+        $far = Branch::factory()->create(['name' => 'Far Branch']);
+        $member = Borrower::factory()->create(['branch_id' => $this->branch->id]);
+        $entry = ShareCapitalLedger::factory()->create(['borrower_id' => $member->id, 'date' => '2026-10-04', 'credit' => 700, 'debit' => 0]);
+        $cashIn = GCashTransaction::factory()->create([
+            'type' => 'cash_in', 'amount' => 5000, 'charge_amount' => 20, 'total_amount' => 5020,
+            'status' => 'paid', 'paid_at' => '2026-10-05 10:00:00', 'borrower_id' => $member->id,
+        ]);
+        $member->update(['branch_id' => $far->id]);
+
+        $here = $this->gaps(['branch_id' => $this->branch->id])->assertOk();
+        $this->assertSame($this->branch->id, $this->rowsOf($here, 'share_capital')[$entry->id]['branch']['id'] ?? null);
+        $this->assertSame($this->branch->id, $this->rowsOf($here, 'cash_in')[$cashIn->id]['branch']['id'] ?? null);
+
+        $there = $this->gaps(['branch_id' => $far->id])->assertOk();
+        $this->assertArrayNotHasKey($entry->id, $this->rowsOf($there, 'share_capital'));
+        $this->assertArrayNotHasKey($cashIn->id, $this->rowsOf($there, 'cash_in'));
+    }
+
     public function test_kind_dates_and_branch_filter_the_rows_and_their_totals(): void
     {
         $this->seedChartOfAccounts();

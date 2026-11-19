@@ -2,6 +2,7 @@
 
 namespace App\Console\Commands;
 
+use App\Models\AmlaOrderHold;
 use App\Models\SavingsApproval;
 use App\Models\SavingsHold;
 use App\Services\AuditLogService;
@@ -18,7 +19,9 @@ use Illuminate\Support\Facades\DB;
  * The nightly savings expiry (design §6, 00:30 Manila).
  *
  * - A hold past its `expires_on` becomes `expired` (it stopped holding money
- *   the day after that date already; this records it).
+ *   the day after that date already; this records it). A hold a legal order
+ *   placed (AmlaOrderHold) never expires: only the order's release lifts it
+ *   (AMLA design decision 5).
  * - A pending request past its `expires_at` (the end of the Manila day it was
  *   made) becomes `expired` and frees its `live_key`, so it can be asked for
  *   again.
@@ -42,6 +45,7 @@ class SavingsExpire extends Command
         $requests = 0;
 
         SavingsHold::query()->where('status', 'active')->whereNotNull('expires_on')->where('expires_on', '<', $today)
+            ->whereNotIn('id', AmlaOrderHold::query()->select('savings_hold_id'))
             ->select(['id', 'account_id'])
             ->chunkById(self::CHUNK, function (Collection $chunk) use ($locks, $today, &$holds): void {
                 $holds += DB::transaction(function () use ($chunk, $locks, $today): int {
@@ -49,7 +53,8 @@ class SavingsExpire extends Command
                     $expired = 0;
 
                     foreach (SavingsHold::query()->whereKey($chunk->pluck('id'))->orderBy('id')->lockForUpdate()->get() as $hold) {
-                        if ($hold->status !== 'active' || $hold->expires_on === null || $hold->expires_on->toDateString() >= $today) {
+                        if ($hold->status !== 'active' || $hold->expires_on === null || $hold->expires_on->toDateString() >= $today
+                            || AmlaOrderHold::isOrderHold($hold->id)) {
                             continue;
                         }
 

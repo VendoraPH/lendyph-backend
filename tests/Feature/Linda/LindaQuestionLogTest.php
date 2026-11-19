@@ -22,7 +22,7 @@ class LindaQuestionLogTest extends TestCase
         $this->assertEqualsCanonicalizing([
             'id', 'user_id', 'asked_at', 'source', 'intent', 'answer_function', 'outcome', 'error_code',
             'period_from', 'period_to', 'branch_scope', 'branch_id', 'member_ids', 'loan_ids', 'model',
-            'input_tokens', 'output_tokens', 'cache_read_tokens', 'cache_write_tokens', 'cost', 'duration_ms',
+            'input_tokens', 'output_tokens', 'cache_read_tokens', 'cache_write_tokens', 'cost', 'duration_ms', 'open_answer',
             'created_at', 'updated_at',
         ], Schema::getColumnListing('linda_questions'));
     }

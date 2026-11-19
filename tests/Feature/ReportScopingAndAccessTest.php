@@ -70,8 +70,8 @@ class ReportScopingAndAccessTest extends TestCase
         $this->assertSame(1, $cashFlow['share_capital']['count']);
 
         // The two reports now describe the same scope with the same word...
-        $this->assertSame('borrower_branch', $cashFlow['share_capital']['branch_scope']);
-        $this->assertSame('borrower_branch', $shareCapital['branch_scope']);
+        $this->assertSame('posted_branch', $cashFlow['share_capital']['branch_scope']);
+        $this->assertSame('posted_branch', $shareCapital['branch_scope']);
 
         // ...and arrive at the same numbers.
         $this->assertEqualsWithDelta(
@@ -148,7 +148,7 @@ class ReportScopingAndAccessTest extends TestCase
         $today = Carbon::today()->toDateString();
         $this->ledgerEntry($this->memberOf($satellite), $today, credit: 1000);
 
-        foreach ([null => 'organisation', $satellite->id => 'borrower_branch'] as $branchId => $expected) {
+        foreach ([null => 'organisation', $satellite->id => 'posted_branch'] as $branchId => $expected) {
             $query = $branchId ? "&branch_id={$branchId}" : '';
 
             $cashFlow = $this->getJson("/api/reports/cash-flow?date_from={$today}&date_to={$today}{$query}")
@@ -168,7 +168,7 @@ class ReportScopingAndAccessTest extends TestCase
             // keep asserting the pre-fix organisation-wide behaviour.
             $note = $cashFlow['share_capital']['note'];
 
-            if ($expected === 'borrower_branch') {
+            if ($expected === 'posted_branch') {
                 $this->assertStringContainsString('member\'s branch', $note);
                 $this->assertStringNotContainsString('organisation-wide', $note);
             } else {

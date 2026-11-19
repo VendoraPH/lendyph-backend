@@ -28,6 +28,13 @@ final class LindaLinks
         'collection_efficiency' => ['label' => 'Open Collection Efficiency', 'url' => '/reports/collection_efficiency', 'needs' => ['reports:view']],
         'performance' => ['label' => 'Open Officer / Branch Performance', 'url' => '/reports/performance', 'needs' => ['reports:view']],
         'repayments_list' => ['label' => 'Open Repayments List', 'url' => '/reports/repayments_list', 'needs' => ['reports:view']],
+        'members' => ['label' => 'Open Members', 'url' => '/borrowers', 'needs' => ['borrowers:view']],
+        'expenses' => ['label' => 'Open Expenses & Payables', 'url' => '/accounting/expenses', 'needs' => ['accounting:view', 'expenses:view']],
+        'share_capital' => ['label' => 'Open Share Capital', 'url' => '/share-capital', 'needs' => ['share_capital:view']],
+        'savings_dashboard' => ['label' => 'Open Savings Dashboard', 'url' => '/savings/dashboard', 'needs' => ['savings:view']],
+        'cda_dashboard' => ['label' => 'Open CDA Dashboard', 'url' => '/cda', 'needs' => ['cda:view', 'branches:view_all']],
+        'cda_calendar' => ['label' => 'Open Compliance Calendar', 'url' => '/cda/calendar', 'needs' => ['cda:view', 'branches:view_all']],
+        'member_report' => ['label' => 'Open Member Report', 'url' => '/reports/borrower_report', 'needs' => ['reports:view']],
     ];
 
     /**
@@ -36,11 +43,13 @@ final class LindaLinks
      */
     private const DATED_REPORTS = [
         'daily_collection', 'disbursement_report', 'income_report', 'collection_efficiency', 'performance', 'repayments_list',
+        'member_report',
     ];
 
     /** The reports whose page reads `?branch=`. */
     private const BRANCH_REPORTS = [
         'daily_collection', 'disbursement_report', 'portfolio_summary', 'income_report', 'collection_efficiency', 'performance', 'repayments_list',
+        'member_report',
     ];
 
     /**
@@ -102,6 +111,20 @@ final class LindaLinks
         }
 
         return $links;
+    }
+
+    /**
+     * The links for $pages that $user may open, each opening on the CDA
+     * reporting year $year (`?year=`, which the CDA pages read).
+     *
+     * @return list<array{label: string, url: string}>
+     */
+    public static function forYear(User $user, int $year, string ...$pages): array
+    {
+        return array_map(
+            fn (array $link): array => ['label' => $link['label'], 'url' => $link['url'].'?'.http_build_query(['year' => $year])],
+            self::for($user, ...$pages),
+        );
     }
 
     /** @return list<array{label: string, url: string}> */

@@ -9,19 +9,27 @@ use App\Models\User;
 use App\Services\BranchAccess;
 use App\Services\Linda\Answers\Answer;
 use App\Services\Linda\Answers\BranchPerformanceAnswer;
+use App\Services\Linda\Answers\CdaSummaryAnswer;
 use App\Services\Linda\Answers\CollectionEfficiencyAnswer;
 use App\Services\Linda\Answers\CollectionSummaryAnswer;
 use App\Services\Linda\Answers\DisbursementSummaryAnswer;
+use App\Services\Linda\Answers\ExpenseSummaryAnswer;
 use App\Services\Linda\Answers\GeneralLendingSummaryAnswer;
+use App\Services\Linda\Answers\HowToAnswer;
+use App\Services\Linda\Answers\IncomeSummaryAnswer;
 use App\Services\Linda\Answers\LoanLookupAnswer;
 use App\Services\Linda\Answers\LoanSummaryAnswer;
 use App\Services\Linda\Answers\LookupAnswer;
 use App\Services\Linda\Answers\MemberLookupAnswer;
+use App\Services\Linda\Answers\MemberSummaryAnswer;
 use App\Services\Linda\Answers\NotYetAnswer;
 use App\Services\Linda\Answers\OfficerPerformanceAnswer;
 use App\Services\Linda\Answers\OverdueAccountsAnswer;
 use App\Services\Linda\Answers\PaymentsAnswer;
+use App\Services\Linda\Answers\PortfolioSummaryAnswer;
 use App\Services\Linda\Answers\ReceiptLookupAnswer;
+use App\Services\Linda\Answers\SavingsSummaryAnswer;
+use App\Services\Linda\Answers\ShareCapitalSummaryAnswer;
 use App\Services\Linda\Answers\UnsupportedAnswer;
 
 /**
@@ -53,6 +61,13 @@ final class LindaAnswerer
         'collection_efficiency' => CollectionEfficiencyAnswer::class,
         'branch_performance' => BranchPerformanceAnswer::class,
         'officer_performance' => OfficerPerformanceAnswer::class,
+        'borrower_summary' => MemberSummaryAnswer::class,
+        'portfolio_summary' => PortfolioSummaryAnswer::class,
+        'income_summary' => IncomeSummaryAnswer::class,
+        'expense_summary' => ExpenseSummaryAnswer::class,
+        'savings_summary' => SavingsSummaryAnswer::class,
+        'share_capital_summary' => ShareCapitalSummaryAnswer::class,
+        'cda_summary' => CdaSummaryAnswer::class,
     ];
 
     /** The record numbers a lookup reads: receipts, loans (LN-, LA-) and members. */
@@ -65,6 +80,11 @@ final class LindaAnswerer
     {
         if ($intent === LindaIntent::UnsupportedQuestion) {
             return $this->unsupported();
+        }
+
+        // Where a page is in the menu: no figures, so no branch scope.
+        if ($intent === LindaIntent::HowTo) {
+            return app(HowToAnswer::class)->answer($user, $question);
         }
 
         $lookupKind = $intent->lookupKind();

@@ -3,6 +3,7 @@
 namespace App\Models;
 
 use App\Services\BranchAccess;
+use App\Services\BranchAttribution;
 use App\Support\StaffRouteBinding;
 use Database\Factories\GCashTransactionFactory;
 use Illuminate\Database\Eloquent\Builder;
@@ -27,8 +28,9 @@ class GCashTransaction extends Model
         'status',
         'borrower_id',
         'gcash_non_member_id',
-        // Where a walk-in transaction was done; its journal posts there. Null
-        // for a member's (the member's branch decides) and for head office.
+        // The branch whose books the row posts in: where a walk-in transaction
+        // was done (null for head office), or, for a member's, the member's
+        // branch, stamped on creation (booted()).
         'branch_id',
         'transactor_user_id',
         'remarks',
@@ -46,6 +48,20 @@ class GCashTransaction extends Model
             'paid_at' => 'datetime',
             'branch_id' => 'integer',
         ];
+    }
+
+    /**
+     * A member's transaction keeps the member's branch at the time it is
+     * written (Phase 6 decision 16), so it stays in that branch's books and
+     * lists if the member later moves. A walk-in's is left as recorded.
+     */
+    protected static function booted(): void
+    {
+        static::creating(function (GCashTransaction $tx): void {
+            if ($tx->borrower_id !== null && $tx->branch_id === null) {
+                $tx->branch_id = BranchAttribution::gcashPostingBranch($tx);
+            }
+        });
     }
 
     public function borrower(): BelongsTo
@@ -67,7 +83,7 @@ class GCashTransaction extends Model
         return $this->belongsTo(GCashNonMember::class, 'gcash_non_member_id')->withTrashed();
     }
 
-    /** The branch a walk-in transaction was done in (null for a member's and for head office). */
+    /** The branch whose books the row posts in (null for a walk-in done at head office). */
     public function branch(): BelongsTo
     {
         return $this->belongsTo(Branch::class);
@@ -84,12 +100,13 @@ class GCashTransaction extends Model
     }
 
     /**
-     * The rows $user may see (Phase 6 decision 1, D6): a member's transaction
-     * follows the member's branch, and a walk-in's follows the branch it was
-     * recorded in. A walk-in recorded with no branch (head office) is visible
-     * only to `branches:view_all`, like every other row with no branch. A
-     * local scope only: the books, the ledger-gaps report and commands stay
-     * unscoped.
+     * The rows $user may see (Phase 6 decisions 1 and 16, D6): each row
+     * follows the branch whose books it posted in (BranchAttribution): a
+     * member's the branch stamped when it was written (a row from before
+     * that, the member's branch), a walk-in's the branch it was recorded in.
+     * A walk-in recorded with no branch (head office) is visible only to
+     * `branches:view_all`, like every other row with no branch. A local scope
+     * only: the books, the ledger-gaps report and commands stay unscoped.
      *
      * @param  Builder<GCashTransaction>  $query
      * @return Builder<GCashTransaction>
@@ -102,11 +119,7 @@ class GCashTransaction extends Model
             return $query;
         }
 
-        return $query->where(fn (Builder $party) => $party
-            ->where(fn (Builder $walkIn) => $walkIn
-                ->whereNull('gcash_transactions.borrower_id')
-                ->whereIn('gcash_transactions.branch_id', $branchIds))
-            ->orWhereHas('borrower', fn (Builder $member) => $member->whereIn('borrowers.branch_id', $branchIds)));
+        return BranchAttribution::gcashInBranches($query, $branchIds);
     }
 
     /**

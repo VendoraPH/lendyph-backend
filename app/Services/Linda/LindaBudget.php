@@ -66,6 +66,16 @@ final class LindaBudget
     }
 
     /**
+     * Whether the cap is reached once $pending (₱, a cost this question has
+     * run up but not saved yet, such as its classifier call) is counted: the
+     * check before an open question's second call.
+     */
+    public function reachedWith(string $pending): bool
+    {
+        return $this->monthToDate()->plus(BigDecimal::of($pending))->isGreaterThanOrEqualTo($this->cap());
+    }
+
+    /**
      * This month's figures for Settings → Linda, every one from the log.
      *
      * @return array{label: string, cost: string, cap: ?string, questions: int, model_questions: int}

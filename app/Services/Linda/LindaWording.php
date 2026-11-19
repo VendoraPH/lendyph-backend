@@ -34,6 +34,12 @@ final class LindaWording
         return Money::format(Money::toCentavos(is_string($pesos) ? $pesos : (float) $pesos) ?? 0);
     }
 
+    /** Whole centavos as ₱ with two decimals: 150000 → "₱1,500.00". */
+    public static function centavos(int $centavos): string
+    {
+        return Money::format($centavos);
+    }
+
     /** A whole percent, two decimals at most, trailing zeros dropped: 87.5 → "87.5%". */
     public static function percent(int|float $percent): string
     {
@@ -107,8 +113,9 @@ final class LindaWording
     {
         return "I can't answer that question yet. Here's what I can answer for now:\n\n"
             .self::suggestions()
-            ."\n\nI can also answer about payments, collection efficiency, and branch and officer performance, "
-            .'and look up a member, a loan or a receipt by name or number (BRW-…, LN-…, RCP-…). '
+            ."\n\nI can also answer about payments, collection efficiency, members, the portfolio, income, expenses, savings, "
+            .'share capital, CDA deadlines, and branch and officer performance, look up a member, a loan or a receipt by name or '
+            .'number (BRW-…, LN-…, RCP-…), and tell you where a page is in the menu. '
             .'You can also name a period ("last month") or one of your branches.';
     }
 
@@ -141,12 +148,52 @@ final class LindaWording
 
     public static function notYet(): string
     {
-        return 'I can\'t answer that kind of question yet. For now I can answer questions about collections, payments, disbursements, active loans, overdue payments, collection efficiency, branch and officer performance and a lending summary, and look up a member, a loan or a receipt.';
+        return 'I can\'t answer that yet. I can help with collections, payments, collection efficiency, disbursements, loans, '
+            .'overdue payments, members, the portfolio, income, expenses, savings, share capital, CDA, branch and officer '
+            .'performance, a member, a loan or a receipt, and finding a page.';
     }
 
     public static function notYetWithReport(): string
     {
         return self::notYet().' The report linked below may help.';
+    }
+
+    public static function savingsNotSetUp(): string
+    {
+        return 'Savings isn\'t set up in this deployment yet, so there are no savings figures to show.';
+    }
+
+    /**
+     * Where pages are in the side menu: "Go to Members → New Member in the
+     * side menu.", or every place when there are several.
+     *
+     * @param  list<string>  $paths
+     */
+    public static function menuPlaces(array $paths): string
+    {
+        if (count($paths) === 1) {
+            return 'Go to '.$paths[0].' in the side menu.';
+        }
+
+        $count = [2 => 'two', 3 => 'three', 4 => 'four'][count($paths)] ?? (string) count($paths);
+
+        return 'You\'ll find that in '.$count.' places in the side menu: '.self::listOf($paths).'.';
+    }
+
+    public static function menuDenied(): string
+    {
+        return 'Your role doesn\'t have access to that page. Please ask your administrator if you need it.';
+    }
+
+    /** The line that ends an open answer, which the model wrote from the reports' figures. */
+    public static function writtenFromFigures(): string
+    {
+        return 'I wrote this from your reports\' figures; the links below open them.';
+    }
+
+    public static function cdaNotSetUp(): string
+    {
+        return 'No CDA reporting year has been opened yet, so there is no deadline or readiness to show.';
     }
 
     public static function branchNotFound(string $name): string

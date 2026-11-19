@@ -14,7 +14,7 @@ use PHPUnit\Framework\TestCase;
  */
 class LindaIntentTest extends TestCase
 {
-    public function test_the_intents_are_exactly_the_frontends_seventeen(): void
+    public function test_the_intents_are_exactly_these(): void
     {
         $this->assertSame([
             'collection_summary',
@@ -33,6 +33,11 @@ class LindaIntentTest extends TestCase
             'collection_efficiency',
             'portfolio_summary',
             'general_lending_summary',
+            'savings_summary',
+            'share_capital_summary',
+            'cda_summary',
+            'how_to',
+            'open_question',
             'unsupported_question',
         ], array_map(fn (LindaIntent $intent) => $intent->value, LindaIntent::cases()));
     }
@@ -48,10 +53,13 @@ class LindaIntentTest extends TestCase
             LindaIntent::CollectionSummary,
             LindaIntent::CollectionDetails,
             LindaIntent::DisbursementSummary,
+            LindaIntent::IncomeSummary,
+            LindaIntent::ExpenseSummary,
             LindaIntent::BranchPerformance,
             LindaIntent::OfficerPerformance,
             LindaIntent::CollectionEfficiency,
             LindaIntent::GeneralLendingSummary,
+            LindaIntent::OpenQuestion,
         ], $defaulting);
     }
 
@@ -68,6 +76,11 @@ class LindaIntentTest extends TestCase
             LindaIntent::BorrowerLookup,
             LindaIntent::OverdueAccounts,
             LindaIntent::TransactionLookup,
+            LindaIntent::PortfolioSummary,
+            LindaIntent::SavingsSummary,
+            LindaIntent::ShareCapitalSummary,
+            LindaIntent::CdaSummary,
+            LindaIntent::HowTo,
             LindaIntent::UnsupportedQuestion,
         ], $timeless);
     }

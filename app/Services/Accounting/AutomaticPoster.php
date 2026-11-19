@@ -8,7 +8,6 @@ use App\Exceptions\CannotPostToTheBooksException;
 use App\Models\AccountingAccount;
 use App\Models\AccountingJournal;
 use App\Models\AmortizationSchedule;
-use App\Models\Borrower;
 use App\Models\GCashTransaction;
 use App\Models\Loan;
 use App\Models\LoanAdjustment;
@@ -18,6 +17,7 @@ use App\Models\SavingsInterestRun;
 use App\Models\SavingsTransaction;
 use App\Models\ShareCapitalLedger;
 use App\Models\TimeDeposit;
+use App\Services\BranchAttribution;
 use App\Services\LoanReleaseFeeService;
 use DateTimeInterface;
 use Illuminate\Database\Eloquent\Model;
@@ -1093,8 +1093,9 @@ final class AutomaticPoster
     /**
      * The journal for a share capital entry a member paid in or took out on
      * its own (decision 5), keyed on the ledger row with source
-     * `share_capital`, dated the row's date, in the member's branch, or null
-     * when this organisation keeps no books. An auto-credit run calls it per
+     * `share_capital`, dated the row's date, in the branch stamped on the row
+     * (the member's when it was written), or null when this organisation
+     * keeps no books. An auto-credit run calls it per
      * row with the method chosen for the run.
      *
      * A row written by a payment's build-up (`repayment_id`), by a release
@@ -1132,7 +1133,7 @@ final class AutomaticPoster
             'date' => $row->date,
             'reference' => $row->reference,
             'description' => $this->describe($posting['description'], $row->reference),
-            'branch_id' => Borrower::query()->whereKey($row->borrower_id)->value('branch_id'),
+            'branch_id' => $row->branch_id ?? BranchAttribution::shareCapitalPostingBranch($row),
         ], $userId);
     }
 
@@ -1141,8 +1142,11 @@ final class AutomaticPoster
      * transaction with source `cash_in` or `cash_out`, or null when this
      * organisation keeps no books. A Cash In posts when it is paid, dated
      * `paid_at`; a Cash Out when it is created, dated `transaction_date`.
-     * The branch is the member's; a walk-in's is the branch it was recorded
-     * in (none for head office, and for walk-ins recorded before 2026-11-11).
+     * The branch is the row's (BranchAttribution): a member's row keeps the
+     * member's branch from when it was written, so a Cash In paid after the
+     * member moved still posts where it was recorded; a walk-in's is the
+     * branch it was recorded in (none for head office, and for walk-ins
+     * recorded before 2026-11-11).
      *
      * @throws CannotPostToTheBooksException for a Cash In not yet paid, figures that disagree, or an unmapped role
      */
@@ -1178,7 +1182,7 @@ final class AutomaticPoster
             'date' => $date,
             'reference' => $tx->reference_no,
             'description' => $this->describe($posting['description'], $tx->reference_no),
-            'branch_id' => $tx->borrower_id === null ? $tx->branch_id : Borrower::query()->whereKey($tx->borrower_id)->value('branch_id'),
+            'branch_id' => BranchAttribution::gcashPostingBranch($tx),
         ], $userId);
     }
 
