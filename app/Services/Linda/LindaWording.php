@@ -113,8 +113,9 @@ final class LindaWording
     {
         return "I can't answer that question yet. Here's what I can answer for now:\n\n"
             .self::suggestions()
-            ."\n\nI can also answer about payments, member counts, collection efficiency, and branch and officer performance, "
-            .'and look up a member, a loan or a receipt by name or number (BRW-…, LN-…, RCP-…). '
+            ."\n\nI can also answer about payments, collection efficiency, members, the portfolio, income, expenses, savings, "
+            .'share capital, CDA deadlines, and branch and officer performance, look up a member, a loan or a receipt by name or '
+            .'number (BRW-…, LN-…, RCP-…), and tell you where a page is in the menu. '
             .'You can also name a period ("last month") or one of your branches.';
     }
 
@@ -147,7 +148,9 @@ final class LindaWording
 
     public static function notYet(): string
     {
-        return 'I can\'t answer that kind of question yet. For now I can answer questions about collections, payments, disbursements, active loans, overdue payments, member counts, collection efficiency, branch and officer performance and a lending summary, and look up a member, a loan or a receipt.';
+        return 'I can\'t answer that yet. I can help with collections, payments, collection efficiency, disbursements, loans, '
+            .'overdue payments, members, the portfolio, income, expenses, savings, share capital, CDA, branch and officer '
+            .'performance, a member, a loan or a receipt, and finding a page.';
     }
 
     public static function notYetWithReport(): string
