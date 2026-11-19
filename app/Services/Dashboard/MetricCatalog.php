@@ -182,10 +182,12 @@ final class MetricCatalog
             'has_history' => $history,
         ];
         $late = fn (int $days): string => $days === 1 ? '1 day or more' : "more than {$days} days";
+        // PAR's denominator is the Portfolio Summary's par_portfolio_principal (loan-balance-summary),
+        // always equal to its outstanding.principal. The wording below stays in words for users.
         $par = fn (int $days): array => $balance(
             "Portfolio at Risk {$days}",
-            "Over every loan ever released in the scope (released, ongoing, completed, defaulted or restructured): the unpaid principal of the loans whose oldest period still marked unpaid is {$late($days)} past its due date, as a share of those loans' unpaid principal (`par_portfolio_principal`, the Loan Balance Summary's `outstanding.principal`). It equals the gross loan portfolio unless a completed or restructured loan still has a period marked unpaid. The whole unpaid principal of each late loan counts, not just the late period. Grace is not applied. A period marked unpaid counts as the oldest even when nothing is left owing on it.",
-            "Unpaid principal of loans {$late($days)} past due ÷ par_portfolio_principal × 100",
+            "Over every loan ever released in the scope (released, ongoing, completed, defaulted or restructured): the unpaid principal of the loans whose oldest period still marked unpaid is {$late($days)} past its due date, as a share of the unpaid principal of every loan ever released in the scope. It equals the gross loan portfolio unless a completed or restructured loan still has a period marked unpaid. The whole unpaid principal of each late loan counts, not just the late period. Grace is not applied. A period marked unpaid counts as the oldest even when nothing is left owing on it.",
+            "Unpaid principal of loans {$late($days)} past due ÷ unpaid principal of every ever-released loan in the scope × 100",
             'percent',
         );
 
