@@ -40,9 +40,12 @@ return new class extends Migration
             return;
         }
 
+        // The foreign key first: MySQL uses the (branch_id, date) index for
+        // it, so the index can't go while the key is there (error 1553).
         Schema::table('share_capital_ledger', function (Blueprint $table): void {
+            $table->dropForeign(['branch_id']);
             $table->dropIndex('share_capital_ledger_branch_date_index');
-            $table->dropConstrainedForeignId('branch_id');
+            $table->dropColumn('branch_id');
         });
     }
 };

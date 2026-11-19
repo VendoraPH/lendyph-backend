@@ -280,6 +280,89 @@ class MoneyRowAttributionTest extends TestCase
         $this->assertSame($loan->branch_id, $row->fresh()->branch_id);
     }
 
+    public function test_the_backfill_takes_a_release_rows_branch_from_the_release_journal(): void
+    {
+        $this->seedChartOfAccounts();
+        $loan = $this->createReleasedLoan();
+        $row = ShareCapitalLedger::factory()->create(['borrower_id' => $loan->borrower_id, 'loan_id' => $loan->id, 'credit' => 500, 'debit' => 0]);
+        DB::table('share_capital_ledger')->where('id', $row->id)->update(['branch_id' => null]);
+        $loan->borrower->update(['branch_id' => $this->north->id]);
+
+        $result = app(BranchAttributionBackfill::class)->run(false);
+
+        $this->assertSame([$row->id], array_column($result['share_capital']['updated'], 'id'));
+        $this->assertSame($loan->branch_id, $row->fresh()->branch_id);
+    }
+
+    public function test_the_backfill_takes_a_savings_rows_branch_from_the_savings_journal(): void
+    {
+        $member = $this->memberOf($this->branch);
+        $account = SavingsAccount::factory()->create(['borrower_id' => $member->id, 'branch_id' => $this->north->id]);
+        $savingsRow = SavingsTransaction::factory()->create(['account_id' => $account->id, 'type' => 'share_capital_transfer', 'debit' => '100.00', 'credit' => '0.00']);
+        $row = ShareCapitalLedger::factory()->create(['borrower_id' => $member->id, 'savings_transaction_id' => $savingsRow->id, 'credit' => 100, 'debit' => 0]);
+        DB::table('share_capital_ledger')->where('id', $row->id)->update(['branch_id' => null]);
+        $this->journal(SavingsTransaction::class, $savingsRow->id, 'savings', $this->north->id);
+
+        app(BranchAttributionBackfill::class)->run(false);
+
+        $this->assertSame($this->north->id, $row->fresh()->branch_id);
+    }
+
+    public function test_the_backfill_skips_a_row_whose_journals_disagree(): void
+    {
+        $member = $this->memberOf($this->north);
+        $tx = GCashTransaction::factory()->create(['borrower_id' => $member->id, 'transactor_user_id' => $this->admin->id]);
+        DB::table('gcash_transactions')->where('id', $tx->id)->update(['branch_id' => null]);
+        $this->journal(GCashTransaction::class, $tx->id, 'cash_in', $this->north->id);
+        $this->journal(GCashTransaction::class, $tx->id, 'cash_out', $this->branch->id);
+
+        $result = app(BranchAttributionBackfill::class)->run(false);
+
+        $this->assertSame([['id' => $tx->id, 'reference' => $tx->reference_no, 'reason' => BranchAttributionBackfill::JOURNALS_DISAGREE]], $result['gcash']['skipped']);
+        $this->assertNull($tx->fresh()->branch_id);
+    }
+
+    public function test_a_journal_reversed_by_hand_proves_only_a_build_up_rows_branch(): void
+    {
+        $this->seedChartOfAccounts();
+        $own = $this->payIn($this->memberOf($this->north), 600);
+        DB::table('accounting_journals')->where('postable_type', 'App\Models\ShareCapitalLedger')
+            ->where('postable_id', $own->id)->update(['status' => 'reversed']);
+
+        $loan = $this->createReleasedLoan();
+        $loan->update(['scb_amount' => 500]);
+        $repaymentId = $this->postJson("/api/loans/{$loan->id}/repayments", [
+            'payment_date' => now()->toDateString(),
+            'amount_paid' => (float) $loan->amortizationSchedules->first()->total_due + 300,
+            'method' => 'cash',
+        ])->assertCreated()->json('data.id');
+        $this->patchJson("/api/repayments/{$repaymentId}/void", ['void_reason' => 'Wrong amount'])->assertOk();
+        DB::table('share_capital_ledger')->update(['branch_id' => null]);
+
+        $result = app(BranchAttributionBackfill::class)->run(false);
+
+        $this->assertSame([['id' => $own->id, 'reference' => $own->reference, 'reason' => BranchAttributionBackfill::JOURNAL_REVERSED]], $result['share_capital']['skipped']);
+        $this->assertNull($own->fresh()->branch_id);
+        $buildUps = ShareCapitalLedger::query()->where('repayment_id', $repaymentId)->get();
+        $this->assertCount(2, $buildUps);
+        $this->assertSame([$loan->branch_id, $loan->branch_id], $buildUps->pluck('branch_id')->all());
+    }
+
+    public function test_marking_a_cash_in_with_no_branch_paid_stamps_the_branch_it_posts_in(): void
+    {
+        $this->seedChartOfAccounts();
+        $member = $this->memberOf($this->north);
+        $tx = GCashTransaction::factory()->create(['borrower_id' => $member->id, 'status' => 'pending', 'transactor_user_id' => $this->admin->id]);
+        DB::table('gcash_transactions')->where('id', $tx->id)->update(['branch_id' => null]);
+
+        $this->patchJson("/api/gcash/transactions/{$tx->id}/paid")->assertOk();
+        $member->update(['branch_id' => $this->branch->id]);
+
+        $this->assertSame($this->north->id, $tx->fresh()->branch_id);
+        $this->assertSame($this->north->id, DB::table('accounting_journals')
+            ->where('postable_type', 'App\Models\GCashTransaction')->where('postable_id', $tx->id)->value('branch_id'));
+    }
+
     public function test_the_backfill_writes_nothing_it_cannot_prove_and_lists_it(): void
     {
         $member = $this->memberOf($this->north);
@@ -370,6 +453,24 @@ class MoneyRowAttributionTest extends TestCase
         app(AutomaticPoster::class)->gcashTransaction($tx, $this->admin->id);
 
         return $tx;
+    }
+
+    /** A bare posted journal keyed on a record, standing in for one posted before this change. */
+    private function journal(string $postableType, int $postableId, string $source, ?int $branchId): int
+    {
+        return DB::table('accounting_journals')->insertGetId([
+            'date' => now()->toDateString(),
+            'source' => $source,
+            'description' => 'Posted before branch attribution',
+            'branch_id' => $branchId,
+            'status' => 'posted',
+            'total_debit' => 10000,
+            'total_credit' => 10000,
+            'postable_type' => $postableType,
+            'postable_id' => $postableId,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
     }
 
     private function journalBranch(ShareCapitalLedger $row, string $source): ?int

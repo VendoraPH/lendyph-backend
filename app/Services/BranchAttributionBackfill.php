@@ -27,13 +27,17 @@ use Illuminate\Support\Facades\DB;
  * - a member's GCash Cash In or Cash Out: its `cash_in` or `cash_out`
  *   journal.
  *
- * Only the original journal counts (not a reversal), posted or since
- * reversed: either way it says which branch's books the money went into.
+ * Only the original journal counts (not a reversal). A build-up row's
+ * journal may since be reversed, by its payment's void, which reverses it in
+ * the same branch; it still proves the branch. Any other row whose journal was
+ * reversed is uncertain (someone reversed it by hand, and the books may now
+ * hold that money elsewhere), so it is skipped and listed.
  *
  * A row is written only when that journal exists and names a branch. It is
  * skipped, with the reason, when there is no posted journal (books were not
  * kept then, an imported loan, a Cash In still pending), when the journal has
- * no branch, or when its journals disagree. It never falls back to the
+ * no branch, when its journals disagree, or when its journal was reversed and
+ * the row is not a build-up. It never falls back to the
  * member's branch; the reports do that at read time instead, and
  * `branches:attribution-report` lists what is left.
  *
@@ -52,6 +56,8 @@ class BranchAttributionBackfill
     public const JOURNAL_HAS_NO_BRANCH = 'its posted journal has no branch';
 
     public const JOURNALS_DISAGREE = 'its posted journals are in different branches';
+
+    public const JOURNAL_REVERSED = 'its posted journal was reversed, so it is uncertain which branch holds that money now';
 
     private const CHUNK = 500;
 
@@ -137,8 +143,11 @@ class BranchAttributionBackfill
                 $found = $journals[$this->journalKey($row, $model)] ?? collect();
                 $branches = $found->pluck('branch_id')->unique()->values();
 
+                $isBuildUp = $model === ShareCapitalLedger::class && $row->repayment_id !== null;
+
                 $reason = match (true) {
                     $found->isEmpty() => self::NO_JOURNAL,
+                    ! $isBuildUp && $found->contains('status', 'reversed') => self::JOURNAL_REVERSED,
                     $branches->count() > 1 => self::JOURNALS_DISAGREE,
                     $branches->first() === null => self::JOURNAL_HAS_NO_BRANCH,
                     default => null,
@@ -196,7 +205,7 @@ class BranchAttributionBackfill
                 ->whereIn('postable_id', $ids->unique()->values()->all())
                 ->whereIn('status', ['posted', 'reversed'])
                 ->whereNull('reverses_journal_id')
-                ->get(['postable_id', 'branch_id', 'journal_no'])
+                ->get(['postable_id', 'branch_id', 'journal_no', 'status'])
                 ->each(function (object $journal) use (&$journals, $postableType): void {
                     $journals["{$postableType}#{$journal->postable_id}"] ??= collect();
                     $journals["{$postableType}#{$journal->postable_id}"]->push($journal);

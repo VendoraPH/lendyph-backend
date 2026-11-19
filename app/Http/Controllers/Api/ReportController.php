@@ -689,7 +689,7 @@ class ReportController extends Controller
             new OA\Parameter(name: 'date_from', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')),
             new OA\Parameter(name: 'date_to', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')),
             new OA\Parameter(name: 'date', in: 'query', required: false, description: 'Legacy single-day parameter; superseded by date_from/date_to.', schema: new OA\Schema(type: 'string', format: 'date')),
-            new OA\Parameter(name: 'branch_id', in: 'query', required: false, description: 'Scopes loan cash by the loan\'s branch and share capital by the member\'s branch, matching the Share Capital report. See share_capital.branch_scope (borrower_branch when filtered, organisation when not). Share capital stays out of by_branch either way.', schema: new OA\Schema(type: 'integer')),
+            new OA\Parameter(name: 'branch_id', in: 'query', required: false, description: 'Scopes loan cash by the loan\'s branch and share capital by the branch each entry posted in (an entry not yet attributed: its member\'s branch), matching the Share Capital report. See share_capital.branch_scope (posted_branch when filtered, organisation when not).', schema: new OA\Schema(type: 'integer')),
         ],
         responses: [new OA\Response(response: 200, description: 'Cash flow for the period')],
     )]

@@ -88,6 +88,17 @@ final class BranchAttribution
     }
 
     /**
+     * SQL for the branch a GCash row counts in: its own (a walk-in's recorded
+     * branch, or a member's row stamped when written), else its member's. A
+     * walk-in done at head office reads null. `$borrowers` must be left
+     * joined to the row's member.
+     */
+    public static function gcashBranchSql(string $gcash = 'gcash_transactions', string $borrowers = 'borrowers'): string
+    {
+        return "COALESCE({$gcash}.branch_id, {$borrowers}.branch_id)";
+    }
+
+    /**
      * Narrow a share capital query to rows that count in one of $branchIds,
      * as a closure for `tap()`. Unchanged when $branchIds is null (every
      * branch). Needs no join.
