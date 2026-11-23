@@ -39,22 +39,22 @@ final class BorrowerRegistration
             $attributes['membership_date'] = now()->toDateString();
         }
 
+        $key = $attributes['registration_uuid'] ?? null;
+
         try {
             // In one transaction so the borrower insert and the Borrower::created
             // hook (which creates the ShareCapitalPledge) are atomic — if either
             // fails, neither row is left behind. Tried again when another create
             // takes the same `borrower_code` or the two deadlock; 409 if it keeps
             // happening.
-            return GeneratedNumberWrite::run(function () use ($request, $attributes) {
-                $this->refuseDuplicateUnderLock($request);
+            return GeneratedNumberWrite::run(function () use ($request, $attributes, $key) {
+                $this->refuseDuplicateUnderLock($request, $key);
 
                 return Borrower::create($attributes);
             }, GeneratedNumberWrite::MEMBER_CONFLICT);
         } catch (UniqueConstraintViolationException $e) {
-            $uuid = $attributes['registration_uuid'] ?? null;
-
             // Not an idempotency-key collision: some other unique column clashed.
-            if (! is_string($uuid) || ! Borrower::where('registration_uuid', $uuid)->exists()) {
+            if (! is_string($key) || ! Borrower::where('registration_uuid', $key)->exists()) {
                 throw $e;
             }
 
@@ -74,19 +74,21 @@ final class BorrowerRegistration
              *
              * So the key is discarded and the submission is handled as what it
              * is: a new registration that happened to quote a key it has no
-             * claim to. That keeps this branch INDISTINGUISHABLE from sending a
-             * key nobody has ever used — both produce a 201 carrying a brand-new
-             * id. An error naming `registration_uuid` would instead have
-             * confirmed to an anonymous caller that the key exists, which is an
-             * existence oracle over a value whose only defence is being
-             * unguessable.
+             * claim to, checked again under the lock as one with no key. That
+             * keeps this branch INDISTINGUISHABLE from sending a key nobody has
+             * ever used — both produce a 201 carrying a brand-new id, or the
+             * same refusal when the person is already registered. An error
+             * naming `registration_uuid` would instead have confirmed to an
+             * anonymous caller that the key exists, which is an existence
+             * oracle over a value whose only defence is being unguessable.
              */
             unset($attributes['registration_uuid']);
 
-            return GeneratedNumberWrite::run(
-                fn () => Borrower::create($attributes),
-                GeneratedNumberWrite::MEMBER_CONFLICT,
-            );
+            return GeneratedNumberWrite::run(function () use ($request, $attributes) {
+                $this->refuseDuplicateUnderLock($request, null);
+
+                return Borrower::create($attributes);
+            }, GeneratedNumberWrite::MEMBER_CONFLICT);
         }
     }
 
@@ -98,17 +100,27 @@ final class BorrowerRegistration
      * snapshot from before the other save committed.
      *
      * Not for staff's "Create Anyway" (StoreBorrowerRequest::forced(); an
-     * anonymous `force` is ignored), and not for a registration with a
-     * `registration_uuid`: there the unique index decides, and the loser reads
-     * the winner's row back rather than being refused.
+     * anonymous `force` is ignored). That is settled before the lock is taken,
+     * so its permission lookup never runs under it.
+     *
+     * A `registration_uuid` ($key) steps aside only when a row already holds
+     * it: then the unique index decides, and createBorrower() reads a retry's
+     * own row back, or drops a key the caller may not use and comes back here
+     * with none. Any other key is checked like no key. The public form always
+     * sends one, so two overlapping submissions of one new person, each with
+     * its own key, would otherwise both be saved.
      */
-    private function refuseDuplicateUnderLock(StoreBorrowerRequest $request): void
+    private function refuseDuplicateUnderLock(StoreBorrowerRequest $request, ?string $key): void
     {
-        if ($request->forced() || $request->filled('registration_uuid')) {
+        if ($request->forced()) {
             return;
         }
 
         Borrower::query()->orderByDesc('id')->lockForUpdate()->first(['id']);
+
+        if ($key !== null && Borrower::where('registration_uuid', $key)->exists()) {
+            return;
+        }
 
         Validator::make($request->safe()->only(['first_name', 'middle_name', 'last_name', 'birthdate']), [
             'first_name' => [new NoDuplicateBorrower(revealDetails: (bool) $request->user(), viewer: $request->user())],

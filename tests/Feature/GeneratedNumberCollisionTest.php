@@ -352,7 +352,13 @@ class GeneratedNumberCollisionTest extends TestCase
         $this->assertSame($before + 1, Borrower::count(), 'Only the twin was created.');
     }
 
-    public function test_an_anonymous_registration_with_a_key_skips_the_recheck_and_reads_the_winner_back(): void
+    /**
+     * A retry of one submission: the row its first attempt saved holds its key,
+     * so the re-check under the lock steps aside, the unique index refuses the
+     * insert and the retry reads that row back instead of being refused as its
+     * own duplicate.
+     */
+    public function test_an_anonymous_registration_whose_key_landed_meanwhile_reads_the_winner_back(): void
     {
         $key = (string) Str::uuid();
         $send = $this->anonymousRegistration(['registration_uuid' => $key]);
@@ -372,6 +378,67 @@ class GeneratedNumberCollisionTest extends TestCase
 
         $this->assertSame($twin()->id, $response->json('data.id'));
         $this->assertSame($before + 1, Borrower::count());
+    }
+
+    /**
+     * Two overlapping submissions of one new person, each with its own key (the
+     * public form always sends one): a key nobody holds is checked under the
+     * lock like no key, so the second is refused and only one record is saved.
+     */
+    public function test_an_anonymous_registration_with_a_key_is_refused_when_a_twin_with_another_key_landed_meanwhile(): void
+    {
+        $send = $this->anonymousRegistration(['registration_uuid' => (string) Str::uuid()]);
+        $this->failOnInsertInto('borrowers', self::DEADLOCK, times: 1);
+        $twin = $this->landOnFirstRollback(fn (): Borrower => Borrower::factory()->create([
+            'branch_id' => $this->branch->id,
+            'registration_uuid' => (string) Str::uuid(),
+            'status' => 'pending',
+            'first_name' => 'Anonymous',
+            'middle_name' => null,
+            'last_name' => 'Applicant',
+            'birthdate' => '1990-01-15',
+        ]));
+
+        $response = $send()->assertStatus(422);
+
+        $this->assertSame(['A similar member already exists. Please contact your branch to continue.'], $response->json('errors.first_name'));
+        $this->assertStringNotContainsString($twin()->borrower_code, $response->getContent());
+        $this->assertSame(1, $this->anonymousApplicants(), 'Only the twin was saved.');
+    }
+
+    /**
+     * A key held by an approved member is dropped and the save goes ahead as a
+     * new registration with no key: checked again under the lock first, so a
+     * twin saved meanwhile still refuses it.
+     */
+    public function test_an_anonymous_registration_quoting_an_approved_members_key_is_refused_when_a_twin_landed_meanwhile(): void
+    {
+        $key = (string) Str::uuid();
+        $member = Borrower::factory()->create([
+            'branch_id' => $this->branch->id,
+            'registration_uuid' => $key,
+            'status' => 'active',
+            'first_name' => 'Approved',
+            'middle_name' => null,
+            'last_name' => 'Member',
+            'birthdate' => '1975-06-30',
+        ]);
+        $send = $this->anonymousRegistration(['registration_uuid' => $key]);
+        $twin = $this->landOnFirstRollback(fn (): Borrower => Borrower::factory()->create([
+            'branch_id' => $this->branch->id,
+            'status' => 'pending',
+            'first_name' => 'Anonymous',
+            'middle_name' => null,
+            'last_name' => 'Applicant',
+            'birthdate' => '1990-01-15',
+        ]));
+
+        $response = $send()->assertStatus(422);
+
+        $this->assertSame(['A similar member already exists. Please contact your branch to continue.'], $response->json('errors.first_name'));
+        $this->assertStringNotContainsString($twin()->borrower_code, $response->getContent());
+        $this->assertSame(1, $this->anonymousApplicants(), 'Only the twin was saved.');
+        $this->assertSame($key, $member->fresh()->registration_uuid);
     }
 
     public function test_a_co_maker_added_while_awaiting_release_is_retried_with_one_link(): void
@@ -559,6 +626,14 @@ class GeneratedNumberCollisionTest extends TestCase
         $this->app['auth']->forgetGuards();
 
         return fn (): TestResponse => $this->postJson('/api/borrowers', $payload);
+    }
+
+    /**
+     * Records of the person anonymousRegistration() submits.
+     */
+    private function anonymousApplicants(): int
+    {
+        return Borrower::where('first_name', 'Anonymous')->where('last_name', 'Applicant')->count();
     }
 
     /**
