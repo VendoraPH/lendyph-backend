@@ -4,6 +4,7 @@ namespace App\Http\Requests\Concerns;
 
 use App\Models\Role;
 use App\Models\User;
+use App\Rules\BranchTakesNew;
 use App\Services\BranchAccess;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\Rules\Exists;
@@ -249,5 +250,18 @@ trait ResolvesBranchAssignment
     protected function assignableBranchRule(): Exists
     {
         return app(BranchAccess::class)->constrainBranchExists(Rule::exists('branches', 'id'), $this->user());
+    }
+
+    /**
+     * A sent `primary_branch_id` that names a closed branch is refused in
+     * words, whatever else is allowed: even for a user still assigned to it,
+     * or whose stored primary branch it is (Phase 6 MB-BE6 follow-up). A
+     * suspended branch can be chosen, as it can be assigned (openOnly()). A
+     * branch the caller can't see isn't named: validatePrimaryBranch() refuses
+     * it as one the user isn't assigned to.
+     */
+    protected function primaryBranchRule(): BranchTakesNew
+    {
+        return BranchTakesNew::openOnly($this->user(), consequence: BranchTakesNew::NO_PRIMARY);
     }
 }

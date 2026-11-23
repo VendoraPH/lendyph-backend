@@ -52,10 +52,10 @@ class StoreUserRequest extends FormRequest
             /**
              * The chosen primary branch (Phase 6 MB-BE6): one of `branch_ids`,
              * or null for Organisation-wide, which needs a role that sees all
-             * branches. Absent, the first assigned branch, as before. See the
-             * trait and validatePrimaryBranch().
+             * branches. Absent, the first assigned branch, as before. Never a
+             * closed branch. See the trait and validatePrimaryBranch().
              */
-            'primary_branch_id' => ['sometimes', 'nullable', 'integer'],
+            'primary_branch_id' => ['sometimes', 'nullable', 'integer', $this->primaryBranchRule()],
             'role' => ['required', 'string', 'exists:roles,name', new AssignableRole($this->user())],
         ];
     }

@@ -92,7 +92,8 @@ class UpdateUserRequest extends FormRequest
             // The chosen primary branch (Phase 6 MB-BE6): one of the user's
             // branches after this save, or null for Organisation-wide, which
             // needs a user who sees all branches (validatePrimaryBranch()).
-            'primary_branch_id' => ['sometimes', 'nullable', 'integer'],
+            // Never a closed branch (primaryBranchRule()).
+            'primary_branch_id' => ['sometimes', 'nullable', 'integer', $this->primaryBranchRule()],
             'role' => ['sometimes', 'string', 'exists:roles,name', new AssignableRole($this->user())],
         ];
     }
