@@ -46,8 +46,10 @@ use Illuminate\Validation\ValidationException;
  * The limits (judge()), with the product's override where one is set, each
  * compared exactly and never on a rounded figure:
  * - DTI at most the maximum: (debt + instalment) × 100 ≤ maximum × income.
- *   It is shown as Capacity's two-decimal ratio, half up, the figure Credit
- *   Scoring shows for the same loan;
+ *   It is shown rounded up to two decimals, so a failing DTI never reads as
+ *   within the limit (40.004% shows as 40.01%). It is the ratio Credit
+ *   Scoring works out for the same loan, which Credit Scoring shows half up
+ *   for its own levels;
  * - coverage (disposable income ÷ instalment) at least the minimum; it is
  *   shown to two decimals rounded down, so a shortfall never reads as the
  *   minimum;
@@ -204,7 +206,9 @@ final class CapacityAssessor
         $disposable = $capacity->disposableCentavos;
         $income = $capacity->incomeCentavos;
 
-        $dti = $hasInstalment && $income !== null ? $capacity->debtServiceRatioText() : null;
+        $dti = $hasInstalment && $income !== null
+            ? (string) BigDecimal::of($existingDebtCentavos + $instalmentCentavos)->multipliedBy(100)->dividedBy($income, 2, RoundingMode::Up)
+            : null;
         $coverage = $hasInstalment && $disposable !== null
             ? (string) BigDecimal::of($disposable)->dividedBy($instalmentCentavos, 2, RoundingMode::Down)
             : null;

@@ -220,6 +220,41 @@ describe('a linked member\'s loans', function () {
     ]);
 });
 
+describe('on the application list and detail (LO-B3\'s)', function () {
+    it('shows the current assessment in the detail, as the assessment screen shows it, and its result in the list', function () {
+        $application = $this->originationApplication();
+        $staff = $this->originationStaff('loan_origination:view', 'loan_origination:assess', 'loans:view', 'borrowers:view');
+        $detailUrl = "/api/loan-origination/applications/{$application->id}";
+
+        $this->actingAs($staff)->getJson($detailUrl)->assertOk()->assertJsonPath('data.assessment', null)->assertJsonPath('data.assessment_result', null);
+
+        $this->actingAs($staff)->postJson(lo4AssessUrl($application->id, '/rerun'), ['verified_monthly_income' => '40000', 'verified_debt_payments' => '1500'])->assertCreated();
+        $this->actingAs($staff)->patchJson(lo4AssessUrl($application->id), ['officer_findings' => 'Payslips match.'])->assertOk();
+        $screen = $this->actingAs($staff)->getJson(lo4AssessUrl($application->id))->assertOk()->json('data');
+
+        $detail = $this->actingAs($staff)->getJson($detailUrl)->assertOk();
+        expect($detail->json('data.assessment'))->toBe($screen)
+            ->and($detail->json('data.assessment.version'))->toBe(2)
+            ->and($detail->json('data.assessment_result'))->toBe('within_capacity');
+        $this->actingAs($staff)->getJson('/api/loan-origination/applications')->assertOk()
+            ->assertJsonPath('data.0.id', $application->id)
+            ->assertJsonPath('data.0.assessment_result', 'within_capacity');
+    });
+
+    it('withholds a linked member\'s loan figures in the detail as the assessment screen does', function () {
+        $application = lo4LinkedAssessed($this);
+        $viewer = $this->originationStaff('loan_origination:view', 'borrowers:view');
+
+        $detail = $this->actingAs($viewer)->getJson("/api/loan-origination/applications/{$application->id}")->assertOk();
+
+        expect($detail->json('data.assessment'))->toBe($this->actingAs($viewer)->getJson(lo4AssessUrl($application->id))->json('data'))
+            ->and($detail->json('data.assessment.member_figures_hidden'))->toBeTrue()
+            ->and($detail->json('data.assessment.figures.lendy_debt_payments'))->toBeNull()
+            ->and($detail->json('data.assessment.figures.dti_ratio'))->toBeNull()
+            ->and($detail->json('data.assessment.explanation'))->not->toContain('of ');
+    });
+});
+
 it('validates the verified amounts as pesos with at most two decimals', function () {
     $application = $this->originationApplication();
 

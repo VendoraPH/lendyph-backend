@@ -17,6 +17,7 @@ use App\Models\ShareCapitalPledge;
 use App\Models\User;
 use App\Services\Branches\MemberLock;
 use App\Services\CreditScoring\Capacity;
+use App\Services\CreditScoring\Centavos;
 use App\Services\CreditScoring\Exposure;
 use App\Services\CreditScoring\MemberCreditData;
 use App\Services\LoanListTotals;
@@ -142,7 +143,9 @@ it('takes the assessed instalment Credit Scoring\'s capacity takes from the crea
     $scored = Capacity::from($data, Exposure::from($data, app(LoanListTotals::class)), CreditScoringSetting::current(), app(LoanService::class));
 
     expect($assessment->figures['proposed_monthly_installment'])->toBe(number_format($proposed['centavos'] / 100, 2, '.', ''))
-        ->and($scored->debtServiceRatioText())->toBe($assessment->figures['dti_ratio'])
+        ->and($scored->incomeCentavos)->toBe(Centavos::of($assessment->figures['eligible_monthly_income']))
+        ->and($scored->existingDebtCentavos)->toBe(Centavos::of($assessment->figures['monthly_debt_payments']))
+        ->and($this->ratioAsAssessed($scored))->toBe($assessment->figures['dti_ratio'])
         ->and($scored->toArray()['disposable_income'])->toBe($assessment->figures['disposable_income']);
 });
 
@@ -423,7 +426,9 @@ it('scores a linked member\'s loan on the application\'s verified income, so Cre
 
     expect(CreditApplicationProfile::query()->where('loan_id', $loan->id)->sole()->monthly_income)->toBe('40000.00')
         ->and($scored->toArray()['monthly_income'])->toBe('40000.00')
-        ->and($scored->debtServiceRatioText())->toBe($assessment->figures['dti_ratio'])
+        ->and($scored->existingDebtCentavos)->toBe(Centavos::of($assessment->figures['monthly_debt_payments']))
+        ->and($scored->proposedPaymentCentavos)->toBe(Centavos::of($assessment->figures['proposed_monthly_installment']))
+        ->and($this->ratioAsAssessed($scored))->toBe($assessment->figures['dti_ratio'])
         ->and($scored->toArray()['disposable_income'])->toBe($assessment->figures['disposable_income'])
         ->and((string) $member->fresh()->monthly_income)->toBe('15000.00');
 });

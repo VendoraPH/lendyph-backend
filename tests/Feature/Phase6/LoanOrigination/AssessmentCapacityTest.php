@@ -9,6 +9,7 @@ use App\Models\Loan;
 use App\Models\OriginationRuleRevision;
 use App\Models\User;
 use App\Services\CreditScoring\Capacity;
+use App\Services\CreditScoring\Centavos;
 use App\Services\CreditScoring\Exposure;
 use App\Services\CreditScoring\MemberCreditData;
 use App\Services\LoanListTotals;
@@ -70,20 +71,39 @@ it('answers no proposed payment for no rows', function () {
     expect(Capacity::proposedPaymentFromRows([], 6, TermUnit::Months))->toBeNull();
 });
 
-it('judges DTI exactly, (debt + instalment) × 100 against the maximum × income, and shows Capacity\'s two-decimal ratio', function () {
+it('judges DTI exactly, (debt + instalment) × 100 against the maximum × income, and shows it rounded up so a failing DTI never reads as within the limit', function () {
     $at = CapacityAssessor::judge(1_000_000, 0, 0, 400_000, lo4Limits());
     $justOver = CapacityAssessor::judge(1_000_000, 0, 100_000, 300_040, lo4Limits());
     $over = CapacityAssessor::judge(1_000_000, 0, 0, 400_100, lo4Limits());
+    $within = CapacityAssessor::judge(1_000_000, 0, 23_401, 100_000, lo4Limits());
 
     expect($at['dti'])->toBe('40.00')
         ->and($at['checks']['dti'])->toBeTrue()
-        ->and($justOver['dti'])->toBe('40.00')
+        ->and($justOver['dti'])->toBe('40.01')
         ->and($justOver['checks']['dti'])->toBeFalse()
         ->and($over['dti'])->toBe('40.01')
         ->and($over['checks']['dti'])->toBeFalse()
+        ->and($within['dti'])->toBe('12.35')
+        ->and($within['checks']['dti'])->toBeTrue()
         ->and(CapacityAssessor::judge(1_000_000, 0, 0, 125_000, lo4Limits('12.5'))['checks']['dti'])->toBeTrue()
-        ->and(CapacityAssessor::judge(1_000_000, 0, 0, 125_001, lo4Limits('12.5'))['checks']['dti'])->toBeFalse()
-        ->and($at['dti'])->toBe(Capacity::calculate(1_000_000, 0, 0, 400_000, CreditScoringSetting::current())->debtServiceRatioText());
+        ->and(CapacityAssessor::judge(1_000_000, 0, 0, 125_001, lo4Limits('12.5'))['checks']['dti'])->toBeFalse();
+});
+
+it('explains a DTI of 40.004% as 40.01%, above the 40% maximum', function () {
+    $application = $this->originationApplication('under_assessment', null, [], ['expenses' => ['housing' => '0', 'food' => '0']]);
+    $instalment = Capacity::proposedPaymentFromRows(app(LoanService::class)->formPreview([
+        'loan_product_id' => $application->loan_product_id, 'principal_amount' => 30000, 'interest_rate' => 2.0, 'term' => 6, 'frequency' => 'monthly', 'start_date' => '2026-11-19',
+    ])['amortization']['rows'], 6, TermUnit::Months)['centavos'];
+    // An income of 100 instalments and other debts of 39.004: (debts + instalment) ÷ income is 40.004%.
+    $income = Centavos::toPesos(100 * $instalment);
+    $debts = Centavos::toPesos(intdiv(39_004 * $instalment + 500, 1_000));
+
+    $outcome = lo4Assessor()->assess($application, $income, $debts);
+
+    expect($outcome->checks['dti'])->toBeFalse()
+        ->and($outcome->figures['dti_ratio'])->toBe('40.01')
+        ->and($outcome->result)->toBe('above_capacity')
+        ->and($outcome->explanation)->toBe('Above capacity: the debt-to-income ratio of 40.01% is above the 40% maximum.');
 });
 
 it('judges coverage exactly against the minimum, and shows it rounded down so a shortfall never reads as the minimum', function () {
@@ -154,7 +174,7 @@ it('assesses an application from the loan form\'s preview and Capacity, figure f
         ->and($outcome->figures['monthly_debt_payments'])->toBe('1500.00')
         ->and($outcome->figures['proposed_monthly_installment'])->toBe(number_format($instalment['centavos'] / 100, 2, '.', ''))
         ->and($outcome->figures['disposable_income'])->toBe($capacity->toArray()['disposable_income'])
-        ->and($outcome->figures['dti_ratio'])->toBe($capacity->debtServiceRatioText())
+        ->and($outcome->figures['dti_ratio'])->toBe($this->ratioAsAssessed($capacity))
         ->and($outcome->figures['coverage_ratio'])->toBe((string) BigDecimal::of($capacity->disposableCentavos)->dividedBy($instalment['centavos'], 2, RoundingMode::Down))
         ->and($outcome->figures['remaining_income'])->toBe(number_format(($capacity->disposableCentavos - $instalment['centavos']) / 100, 2, '.', ''))
         ->and($outcome->request)->toMatchArray(['loan_product_id' => $application->loan_product_id, 'requested_amount' => '30000.00', 'requested_term' => 6, 'frequency' => 'monthly', 'start_date' => '2026-11-19']);

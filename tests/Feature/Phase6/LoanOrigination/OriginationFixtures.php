@@ -9,7 +9,10 @@ use App\Models\OriginationDocument;
 use App\Models\OriginationDocumentVersion;
 use App\Models\Role;
 use App\Models\User;
+use App\Services\CreditScoring\Capacity;
 use App\Services\LoanOrigination\DraftRules;
+use Brick\Math\BigDecimal;
+use Brick\Math\RoundingMode;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
@@ -25,6 +28,17 @@ trait OriginationFixtures
     public function pinOriginationToday(string $date = '2026-11-19 09:00:00'): void
     {
         $this->travelTo(Carbon::parse($date, 'Asia/Manila'));
+    }
+
+    /**
+     * A capacity's debt-to-income ratio as an assessment shows it: the exact
+     * ratio rounded up to two decimals (Credit Scoring shows it half up).
+     */
+    public function ratioAsAssessed(Capacity $capacity): string
+    {
+        return (string) BigDecimal::of($capacity->existingDebtCentavos + (int) $capacity->proposedPaymentCentavos)
+            ->multipliedBy(100)
+            ->dividedBy((int) $capacity->incomeCentavos, 2, RoundingMode::Up);
     }
 
     /** @param  array<string, mixed>  $attributes */
