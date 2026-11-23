@@ -110,6 +110,7 @@ class CsvImportStager
         $this->clearPreviousStaging($file);
 
         $result = $this->reader->readFromDisk(CsvImportReader::PII_DISK, $file->assembled_path, $shape);
+        $mayImportMembership = $shape === CsvImportSchema::CUSTOMERS && $this->starterMayEditMembers($file);
 
         $batch = [];
         $staged = 0;
@@ -122,7 +123,7 @@ class CsvImportStager
         foreach ($result->rows() as $row) {
             $normalized = $shape === CsvImportSchema::LOANS
                 ? $this->loans->normalize($row)
-                : $this->customers->normalize($row);
+                : $this->customers->normalize($row, $mayImportMembership);
 
             if ($shape === CsvImportSchema::LOANS) {
                 $this->collectLoanProduct($normalized, $products, $productsTruncated);
@@ -173,7 +174,7 @@ class CsvImportStager
                 .'Only the first '.self::MAX_DISTINCT_PRODUCTS.' were collected; check the file before mapping.';
         }
 
-        $this->assertPayloadRoundTrips($file, $shape);
+        $this->assertPayloadRoundTrips($file, $result->columnCount);
 
         // Written LAST and only on a complete pass: this is the file's "staged"
         // flag, so it must not be true of a half-staged file.
@@ -308,6 +309,19 @@ class CsvImportStager
     }
 
     /**
+     * Whether the run may carry the membership columns: the staff member who
+     * started it must also be able to edit members (`borrowers:update`, which
+     * sets a membership date and type on the member's profile), on top of the
+     * `imports:process` every import needs. A run whose starter has since
+     * left (`initiated_by` is nullOnDelete) can credit nobody, so it carries
+     * none. Decided once per file, here, where the rows are accepted.
+     */
+    private function starterMayEditMembers(CsvImportFile $file): bool
+    {
+        return $file->run?->initiatedBy?->can('borrowers:update') ?? false;
+    }
+
+    /**
      * @param  array<string, string>  $products
      */
     private function collectLoanProduct(NormalizedRow $normalized, array &$products, bool &$truncated): void
@@ -373,8 +387,12 @@ class CsvImportStager
      * key-ordered `raw` and a retyped money value both produce a staged file
      * that looks entirely normal and imports plausible garbage — the exact class
      * of bug that has to be caught on the way in or not at all.
+     *
+     * `$width` is the file's own layout width (CsvReadResult::columnCount):
+     * `raw` holds the cells as read, so a file in the earlier layout stages
+     * rows of that width.
      */
-    private function assertPayloadRoundTrips(CsvImportFile $file, string $shape): void
+    private function assertPayloadRoundTrips(CsvImportFile $file, int $width): void
     {
         $stored = CsvImportRow::query()
             ->where('csv_import_file_id', $file->id)
@@ -397,10 +415,10 @@ class CsvImportStager
         // value came back as something other than the string it went in as.
         NormalizedRow::fromPayload((array) $stored->normalized);
 
-        if (count($stored->raw) !== CsvImportSchema::width($shape) && $stored->status === 'valid') {
+        if (count($stored->raw) !== $width && $stored->status === 'valid') {
             throw new LogicException(
                 "A valid staged row for csv_import_files #{$file->id} holds ".count($stored->raw)
-                .' cells but the '.$shape.' shape is '.CsvImportSchema::width($shape).' columns wide.'
+                ." cells but the file is {$width} columns wide."
             );
         }
     }

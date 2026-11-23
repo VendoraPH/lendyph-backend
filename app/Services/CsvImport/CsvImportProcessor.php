@@ -732,6 +732,15 @@ class CsvImportProcessor
             return RowOutcome::skipped($match->outcome, (string) $match->reason, $match->borrower?->id);
         }
 
+        // Asked here rather than at staging: in this transaction the rows
+        // already written are visible, an earlier row of this same file
+        // included. The unique index stays the backstop for a race with staff.
+        $membershipNumber = $normalized->value('membership_number');
+
+        if (is_string($membershipNumber) && Borrower::query()->where('membership_number', $membershipNumber)->exists()) {
+            return RowOutcome::failed('membership_number_taken', "Membership Number {$membershipNumber} is already another member's, and each member's number is their own. Correct it in the file, or leave it blank to use the member's own code.");
+        }
+
         $street = $normalized->value('street_address');
 
         $borrower = Borrower::create([
@@ -765,6 +774,7 @@ class CsvImportProcessor
             'city' => $normalized->value('city'),
             'province' => $normalized->value('province'),
             'employer_or_business' => $normalized->value('employer_or_business'),
+            'date_hired' => $normalized->value('date_hired'),
             'monthly_income' => $this->pesos($this->money($normalized, 'monthly_income')),
             /*
              * Read by Borrower::booted()'s `created` hook to size the member's
@@ -778,6 +788,15 @@ class CsvImportProcessor
             'spouse_last_name' => $normalized->value('spouse_last_name'),
             'spouse_contact_number' => $normalized->value('spouse_contact_number'),
             'spouse_occupation' => $normalized->value('spouse_occupation'),
+            /*
+             * The CDA membership columns, where the file gives them. A blank
+             * membership date stays blank for staff to enter, as before; a date
+             * with no number gets the member's own code (Borrower::booted()),
+             * and a blank type is the app's default for every new member.
+             */
+            'membership_date' => $normalized->value('membership_date'),
+            'member_type' => $normalized->value('member_type') ?? Borrower::MEMBER_TYPE_REGULAR,
+            'membership_number' => $membershipNumber,
             'branch_id' => $run->branch_id,
             /*
              * `active`, never `pending`.

@@ -334,8 +334,8 @@ class CsvImportStagerTest extends TestCase
             $this->customerRow('A-003'),
         ]);
 
-        // One stray delimiter on the second record: 23 cells where 22 are
-        // expected. Written straight to the disk because the fixture builder
+        // One stray delimiter on the second record: one cell more than the
+        // layout has. Written straight to the disk because the fixture builder
         // pads every row to the schema width by construction, which is exactly
         // the malformation being tested.
         $lines = explode("\n", rtrim(Storage::disk('private')->get($file->assembled_path), "\n"));
@@ -348,7 +348,7 @@ class CsvImportStagerTest extends TestCase
 
         $this->assertSame(['valid', 'invalid', 'valid'], $rows->pluck('status')->all());
         $this->assertSame('row_column_count', $rows[1]->errors[0]['code'], 'The middle row did not fail the way this test assumes.');
-        $this->assertCount(23, $rows[1]->raw);
+        $this->assertCount(CsvImportSchema::width(CsvImportSchema::CUSTOMERS) + 1, $rows[1]->raw);
 
         $this->assertSame(
             ['A-001', 'A-002', 'A-003'],

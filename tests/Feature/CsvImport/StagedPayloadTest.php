@@ -126,7 +126,7 @@ class StagedPayloadTest extends TestCase
         $payload = $this->customerRow()->toPayload();
 
         $this->assertTrue(array_is_list($payload['values']));
-        $this->assertCount(22, $payload['values']);
+        $this->assertCount(CsvImportSchema::width(CsvImportSchema::CUSTOMERS), $payload['values']);
 
         // The counter-example, spelled out: had `values` been keyed by column
         // name, MySQL would hand it back in a different order, and anything
