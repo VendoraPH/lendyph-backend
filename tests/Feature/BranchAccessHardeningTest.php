@@ -484,14 +484,14 @@ class BranchAccessHardeningTest extends TestCase
             $member = Borrower::factory()->create(['branch_id' => $this->branch->id]);
             $this->loanIn($this->branch, ['borrower_id' => $member->id, 'status' => $status]);
 
-            $this->putJson("/api/borrowers/{$member->id}", ['branch_id' => $second->id])
+            $this->postJson("/api/borrowers/{$member->id}/transfer", ['branch_id' => $second->id, 'reason' => 'Moved.'])
                 ->assertUnprocessable()
-                ->assertJsonValidationErrors(['branch_id' => "This member can't move to another branch while they have 1 loan application not yet released. Loans, savings and time deposits stay in the branch where they were opened, so the member keeps that branch until these are closed."]);
+                ->assertJsonValidationErrors(['branch_id' => "This member can't be transferred while they have 1 loan application not yet released. Loans, savings, time deposits, portal requests and GCash Cash Ins stay in the branch where they were opened, so close or settle them first."]);
         }
 
         $closed = Borrower::factory()->create(['branch_id' => $this->branch->id]);
         $this->loanIn($this->branch, ['borrower_id' => $closed->id, 'status' => 'rejected']);
-        $this->putJson("/api/borrowers/{$closed->id}", ['branch_id' => $second->id])->assertOk();
+        $this->postJson("/api/borrowers/{$closed->id}/transfer", ['branch_id' => $second->id, 'reason' => 'Moved.'])->assertOk();
     }
 
     public function test_m4_a_member_with_collectible_loans_cannot_change_branch(): void
@@ -501,12 +501,12 @@ class BranchAccessHardeningTest extends TestCase
 
         $this->actingAs($this->admin);
 
-        $this->putJson("/api/borrowers/{$loan->borrower_id}", ['branch_id' => $second->id])
+        $this->postJson("/api/borrowers/{$loan->borrower_id}/transfer", ['branch_id' => $second->id, 'reason' => 'Moved.'])
             ->assertUnprocessable()
-            ->assertJsonValidationErrors(['branch_id' => "This member can't move to another branch while they have 1 loan still being paid. Loans, savings and time deposits stay in the branch where they were opened, so the member keeps that branch until these are closed."]);
+            ->assertJsonValidationErrors(['branch_id' => "This member can't be transferred while they have 1 loan still being paid. Loans, savings, time deposits, portal requests and GCash Cash Ins stay in the branch where they were opened, so close or settle them first."]);
 
         $idle = Borrower::factory()->create(['branch_id' => $this->branch->id]);
-        $this->putJson("/api/borrowers/{$idle->id}", ['branch_id' => $second->id])->assertOk();
+        $this->postJson("/api/borrowers/{$idle->id}/transfer", ['branch_id' => $second->id, 'reason' => 'Moved.'])->assertOk();
         $this->assertSame($second->id, (int) $idle->fresh()->branch_id);
     }
 
