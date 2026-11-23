@@ -31,6 +31,7 @@ class OriginationSetting extends Model
     protected $fillable = [
         'online_applications_enabled',
         'default_branch_id',
+        'require_approved_member',
         'reference_prefix',
         'draft_expiration_days',
         'estimated_minutes',
@@ -47,6 +48,7 @@ class OriginationSetting extends Model
         return [
             'online_applications_enabled' => 'boolean',
             'default_branch_id' => 'integer',
+            'require_approved_member' => 'boolean',
             'draft_expiration_days' => 'integer',
             'estimated_minutes' => 'integer',
             'accepted_file_types' => 'array',

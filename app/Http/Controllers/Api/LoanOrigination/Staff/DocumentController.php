@@ -87,7 +87,7 @@ class DocumentController extends Controller
         ]);
     }
 
-    #[OA\Post(path: '/api/loan-origination/documents/{document}/verify', summary: 'Verify a document', tags: ['Loan Origination'], security: [['sanctum' => []]],
+    #[OA\Post(path: '/api/loan-origination/documents/{document}/verify', summary: 'Verify a document', description: 'Optional `notes`. An ID (`id_document`) also needs `id_type` (a member valid ID type: philippine_id, drivers_license, passport, sss, umid, voters_id, postal_id, prc_id, tin_id or others), `custom_type_name` for others, and `id_number`, kept encrypted; the hand-off files the ID as the member\'s valid ID with them.', tags: ['Loan Origination'], security: [['sanctum' => []]],
         parameters: [new OA\Parameter(name: 'document', in: 'path', required: true, schema: new OA\Schema(type: 'integer'))],
         responses: [new OA\Response(response: 200, description: 'The document'), new OA\Response(response: 422, description: 'Not reviewable now, in words')])]
     public function verify(DocumentDecisionRequest $request): JsonResponse
@@ -133,7 +133,7 @@ class DocumentController extends Controller
 
     private function decide(DocumentDecisionRequest $request, string $to): JsonResponse
     {
-        $document = $this->review->decide($request->document(), $to, $request->user(), $request->text());
+        $document = $this->review->decide($request->document(), $to, $request->user(), $request->text(), $request->idDetails());
         $application = OriginationApplication::query()->find($document->application_id);
 
         return response()->json(['success' => true, 'data' => [

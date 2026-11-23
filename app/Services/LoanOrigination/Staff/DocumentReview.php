@@ -8,6 +8,7 @@ use App\Models\OriginationDocumentVersion;
 use App\Models\User;
 use App\Services\AuditLogService;
 use App\Services\LoanOrigination\ApplicationTransitions;
+use App\Services\LoanOrigination\HandOff\MemberDocuments;
 use App\Services\LoanWriteTransaction;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Facades\Storage;
@@ -26,6 +27,9 @@ use Symfony\Component\HttpFoundation\StreamedResponse;
  * - Each decision moves the application's version on, so a hand-off decided
  *   on what the documents were before is caught (409).
  * - A replacement request logs a message for the applicant, never sent.
+ * - Verifying an ID records the ID type and number staff read off it
+ *   (encrypted), which the hand-off files on the member's valid ID (LO-B4,
+ *   MemberDocuments); rejecting it, or asking for a replacement, clears them.
  * - A download streams the stored file as an attachment, never cached and
  *   never sniffed, under its stored name. Every one is audited by ids only.
  */
@@ -61,9 +65,12 @@ final class DocumentReview
         return OriginationDocument::query()->whereHas('application', fn (Builder $q) => $q->visibleTo($viewer));
     }
 
-    public function decide(OriginationDocument $document, string $to, User $user, ?string $text): OriginationDocument
+    /**
+     * @param  array{type: string, custom_type_name: ?string, id_number: string}|null  $idDetails  what verifying an ID records
+     */
+    public function decide(OriginationDocument $document, string $to, User $user, ?string $text, ?array $idDetails = null): OriginationDocument
     {
-        return LoanWriteTransaction::run(conflictMessage: ApplicationTransitions::STALE, callback: function () use ($document, $to, $user, $text): OriginationDocument {
+        return LoanWriteTransaction::run(conflictMessage: ApplicationTransitions::STALE, callback: function () use ($document, $to, $user, $text, $idDetails): OriginationDocument {
             // The document first, then its application: the order the file
             // store takes them in on an upload, so the two never deadlock.
             /** @var OriginationDocument $locked */
@@ -83,12 +90,18 @@ final class DocumentReview
                 )]);
             }
 
+            $isId = MemberDocuments::isId($locked->type);
+
+            if ($to === 'verified' && $isId && $idDetails === null) {
+                throw ValidationException::withMessages(['id_number' => 'Enter the ID type and number to verify an ID.']);
+            }
+
             $from = $locked->status;
 
             $locked->forceFill(match ($to) {
-                'verified' => ['status' => 'verified', 'verified_by' => $user->id, 'verified_at' => now(), 'notes' => $text, 'rejection_reason' => null],
-                'rejected' => ['status' => 'rejected', 'verified_by' => null, 'verified_at' => null, 'rejection_reason' => $text],
-                default => ['status' => 'replacement_requested', 'verified_by' => null, 'verified_at' => null, 'rejection_reason' => $text],
+                'verified' => ['status' => 'verified', 'verified_by' => $user->id, 'verified_at' => now(), 'notes' => $text, 'rejection_reason' => null, 'id_details' => $isId ? $idDetails : null],
+                'rejected' => ['status' => 'rejected', 'verified_by' => null, 'verified_at' => null, 'rejection_reason' => $text, 'id_details' => null],
+                default => ['status' => 'replacement_requested', 'verified_by' => null, 'verified_at' => null, 'rejection_reason' => $text, 'id_details' => null],
             })->save();
 
             OriginationApplication::query()->whereKey($application->id)->update(['updated_at' => now()]);

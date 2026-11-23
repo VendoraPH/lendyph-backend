@@ -322,6 +322,7 @@ class TimezoneShift
         'origination_applications' => [
             'created_at', 'decided_at', 'erased_at', 'last_saved_at', 'started_at', 'submitted_at', 'updated_at',
         ],
+        'origination_assessments' => ['created_at'],
         'origination_consents' => ['accepted_at', 'created_at'],
         'origination_document_versions' => ['scanned_at', 'uploaded_at'],
         'origination_documents' => ['created_at', 'updated_at', 'verified_at'],

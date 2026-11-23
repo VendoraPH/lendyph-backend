@@ -148,6 +148,9 @@ class ShareCapitalReleaseCreditTest extends TestCase
         $loan = $this->approvedLoan([
             ['name' => 'Share Capital', 'amount' => 500, 'type' => 'fixed'],
         ]);
+        // Released to a pending registration on purpose: the approved-member
+        // setting (Phase 6, on by default) would refuse it first, so it is off here.
+        DB::table('origination_settings')->update(['require_approved_member' => false]);
         // The registration was sent back to pending after the loan was approved.
         DB::table('borrowers')->where('id', $this->borrower->id)->update(['status' => 'pending']);
 
@@ -168,6 +171,9 @@ class ShareCapitalReleaseCreditTest extends TestCase
         $loan = $this->approvedLoan([
             ['name' => 'Processing Fee', 'amount' => 2, 'type' => 'percentage'],
         ]);
+        // Released to a pending registration on purpose: the approved-member
+        // setting (Phase 6, on by default) would refuse it first, so it is off here.
+        DB::table('origination_settings')->update(['require_approved_member' => false]);
         DB::table('borrowers')->where('id', $this->borrower->id)->update(['status' => 'pending']);
 
         $this->patchJson("/api/loans/{$loan->id}/release")->assertOk();

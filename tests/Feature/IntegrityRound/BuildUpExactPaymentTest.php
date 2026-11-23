@@ -8,6 +8,7 @@ use App\Models\LoanProduct;
 use App\Models\Repayment;
 use App\Models\ShareCapitalLedger;
 use App\Services\LoanService;
+use Illuminate\Support\Facades\DB;
 use Tests\TestCase;
 use Tests\Traits\SetupLendyPH;
 
@@ -137,6 +138,9 @@ class BuildUpExactPaymentTest extends TestCase
 
     public function test_a_non_members_extra_stays_an_overpayment_as_today(): void
     {
+        // Released to a pending registration on purpose: the approved-member
+        // setting (Phase 6, on by default) would refuse it first, so it is off here.
+        DB::table('origination_settings')->update(['require_approved_member' => false]);
         // A pending borrower is not a member yet: nothing is credited to share
         // capital, so the ₱250.00 is an ordinary overpayment.
         $loan = $this->buildUpLoan(Borrower::factory()->create(['branch_id' => $this->branch->id, 'status' => 'pending']));

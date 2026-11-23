@@ -13,6 +13,12 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
  * review. `public_id` is the random id the applicant's side uses, never the
  * row id.
  *
+ * An ID document records the ID type and number staff read off it when they
+ * verify it (`id_details`: `type`, a member valid ID type key, its
+ * `custom_type_name` for "others", and `id_number`), encrypted and never
+ * serialised; the hand-off makes it the member's valid ID with them
+ * (MemberDocuments).
+ *
  * @property string $status
  */
 class OriginationDocument extends Model
@@ -30,7 +36,10 @@ class OriginationDocument extends Model
 
     protected $fillable = [
         'application_id', 'public_id', 'type', 'status', 'current_version_id', 'verified_by', 'verified_at', 'rejection_reason', 'notes',
+        'id_details',
     ];
+
+    protected $hidden = ['id_details'];
 
     protected function casts(): array
     {
@@ -39,6 +48,7 @@ class OriginationDocument extends Model
             'current_version_id' => 'integer',
             'verified_by' => 'integer',
             'verified_at' => 'datetime',
+            'id_details' => 'encrypted:array',
         ];
     }
 

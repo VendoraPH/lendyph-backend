@@ -14,6 +14,7 @@ use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasOne;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
 
@@ -267,6 +268,15 @@ class OriginationApplication extends Model
     public function loanProduct(): BelongsTo
     {
         return $this->belongsTo(LoanProduct::class);
+    }
+
+    /**
+     * The application's current assessment revision (LO-B4): the highest
+     * version, for the staff list and detail.
+     */
+    public function latestAssessment(): HasOne
+    {
+        return $this->hasOne(OriginationAssessment::class, 'application_id')->latestOfMany('version');
     }
 
     public function assignedOfficer(): BelongsTo

@@ -4,6 +4,7 @@ namespace App\Services\Cda;
 
 use App\Models\Borrower;
 use App\Models\Loan;
+use App\Models\OriginationSetting;
 use App\Rules\NotAFormerMember;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
@@ -12,6 +13,12 @@ use Illuminate\Validation\ValidationException;
  * No new credit to a former member (C1 review, H1, M2 and L2): a loan isn't
  * released while its member, or any of its co-makers (by their member
  * record), has withdrawn or died.
+ *
+ * Nor, while the approved-member setting is on (Phase 6 owner question 11,
+ * `origination_settings.require_approved_member`, on by default), while its
+ * member's registration isn't approved: a pending (or rejected) registration,
+ * such as an online application's hand-off creates, is approved first. New
+ * releases only; nothing already released changes.
  *
  * The release request checks it before the release starts, and
  * LoanService::release() checks it again under the loan lock, reading the
@@ -51,6 +58,10 @@ final class FormerMemberGuard
             $refusals['borrower_id'][] = NotAFormerMember::messageFor($member);
         }
 
+        if ($member !== null && in_array($member->status, Borrower::NON_MEMBER_STATUSES, true) && OriginationSetting::current()->require_approved_member) {
+            $refusals['borrower_id'][] = self::notApprovedMessage($member);
+        }
+
         foreach ($coMakerMemberIds as $id) {
             $coMaker = $members->get($id);
 
@@ -77,6 +88,12 @@ final class FormerMemberGuard
         if ($member !== null && $member->isFormerMember()) {
             throw ValidationException::withMessages([$field => trim(NotAFormerMember::messageFor($member).' '.$advice)]);
         }
+    }
+
+    /** Why a loan can't be released to a member whose registration isn't approved, in words. */
+    public static function notApprovedMessage(Borrower $member): string
+    {
+        return trim("{$member->full_name} ({$member->borrower_code})")." isn't an approved member yet: approve their membership registration before releasing this loan.";
     }
 
     /** @throws ValidationException 422 in words when the loan can't be released */

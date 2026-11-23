@@ -17,9 +17,9 @@
  * (OriginationApplication::eraseForRetention()), and only
  * ApplicationTransitions opens a status write (OriginationApplication::withinTransition()).
  */
-const IMMUTABLE_ORIGINATION_MODELS = ['OriginationNotice', 'OriginationConsent', 'OriginationNote', 'OriginationStatusHistory'];
+const IMMUTABLE_ORIGINATION_MODELS = ['OriginationNotice', 'OriginationConsent', 'OriginationNote', 'OriginationStatusHistory', 'OriginationAssessment'];
 
-const IMMUTABLE_ORIGINATION_TABLES = ['origination_notices', 'origination_consents', 'origination_notes', 'origination_status_history'];
+const IMMUTABLE_ORIGINATION_TABLES = ['origination_notices', 'origination_consents', 'origination_notes', 'origination_status_history', 'origination_assessments'];
 
 /** @return list<string> */
 function relationsToImmutableOriginationModels(): array
