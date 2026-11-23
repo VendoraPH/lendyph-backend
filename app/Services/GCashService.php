@@ -14,6 +14,7 @@ use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Http\Exceptions\HttpResponseException;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
 
 class GCashService
@@ -103,7 +104,8 @@ class GCashService
                 action: 'created',
                 auditable: $tx,
                 newValues: $tx->toArray(),
-                description: "GCash {$type} transaction {$tx->reference_no} created (status={$status})",
+                // Printed as stored on the Audit Trail, so words, not the type and status keys.
+                description: 'GCash '.Str::headline($type).' '.$tx->reference_no.' recorded ('.Str::headline($status).')',
             );
 
             if ($status !== 'pending') {
