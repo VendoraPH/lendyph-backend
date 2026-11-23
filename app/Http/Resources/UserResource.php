@@ -2,6 +2,7 @@
 
 namespace App\Http\Resources;
 
+use App\Models\Branch;
 use App\Models\Role;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\JsonResource;
@@ -98,6 +99,15 @@ class UserResource extends JsonResource
                 'branches',
                 fn () => BranchResource::collection($this->branches),
             ),
+            /**
+             * The chosen primary branch (Phase 6 MB-BE6): `users.branch_id`,
+             * or null for Organisation-wide. Sent with `branches`, so the
+             * nested actor payload keeps its shape.
+             */
+            'primary_branch_id' => $this->when($this->relationLoaded('branches'), fn () => $this->branch_id === null ? null : (int) $this->branch_id),
+            'primary_branch_name' => $this->when($this->relationLoaded('branches'), fn () => $this->branch_id === null
+                ? 'Organisation-wide'
+                : ($this->branches->firstWhere('id', (int) $this->branch_id)?->name ?? Branch::query()->whereKey($this->branch_id)->value('name'))),
             'roles' => $this->whenLoaded('roles', fn () => $this->roles->pluck('name')),
             'role_details' => $this->when(
                 $this->roleDetails && $this->relationLoaded('roles'),

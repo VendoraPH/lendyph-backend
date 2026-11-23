@@ -79,8 +79,11 @@ class UserRouteRateLimitTest extends TestCase
      */
     private function userRouteNames(): array
     {
+        // `users.branch-history` (Phase 6 MB-BE6) reads a user's record under
+        // users:view, so it takes user management's limiter too.
         return ['users.index', 'users.store', 'users.show', 'users.update',
-            'users.deactivate', 'users.reactivate', 'users.reset-password'];
+            'users.deactivate', 'users.reactivate', 'users.reset-password',
+            'users.branch-history'];
     }
 
     /**
