@@ -29,6 +29,9 @@ final class BranchTakesNew implements ValidationRule
 {
     public const NOTHING_NEW = 'nothing new can be added there';
 
+    /** A user's chosen primary branch (ResolvesBranchAssignment::primaryBranchRule()). */
+    public const NO_PRIMARY = "it can't be anyone's primary branch";
+
     public const PUBLIC_REFUSAL = "This branch isn't taking new members right now. Choose another branch.";
 
     private function __construct(
@@ -45,9 +48,9 @@ final class BranchTakesNew implements ValidationRule
     }
 
     /** Refused by a closed branch only. */
-    public static function openOnly(?User $viewer, ?int $unchanged = null): self
+    public static function openOnly(?User $viewer, ?int $unchanged = null, string $consequence = self::NOTHING_NEW): self
     {
-        return new self(self::NOTHING_NEW, false, $viewer, $unchanged);
+        return new self($consequence, false, $viewer, $unchanged);
     }
 
     /** A public registration's branch: active only, refused in generic words. */

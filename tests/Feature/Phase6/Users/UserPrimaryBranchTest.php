@@ -248,6 +248,80 @@ class UserPrimaryBranchTest extends TestCase
     }
 
     /**
+     * Follow-up: a closed branch is nobody's primary branch, whatever else is
+     * allowed: on create, and on update even for a user still assigned to it
+     * or whose stored primary branch it is. Without the key, other edits go on.
+     */
+    public function test_a_closed_branch_cannot_be_anyones_primary_branch(): void
+    {
+        $closed = Branch::factory()->create(['name' => 'Shut', 'code' => 'SHT', 'status' => Branch::STATUS_CLOSED]);
+        $refusal = 'Branch "Shut" (SHT) is closed, so it can\'t be anyone\'s primary branch.';
+
+        $this->postJson('/api/users', $this->newUser([
+            'branch_ids' => [$this->second->id],
+            'primary_branch_id' => $closed->id,
+        ]))
+            ->assertStatus(422)
+            ->assertJsonValidationErrors(['primary_branch_id' => $refusal]);
+        $this->assertFalse(User::where('username', 'primary')->exists());
+
+        $user = $this->officer([$this->second]);
+        $user->branches()->attach($closed->id);
+
+        $this->putJson("/api/users/{$user->id}", ['primary_branch_id' => $closed->id])
+            ->assertStatus(422)
+            ->assertJsonValidationErrors(['primary_branch_id' => $refusal]);
+        $this->assertSame($this->second->id, $user->fresh()->branch_id);
+
+        $user->forceFill(['branch_id' => $closed->id])->saveQuietly();
+
+        $this->putJson("/api/users/{$user->id}", ['first_name' => 'Renamed', 'primary_branch_id' => $closed->id])
+            ->assertStatus(422)
+            ->assertJsonValidationErrors(['primary_branch_id' => $refusal]);
+
+        $this->putJson("/api/users/{$user->id}", ['first_name' => 'Renamed'])->assertOk();
+        $this->assertSame('Renamed', $user->fresh()->first_name);
+    }
+
+    /**
+     * A suspended branch follows the assignment rule (BranchTakesNew::openOnly):
+     * a user may be assigned to it, so it may be their primary branch.
+     */
+    public function test_a_suspended_branch_can_be_the_primary_branch(): void
+    {
+        $this->third->forceFill(['status' => Branch::STATUS_SUSPENDED])->saveQuietly();
+
+        $this->postJson('/api/users', $this->newUser([
+            'branch_ids' => [$this->second->id, $this->third->id],
+            'primary_branch_id' => $this->third->id,
+        ]))
+            ->assertCreated()
+            ->assertJsonPath('data.primary_branch_id', $this->third->id);
+
+        $user = $this->officer([$this->second, $this->third]);
+
+        $this->putJson("/api/users/{$user->id}", ['primary_branch_id' => $this->third->id])->assertOk();
+        $this->assertSame($this->third->id, $user->fresh()->branch_id);
+    }
+
+    /**
+     * The refusal names the branch only to a caller who can see it: a
+     * branch-limited admin gets the assignment refusal instead.
+     */
+    public function test_a_closed_branch_the_caller_cannot_see_is_not_named(): void
+    {
+        $closed = Branch::factory()->create(['name' => 'Shut', 'code' => 'SHT', 'status' => Branch::STATUS_CLOSED]);
+        $admin = $this->branchAdmin([$this->second, $this->third]);
+        $user = User::factory()->inBranches($this->second, $this->third)->create();
+
+        $this->actingAs($admin)
+            ->putJson("/api/users/{$user->id}", ['primary_branch_id' => $closed->id])
+            ->assertStatus(422)
+            ->assertJsonValidationErrors(['primary_branch_id' => 'The primary branch must be one of the branches this user is assigned to.'])
+            ->assertDontSee('Shut');
+    }
+
+    /**
      * @param  list<Branch>  $branches
      */
     private function branchAdmin(array $branches): User
