@@ -88,17 +88,31 @@ class MemberReportListTest extends TestCase
 
         $new = $this->member('2026-03-10 09:00:00', ['first_name' => 'Ben', 'middle_name' => null, 'last_name' => 'New', 'suffix' => null]);
 
-        // Neither active nor new: a repeat member stays off the list, and on the card.
+        // Neither active nor new: a repeat member is on the list as on the card.
         $repeatOnly = $this->member('2025-01-01 09:00:00', ['first_name' => 'Cara', 'middle_name' => null, 'last_name' => 'Repeat', 'suffix' => null]);
         $this->loan($repeatOnly, 'completed', '2025-02-05 09:00:00');
         $this->loan($repeatOnly, 'completed', '2025-03-05 09:00:00');
 
+        // On no card: one finished loan, created before the period.
+        $neither = $this->member('2025-01-01 09:00:00', ['first_name' => 'Dan', 'middle_name' => null, 'last_name' => 'Once', 'suffix' => null]);
+        $this->loan($neither, 'completed', '2025-02-05 09:00:00');
+
         $response = $this->list()->assertOk();
         $rows = collect($response->json('data'))->keyBy('borrower_id');
 
-        $this->assertSame(2, $response->json('meta.total'));
-        $this->assertCount(2, $rows);
-        $this->assertFalse($rows->has($repeatOnly->id));
+        $this->assertSame(3, $response->json('meta.total'));
+        $this->assertCount(3, $rows);
+        $this->assertFalse($rows->has($neither->id), 'A member on no card stays off the list.');
+
+        $row = $rows[$repeatOnly->id];
+        $this->assertSame('Cara Repeat', $row['borrower_name']);
+        $this->assertFalse($row['is_active']);
+        $this->assertFalse($row['is_new']);
+        $this->assertTrue($row['is_repeat']);
+        $this->assertSame(0, $row['active_loans']);
+        $this->assertSame(2, $row['loans_released']);
+        $this->assertEquals(0, $row['outstanding']);
+        $this->assertSame('2025-03-05', $row['last_release_date']);
 
         $row = $rows[$repeatActive->id];
         $this->assertSame($repeatActive->borrower_code, $row['borrower_code']);
