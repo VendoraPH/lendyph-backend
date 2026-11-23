@@ -16,6 +16,12 @@ class GCashTransaction extends Model
     /** @use HasFactory<GCashTransactionFactory> */
     use HasFactory;
 
+    /** The `type` column's values (an ENUM). */
+    public const TYPES = ['cash_in', 'cash_out'];
+
+    /** The `status` column's values (an ENUM): a Cash In is pending or paid, a Cash Out completed. */
+    public const STATUSES = ['pending', 'paid', 'completed'];
+
     protected $table = 'gcash_transactions';
 
     protected $fillable = [

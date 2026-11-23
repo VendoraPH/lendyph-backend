@@ -7,7 +7,10 @@ use App\Models\GCashTransaction;
 use App\Models\User;
 use App\Services\Accounting\AutomaticPoster;
 use App\Services\Accounting\Money;
+use Brick\Math\BigDecimal;
+use Brick\Math\RoundingMode;
 use Carbon\Carbon;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Http\Exceptions\HttpResponseException;
 use Illuminate\Support\Facades\DB;
@@ -298,6 +301,67 @@ class GCashService
             ->when($viewer !== null, fn ($q) => $q->visibleTo($viewer))
             ->orderBy('transaction_date')
             ->get();
+    }
+
+    /**
+     * The GCash Transactions list's totals (GET /gcash/transactions
+     * `meta.totals`): every row $matching holds, on every page, in one SQL
+     * aggregate, so the report prints the server's figures and the browser
+     * never adds rows up.
+     *
+     * $matching is the list's own query, its scope and every filter, `status`
+     * included. So a pending Cash In counts whenever the status filter lets it
+     * into the list, as "All" does, and `pending` says how much of each figure
+     * is still pending: a pending Cash In's charge is not income until it is
+     * paid, which is why incomeReport() leaves it out.
+     *
+     * - `amount`: the Amount column, Cash In and Cash Out together.
+     * - `cash_in`, `cash_out`: the amounts of each type.
+     * - `charges`: the Charge column.
+     * - `total`: the Total column, each Cash In's amount plus its charge and
+     *   each Cash Out's amount less its charge.
+     *
+     * The columns are DECIMAL pesos, so the sums are exact. Each goes out as a
+     * two-decimal string.
+     *
+     * @param  Builder<GCashTransaction>  $matching  the list's query, before its eager loads, order and paging
+     * @return array{count: int, amount: string, cash_in: string, cash_out: string, charges: string, total: string, pending: array{count: int, amount: string, charges: string, total: string}}
+     */
+    public function listTotals(Builder $matching): array
+    {
+        $row = $matching->toBase()
+            ->selectRaw('COUNT(*) AS row_count')
+            ->selectRaw('COALESCE(SUM(gcash_transactions.amount), 0) AS amount')
+            ->selectRaw("COALESCE(SUM(CASE WHEN gcash_transactions.type = 'cash_in' THEN gcash_transactions.amount END), 0) AS cash_in")
+            ->selectRaw("COALESCE(SUM(CASE WHEN gcash_transactions.type = 'cash_out' THEN gcash_transactions.amount END), 0) AS cash_out")
+            ->selectRaw('COALESCE(SUM(gcash_transactions.charge_amount), 0) AS charges')
+            ->selectRaw('COALESCE(SUM(gcash_transactions.total_amount), 0) AS total')
+            ->selectRaw("COUNT(CASE WHEN gcash_transactions.status = 'pending' THEN 1 END) AS pending_count")
+            ->selectRaw("COALESCE(SUM(CASE WHEN gcash_transactions.status = 'pending' THEN gcash_transactions.amount END), 0) AS pending_amount")
+            ->selectRaw("COALESCE(SUM(CASE WHEN gcash_transactions.status = 'pending' THEN gcash_transactions.charge_amount END), 0) AS pending_charges")
+            ->selectRaw("COALESCE(SUM(CASE WHEN gcash_transactions.status = 'pending' THEN gcash_transactions.total_amount END), 0) AS pending_total")
+            ->first();
+
+        return [
+            'count' => (int) $row->row_count,
+            'amount' => self::pesos($row->amount),
+            'cash_in' => self::pesos($row->cash_in),
+            'cash_out' => self::pesos($row->cash_out),
+            'charges' => self::pesos($row->charges),
+            'total' => self::pesos($row->total),
+            'pending' => [
+                'count' => (int) $row->pending_count,
+                'amount' => self::pesos($row->pending_amount),
+                'charges' => self::pesos($row->pending_charges),
+                'total' => self::pesos($row->pending_total),
+            ],
+        ];
+    }
+
+    /** A DECIMAL sum as the API's two-decimal peso string ("1500.00"). */
+    private static function pesos(string|int|float $sum): string
+    {
+        return (string) BigDecimal::of((string) $sum)->toScale(2, RoundingMode::HalfUp);
     }
 
     private function resolveTier(float $amount): GCashTier
