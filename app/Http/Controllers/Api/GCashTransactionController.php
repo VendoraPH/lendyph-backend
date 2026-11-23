@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Http\Requests\GCash\ListGCashTransactionsRequest;
 use App\Http\Requests\GCash\PreviewGCashTransactionRequest;
 use App\Http\Requests\GCash\StoreGCashTransactionRequest;
 use App\Http\Resources\GCashTransactionResource;
@@ -11,7 +12,6 @@ use App\Services\Branches\MemberLock;
 use App\Services\GCashService;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\JsonResponse;
-use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
 use OpenApi\Attributes as OA;
 
@@ -25,12 +25,12 @@ class GCashTransactionController extends Controller
         tags: ['GCash'],
         security: [['sanctum' => []]],
         parameters: [
-            new OA\Parameter(name: 'type', in: 'query', required: false, schema: new OA\Schema(type: 'string', enum: ['cash_in', 'cash_out'])),
-            new OA\Parameter(name: 'status', in: 'query', required: false, schema: new OA\Schema(type: 'string', enum: ['pending', 'paid', 'completed'])),
-            new OA\Parameter(name: 'start_date', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')),
-            new OA\Parameter(name: 'end_date', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')),
-            new OA\Parameter(name: 'borrower_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')),
-            new OA\Parameter(name: 'per_page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', default: 25)),
+            new OA\Parameter(name: 'type', in: 'query', required: false, schema: new OA\Schema(type: 'string', enum: GCashTransaction::TYPES)),
+            new OA\Parameter(name: 'status', in: 'query', required: false, schema: new OA\Schema(type: 'string', enum: GCashTransaction::STATUSES)),
+            new OA\Parameter(name: 'start_date', in: 'query', required: false, description: 'YYYY-MM-DD, inclusive.', schema: new OA\Schema(type: 'string', format: 'date')),
+            new OA\Parameter(name: 'end_date', in: 'query', required: false, description: 'YYYY-MM-DD, inclusive; not before start_date.', schema: new OA\Schema(type: 'string', format: 'date')),
+            new OA\Parameter(name: 'borrower_id', in: 'query', required: false, description: 'One member\'s rows.', schema: new OA\Schema(type: 'integer', minimum: 1)),
+            new OA\Parameter(name: 'per_page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', default: 25, minimum: 1, maximum: 100)),
         ],
         responses: [
             new OA\Response(
@@ -57,31 +57,30 @@ class GCashTransactionController extends Controller
                 ]),
             ),
             new OA\Response(response: 403, description: 'Missing gcash:view permission'),
+            new OA\Response(response: 422, description: 'A filter that isn\'t valid, in words: a type or status not in the list, a member id that isn\'t a whole number from 1, a date that isn\'t a real YYYY-MM-DD date, an end_date before start_date, or per_page below 1'),
         ],
     )]
-    public function index(Request $request): AnonymousResourceCollection
+    public function index(ListGCashTransactionsRequest $request): AnonymousResourceCollection
     {
-        $this->authorize('gcash:view');
-
-        // `min:1`: `?per_page=0` silently became the default page inside
+        // gcash:view and every filter are checked by the request. `per_page`
+        // has `min:1`: `?per_page=0` silently became the default page inside
         // paginate(), and a negative value reached MySQL as `offset` with no
-        // `limit` — a 500. The same rule every other list validates.
-        $perPage = (int) ($request->validate([
-            'per_page' => ['nullable', 'integer', 'min:1'],
-        ])['per_page'] ?? 25);
+        // `limit` — a 500.
+        $filters = $request->validated();
 
-        // The list's rows: its scope and every filter. The page and
-        // `meta.totals` both read it, so the totals always describe exactly
-        // the rows the list pages through.
+        // The list's rows: its scope and every filter, each applied when it
+        // is present (isset), never when it is truthy, so `0` can't drop one.
+        // The page and `meta.totals` both read it, so the totals always
+        // describe exactly the rows the list pages through.
         $matching = fn (): Builder => GCashTransaction::query()
             // A member's row follows the member's branch, a walk-in's the
             // branch it was recorded in (GCashTransaction::scopeVisibleTo).
             ->visibleTo($request->user())
-            ->when($request->query('type'), fn ($q, $t) => $q->where('type', $t))
-            ->when($request->query('status'), fn ($q, $s) => $q->where('status', $s))
-            ->when($request->query('borrower_id'), fn ($q, $b) => $q->where('borrower_id', $b))
-            ->when($request->query('start_date'), fn ($q, $d) => $q->whereDate('transaction_date', '>=', $d))
-            ->when($request->query('end_date'), fn ($q, $d) => $q->whereDate('transaction_date', '<=', $d));
+            ->when(isset($filters['type']), fn ($q) => $q->where('type', $filters['type']))
+            ->when(isset($filters['status']), fn ($q) => $q->where('status', $filters['status']))
+            ->when(isset($filters['borrower_id']), fn ($q) => $q->where('borrower_id', $filters['borrower_id']))
+            ->when(isset($filters['start_date']), fn ($q) => $q->whereDate('transaction_date', '>=', $filters['start_date']))
+            ->when(isset($filters['end_date']), fn ($q) => $q->whereDate('transaction_date', '<=', $filters['end_date']));
 
         $transactions = $matching()
             ->with(['borrower', 'nonMember', 'transactor'])
@@ -89,7 +88,7 @@ class GCashTransactionController extends Controller
             // Tiebreak on the key so transactions stamped in the same second
             // keep one order across pages. See DeterministicPaginationTest.
             ->orderByDesc('id')
-            ->paginate(min($perPage, 100));
+            ->paginate(min((int) ($filters['per_page'] ?? 25), 100));
 
         return GCashTransactionResource::collection($transactions)
             ->additional(['meta' => ['totals' => $this->gcash->listTotals($matching())]]);
