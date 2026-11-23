@@ -6,6 +6,8 @@ use App\Http\Resources\Savings\SavingsUserRef;
 use App\Models\OriginationApplication;
 use App\Models\OriginationAssessment;
 use App\Models\User;
+use Brick\Math\BigDecimal;
+use Brick\Math\RoundingMode;
 
 /**
  * An assessment revision in the shape of #615's `Assessment` type. Money and
@@ -16,6 +18,14 @@ use App\Models\User;
  * The figures that count a linked member's Lendy loans read null, with an
  * explanation that doesn't give them, for a viewer who may not see that
  * member's loans (MemberLoanFigures); `member_figures_hidden` says so.
+ *
+ * `verified_inputs` are the verified monthly income and debt payments staff
+ * entered for the run, as two-decimal strings (null: not verified), so the
+ * run dialog can prefill them. They go to every viewer: they are the
+ * applicant's own figures, the same as `figures.verified_monthly_income` and
+ * `figures.outside_debt_payments` (which equals the verified debt payments
+ * when they were entered), and neither counts nor gives back the member's
+ * Lendy loans.
  *
  * Public so the application detail (LO-B3) can show the current revision the
  * same way.
@@ -52,6 +62,10 @@ final class AssessmentPresenter
             'policy_exception' => $assessment->goesToPolicyException(),
             'figures' => array_map(self::number(...), $hidden ? MemberLoanFigures::withheld($assessment->figures) : $assessment->figures),
             'member_figures_hidden' => $hidden,
+            'verified_inputs' => [
+                'monthly_income' => self::pesos($assessment->inputs['verified_monthly_income'] ?? null),
+                'debt_payments' => self::pesos($assessment->inputs['verified_debt_payments'] ?? null),
+            ],
             'thresholds' => array_map(self::number(...), $assessment->thresholds),
             'checks' => $assessment->checks,
             'instalment_basis' => $assessment->instalment_basis,
@@ -65,6 +79,16 @@ final class AssessmentPresenter
             'assessed_by' => SavingsUserRef::from($assessment->creator),
             'assessed_at' => $assessment->created_at,
         ];
+    }
+
+    /** A verified figure as entered for the run: a two-decimal string, or null when not verified. */
+    private static function pesos(mixed $value): ?string
+    {
+        if ($value === null || ! is_numeric($value)) {
+            return null;
+        }
+
+        return (string) BigDecimal::of((string) $value)->toScale(2, RoundingMode::HalfUp);
     }
 
     private static function number(?string $value): int|float|null

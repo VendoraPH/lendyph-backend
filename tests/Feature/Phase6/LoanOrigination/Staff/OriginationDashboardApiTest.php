@@ -102,3 +102,53 @@ it('refuses without loan_origination:view, a branch outside the caller\'s, and a
     $this->actingAs($this->user)->getJson('/api/loan-origination/dashboard?date_from=2024-01-01&date_to=2026-11-19')->assertUnprocessable();
     $this->actingAs($this->user)->getJson('/api/loan-origination/dashboard')->assertOk()->assertJsonPath('data.period.from', '2026-11-01');
 });
+
+describe('the change from the period before (the executive dashboard\'s rule)', function () {
+    beforeEach(function () {
+        $day = fn (string $date) => Carbon::parse($date.' 09:00:00', 'Asia/Manila');
+
+        lo3Application('submitted', ['started_at' => $day('2026-10-20'), 'submitted_at' => $day('2026-10-20'), 'requested_amount' => '10000.00']);
+        foreach (['2026-10-21', '2026-10-22', '2026-10-23', '2026-10-24'] as $date) {
+            lo3Application('draft', ['started_at' => $day($date), 'submitted_at' => null]);
+        }
+        foreach (['2026-11-10', '2026-11-11', '2026-11-12'] as $date) {
+            lo3Application('submitted', ['started_at' => $day($date), 'submitted_at' => $day($date), 'requested_amount' => '5000.00']);
+        }
+
+        foreach (['2026-10-25' => 10000, '2026-11-14' => 12000] as $date => $principal) {
+            $loan = Loan::factory()->create(['branch_id' => $this->main->id, 'status' => 'approved', 'principal_amount' => $principal, 'approved_at' => $day($date)]);
+            lo3Application('pending_approval', ['loan_id' => $loan->id, 'started_at' => $day('2026-09-01'), 'submitted_at' => $day('2026-09-01')]);
+        }
+    });
+
+    it('sends a server-worked change for every figure with a previous figure: a percentage, or points for a rate', function () {
+        $this->user = lo3Staff($this->main, 'loan_origination:view', 'loans:view');
+        $data = lo3Dashboard($this)->json('data');
+        $changes = $data['changes'];
+
+        expect(array_keys($changes))->toBe(array_keys($data['kpis']))
+            ->and($data['previous']['new'])->toBe(1)
+            ->and($data['kpis']['new'])->toBe(3)
+            // a rise
+            ->and($changes['new'])->toEqual(['change' => 200.0, 'change_unit' => 'percent'])
+            ->and($changes['amount_requested'])->toEqual(['change' => 50.0, 'change_unit' => 'percent'])
+            ->and($changes['amount_approved'])->toEqual(['change' => 20.0, 'change_unit' => 'percent'])
+            ->and($changes['completion_rate'])->toEqual(['change' => 80.0, 'change_unit' => 'points'])
+            // a fall
+            ->and($changes['total'])->toEqual(['change' => -40.0, 'change_unit' => 'percent'])
+            ->and($changes['incomplete'])->toEqual(['change' => -100.0, 'change_unit' => 'percent'])
+            // a previous figure of zero, or none
+            ->and($changes['under_assessment'])->toBe(['change' => null, 'change_unit' => 'percent'])
+            ->and($changes['approval_rate'])->toBe(['change' => null, 'change_unit' => 'points'])
+            ->and($changes['avg_processing_hours'])->toBe(['change' => null, 'change_unit' => 'percent']);
+    });
+
+    it('keeps a withheld figure\'s change withheld', function () {
+        $data = lo3Dashboard($this)->json('data');
+
+        expect($data['kpis']['amount_approved'])->toBeNull()
+            ->and($data['previous']['amount_approved'])->toBeNull()
+            ->and($data['changes']['amount_approved'])->toBe(['change' => null, 'change_unit' => 'percent'])
+            ->and($data['changes']['new'])->toEqual(['change' => 200.0, 'change_unit' => 'percent']);
+    });
+});

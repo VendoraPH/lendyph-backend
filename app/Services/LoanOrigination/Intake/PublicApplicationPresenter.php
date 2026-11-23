@@ -14,7 +14,8 @@ use App\Support\PhilippineMobile;
  * What the applicant's side reads (origination decisions 5 and 8):
  *
  * - state(): their own draft, its completion, the server's declared totals
- *   and what still blocks a submit, and their documents (never a file link);
+ *   what still blocks a submit, the chosen product's required field keys,
+ *   and their documents (never a file link);
  * - track(): a whitelist only (decision 8): the status in the applicant's
  *   words, what to do next, the documents they may replace, the decision
  *   notice staff wrote for them and the office's contact. Never notes,
@@ -81,6 +82,7 @@ final class PublicApplicationPresenter
             ],
             'declared_totals' => $this->rules->declaredTotals($draft),
             'missing_fields' => (object) $this->missingFields($draft, $product, $application->loan_product_id),
+            'required_fields' => $this->requiredFieldKeys($application->loan_product_id),
         ];
     }
 
@@ -170,6 +172,25 @@ final class PublicApplicationPresenter
         }
 
         return $missing;
+    }
+
+    /**
+     * The chosen product's required fields, filled or not, keyed as
+     * `missing_fields` is (`draft.<section>.<field>`), so a resumed session
+     * can show one an income source would hide. Keys only, in the settings'
+     * order; one the form no longer has is left out, as missingFields()
+     * leaves it out.
+     *
+     * @return list<string>
+     */
+    public function requiredFieldKeys(?int $productId): array
+    {
+        $known = DraftRules::fieldKeys();
+
+        return array_values(array_map(
+            fn (string $key) => "draft.{$key}",
+            array_filter($this->requiredFields($productId), fn (mixed $key) => in_array($key, $known, true)),
+        ));
     }
 
     /** @return list<string> */

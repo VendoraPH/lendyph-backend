@@ -25,6 +25,7 @@ use Illuminate\Http\Request;
 use Illuminate\Http\Response;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\ValidationException;
+use OpenApi\Attributes as OA;
 
 /**
  * The public application (origination audit §4.1–5 and §4.8, slice LO-B2),
@@ -103,12 +104,41 @@ class PublicApplyController extends Controller
     }
 
     /** GET /public-apply/{token}/draft */
+    #[OA\Get(
+        path: '/api/public-apply/{token}/draft',
+        summary: 'The applicant\'s draft',
+        description: 'The applicant\'s application state, the same object the code step answers as `application`: {reference_number, status, last_completed_step, completion_percent, draft, documents, verified_contact (mobile masked), declared_totals (two-decimal strings), missing_fields (`draft.<section>.<field>` => what to do, in words; only fields still blank), required_fields (the chosen product\'s required field keys, filled or not, keyed as missing_fields is, e.g. `draft.employment.employer_name`; [] with no product chosen or none required; keys only)}.',
+        tags: ['Loan Origination (public)'],
+        parameters: [
+            new OA\Parameter(name: 'token', in: 'path', required: true, schema: new OA\Schema(type: 'string')),
+            new OA\Parameter(name: 'X-Application-Session', in: 'header', required: true, description: 'The session token from the code step', schema: new OA\Schema(type: 'string')),
+        ],
+        responses: [
+            new OA\Response(response: 200, description: 'The application state'),
+            new OA\Response(response: 401, description: 'No valid session'),
+        ],
+    )]
     public function showDraft(Request $request): JsonResponse
     {
         return response()->json(['data' => $this->presenter->state(self::application($request)->fresh())]);
     }
 
     /** PUT /public-apply/{token}/draft: autosave. */
+    #[OA\Put(
+        path: '/api/public-apply/{token}/draft',
+        summary: 'Autosave the applicant\'s draft',
+        description: 'Body {draft, last_completed_step}; the draft goes through the form\'s whitelist. Answers the applicant\'s application state, the same object the code step answers as `application`: {reference_number, status, last_completed_step, completion_percent, draft, documents, verified_contact (mobile masked), declared_totals (two-decimal strings), missing_fields (`draft.<section>.<field>` => what to do, in words; only fields still blank), required_fields (the chosen product\'s required field keys, filled or not, keyed as missing_fields is, e.g. `draft.employment.employer_name`; [] with no product chosen or none required; keys only)}.',
+        tags: ['Loan Origination (public)'],
+        parameters: [
+            new OA\Parameter(name: 'token', in: 'path', required: true, schema: new OA\Schema(type: 'string')),
+            new OA\Parameter(name: 'X-Application-Session', in: 'header', required: true, description: 'The session token from the code step', schema: new OA\Schema(type: 'string')),
+        ],
+        responses: [
+            new OA\Response(response: 200, description: 'The application state'),
+            new OA\Response(response: 401, description: 'No valid session'),
+            new OA\Response(response: 422, description: 'A field of the wrong shape, or a product the link doesn\'t offer'),
+        ],
+    )]
     public function saveDraft(Request $request): JsonResponse
     {
         $request->validate([
