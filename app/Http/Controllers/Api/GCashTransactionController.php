@@ -30,7 +30,7 @@ class GCashTransactionController extends Controller
             new OA\Parameter(name: 'start_date', in: 'query', required: false, description: 'YYYY-MM-DD, inclusive.', schema: new OA\Schema(type: 'string', format: 'date')),
             new OA\Parameter(name: 'end_date', in: 'query', required: false, description: 'YYYY-MM-DD, inclusive; not before start_date.', schema: new OA\Schema(type: 'string', format: 'date')),
             new OA\Parameter(name: 'borrower_id', in: 'query', required: false, description: 'One member\'s rows.', schema: new OA\Schema(type: 'integer', minimum: 1)),
-            new OA\Parameter(name: 'per_page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', default: 25, minimum: 1, maximum: 100)),
+            new OA\Parameter(name: 'per_page', in: 'query', required: false, description: 'Values above 100 read as 100.', schema: new OA\Schema(type: 'integer', default: 25, minimum: 1)),
         ],
         responses: [
             new OA\Response(
