@@ -106,12 +106,16 @@ final class NormalizedRow
             );
         }
 
-        if (count($raw) !== count($keys)) {
+        // A row staged before columns were appended to its shape holds only
+        // the earlier ones (an import still running across the release). They
+        // are a prefix of today's, so the rest read as blank: not set.
+        if (! in_array(count($raw), CsvImportSchema::acceptedWidths($shape), true)) {
             throw new InvalidArgumentException(
                 'A staged '.$shape.' payload must hold exactly '.count($keys).' values, got '.count($raw).'.'
             );
         }
 
+        $raw = array_pad($raw, count($keys), null);
         $values = [];
 
         foreach ($keys as $index => $key) {

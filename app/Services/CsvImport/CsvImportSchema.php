@@ -29,7 +29,8 @@ use InvalidArgumentException;
  * and nothing downstream can tell.
  *
  * ORDER IS CONTRACT. Re-ordering, adding or removing an entry changes what a
- * positional file means.
+ * positional file means. A column may only ever be appended, and an appended
+ * one is declared in self::APPENDED_FROM so a file made before it still reads.
  */
 final class CsvImportSchema
 {
@@ -54,7 +55,11 @@ final class CsvImportSchema
     public const TYPE_ENUM = 'enum';
 
     /**
-     * The 22 Customer Profile columns, in file order.
+     * The 26 Customer Profile columns, in file order: the workbook's 22, then
+     * the four Member Profile fields it lacked (Date Hired from the
+     * registration form, and the CDA membership columns), appended so a file
+     * in the workbook's own 22-column layout still reads by position. See
+     * self::APPENDED_FROM.
      *
      * @var list<array{key: string, label: string, type: string, aliases: list<string>}>
      */
@@ -81,6 +86,10 @@ final class CsvImportSchema
         ['key' => 'spouse_last_name', 'label' => 'Spouse LName (If Married)', 'type' => self::TYPE_TEXT, 'aliases' => ['spouse lname', 'spouse last name', 'spouse last', 'spouse surname']],
         ['key' => 'spouse_contact_number', 'label' => 'Spouse Contact No (If Married)', 'type' => self::TYPE_TEXT, 'aliases' => ['spouse contact no', 'spouse contact number', 'spouse contact', 'spouse mobile']],
         ['key' => 'spouse_occupation', 'label' => 'Spouse Occupation (If Married)', 'type' => self::TYPE_TEXT, 'aliases' => ['spouse occupation', 'spouse work', 'spouse job', 'spouse employer', 'spouse business']],
+        ['key' => 'date_hired', 'label' => 'Date Hired', 'type' => self::TYPE_DATE, 'aliases' => ['hire date', 'date of hiring', 'date employed', 'employment date']],
+        ['key' => 'membership_date', 'label' => 'Membership Date', 'type' => self::TYPE_DATE, 'aliases' => ['date of membership', 'member since', 'date admitted', 'date of admission']],
+        ['key' => 'member_type', 'label' => 'Member Type', 'type' => self::TYPE_ENUM, 'aliases' => ['membership type', 'type of member', 'type of membership']],
+        ['key' => 'membership_number', 'label' => 'Membership Number', 'type' => self::TYPE_TEXT, 'aliases' => ['membership no', 'membership num', 'cda membership number']],
     ];
 
     /**
@@ -116,11 +125,58 @@ final class CsvImportSchema
     ];
 
     /**
+     * Columns appended to a shape after its first layout, by the key of the
+     * first one appended.
+     *
+     * A file made before them is the same file without its last columns:
+     * every column it has keeps its position, so it is still read
+     * positionally, and the appended fields read as blank (not set). That is
+     * the ONLY way a column may be added. One inserted anywhere else would move
+     * an earlier file's values into the wrong fields, which is the outcome
+     * this whole package exists to prevent.
+     */
+    private const APPENDED_FROM = [
+        self::CUSTOMERS => 'date_hired',
+    ];
+
+    /**
      * @return list<string>
      */
     public static function shapes(): array
     {
         return [self::CUSTOMERS, self::LOANS];
+    }
+
+    /**
+     * The record widths a file of this shape may have: today's layout first,
+     * then the earlier one (the layout before the appended columns), if any.
+     *
+     * The file's own width decides which layout it is, and every row of the
+     * file is then held to that one width. Accepting either width row by row
+     * would read a row of an old file that grew four stray separators as a
+     * row of the new layout, with every value after them in the wrong field.
+     *
+     * @return list<int>
+     */
+    public static function acceptedWidths(string $shape): array
+    {
+        $first = self::APPENDED_FROM[$shape] ?? null;
+
+        return $first === null
+            ? [self::width($shape)]
+            : [self::width($shape), self::indexOf($shape, $first)];
+    }
+
+    /**
+     * The labels of the appended columns, which an earlier file does not have.
+     *
+     * @return list<string>
+     */
+    public static function appendedLabels(string $shape): array
+    {
+        $first = self::APPENDED_FROM[$shape] ?? null;
+
+        return $first === null ? [] : array_slice(self::labels($shape), self::indexOf($shape, $first));
     }
 
     /**

@@ -38,9 +38,9 @@ class CsvImportReaderTest extends TestCase
     /**
      * @param  array<int, string>  $overrides
      */
-    private function customerRow(array $overrides = [], string $delimiter = ','): string
+    private function customerRow(array $overrides = [], string $delimiter = ',', ?int $width = null): string
     {
-        $cells = array_fill(0, CsvImportSchema::width(CsvImportSchema::CUSTOMERS), '');
+        $cells = array_fill(0, $width ?? CsvImportSchema::width(CsvImportSchema::CUSTOMERS), '');
         $cells[0] = 'A-001';
         $cells[1] = 'Dela Cruz';
         $cells[2] = 'Juan';
@@ -162,7 +162,8 @@ class CsvImportReaderTest extends TestCase
 
     public function test_a_wrong_column_count_rejects_the_file_not_the_row(): void
     {
-        $short = implode(',', array_fill(0, CsvImportSchema::width(CsvImportSchema::CUSTOMERS) - 1, 'x'));
+        $width = CsvImportSchema::width(CsvImportSchema::CUSTOMERS);
+        $short = implode(',', array_fill(0, $width - 1, 'x'));
         $body = str_repeat($short."\n", 5);
 
         try {
@@ -174,8 +175,8 @@ class CsvImportReaderTest extends TestCase
             // Gender, Pledge Amount into Spouse First Name. Nothing downstream
             // can detect that, so the file never gets to start.
             $this->assertSame('unexpected_column_count', $e->reasonCode);
-            $this->assertStringContainsString('21 columns', $e->getMessage());
-            $this->assertStringContainsString('22', $e->getMessage());
+            $this->assertStringContainsString(($width - 1).' columns', $e->getMessage());
+            $this->assertStringContainsString((string) $width, $e->getMessage());
         }
     }
 
@@ -259,7 +260,7 @@ class CsvImportReaderTest extends TestCase
         $result = (new CsvImportReader)->read($this->writeFile(implode(',', $cells)."\n"), CsvImportSchema::CUSTOMERS);
         $row = iterator_to_array($result->rows())[0];
 
-        $this->assertCount(22, $row->cells);
+        $this->assertCount(CsvImportSchema::width(CsvImportSchema::CUSTOMERS), $row->cells);
         $this->assertSame('123 Main St, Unit 4', $row->cell(8));
         $this->assertSame('70,000.07', $row->cell(16));
     }
@@ -296,7 +297,7 @@ class CsvImportReaderTest extends TestCase
         $rows = iterator_to_array($result->rows());
 
         $this->assertCount(10, $rows);
-        $this->assertCount(23, $rows[9]->cells, 'The odd row is still handed over, for the normalizer to fail.');
+        $this->assertCount(CsvImportSchema::width(CsvImportSchema::CUSTOMERS) + 1, $rows[9]->cells, 'The odd row is still handed over, for the normalizer to fail.');
     }
 
     public function test_the_row_stream_refuses_to_be_read_twice(): void
@@ -354,12 +355,14 @@ class CsvImportReaderTest extends TestCase
         // bracket in "Pledge Amt(If Applicable)" but a space in the spouse
         // ones, and a lowercase "email" among title-case neighbours. All of it
         // has to pass, because all of it is what the client will upload.
+        // The workbook is the members file's first layout, so its data rows
+        // are 22 wide too: the columns appended since are not in it.
         $header = $this->workbookCustomerHeader();
 
         $this->assertCount(22, $header);
 
         $result = (new CsvImportReader)->read(
-            $this->writeFile(implode(',', $header)."\n".$this->customerRow()."\n"),
+            $this->writeFile(implode(',', $header)."\n".$this->customerRow(width: 22)."\n"),
             CsvImportSchema::CUSTOMERS,
         );
 
@@ -390,10 +393,12 @@ class CsvImportReaderTest extends TestCase
     {
         // Compared on labelKey(), which is how the reader compares them — so
         // this asserts the contract that actually governs, not the cosmetics.
+        // The workbook is each shape's first layout (its narrowest accepted
+        // width); columns appended since come after it and nowhere else.
         foreach ([
-            [CsvImportSchema::CUSTOMERS, $this->workbookCustomerHeader()],
-            [CsvImportSchema::LOANS, $this->workbookLoanHeader()],
-        ] as [$shape, $workbook]) {
+            [CsvImportSchema::CUSTOMERS, $this->workbookCustomerHeader(), ['Date Hired', 'Membership Date', 'Member Type', 'Membership Number']],
+            [CsvImportSchema::LOANS, $this->workbookLoanHeader(), []],
+        ] as [$shape, $workbook, $appended]) {
             $declared = array_map(
                 static fn (string $label): string => CsvImportSchema::labelKey($label),
                 CsvImportSchema::labels($shape),
@@ -402,8 +407,10 @@ class CsvImportReaderTest extends TestCase
                 static fn (string $label): string => CsvImportSchema::labelKey($label),
                 $workbook,
             );
+            $workbookWidth = min(CsvImportSchema::acceptedWidths($shape));
 
-            $this->assertSame($actual, $declared, "The declared [{$shape}] labels have drifted from the workbook.");
+            $this->assertSame($actual, array_slice($declared, 0, $workbookWidth), "The declared [{$shape}] labels have drifted from the workbook.");
+            $this->assertSame($appended, CsvImportSchema::appendedLabels($shape), "The [{$shape}] columns after the workbook's are not the appended ones.");
         }
     }
 
@@ -425,14 +432,17 @@ class CsvImportReaderTest extends TestCase
         $this->assertNotSame(CsvImportSchema::labelKey('Interest Rate'), CsvImportSchema::labelKey('Interest Amount'));
     }
 
-    public function test_the_declared_shapes_are_22_and_18_columns(): void
+    public function test_the_declared_shapes_are_26_and_18_columns_and_a_22_column_members_file_still_reads(): void
     {
         // The width is DERIVED from CsvImportSchema, so this is what stops a
         // column being added to the declaration without anyone noticing that
-        // every existing positional file now fails.
-        $this->assertSame(22, CsvImportSchema::width(CsvImportSchema::CUSTOMERS));
+        // every existing positional file now fails. The members file's four
+        // appended columns were added with the 22-column layout kept readable.
+        $this->assertSame(26, CsvImportSchema::width(CsvImportSchema::CUSTOMERS));
         $this->assertSame(18, CsvImportSchema::width(CsvImportSchema::LOANS));
-        $this->assertCount(22, array_unique(CsvImportSchema::keys(CsvImportSchema::CUSTOMERS)));
+        $this->assertSame([26, 22], CsvImportSchema::acceptedWidths(CsvImportSchema::CUSTOMERS));
+        $this->assertSame([18], CsvImportSchema::acceptedWidths(CsvImportSchema::LOANS));
+        $this->assertCount(26, array_unique(CsvImportSchema::keys(CsvImportSchema::CUSTOMERS)));
         $this->assertCount(18, array_unique(CsvImportSchema::keys(CsvImportSchema::LOANS)));
     }
 }

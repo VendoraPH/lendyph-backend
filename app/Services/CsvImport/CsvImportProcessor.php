@@ -698,10 +698,14 @@ class CsvImportProcessor
         // an absence in `audit_logs` that nobody notices until an auditor asks.
         // If you add a write here, decide explicitly whether it belongs in the
         // run's summary row (self::finalise()) and put it there.
-        AuditLogService::withoutModelAuditing(function () use ($run, $rows, $shape): void {
+        // Asked again here, not only at staging: a run can wait days on its
+        // product mapping, and its starter can lose the access meanwhile.
+        $membershipAllowed = $shape === CsvImportSchema::CUSTOMERS && $run->starterMayEditMembers();
+
+        AuditLogService::withoutModelAuditing(function () use ($run, $rows, $shape, $membershipAllowed): void {
             foreach ($rows as $row) {
                 $outcome = $shape === CsvImportSchema::CUSTOMERS
-                    ? $this->importCustomerRow($run, $row)
+                    ? $this->importCustomerRow($run, $row, $membershipAllowed)
                     : $this->importLoanRow($run, $row);
 
                 $this->stamp($row, $outcome);
@@ -709,7 +713,7 @@ class CsvImportProcessor
         });
     }
 
-    private function importCustomerRow(CsvImportRun $run, CsvImportRow $row): RowOutcome
+    private function importCustomerRow(CsvImportRun $run, CsvImportRow $row, bool $membershipAllowed): RowOutcome
     {
         $normalized = NormalizedRow::fromPayload((array) $row->normalized);
 
@@ -730,6 +734,19 @@ class CsvImportProcessor
 
         if ($match->needsReview()) {
             return RowOutcome::skipped($match->outcome, (string) $match->reason, $match->borrower?->id);
+        }
+
+        if (! $membershipAllowed && $this->carriesMembership($normalized)) {
+            return RowOutcome::failed(CustomerRowNormalizer::MEMBERSHIP_NEEDS_MEMBER_EDIT, CustomerRowNormalizer::MEMBERSHIP_NEEDS_MEMBER_EDIT_MESSAGE);
+        }
+
+        // Asked here rather than at staging: in this transaction the rows
+        // already written are visible, an earlier row of this same file
+        // included. The unique index stays the backstop for a race with staff.
+        $membershipNumber = $normalized->value('membership_number');
+
+        if (is_string($membershipNumber) && Borrower::query()->where('membership_number', $membershipNumber)->exists()) {
+            return RowOutcome::failed('membership_number_taken', "Membership Number {$membershipNumber} is already another member's, and each member's number is their own. Correct it in the file, or leave it blank to use the member's own code.");
         }
 
         $street = $normalized->value('street_address');
@@ -765,6 +782,7 @@ class CsvImportProcessor
             'city' => $normalized->value('city'),
             'province' => $normalized->value('province'),
             'employer_or_business' => $normalized->value('employer_or_business'),
+            'date_hired' => $normalized->value('date_hired'),
             'monthly_income' => $this->pesos($this->money($normalized, 'monthly_income')),
             /*
              * Read by Borrower::booted()'s `created` hook to size the member's
@@ -778,6 +796,15 @@ class CsvImportProcessor
             'spouse_last_name' => $normalized->value('spouse_last_name'),
             'spouse_contact_number' => $normalized->value('spouse_contact_number'),
             'spouse_occupation' => $normalized->value('spouse_occupation'),
+            /*
+             * The CDA membership columns, where the file gives them. A blank
+             * membership date stays blank for staff to enter, as before; a date
+             * with no number gets the member's own code (Borrower::booted()),
+             * and a blank type is the app's default for every new member.
+             */
+            'membership_date' => $normalized->value('membership_date'),
+            'member_type' => $normalized->value('member_type') ?? Borrower::MEMBER_TYPE_REGULAR,
+            'membership_number' => $membershipNumber,
             'branch_id' => $run->branch_id,
             /*
              * `active`, never `pending`.
@@ -1095,6 +1122,20 @@ class CsvImportProcessor
         }
 
         return $items;
+    }
+
+    /**
+     * Whether a staged member row holds a value in any membership column.
+     */
+    private function carriesMembership(NormalizedRow $normalized): bool
+    {
+        foreach (CustomerRowNormalizer::MEMBERSHIP_FIELDS as $field) {
+            if ($normalized->value($field) !== null) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**
