@@ -19,7 +19,7 @@ use Illuminate\Support\Carbon;
  *
  * @property int $id
  * @property string $source un|amlc|internal
- * @property string $version_label
+ * @property string|null $version_label the typed or file label; none reads "Version #n"
  * @property string $file_sha256
  * @property int $entry_count
  * @property string $status active|superseded

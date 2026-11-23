@@ -67,6 +67,8 @@ final class RepeatedDepositsWithdrawals extends DetectionRule
                 self::indicator('Withdrawals', (string) $withdrawals),
                 self::indicator('Total', self::peso($total)),
             ],
+            countedCentavos: $total,
+            countedTransactions: $events->count(),
         );
     }
 }

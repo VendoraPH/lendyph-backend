@@ -396,7 +396,7 @@ class TimezoneShift
         // Phase 6 AMLA-B7 (2026-11-23): report exports and set-aside asks, well
         // after the cutover.
         'amla_ctr_set_asides' => ['created_at', 'decided_at', 'updated_at'],
-        'amla_exports' => ['created_at'],
+        'amla_exports' => ['created_at', 'file_deleted_at'],
         // Added 2026-11-19 with the executive dashboard's alert thresholds
         // (Phase 6 EB-C), well after the cutover, for the same reason.
         'dashboard_settings' => ['created_at', 'updated_at'],

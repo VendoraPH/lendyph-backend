@@ -75,7 +75,7 @@ final class WatchlistScreening extends ComplianceReport
             'reference' => 'SCR-'.str_pad((string) $match->id, 6, '0', STR_PAD_LEFT),
             'subject' => $this->subject($match),
             'source' => AmlaWatchlistVersion::SOURCES[$match->source]['words'] ?? $match->source,
-            'list_version' => $versions[$match->version_id] ?? null,
+            'list_version' => $versions[$match->version_id] ?? 'Version #'.$match->version_id,
             'score' => (int) $match->score,
             'status' => self::STATUS_WORDS[$match->status] ?? ucfirst((string) $match->status),
             'findings' => $match->status === AmlaScreeningMatch::PENDING ? null : 'Recorded',

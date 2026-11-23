@@ -6,7 +6,9 @@ use App\Enums\PaymentMethod;
 use App\Models\AmlaAlert;
 use App\Models\AmlaChangeRequest;
 use App\Models\AmlaCtrCandidate;
+use App\Models\AmlaCtrSetAside;
 use App\Models\AmlaEvent;
+use App\Models\AmlaReport;
 use App\Models\AmlaRuleVersion;
 use App\Models\Borrower;
 use App\Models\Branch;
@@ -32,8 +34,17 @@ final class AmlaDetectionPresenter
 
     public function __construct(private readonly DetectionRules $rules) {}
 
-    /** @return array<string, mixed> */
-    /** The alert's row; its case shows only to `amla:cases` holders with head-office access (`$viewer`). */
+    /**
+     * The alert's row; its case shows only to `amla:cases` holders with
+     * head-office access (`$viewer`). Two figures, labelled apart:
+     * `counted_amount` (and `counted_transactions_count`) is the figure the
+     * reason prints, set by the rule when the alert opened (null when the
+     * reason prints none, and on alerts opened before AMLA-B8); `amount` (and
+     * `transactions_count`) is
+     * every transaction linked since, later joins included, less any voided.
+     *
+     * @return array<string, mixed>
+     */
     public function alertRow(AmlaAlert $alert, ?User $viewer = null): array
     {
         $standing = $alert->events->whereNull('reversed_at');
@@ -54,6 +65,8 @@ final class AmlaDetectionPresenter
             'window_end' => $alert->window_end->toDateString(),
             'amount' => self::pesos($standing),
             'transactions_count' => $alert->events->count(),
+            'counted_amount' => $alert->counted_amount === null ? null : PesoAmount::words((string) $alert->counted_amount),
+            'counted_transactions_count' => $alert->counted_transactions,
             'from_history' => (bool) $alert->from_history,
             'assigned_to' => AmlaPresenter::user($alert->assignee),
             'case' => $alert->amlaCase === null || ! self::seesCases($viewer) ? null : ['id' => (int) $alert->amlaCase->id, 'reference' => $alert->amlaCase->reference],
@@ -97,13 +110,34 @@ final class AmlaDetectionPresenter
         ];
     }
 
-    /** @return array<string, mixed> */
-    public function ctrDetail(AmlaCtrCandidate $candidate): array
+    /**
+     * A candidate's page, for an `amla:ctr` holder who sees it: its CTR's id
+     * when one is prepared (a returned one doesn't count), and a waiting
+     * set-aside ask with its reason and whether `$viewer` asked
+     * (`requested_by_me`), so the screen can apply the rule that the asker
+     * never decides. The asker is named only to `amla:approve` holders.
+     *
+     * @return array<string, mixed>
+     */
+    public function ctrDetail(AmlaCtrCandidate $candidate, User $viewer): array
     {
+        $reportId = AmlaReport::query()->where('ctr_candidate_id', $candidate->id)->where('status', '!=', AmlaReport::RETURNED)->max('id');
+        $ask = $candidate->status === AmlaCtrCandidate::SET_ASIDE_PENDING
+            ? AmlaCtrSetAside::query()->with('requester')->where('pending_key', $candidate->id)->first()
+            : null;
+
         return [
             ...$this->ctrRow($candidate),
             'explanation' => $candidate->explanation,
             'transaction' => $candidate->event === null ? null : self::transaction($candidate->event),
+            'ctr_report_id' => $reportId === null ? null : (int) $reportId,
+            'set_aside' => $ask === null ? null : [
+                'id' => (int) $ask->id,
+                'reason' => $ask->reason,
+                'requested_by_me' => (int) $ask->requested_by === (int) $viewer->id,
+                'requested_by' => $viewer->can(AmlaAccess::APPROVE) ? AmlaPresenter::user($ask->requester) : null,
+                'requested_at' => $ask->created_at?->toIso8601String(),
+            ],
         ];
     }
 

@@ -82,6 +82,8 @@ final class LoanAnomalies extends DetectionRule
                     self::indicator('Days after release', (string) $from->diffInDays($day)),
                     self::indicator('Payer', null),
                 ],
+                countedCentavos: self::cents($trigger),
+                countedTransactions: 1,
             );
         }
 
