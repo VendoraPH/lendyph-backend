@@ -4,19 +4,132 @@ namespace Tests\Feature\Linda;
 
 use App\Models\Loan;
 use App\Models\Repayment;
+use App\Models\User;
+use App\Services\Linda\LindaAnswerer;
+use App\Services\Linda\LindaIntent;
+use App\Services\Linda\LindaMatcher;
+use App\Services\Linda\LindaPeriod;
+use App\Services\Linda\LindaReply;
+use App\Services\Linda\LindaWording;
 use App\Services\PortfolioOutstanding;
 use App\Services\ReportService;
 
 /**
  * The figures Linda adds to the reports (payment count, active loans per
  * branch, past due by member) are read on the reports' own basis, and every
- * existing key and value stays as it was.
+ * existing key and value stays as it was. Each figure an answer shows equals
+ * the one its screen shows for the same user, branch and dates.
  */
 class LindaReportFiguresTest extends LindaAnswersTestCase
 {
     private function reports(): ReportService
     {
         return app(ReportService::class);
+    }
+
+    /** @return array<string, mixed> every stats item of a reply, by label */
+    private function statsOf(LindaReply $reply): array
+    {
+        $values = [];
+        foreach ($reply->blocks as $block) {
+            foreach ($block['type'] === 'stats' ? $block['items'] : [] as $item) {
+                $values[$item['label']] = $item['value'];
+            }
+        }
+
+        return $values;
+    }
+
+    /**
+     * The head office, a Main Branch user and the head office naming Far
+     * Branch, each with the query its screen takes.
+     *
+     * @return list<array{User, ?string, array<string, int>}>
+     */
+    private function viewers(): array
+    {
+        return [
+            [$this->headOffice(), null, []],
+            [$this->branchUser(), null, []],
+            [$this->headOffice(), 'far', ['branch_id' => $this->far->id]],
+        ];
+    }
+
+    // -----------------------------------------------------------------
+    // Active loans: Outstanding (round 4)
+    // -----------------------------------------------------------------
+
+    public function test_the_active_loans_answer_adds_the_portfolio_summarys_outstanding(): void
+    {
+        $this->pay($this->releaseTo($this->member($this->branch, 'Ana', 'Cruz')), 1500);
+        // Defaulted: collectible, so in Outstanding, but not an active loan.
+        $this->releaseTo($this->member($this->branch, 'Dan', 'Lim'), 30000)->update(['status' => 'defaulted']);
+        $this->releaseTo($this->member($this->far, 'Ben', 'Reyes'), 45000);
+
+        foreach ($this->viewers() as [$user, $branch, $query]) {
+            $screen = $this->actingAs($user)->getJson('/api/reports/loan-balance-summary?'.http_build_query($query))->assertOk()->json('data');
+
+            $reply = app(LindaAnswerer::class)->answer($user, LindaIntent::LoanSummary, null, $branch, 'How many active loans do we have?');
+            $stats = $this->statsOf($reply);
+
+            $this->assertSame($screen['active_loans'], $stats['Active Loans']);
+            $this->assertEquals((float) $screen['total_outstanding'], $stats['Outstanding']);
+            $this->assertGreaterThan(0, $stats['Outstanding']);
+            $this->assertStringContainsString(
+                LindaWording::money($screen['total_outstanding']).' is outstanding: the principal, interest, penalty and insurance premium still owed on collectible loans, defaulted ones included.',
+                $reply->answer,
+            );
+        }
+    }
+
+    public function test_an_outstanding_question_leads_with_the_amount(): void
+    {
+        $this->releaseTo($this->member($this->branch, 'Ana', 'Cruz'));
+        $user = $this->headOffice();
+        $screen = $this->actingAs($user)->getJson('/api/reports/loan-balance-summary')->assertOk()->json('data');
+        $asOf = 'As of today, '.LindaWording::today().', ';
+
+        foreach (['How much is outstanding?', 'What is our total outstanding?', 'Pila ang outstanding nato?'] as $question) {
+            $this->assertSame(LindaIntent::LoanSummary, LindaMatcher::match($question)?->intent, $question);
+
+            $reply = app(LindaAnswerer::class)->answer($user, LindaIntent::LoanSummary, null, null, $question);
+
+            $this->assertStringStartsWith($asOf.LindaWording::money($screen['total_outstanding']).' is outstanding across all branches', $reply->answer, $question);
+            $this->assertStringEndsWith('There is 1 active loan.', $reply->answer, $question);
+        }
+
+        $count = app(LindaAnswerer::class)->answer($user, LindaIntent::LoanSummary, null, null, 'How many active loans do we have?');
+        $this->assertStringStartsWith($asOf.'there is 1 active loan across all branches.', $count->answer);
+    }
+
+    // -----------------------------------------------------------------
+    // Disbursements: Average Loan Size (round 4)
+    // -----------------------------------------------------------------
+
+    public function test_the_disbursement_answer_adds_the_member_reports_average_loan_size(): void
+    {
+        $today = now()->toDateString();
+        $this->releaseTo($this->member($this->branch, 'Ana', 'Cruz'), 60000, $today);
+        $this->releaseTo($this->member($this->branch, 'Carla', 'Diaz'), 25000, $today);
+        $this->releaseTo($this->member($this->far, 'Ben', 'Reyes'), 40000, $today);
+        // Last month: in last month's average only.
+        $this->releaseTo($this->member($this->branch, 'Dan', 'Lim'), 90000, now()->subMonthNoOverflow()->startOfMonth()->toDateString());
+
+        foreach ([LindaPeriod::named('this_month'), LindaPeriod::named('last_month')] as $period) {
+            $dates = ['date_from' => $period->from->toDateString(), 'date_to' => $period->to->toDateString()];
+
+            foreach ($this->viewers() as [$user, $branch, $query]) {
+                $screen = $this->actingAs($user)->getJson('/api/reports/borrowers?'.http_build_query([...$dates, ...$query]))->assertOk()->json('data');
+
+                $reply = app(LindaAnswerer::class)->answer($user, LindaIntent::DisbursementSummary, $period, $branch);
+
+                $this->assertEquals((float) $screen['avg_loan_size'], $this->statsOf($reply)['Average Loan Size'], $period->key);
+            }
+        }
+
+        $reply = app(LindaAnswerer::class)->answer($this->headOffice(), LindaIntent::DisbursementSummary, LindaPeriod::named('this_month'), null);
+        $this->assertEquals(41666.67, $this->statsOf($reply)['Average Loan Size']);
+        $this->assertStringEndsWith('The average loan size was ₱41,666.67.', $reply->answer);
     }
 
     // -----------------------------------------------------------------

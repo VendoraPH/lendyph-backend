@@ -1087,6 +1087,65 @@ class LoanApprovalChainService
     }
 
     /**
+     * The steps of the loan's own chain copy (`loans.approval_chain`) that its
+     * minimum left out of the current round, in chain order, for GET
+     * /loans/{loan}/approval-steps (`left_out_steps`). Each names the kept step
+     * it follows in the copy (`after_step_id`, null when none comes before it)
+     * and says why in words. Empty when nothing was left out, and for a loan
+     * with no copy (its chain carried no minimum) or no round yet.
+     *
+     * A step left out whose minimum the amount has reached since (raised after
+     * submitting; sign-off is refused until the loan is re-submitted, see
+     * assertNoLeftOutStepApplies()) is still listed, and says so.
+     *
+     * @param  SupportCollection<int, LoanApprovalStep>  $round
+     * @return list<array{step_id: string, after_step_id: ?string, name: string, min_principal: string, description: string}>
+     */
+    public function leftOutSteps(Loan $loan, SupportCollection $round): array
+    {
+        $chain = is_array($loan->approval_chain) ? $loan->approval_chain : [];
+
+        if ($chain === [] || $round->isEmpty()) {
+            return [];
+        }
+
+        $kept = $round->pluck('step_id')->map(fn (mixed $id): string => (string) $id)->all();
+        $amount = $this->principalOf($loan);
+        $measured = ($loan->source_loan_id !== null ? 'the amount restructured of ' : "this loan's ").StepMinimum::pesos($amount);
+
+        $leftOut = [];
+        $after = null;
+
+        foreach ($chain as $step) {
+            $id = (string) ($step['id'] ?? '');
+
+            if (in_array($id, $kept, true)) {
+                $after = $id;
+
+                continue;
+            }
+
+            $minimum = StepMinimum::normalise($step[StepMinimum::KEY] ?? null);
+
+            if ($minimum === null) {
+                continue;
+            }
+
+            $leftOut[] = [
+                'step_id' => $id,
+                'after_step_id' => $after,
+                'name' => (string) ($step['name'] ?? ''),
+                'min_principal' => $minimum,
+                'description' => StepMinimum::applies($step, $amount)
+                    ? 'Skipped when the approval chain was set, but '.$measured.' now meets the '.StepMinimum::pesos($minimum).' minimum.'
+                    : 'Skipped: the '.StepMinimum::pesos($minimum).' minimum is above '.$measured.'.',
+            ];
+        }
+
+        return $leftOut;
+    }
+
+    /**
      * Re-submitting (a sign-off on the Submit step after a send-back) sets the
      * rest of the round again from the loan's copied chain, at the principal
      * it has now: a step whose minimum is now met comes back, one whose

@@ -458,6 +458,27 @@ it('scores a linked member\'s loan on the income its assessment counted when non
         ->and($this->ratioAsAssessed($scored))->toBe($assessment->figures['dti_ratio']);
 });
 
+it('records no income on the loan\'s credit profile when its assessment counted none, so the score never reads the member record\'s', function () {
+    $member = Borrower::factory()->create(['status' => 'active', 'branch_id' => Branch::query()->value('id'), 'monthly_income' => 15000]);
+    $application = $this->originationApplication('under_assessment', null, ['borrower_id' => $member->id], ['employment' => ['gross_monthly_income' => '']]);
+    $this->originationDocuments($application);
+    $staff = $this->originationStaff(...LO4_HANDOFF);
+    $this->actingAs($staff)->postJson("/api/loan-origination/applications/{$application->id}/assessment/rerun", ['verified_debt_payments' => '1500'])
+        ->assertCreated()->assertJsonPath('data.result', 'insufficient_information');
+    $this->actingAs($staff)->postJson(lo4HandOffUrl($application->id), ['version' => $application->fresh()->version])->assertOk();
+    $loan = Loan::query()->findOrFail($application->fresh()->loan_id);
+    $profile = CreditApplicationProfile::query()->where('loan_id', $loan->id)->sole();
+
+    $data = MemberCreditData::load($member->id, $loan, now());
+    $scored = Capacity::from($data, Exposure::from($data, app(LoanListTotals::class)), CreditScoringSetting::current(), app(LoanService::class));
+
+    expect($loan->policy_exception)->toBeTrue()
+        ->and($profile->monthly_income)->toBe('0.00')
+        ->and($profile->income_verification)->toBeNull()
+        ->and($scored->incomeCentavos)->toBeNull()
+        ->and($scored->debtServiceRatioText())->toBeNull();
+});
+
 it('reads the latest assessment revision under a lock inside the loan transaction', function () {
     $application = lo4Ready($this);
     $locking = [];

@@ -5,6 +5,7 @@ namespace Tests\Feature\Phase6\Approvals;
 use App\Models\ApprovalWorkflowSetting;
 use App\Models\AuditLog;
 use App\Models\Borrower;
+use App\Models\Branch;
 use App\Models\Loan;
 use App\Models\LoanApprovalStep;
 use App\Models\LoanProduct;
@@ -290,6 +291,177 @@ class ApprovalStepMinimumTest extends TestCase
         $this->assertFalse($users->contains($creator->id), 'With Head Office left out, First Review is the last approval, which the creator never takes.');
         $this->assertNull($restructure->fresh()->approval_chain);
         $this->assertSame($auditRows, AuditLog::query()->count());
+    }
+
+    /**
+     * Follow-up: the approval steps list the steps the loan's chain left out
+     * (`left_out_steps`), from the loan's own chain copy, in words.
+     */
+    public function test_the_approval_steps_list_a_step_the_chain_left_out(): void
+    {
+        $this->saveChain();
+
+        $loan = $this->submittedLoan(10000);
+
+        $this->getJson("/api/loans/{$loan->id}/approval-steps")
+            ->assertOk()
+            ->assertJsonCount(3, 'data.current_steps')
+            ->assertJsonPath('data.left_out_steps', [[
+                'step_id' => 'head-office',
+                'after_step_id' => 'first',
+                'name' => 'Head Office',
+                'min_principal' => '50000.00',
+                'description' => "Skipped: the ₱50,000.00 minimum is above this loan's ₱10,000.00.",
+            ]]);
+    }
+
+    /**
+     * Each left-out step names the kept step it follows in the loan's chain
+     * copy (`after_step_id`), so the screen can place it: the nearest step
+     * before it that the round kept, never another left-out one.
+     */
+    public function test_each_left_out_step_names_the_kept_step_it_follows(): void
+    {
+        $this->putJson('/api/settings/approval-workflow', ['type' => 'normal', 'steps' => [
+            ['id' => 'processor', 'name' => 'Processor', 'role' => 'loan_processor', 'kind' => 'submit'],
+            ['id' => 'first', 'name' => 'First Review', 'role' => 'manager', 'kind' => 'approve'],
+            ['id' => 'head-office', 'name' => 'Head Office', 'role' => 'bod1', 'kind' => 'approve', 'min_principal' => '50000.00'],
+            ['id' => 'chair', 'name' => 'Board Chair', 'role' => 'bod2', 'kind' => 'approve', 'min_principal' => '80000.00'],
+            ['id' => 'board', 'name' => 'Board', 'role' => 'bod3', 'kind' => 'approve'],
+            ['id' => 'release', 'name' => 'Release', 'role' => 'cashier', 'kind' => 'release'],
+        ]])->assertOk();
+
+        $small = $this->submittedLoan(10000);
+
+        $this->getJson("/api/loans/{$small->id}/approval-steps")
+            ->assertOk()
+            ->assertJsonPath('data.current_steps.*.step_id', ['processor', 'first', 'board', 'release'])
+            ->assertJsonPath('data.left_out_steps.*.step_id', ['head-office', 'chair'])
+            ->assertJsonPath('data.left_out_steps.*.after_step_id', ['first', 'first']);
+
+        $middle = $this->submittedLoan(60000);
+
+        $this->getJson("/api/loans/{$middle->id}/approval-steps")
+            ->assertOk()
+            ->assertJsonPath('data.current_steps.*.step_id', ['processor', 'first', 'head-office', 'board', 'release'])
+            ->assertJsonPath('data.left_out_steps', [[
+                'step_id' => 'chair',
+                'after_step_id' => 'head-office',
+                'name' => 'Board Chair',
+                'min_principal' => '80000.00',
+                'description' => "Skipped: the ₱80,000.00 minimum is above this loan's ₱60,000.00.",
+            ]]);
+    }
+
+    public function test_a_restructures_left_out_steps_are_measured_by_the_amount_restructured(): void
+    {
+        $this->saveChain('65000.00');
+
+        $kept = $this->restructureOf($this->createReleasedLoan(), 40000);
+        app(LoanService::class)->submitForReview($kept, $this->admin);
+
+        $this->getJson("/api/loans/{$kept->id}/approval-steps")
+            ->assertOk()
+            ->assertJsonPath('data.left_out_steps', []);
+
+        $this->saveChain('900000.00');
+
+        $skipped = $this->restructureOf($this->createReleasedLoan(), 40000);
+        app(LoanService::class)->submitForReview($skipped, $this->admin);
+        $restructured = number_format((float) $skipped->fresh()->restructure_outstanding, 2);
+
+        $this->getJson("/api/loans/{$skipped->id}/approval-steps")
+            ->assertOk()
+            ->assertJsonPath('data.left_out_steps.0.step_id', 'head-office')
+            ->assertJsonPath('data.left_out_steps.0.min_principal', '900000.00')
+            ->assertJsonPath('data.left_out_steps.0.description', "Skipped: the ₱900,000.00 minimum is above the amount restructured of ₱{$restructured}.");
+    }
+
+    public function test_nothing_left_out_lists_no_steps(): void
+    {
+        $this->saveChain();
+        $kept = $this->submittedLoan(60000);
+        $this->assertNotNull($kept->approval_chain);
+
+        $this->getJson("/api/loans/{$kept->id}/approval-steps")
+            ->assertOk()
+            ->assertJsonPath('data.left_out_steps', []);
+
+        // A chain with no minimum leaves no copy on the loan.
+        $this->putJson('/api/settings/approval-workflow', ['type' => 'normal', 'steps' => $this->chain()])->assertOk();
+        $plain = $this->submittedLoan(10000);
+        $this->assertNull($plain->approval_chain);
+
+        $this->getJson("/api/loans/{$plain->id}/approval-steps")
+            ->assertOk()
+            ->assertJsonPath('data.left_out_steps', []);
+
+        $draft = Loan::factory()->create(['status' => 'draft', 'branch_id' => $this->branch->id]);
+
+        $this->getJson("/api/loans/{$draft->id}/approval-steps")
+            ->assertOk()
+            ->assertJsonPath('data.current_steps', [])
+            ->assertJsonPath('data.left_out_steps', []);
+    }
+
+    /**
+     * A step left out at submit stays out of the round when the principal is
+     * raised past its minimum afterwards (sign-off is then refused until the
+     * loan is re-submitted), so the list says so instead of calling the
+     * minimum "above" the principal. Re-submitting brings the step back.
+     */
+    public function test_a_left_out_step_the_principal_has_since_reached_is_listed_until_re_submitted(): void
+    {
+        $this->saveChain();
+
+        $loan = $this->submittedLoan(10000);
+        Loan::query()->whereKey($loan->id)->update(['principal_amount' => 90000]);
+
+        $this->getJson("/api/loans/{$loan->id}/approval-steps")
+            ->assertOk()
+            ->assertJsonPath('data.left_out_steps.0.step_id', 'head-office')
+            ->assertJsonPath('data.left_out_steps.0.description', "Skipped when the approval chain was set, but this loan's ₱90,000.00 now meets the ₱50,000.00 minimum.");
+
+        $first = $this->pendingStep($loan);
+        $this->actingAs($this->userWithRole('manager'))
+            ->patchJson("/api/loans/{$loan->id}/approval-steps/{$first->id}/send-back", [
+                'target_step_order' => 0,
+                'remarks' => 'Set the chain again.',
+            ])->assertOk();
+
+        $submit = $this->pendingStep($loan);
+        $this->actingAs($this->admin)
+            ->patchJson("/api/loans/{$loan->id}/approval-steps/{$submit->id}/approve")
+            ->assertOk();
+
+        $this->getJson("/api/loans/{$loan->id}/approval-steps")
+            ->assertOk()
+            ->assertJsonCount(4, 'data.current_steps')
+            ->assertJsonPath('data.left_out_steps', []);
+    }
+
+    public function test_another_branchs_loan_answers_404(): void
+    {
+        $this->saveChain();
+        $loan = $this->submittedLoan(10000);
+
+        $role = Role::create(['name' => 'mb6f_loan_viewer', 'guard_name' => 'web']);
+        $role->givePermissionTo('loans:view');
+
+        $outsider = User::factory()->inBranches(Branch::factory()->create())->create();
+        $outsider->assignRole($role);
+
+        $this->actingAs($outsider)
+            ->getJson("/api/loans/{$loan->id}/approval-steps")
+            ->assertNotFound();
+
+        $insider = User::factory()->inBranches($this->branch)->create();
+        $insider->assignRole($role);
+
+        $this->actingAs($insider)
+            ->getJson("/api/loans/{$loan->id}/approval-steps")
+            ->assertOk()
+            ->assertJsonPath('data.left_out_steps.0.step_id', 'head-office');
     }
 
     /**

@@ -9,11 +9,13 @@ namespace App\Services\Linda;
  * model.
  *
  * It answers only when it understands every word. The question is cleaned
- * (LindaText), then the period, a follow-up phrase, a branch or officer
- * performance subject, a branch phrase and the subject are taken out in that
- * order. Every word left over must be a filler
- * word; one unknown word ("from GCash", "interest", "weather") and it
- * returns null, so the question goes to the model or gets the help text.
+ * (LindaText), then the period, a follow-up phrase, the officer words of a
+ * training question, a branch or officer performance subject, a branch phrase
+ * and the subject are taken out in that order. Every word left over must be a
+ * filler word, or one of the words its one subject understands (savings,
+ * CDA, reminders: "net growth", "why", "failed"); one unknown word ("from
+ * GCash", "interest", "weather") and it returns null, so the question goes
+ * to the model or gets the help text.
  *
  * A branch is returned as the text the user wrote ("san jose"), never looked
  * up here: the caller matches it among the user's own branches.
@@ -74,6 +76,12 @@ final class LindaMatcher
         'savings_summary' => [
             'savings', 'savings account', 'savings accounts', 'savings deposits', 'deposits', 'total deposits',
             'time deposit', 'time deposits', 'maturing time deposits', 'maturing', 'ipon', 'impok', 'tinipid', 'tinigom', 'tigom',
+            // Round 4: money in and out over a period, and dormant accounts. Never
+            // a bare "deposit" or "withdraw": "How do I withdraw?" asks for a page.
+            'deposited', 'withdrawal', 'withdrawals', 'withdrawn', 'withdrew', 'deposit growth', 'savings growth',
+            'dormant', 'dormant account', 'dormant accounts', 'deposito', 'nadeposito', 'gideposito', 'nideposito',
+            'nadeposit', 'gideposit', 'nideposit', 'na deposit', 'nag deposit', 'gi deposit', 'ni deposit',
+            'nawithdraw', 'giwithdraw', 'niwithdraw', 'na withdraw', 'nag withdraw', 'gi withdraw', 'ni withdraw',
         ],
         'share_capital_summary' => [
             'share capital', 'share capitals', 'capital build up', 'capital buildup', 'cbu', 'capital', 'kapital',
@@ -83,6 +91,16 @@ final class LindaMatcher
             'cda', 'cda deadline', 'cda deadlines', 'cda readiness', 'cda report', 'cda reports', 'cda compliance',
             'compliance', 'compliance status', 'readiness', 'ready', 'deadline', 'deadlines', 'next deadline', 'next deadlines', 'next cda deadline', 'next cda deadlines',
             'sunod nga deadline', 'susunod na deadline', 'handa', 'andam',
+            // Round 4: the reports by name, officers' trainings, the PESOS rating
+            // and missing documents.
+            'capr', 'enhanced pesos', 'pesos rating', 'pesos score', 'pesos report', 'social audit', 'performance audit',
+            'sworn statement', 'atir', 'abr', 'mediation', 'training', 'trainings', 'pagsasanay', 'pagbansay',
+            'cda documents', 'cda document', 'compliance documents', 'compliance document', 'missing documents', 'missing document',
+        ],
+        'reminder_summary' => [
+            'reminder', 'reminders', 'payment reminder', 'payment reminders', 'due date reminder', 'due date reminders',
+            'sms', 'sms reminder', 'sms reminders', 'email reminder', 'email reminders', 'text reminder', 'text reminders',
+            'paalala', 'pahinumdom', 'pahimangno',
         ],
         'borrower_summary' => [
             'active members', 'active member', 'inactive members', 'inactive member', 'blacklisted members',
@@ -105,15 +123,56 @@ final class LindaMatcher
     private const WEAK_SUBJECTS = [
         'loan_summary' => ['pila ka loans', 'pila ka loan', 'pila kabuok nga loan', 'pila kabuok loan'],
         'borrower_summary' => ['members', 'member', 'miyembro', 'myembro', 'kasapi'],
+        // "Which documents are missing?" asks for the CDA documents.
+        'cda_summary' => ['documents', 'document', 'dokumento', 'dokumentos'],
     ];
 
     /**
-     * Words that keep a bare member word from being a member count: "how many
-     * loans do our members have" is about loans.
+     * Words that keep a weak subject from counting: "how many loans do our
+     * members have" is about loans, and "which loan documents are missing" isn't
+     * about the CDA documents.
      *
-     * @var list<string>
+     * @var array<string, list<string>>
      */
-    private const NOT_A_MEMBER_COUNT = ['loan', 'loans'];
+    private const WEAK_CANCELLED_BY = [
+        'borrower_summary' => ['loan', 'loans'],
+        'cda_summary' => ['loan', 'loans', 'payment', 'payments', 'account', 'accounts'],
+    ];
+
+    /**
+     * Words understood only in a question whose one subject is that topic
+     * (round 4): "net growth", "why", "failed" mean nothing on their own.
+     *
+     * @var array<string, list<string>>
+     */
+    private const TOPIC_WORDS = [
+        'savings_summary' => [
+            'hold', 'held', 'holding', 'net', 'growth', 'grow', 'grew', 'grown', 'increase', 'increased', 'decrease',
+            'decreased', 'movement', 'movements', 'change', 'performing', 'doing', 'mature', 'matures', 'matured',
+            'maturity', 'deposit', 'withdraw', 'came', 'out', 'money', 'pera', 'kwarta',
+        ],
+        'cda_summary' => [
+            'why', 'bakit', 'ngano', 'nganong', 'only', 'just', 'still', 'yet', 'not', 'no', 'hindi', 'dili', 'wala',
+            'low', 'complete', 'completed', 'incomplete', 'kumpleto', 'kompleto', 'missing', 'lacking', 'lack', 'kulang',
+            'kulangan', 'pending', 'needed', 'required', 'requires', 'requirement', 'requirements', 'kailangan',
+            'kinahanglan', 'submit', 'submitted', 'submission', 'file', 'filed', 'filing', 'ipasa', 'isumite', 'rating',
+            'rated', 'score', 'grade', 'enhanced', 'pesos', 'reports', 'upload', 'uploaded', 'financial', 'statements',
+            'statement', 'audited', 'audit', 'social', 'performance', 'sworn', 'conciliation', 'tax', 'incentives',
+            'benefits', 'annual', 'progress', 'issue', 'issues', 'critical', 'problem', 'problems', 'problema', 'status',
+        ],
+        'reminder_summary' => [
+            'sent', 'delivered', 'failed', 'fail', 'failing', 'pending', 'logged', 'scheduled', 'queued', 'email',
+            'emails', 'text', 'texts', 'message', 'messages', 'borrower', 'borrowers', 'receive', 'received', 'napadala',
+            'naipadala', 'ipinadala', 'gipadala', 'nipadala', 'napadalhan', 'nasend', 'gisend', 'nag', 'nafail',
+            'pumalya', 'napakyas', 'test', 'mode', 'due', 'date', 'delivery', 'status',
+        ],
+    ];
+
+    /** Words for a training: an officer word beside one is about the CDA officers' trainings. */
+    private const TRAINING_WORDS = ['training', 'trainings', 'pagsasanay', 'pagbansay'];
+
+    /** The officer words a training question drops, so it is never officer performance. */
+    private const TRAINED_OFFICER_WORDS = ['officer', 'officers', 'opisyal', 'opisyales'];
 
     /**
      * Officer words: any of them makes the question about officer
@@ -241,16 +300,23 @@ final class LindaMatcher
         $words = LindaText::words($found['rest']);
 
         [$words, $followUpPhrase] = self::takeFollowUpPhrase($words);
+        $words = self::takeTrainingOfficers($words);
         [$words, $performance] = self::takePerformance($words);
         [$words, $branchName] = self::takeBranch($words);
         [$words, $subjects] = self::takeSubjects($words, $performance);
 
         // Ranking words ("most", "pinakadaghan") are understood only when
-        // they rank branches or officers.
-        $understood = count($performance) === 1 ? [...self::FILLERS, ...self::RANKING_WORDS] : self::FILLERS;
+        // they rank branches or officers, and a topic's own words only in a
+        // question on that one topic. A CDA question may quote a figure ("only 82%").
+        $understood = [
+            ...self::FILLERS,
+            ...(count($performance) === 1 ? self::RANKING_WORDS : []),
+            ...(count($subjects) === 1 ? self::TOPIC_WORDS[$subjects[0]->value] ?? [] : []),
+        ];
+        $quotesFigures = $subjects === [LindaIntent::CdaSummary];
 
         foreach ($words as $word) {
-            if (! in_array($word, $understood, true)) {
+            if (! in_array($word, $understood, true) && ! ($quotesFigures && preg_match('/^\d+(?:\.\d+)?$/', $word) === 1)) {
                 return null;
             }
         }
@@ -309,6 +375,23 @@ final class LindaMatcher
         }
 
         return [$words, $found];
+    }
+
+    /**
+     * Drop the officer words of a question about trainings ("Which officer
+     * trainings are missing?", "Sino sa mga opisyal ang kulang ang training?"):
+     * it asks about the CDA officers register, never officer performance.
+     *
+     * @param  list<string>  $words
+     * @return list<string>
+     */
+    private static function takeTrainingOfficers(array $words): array
+    {
+        if (array_intersect($words, self::TRAINING_WORDS) === []) {
+            return $words;
+        }
+
+        return array_values(array_filter($words, fn (string $word) => ! in_array($word, self::TRAINED_OFFICER_WORDS, true)));
     }
 
     /**
@@ -451,14 +534,18 @@ final class LindaMatcher
      * Some subjects only describe another one, so they count only on their
      * own:
      * - a branch or officer performance question ranks by the figure it
-     *   names ("which branch collected the most"), so it wins over them all;
+     *   names ("which branch collected the most"), so it wins over them all,
+     *   except savings: "which branch has the highest savings" is a savings
+     *   question, whose answer ranks the branches by their deposits;
+     * - reminders win over collections and overdue ("payment reminders",
+     *   "overdue reminders");
      * - collection efficiency is about collections ("porsyento sa
      *   koleksyon"), so it wins over collections;
      * - a bare member word ("members", "miyembro") only says whose figures
      *   another subject is about ("which members are overdue"), and beside a
      *   loan word it is a loan question, so it counts only on its own;
      * - "summary" beside another subject only describes it ("collection
-     *   summary"), and so do the weak phrases ("pila ka loan").
+     *   summary"), and so do the weak phrases ("pila ka loan", "documents").
      *
      * @param  list<string>  $words
      * @param  list<LindaIntent>  $performance  the performance subjects already taken
@@ -491,11 +578,19 @@ final class LindaMatcher
         }
 
         if ($performance !== []) {
+            if ($performance === [LindaIntent::BranchPerformance] && array_keys($intents) === [LindaIntent::SavingsSummary->value]) {
+                return [$words, [LindaIntent::SavingsSummary]];
+            }
+
             return [$words, $performance];
         }
 
         if (isset($intents[LindaIntent::CollectionEfficiency->value])) {
             unset($intents[LindaIntent::CollectionSummary->value]);
+        }
+
+        if (isset($intents[LindaIntent::ReminderSummary->value])) {
+            unset($intents[LindaIntent::CollectionSummary->value], $intents[LindaIntent::OverdueAccounts->value]);
         }
 
         $summary = LindaIntent::GeneralLendingSummary->value;
@@ -504,8 +599,10 @@ final class LindaMatcher
         }
 
         if ($intents === []) {
-            if (array_intersect($words, self::NOT_A_MEMBER_COUNT) !== []) {
-                unset($weakIntents[LindaIntent::BorrowerSummary->value]);
+            foreach (self::WEAK_CANCELLED_BY as $intent => $cancelling) {
+                if (array_intersect($words, $cancelling) !== []) {
+                    unset($weakIntents[$intent]);
+                }
             }
 
             $intents = $weakIntents;
@@ -519,6 +616,12 @@ final class LindaMatcher
     {
         if (in_array($word, self::FILLERS, true) || in_array($word, self::BRANCH_WORDS, true) || in_array($word, self::RANKING_WORDS, true)) {
             return false;
+        }
+
+        foreach (self::TOPIC_WORDS as $topicWords) {
+            if (in_array($word, $topicWords, true)) {
+                return false;
+            }
         }
 
         foreach ([...self::OFFICER_PHRASES, ...self::BRANCH_PERFORMANCE_PHRASES, ...self::ALL_BRANCHES_PHRASES, ...array_merge(...array_values(self::WEAK_SUBJECTS))] as $phrase) {

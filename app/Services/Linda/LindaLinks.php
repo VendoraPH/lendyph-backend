@@ -35,6 +35,30 @@ final class LindaLinks
         'cda_dashboard' => ['label' => 'Open CDA Dashboard', 'url' => '/cda', 'needs' => ['cda:view', 'branches:view_all']],
         'cda_calendar' => ['label' => 'Open Compliance Calendar', 'url' => '/cda/calendar', 'needs' => ['cda:view', 'branches:view_all']],
         'member_report' => ['label' => 'Open Member Report', 'url' => '/reports/borrower_report', 'needs' => ['reports:view']],
+        // Round 4: the reminders page, and each CDA report's page (a restricted
+        // report's needs its view key), Officers & Trainings and Compliance Documents.
+        'reminders' => ['label' => 'Open Reminders', 'url' => '/loans/reminders', 'needs' => ['loans:view', 'reminders:view']],
+        'cda_capr' => ['label' => 'Open CAPR', 'url' => '/cda/capr', 'needs' => ['cda:view', 'branches:view_all']],
+        'cda_financial_statements' => ['label' => 'Open Financial Statements', 'url' => '/cda/financial-statements', 'needs' => ['cda:view', 'branches:view_all', 'cda:view_audit']],
+        'cda_performance_audit' => ['label' => 'Open Performance Audit', 'url' => '/cda/performance-audit', 'needs' => ['cda:view', 'branches:view_all', 'cda:view_audit']],
+        'cda_social_audit' => ['label' => 'Open Social Audit', 'url' => '/cda/social-audit', 'needs' => ['cda:view', 'branches:view_all']],
+        'cda_pesos' => ['label' => 'Open Enhanced PESOS', 'url' => '/cda/pesos', 'needs' => ['cda:view', 'branches:view_all']],
+        'cda_officers' => ['label' => 'Open Officers & Trainings', 'url' => '/cda/officers', 'needs' => ['cda:view', 'branches:view_all']],
+        'cda_mediation' => ['label' => 'Open Mediation & Conciliation', 'url' => '/cda/mediation', 'needs' => ['cda:view', 'branches:view_all', 'cda:view_mediation']],
+        'cda_sworn_statement' => ['label' => 'Open Sworn Statement', 'url' => '/cda/sworn-statement', 'needs' => ['cda:view', 'branches:view_all']],
+        'cda_tax_reports' => ['label' => 'Open ATIR & ABR', 'url' => '/cda/tax-reports', 'needs' => ['cda:view', 'branches:view_all', 'cda:view_tax']],
+        'cda_documents' => ['label' => 'Open Compliance Documents', 'url' => '/cda/documents', 'needs' => ['cda:view', 'branches:view_all']],
+    ];
+
+    /**
+     * Each CDA report type's page in self::PAGES (ATIR and ABR share one).
+     *
+     * @var array<string, string>
+     */
+    public const CDA_REPORT_PAGES = [
+        'capr' => 'cda_capr', 'financial_statements' => 'cda_financial_statements', 'performance_audit' => 'cda_performance_audit',
+        'social_audit' => 'cda_social_audit', 'pesos' => 'cda_pesos', 'officers_trainings' => 'cda_officers', 'mediation' => 'cda_mediation',
+        'sworn_statement' => 'cda_sworn_statement', 'atir' => 'cda_tax_reports', 'abr' => 'cda_tax_reports',
     ];
 
     /**

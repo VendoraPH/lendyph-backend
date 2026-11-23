@@ -3,6 +3,7 @@
 namespace App\Services\Linda;
 
 use App\Models\Borrower;
+use App\Models\CdaOfficer;
 use App\Models\CoMaker;
 use App\Models\GCashNonMember;
 use App\Models\User;
@@ -15,7 +16,8 @@ use UnexpectedValueException;
  * lookup parser and the pending-lookup rule, and before any model call:
  * whether a question names one of this deployment's people by full name, so
  * the name never reaches the model. People are members and staff users, and
- * co-makers and GCash walk-ins, who Linda can't look up yet.
+ * co-makers, GCash walk-ins and CDA officers not linked to a member (the
+ * officers register's free-text name), who Linda can't look up yet.
  *
  * - First and last name together, in either order ("Juan Dela Cruz",
  *   "Dela Cruz, Juan"), any case, extra spaces ignored. Between them, up to
@@ -23,9 +25,9 @@ use UnexpectedValueException;
  *   name, or a name-like word. First and last names of several words work
  *   ("Maria Clara Santos"), first and last names may be common words ("May",
  *   "Will", "Salamat", "Bulan"), and a dotted surname matches with or without its dot ("Sta.
- *   Maria"). A walk-in's free-text full name is compared without dots,
- *   commas, initials or accents, as stored or with its last part first
- *   ("Soriano, Carmen").
+ *   Maria"). A walk-in's or an unlinked CDA officer's free-text full name is
+ *   compared without dots, commas, initials or accents, as stored or with its
+ *   last part first ("Soriano, Carmen").
  * - When several people of one kind fit, the one covering the most typed
  *   words wins ("Juan Pedro Dela Cruz" over "Juan Dela Cruz"); a tie is
  *   answered as several matches, never a guess.
@@ -39,8 +41,9 @@ use UnexpectedValueException;
  *
  * Cost: one indexed read per table (borrowers, users and co_makers by last
  * name and first name, gcash_non_members by full-name prefixes built from
- * pairs of question words), from the question's spans, and the names are
- * compared here. A read that reaches its cap may
+ * pairs of question words), and a read of the unlinked CDA officers by the
+ * same prefixes (a small register), from the question's spans, and the names
+ * are compared here. A read that reaches its cap may
  * have left the person out, so it keeps the question local too (a hit with
  * no name). Nothing is stored or logged.
  *
@@ -56,6 +59,9 @@ final readonly class LindaNameCheck
     public const CO_MAKER = 'co_maker';
 
     public const WALK_IN = 'walk_in';
+
+    /** A CDA officer not linked to a member: the register keeps their name as free text. */
+    public const CDA_OFFICER = 'cda_officer';
 
     /** The most rows read from each table. */
     public const CANDIDATES_MAX = 200;
@@ -79,10 +85,13 @@ final readonly class LindaNameCheck
     ];
 
     /** The order a hit is taken in, after a staff hit on a performance question. */
-    private const ORDER = [self::MEMBER, self::STAFF, self::CO_MAKER, self::WALK_IN];
+    private const ORDER = [self::MEMBER, self::STAFF, self::CO_MAKER, self::WALK_IN, self::CDA_OFFICER];
+
+    /** The kinds stored as one free-text full name, compared as typed (walkInNamed()). */
+    private const FREE_TEXT = [self::WALK_IN, self::CDA_OFFICER];
 
     /**
-     * @param  'member'|'staff'|'co_maker'|'walk_in'  $kind
+     * @param  'member'|'staff'|'co_maker'|'walk_in'|'cda_officer'  $kind
      * @param  ?string  $name  first and last name as typed, first name first; null when the read was capped or failed
      * @param  bool  $performance  the question has officer or ranking words
      */
@@ -99,11 +108,11 @@ final readonly class LindaNameCheck
      * after every named hit.
      *
      * $people gives the candidates for the given lower-case, accent-folded
-     * spans: (last names, first names, a walk-in's `full_name LIKE`
-     * patterns). By default, the
+     * spans: (last names, first names, the `LIKE` patterns of a free-text
+     * full name). By default, the
      * database. A row is a person (`kind`, `first_name`, `middle_name`,
-     * `last_name`, or a walk-in's `full_name`) or `['kind' => …, 'capped' =>
-     * true]` for a read that reached its cap.
+     * `last_name`, or a walk-in's or unlinked officer's `full_name`) or
+     * `['kind' => …, 'capped' => true]` for a read that reached its cap.
      *
      * @param  ?Closure(list<string>, list<string>, list<string>): iterable<array<string, mixed>>  $people
      */
@@ -142,7 +151,7 @@ final readonly class LindaNameCheck
                 continue;
             }
 
-            $found = $kind === self::WALK_IN
+            $found = in_array($kind, self::FREE_TEXT, true)
                 ? self::walkInNamed($question, $tokens, (string) ($person['full_name'] ?? ''))
                 : self::personNamed($question, $tokens, $person);
 
@@ -220,10 +229,10 @@ final readonly class LindaNameCheck
     }
 
     /**
-     * A walk-in's stored full name (free text) in the question: compared
-     * without dots, commas, initials or accents, as stored or with its last
-     * part first ("Soriano, Carmen"), as typed, and how many typed words it
-     * covers; or null.
+     * A walk-in's or an unlinked CDA officer's stored full name (free text) in
+     * the question: compared without dots, commas, initials or accents, as
+     * stored or with its last part first ("Soriano, Carmen"), as typed, and how
+     * many typed words it covers; or null.
      *
      * @param  list<array{word: string, start: int, end: int}>  $tokens
      * @return ?array{string, int}
@@ -520,9 +529,10 @@ final readonly class LindaNameCheck
     /**
      * The people whose names fit the spans, any branch, at most
      * CANDIDATES_MAX a read: members, staff users and co-makers by last and
-     * first name (the collation ignores case and accents), walk-ins whose free
-     * full name starts with a pair of the question's words (index-friendly
-     * prefixes, at most 100 a read), soft-deleted ones included. No read
+     * first name (the collation ignores case and accents), walk-ins and CDA
+     * officers not linked to a member whose free full name starts with a pair
+     * of the question's words (index-friendly prefixes, at most 100 a read),
+     * soft-deleted ones included. No read
      * leaves out common words: first and last name together, and the
      * comparison here, decide. Only a read that actually reaches its cap keeps
      * the question local. A read that reaches the cap adds a
@@ -577,6 +587,22 @@ final readonly class LindaNameCheck
             $capped(self::WALK_IN, $walkIns->count());
             foreach ($walkIns as $walkIn) {
                 $rows[] = ['kind' => self::WALK_IN, 'full_name' => $walkIn->full_name];
+            }
+
+            // A linked officer's name is the member's, read above.
+            $officers = CdaOfficer::withTrashed()
+                ->whereNull('borrower_id')
+                ->whereNotNull('name')
+                ->where(function ($query) use ($batch): void {
+                    foreach ($batch as $pattern) {
+                        $query->orWhere('name', 'like', $pattern);
+                    }
+                })
+                ->limit(self::CANDIDATES_MAX)
+                ->get(['name']);
+            $capped(self::CDA_OFFICER, $officers->count());
+            foreach ($officers as $officer) {
+                $rows[] = ['kind' => self::CDA_OFFICER, 'full_name' => $officer->name];
             }
         }
 

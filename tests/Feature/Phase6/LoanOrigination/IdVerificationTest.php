@@ -4,6 +4,7 @@ use App\Models\ApprovalWorkflowSetting;
 use App\Models\Borrower;
 use App\Models\Loan;
 use App\Models\OriginationDocument;
+use App\Models\OriginationSetting;
 use App\Models\User;
 use App\Services\ValidIdService;
 use Illuminate\Support\Facades\DB;
@@ -115,3 +116,17 @@ it('hands off an applicant whose ID was verified with its type and number, so th
     expect(Loan::query()->findOrFail($application->loan_id)->status)->toBe('released')
         ->and($application->fresh()->status)->toBe('converted');
 });
+
+it('refuses a settings document type whose key reads as "valid ID", in words', function (string $key) {
+    $admin = User::query()->where('username', 'super_admin')->firstOrFail();
+    $types = [
+        ['type' => 'government_id', 'label' => 'Valid government ID', 'required' => true],
+        ['type' => $key, 'label' => 'Another ID', 'required' => false],
+    ];
+
+    $this->actingAs($admin)->putJson('/api/loan-origination/settings', ['documents' => ['types' => $types]])
+        ->assertUnprocessable()
+        ->assertJsonPath('errors', fn (array $errors) => in_array('A document type\'s key can\'t read as "valid ID", which members\' own valid IDs use. The applicant\'s ID is government_id.', $errors['documents.types.1.type'] ?? [], true));
+
+    expect(collect(OriginationSetting::current()->document_types)->pluck('type')->all())->not->toContain($key);
+})->with(['valid_id', 'validid', 'valid_i_d']);

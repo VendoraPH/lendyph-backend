@@ -529,11 +529,12 @@ final class ApplicationHandOff
     /**
      * The application's figures for Credit Scoring (credit_application_profiles):
      * the monthly income the assessment counted, verified or declared, other
-     * regular income included (Credit Scoring scores this loan on it, not on
-     * the member record's income; `income_verification` says verified only
-     * when it was), household expenses, the debt payments counted outside
-     * Lendy and the stability details. Credit Scoring then reads this loan's
-     * capacity on the same figures the assessment used.
+     * regular income included, or ₱0.00 when it counted none (Credit Scoring
+     * scores this loan on it, never on the member record's income, and reads
+     * ₱0.00 as no income; `income_verification` says verified only when it
+     * was), household expenses, the debt payments counted outside Lendy and
+     * the stability details. Credit Scoring then reads this loan's capacity on
+     * the same figures the assessment used.
      */
     private function writeProfile(Loan $loan, OriginationApplication $application, OriginationAssessment $assessment, User $user): void
     {
@@ -544,7 +545,7 @@ final class ApplicationHandOff
 
         CreditApplicationProfile::query()->create([
             'loan_id' => $loan->id,
-            'monthly_income' => $assessment->figures['eligible_monthly_income'],
+            'monthly_income' => $assessment->figures['eligible_monthly_income'] ?? '0.00',
             'household_expenses' => $assessment->figures['monthly_expenses'],
             'outside_debt_payments' => $assessment->figures['outside_debt_payments'],
             'outside_lenders_count' => $loansCount,
