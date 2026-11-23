@@ -9,6 +9,8 @@ use App\Http\Middleware\Portal\EnsurePortalFeature;
 use App\Http\Middleware\Portal\EnsurePortalMemberActive;
 use App\Http\Middleware\Portal\EnsurePortalToken;
 use App\Http\Middleware\Portal\RequirePortalTerms;
+use App\Http\Middleware\PublicApply\EnsureOriginationEnabled;
+use App\Http\Middleware\PublicApply\PublicApplyNoStore;
 use App\Http\Middleware\RejectInvalidUtf8;
 use App\Http\Middleware\RequirePasswordChange;
 use App\Http\Middleware\SecurityHeaders;
@@ -103,6 +105,12 @@ return Application::configure(basePath: dirname(__DIR__))
         // priority 6.
         $middleware->prependToPriorityList(ThrottleRequests::class, OptionalSanctumAuth::class);
         $middleware->prependToPriorityList(ThrottleRequests::class, AllowAuthOrSubmissionToken::class);
+
+        // The public loan application's no-store and server switch run ahead
+        // of its limiters too, so while LOAN_ORIGINATION_ENABLED is off every
+        // request answers 404 (never 429) and every answer is no-store.
+        $middleware->prependToPriorityList(ThrottleRequests::class, PublicApplyNoStore::class);
+        $middleware->prependToPriorityList(ThrottleRequests::class, EnsureOriginationEnabled::class);
 
         // Keep the three post-auth gates AHEAD of SubstituteBindings.
         //

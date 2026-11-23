@@ -72,6 +72,8 @@ final class IncomeMismatch extends DetectionRule
                 self::indicator('Money in this month', self::peso($total)),
                 self::indicator('Recorded monthly income', self::peso($incomeCentavos)),
             ],
+            countedCentavos: $total,
+            countedTransactions: $events->count(),
         );
     }
 }

@@ -23,6 +23,9 @@ final class ReportExports
     /** Minutes after the link's expiry before its file is deleted. */
     public const PRUNE_GRACE_MINUTES = 5;
 
+    /** Exports a run looks at, oldest first; the next run takes the rest. */
+    public const PRUNE_BATCH = 500;
+
     public function __construct(
         private readonly AmlaReports $reports,
         private readonly ReportRenderer $renderer,
@@ -59,8 +62,13 @@ final class ReportExports
     /**
      * Delete the files of exports whose signed link has expired (the link
      * lives SignedFileLink::TTL_MINUTES and nothing makes a new one), so a
-     * report's decrypted contents never sit on disk for good. The export's
-     * record and checksum stay.
+     * report's decrypted contents never sit on disk for good. Each export is
+     * marked `file_deleted_at` once its file is gone (deleted now, or already
+     * missing); a delete that fails leaves it unmarked for the next run. A
+     * run reads only expired exports not yet marked, on the
+     * (`file_deleted_at`, `created_at`) index, up to PRUNE_BATCH of them. So
+     * no run re-checks old exports, and a scheduler stopped for days still
+     * has its files swept when it starts again. The record and checksum stay.
      *
      * @return int files deleted
      */
@@ -68,14 +76,20 @@ final class ReportExports
     {
         $disk = Storage::disk(self::DISK);
         $deleted = 0;
-        $paths = AmlaExport::query()->where('created_at', '<', Carbon::now()->subMinutes(SignedFileLink::TTL_MINUTES + self::PRUNE_GRACE_MINUTES))
-            ->orderBy('id')->pluck('file_path');
+        $exports = AmlaExport::query()->whereNull('file_deleted_at')
+            ->where('created_at', '<', Carbon::now()->subMinutes(SignedFileLink::TTL_MINUTES + self::PRUNE_GRACE_MINUTES))
+            ->orderBy('created_at')->orderBy('id')->limit(self::PRUNE_BATCH)->get(['id', 'file_path', 'file_deleted_at']);
 
-        foreach ($paths as $path) {
-            if ($disk->exists($path)) {
-                $disk->delete($path);
+        foreach ($exports as $export) {
+            if ($disk->exists($export->file_path)) {
+                if (! $disk->delete($export->file_path)) {
+                    continue;
+                }
+
                 $deleted++;
             }
+
+            $export->forceFill(['file_deleted_at' => Carbon::now()])->save();
         }
 
         return $deleted;

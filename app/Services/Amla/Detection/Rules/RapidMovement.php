@@ -76,6 +76,8 @@ final class RapidMovement extends DetectionRule
                     self::indicator('Money in', self::peso(self::cents($receipt))),
                     self::indicator('Money out within '.$within.' days', self::peso($out)),
                 ],
+                countedCentavos: self::cents($receipt),
+                countedTransactions: 1,
             );
         }
 

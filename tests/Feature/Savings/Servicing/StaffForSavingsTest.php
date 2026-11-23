@@ -67,6 +67,6 @@ class StaffForSavingsTest extends TestCase
         $this->actingAs($this->userWith(['loans:create']));
         $this->getJson('/api/staff')->assertOk();
         $this->getJson('/api/staff?for=savings')->assertOk();
-        $this->getJson('/api/staff?for=loans')->assertUnprocessable()->assertJsonPath('errors.for.0', 'The staff list can be asked for the savings opening form (for=savings) or the online applications\' assign picker (for=origination), or without either.');
+        $this->getJson('/api/staff?for=loans')->assertUnprocessable()->assertJsonPath('errors.for.0', 'The staff list can be asked for the savings opening form (for=savings), the AMLA case assignee (for=amla_cases) or the online applications\' assign picker (for=origination), or without any of them.');
     }
 }

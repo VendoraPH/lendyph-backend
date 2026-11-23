@@ -238,6 +238,8 @@ final class Detector
             'window_end' => $finding->windowEnd,
             'reason' => $finding->reason,
             'indicators' => $finding->indicators,
+            'counted_amount' => $finding->countedCentavos === null ? null : PesoAmount::fromCentavos($finding->countedCentavos),
+            'counted_transactions' => $finding->countedTransactions,
             'from_history' => $trigger->harvested_by === 'history',
         ]);
 

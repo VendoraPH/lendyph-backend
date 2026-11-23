@@ -6,10 +6,12 @@ use App\Models\AmlaCase;
 use App\Models\AmlaCtrCandidate;
 use App\Models\AmlaReport;
 use App\Models\AmlaSettingsVersion;
+use App\Models\User;
 use App\Services\Amla\Foundation\AmlaAccess;
 use App\Services\Amla\Foundation\AmlaSettings;
 use App\Services\Amla\Foundation\Deadlines;
 use App\Services\Amla\Foundation\WorkingDayCalendar;
+use App\Services\BranchAccess;
 use Carbon\CarbonImmutable;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Collection;
@@ -38,6 +40,7 @@ final class FilingDeadlines
         private readonly WorkingDayCalendar $calendar,
         private readonly AmlaInbox $inbox,
         private readonly AmlaSettings $settings,
+        private readonly BranchAccess $branches,
     ) {}
 
     /**
@@ -128,6 +131,22 @@ final class FilingDeadlines
         }
 
         return $rows;
+    }
+
+    /**
+     * The filings `$user` may see: a CTR with a CTR reading key, an STR with
+     * an STR reading key, each in the user's branches (STRs and walk-ins:
+     * head office). The deadlines list, the dashboard counts and the
+     * management summary all count through this one rule.
+     *
+     * @return list<array{subject_type: string, id: int, reference: string, type: string, status_words: string, due: array<string, mixed>, branch_id: int|null, head_office: bool}>
+     */
+    public function visibleTo(User $user): array
+    {
+        $headOffice = $user->can(BranchAccess::VIEW_ALL);
+
+        return array_values(array_filter($this->filings(), fn (array $filing) => $user->canAny($filing['type'] === AmlaReport::STR ? Filings::STR_READ : Filings::CTR_READ)
+            && ($filing['head_office'] ? $headOffice : $this->branches->canSee($user, $filing['branch_id']))));
     }
 
     /** @return int inbox items added */

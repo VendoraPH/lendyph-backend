@@ -67,6 +67,8 @@ final class UnusualVolume extends DetectionRule
                 self::indicator('Earlier average', self::peso($average)),
                 self::indicator('Earlier transactions', (string) $before->count()),
             ],
+            countedCentavos: $amount,
+            countedTransactions: 1,
         );
     }
 }

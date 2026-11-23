@@ -99,7 +99,8 @@ final class AmlaPresenter
     }
 
     /** @return array<string, mixed> */
-    public static function logEntry(AmlaLogEntry $entry): array
+    /** @param  array<string, string>  $references  AmlaLog::references() for the page */
+    public static function logEntry(AmlaLogEntry $entry, array $references = []): array
     {
         return [
             'id' => (int) $entry->id,
@@ -110,7 +111,7 @@ final class AmlaPresenter
             'actor' => self::user($entry->user),
             'subject_type' => $entry->subject_type,
             'subject_id' => $entry->subject_id,
-            'subject_words' => AmlaLog::subjectWords($entry->subject_type, $entry->subject_id),
+            'subject_words' => AmlaLog::subjectWords($entry->subject_type, $entry->subject_id, $references["{$entry->subject_type}:{$entry->subject_id}"] ?? null),
             'details' => $entry->details,
             'ip_address' => $entry->ip_address,
         ];
