@@ -15,6 +15,7 @@ use App\Models\OriginationSetting;
 use App\Models\User;
 use App\Services\AuditLogService;
 use App\Services\Branches\BranchWriteGuard;
+use App\Services\Branches\MemberLock;
 use App\Services\CreditScoring\Exposure;
 use App\Services\CreditScoring\MemberCreditData;
 use App\Services\LoanListTotals;
@@ -57,9 +58,10 @@ use Throwable;
  * (ApplicantMember). It is its own write, so when step two fails the member
  * stays linked and a retry resumes from step two.
  *
- * Step two, the loan, under the member's branch lock
- * (BranchWriteGuard::whileTakingNew(), as LoanController::store()) and in one
- * loan transaction (LoanService::createAndSubmitForHandOff()):
+ * Step two, the loan, as LoanController::store() makes one: under the
+ * member's lock (MemberLock, MB-BE4), then their branch's lock
+ * (BranchWriteGuard::whileTakingNew()) on the branch read under the first,
+ * and in one loan transaction (LoanService::createAndSubmitForHandOff()):
  * - the draft loan from StoreLoanRequest's own rules: the product's terms,
  *   the requested amount, term and frequency, a start date of today (or the
  *   one sent), the product's fees, and the assigned officer;
@@ -142,19 +144,26 @@ final class ApplicationHandOff
             : Borrower::query()->findOrFail($application->borrower_id);
         $application->refresh();
 
-        $validated = $this->loanData($application, $member, $assessment, $input, $user, $startDate);
         $copied = [];
 
         try {
-            $loan = $this->branches->whileTakingNew(
-                (int) $member->branch_id,
-                BranchWriteGuard::LOANS,
-                function () use ($validated, $application, $member, $assessment, $user, &$copied): Loan {
-                    return $this->loans->createAndSubmitForHandOff($validated, $user, function (Loan $loan) use ($application, $member, $assessment, $user, &$copied): void {
-                        $this->alongside($loan, $application, $member, $assessment, $user, $copied);
-                    });
-                },
-            );
+            // As LoanController::store(): the member's lock first (MB-BE4), so
+            // a member transfer can't move them between the branch read and
+            // the loan; the branch and the loan's rules read under it.
+            $loan = MemberLock::whileHeld($member->id, function () use ($application, $member, $assessment, $input, $user, $startDate, &$copied): Loan {
+                $branchId = (int) Borrower::query()->whereKey($member->id)->value('branch_id');
+                $validated = $this->loanData($application, $member, $assessment, $input, $user, $startDate);
+
+                return $this->branches->whileTakingNew(
+                    $branchId,
+                    BranchWriteGuard::LOANS,
+                    function () use ($validated, $application, $member, $assessment, $user, &$copied): Loan {
+                        return $this->loans->createAndSubmitForHandOff($validated, $user, function (Loan $loan) use ($application, $member, $assessment, $user, &$copied): void {
+                            $this->alongside($loan, $application, $member, $assessment, $user, $copied);
+                        });
+                    },
+                );
+            });
         } catch (Throwable $e) {
             foreach ($copied as $path) {
                 Storage::disk('private')->delete($path);

@@ -15,6 +15,7 @@ use App\Models\OriginationDocument;
 use App\Models\OriginationStatusHistory;
 use App\Models\ShareCapitalPledge;
 use App\Models\User;
+use App\Services\Branches\MemberLock;
 use App\Services\CreditScoring\Capacity;
 use App\Services\CreditScoring\Exposure;
 use App\Services\CreditScoring\MemberCreditData;
@@ -440,6 +441,21 @@ it('answers 409 while another hand-off of the same application holds its lock, a
     expect(Loan::query()->count())->toBe(0)
         ->and(Borrower::query()->where('status', 'pending')->count())->toBe(0)
         ->and($application->fresh()->borrower_id)->toBeNull();
+});
+
+it('holds the member\'s lock around the loan, as a new loan does, so a member being transferred answers 409', function () {
+    $member = Borrower::factory()->create(['status' => 'active', 'branch_id' => Branch::query()->value('id')]);
+    $application = lo4Ready($this, [], '40000', ['borrower_id' => $member->id]);
+    $lock = Cache::lock(MemberLock::key($member->id), 60);
+    expect($lock->get())->toBeTrue();
+
+    $this->actingAs($this->originationStaff(...LO4_HANDOFF))->postJson(lo4HandOffUrl($application->id), ['version' => $application->version])
+        ->assertStatus(409)
+        ->assertJsonPath('message', MemberLock::BUSY);
+
+    $lock->release();
+    expect(Loan::query()->count())->toBe(0)
+        ->and($application->fresh()->status)->toBe('under_assessment');
 });
 
 it('re-checks the required documents inside the loan transaction, so one rejected meanwhile stops the hand-off', function () {
