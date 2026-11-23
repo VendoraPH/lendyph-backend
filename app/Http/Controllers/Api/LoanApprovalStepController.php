@@ -67,6 +67,21 @@ class LoanApprovalStepController extends Controller
                                         type: 'object',
                                     ),
                                 ),
+                                new OA\Property(
+                                    property: 'left_out_steps',
+                                    type: 'array',
+                                    description: "Steps of the loan's own chain copy that its minimum principal left out of the current round, in chain order. Empty when nothing was left out, and for a loan whose chain carried no minimum. A restructure is measured by the amount restructured.",
+                                    items: new OA\Items(
+                                        properties: [
+                                            new OA\Property(property: 'step_id', type: 'string', example: 'head-office'),
+                                            new OA\Property(property: 'after_step_id', type: 'string', nullable: true, example: 'first-review', description: 'The kept step it follows in the chain copy (a `current_steps[].step_id`), or null when no kept step comes before it.'),
+                                            new OA\Property(property: 'name', type: 'string', example: 'Head Office'),
+                                            new OA\Property(property: 'min_principal', type: 'string', example: '50000.00'),
+                                            new OA\Property(property: 'description', type: 'string', example: "Skipped: the ₱50,000.00 minimum is above this loan's ₱10,000.00."),
+                                        ],
+                                        type: 'object',
+                                    ),
+                                ),
                             ],
                         ),
                     ],
@@ -258,14 +273,14 @@ class LoanApprovalStepController extends Controller
     }
 
     /**
-     * @return array{current_steps: list<array<string, mixed>>, rounds: list<array<string, mixed>>}
+     * @return array{current_steps: list<array<string, mixed>>, rounds: list<array<string, mixed>>, left_out_steps: list<array<string, mixed>>}
      */
     private function state(Loan $loan, ?User $viewer): array
     {
         $steps = $loan->approvalSteps()->with(['actedByUser', 'assignee.roles', 'assignee.permissions'])->get();
 
         if ($steps->isEmpty()) {
-            return ['current_steps' => [], 'rounds' => []];
+            return ['current_steps' => [], 'rounds' => [], 'left_out_steps' => []];
         }
 
         $currentRound = (int) $steps->max('round');
@@ -292,12 +307,15 @@ class LoanApprovalStepController extends Controller
             ->values()
             ->all();
 
+        $current = LoanApprovalStep::currentRound($steps);
+
         return [
-            'current_steps' => LoanApprovalStep::currentRound($steps)
+            'current_steps' => $current
                 ->map(fn (LoanApprovalStep $s) => $this->presentStep($s, $loan, $viewer))
                 ->values()
                 ->all(),
             'rounds' => $rounds,
+            'left_out_steps' => $this->chain->leftOutSteps($loan, $current),
         ];
     }
 
