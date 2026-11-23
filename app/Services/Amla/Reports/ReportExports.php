@@ -23,8 +23,8 @@ final class ReportExports
     /** Minutes after the link's expiry before its file is deleted. */
     public const PRUNE_GRACE_MINUTES = 5;
 
-    /** How far back the regular sweep looks: a day of 15-minute runs, so a missed run or a short outage still sweeps its files. */
-    public const PRUNE_LOOKBACK_HOURS = 24;
+    /** Exports a run looks at, oldest first; the next run takes the rest. */
+    public const PRUNE_BATCH = 500;
 
     public function __construct(
         private readonly AmlaReports $reports,
@@ -62,30 +62,30 @@ final class ReportExports
     /**
      * Delete the files of exports whose signed link has expired (the link
      * lives SignedFileLink::TTL_MINUTES and nothing makes a new one), so a
-     * report's decrypted contents never sit on disk for good. The export's
-     * record and checksum stay.
-     *
-     * The regular sweep looks only at exports that expired in the last
-     * PRUNE_LOOKBACK_HOURS (a range on the indexed `created_at`), so it never
-     * re-checks every old export. `$full` checks every expired export, for a
-     * sweep after a longer outage (`amla:prune-exports --full`).
+     * report's decrypted contents never sit on disk for good. Each export is
+     * marked `file_deleted_at` once its file is gone (deleted now, or already
+     * missing), and a run reads only expired exports not yet marked, on the
+     * (`file_deleted_at`, `created_at`) index, up to PRUNE_BATCH of them. So
+     * no run re-checks old exports, and a scheduler stopped for days still
+     * has its files swept when it starts again. The record and checksum stay.
      *
      * @return int files deleted
      */
-    public function pruneExpired(bool $full = false): int
+    public function pruneExpired(): int
     {
         $disk = Storage::disk(self::DISK);
         $deleted = 0;
-        $expiredBefore = Carbon::now()->subMinutes(SignedFileLink::TTL_MINUTES + self::PRUNE_GRACE_MINUTES);
-        $paths = AmlaExport::query()->where('created_at', '<', $expiredBefore)
-            ->when(! $full, fn ($query) => $query->where('created_at', '>=', $expiredBefore->copy()->subHours(self::PRUNE_LOOKBACK_HOURS)))
-            ->orderBy('id')->pluck('file_path');
+        $exports = AmlaExport::query()->whereNull('file_deleted_at')
+            ->where('created_at', '<', Carbon::now()->subMinutes(SignedFileLink::TTL_MINUTES + self::PRUNE_GRACE_MINUTES))
+            ->orderBy('created_at')->orderBy('id')->limit(self::PRUNE_BATCH)->get(['id', 'file_path', 'file_deleted_at']);
 
-        foreach ($paths as $path) {
-            if ($disk->exists($path)) {
-                $disk->delete($path);
+        foreach ($exports as $export) {
+            if ($disk->exists($export->file_path)) {
+                $disk->delete($export->file_path);
                 $deleted++;
             }
+
+            $export->forceFill(['file_deleted_at' => Carbon::now()])->save();
         }
 
         return $deleted;

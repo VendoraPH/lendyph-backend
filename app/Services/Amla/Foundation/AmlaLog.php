@@ -185,16 +185,23 @@ final class AmlaLog
     /**
      * The references of the entries' subjects, one query per subject type,
      * keyed "<type>:<id>". Records without a reference are left out and read
-     * "#<id>".
+     * "#<id>". An order's reference is the authority's own number, which can
+     * name its subject, so it is resolved only for `amla:sanctions` holders
+     * (who may open orders); everyone else reads "Order #<id>".
      *
      * @param  iterable<AmlaLogEntry>  $entries
      * @return array<string, string>
      */
-    public static function references(iterable $entries): array
+    public static function references(iterable $entries, User $viewer): array
     {
         $references = [];
+        $types = array_keys(self::REFERENCED);
 
-        foreach (Collection::make($entries)->filter(fn (AmlaLogEntry $entry) => isset(self::REFERENCED[$entry->subject_type]) && $entry->subject_id !== null)
+        if (! $viewer->can(AmlaAccess::SANCTIONS)) {
+            $types = array_values(array_diff($types, ['order']));
+        }
+
+        foreach (Collection::make($entries)->filter(fn (AmlaLogEntry $entry) => in_array($entry->subject_type, $types, true) && $entry->subject_id !== null)
             ->groupBy('subject_type') as $type => $group) {
             [$model, $column] = self::REFERENCED[$type];
             $query = $model::query();

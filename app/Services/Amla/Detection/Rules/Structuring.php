@@ -76,6 +76,8 @@ final class Structuring extends DetectionRule
                 self::indicator('Largest', self::peso((int) $events->max(fn (AmlaEvent $event) => self::cents($event)))),
                 self::indicator('CTR threshold', self::peso($threshold).' (AMLA settings version '.$context->settingsVersion.')'),
             ],
+            countedCentavos: $total,
+            countedTransactions: $events->count(),
         );
     }
 }

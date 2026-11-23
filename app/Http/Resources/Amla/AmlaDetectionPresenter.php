@@ -37,9 +37,10 @@ final class AmlaDetectionPresenter
     /**
      * The alert's row; its case shows only to `amla:cases` holders with
      * head-office access (`$viewer`). Two figures, labelled apart:
-     * `counted_amount` (and `counted_transactions_count`) is what the rule
-     * counted when the alert opened, the figure its reason states (null on
-     * alerts opened before AMLA-B8); `amount` (and `transactions_count`) is
+     * `counted_amount` (and `counted_transactions_count`) is the figure the
+     * reason prints, set by the rule when the alert opened (null when the
+     * reason prints none, and on alerts opened before AMLA-B8); `amount` (and
+     * `transactions_count`) is
      * every transaction linked since, later joins included, less any voided.
      *
      * @return array<string, mixed>

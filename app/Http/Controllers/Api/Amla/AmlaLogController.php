@@ -40,7 +40,7 @@ class AmlaLogController extends Controller
             ->with('user')
             ->orderByDesc('id')
             ->paginate((int) ($filters['per_page'] ?? 50));
-        $references = AmlaLog::references($page->items());
+        $references = AmlaLog::references($page->items(), $request->user());
 
         return response()->json([
             'success' => true,

@@ -7,15 +7,17 @@ use Illuminate\Support\Facades\Schema;
 
 /**
  * AMLA-B8 follow-ups (Phase 6):
- * - an index on `amla_exports.created_at`, the export sweep's range (it
- *   looks only at exports that expired in the last day);
+ * - `amla_exports.file_deleted_at`, set once when the sweep deletes an
+ *   export's file (or finds it gone), indexed with `created_at`, so each run
+ *   reads only expired exports whose file it hasn't removed yet, however long
+ *   the scheduler was stopped;
  * - `amla_watchlist_versions.version_label` may be empty: a version uploaded
  *   without a label (and none in its file) keeps none, and screens read
  *   "Version #n". Existing labels stay as they are.
- * - `amla_alerts.counted_amount` and `counted_transactions`: what the rule
- *   counted when the alert opened, the figure its reason states, apart from
- *   every transaction that joined it later. New alerts only: past alerts
- *   keep null, nothing is back-filled.
+ * - `amla_alerts.counted_amount` and `counted_transactions`: the figures the
+ *   alert's reason prints, set by its rule when it opened (null when the
+ *   reason prints none), apart from every transaction that joined it later.
+ *   New alerts only: past alerts keep null, nothing is back-filled.
  *
  * Nothing outside AMLA is written.
  */
@@ -24,7 +26,8 @@ return new class extends Migration
     public function up(): void
     {
         Schema::table('amla_exports', function (Blueprint $table) {
-            $table->index('created_at');
+            $table->timestamp('file_deleted_at')->nullable()->after('user_id');
+            $table->index(['file_deleted_at', 'created_at']);
         });
 
         Schema::table('amla_watchlist_versions', function (Blueprint $table) {
@@ -40,7 +43,8 @@ return new class extends Migration
     public function down(): void
     {
         if (DB::table('amla_watchlist_versions')->whereNull('version_label')->exists()
-            || DB::table('amla_alerts')->whereNotNull('counted_amount')->exists()) {
+            || DB::table('amla_alerts')->whereNotNull('counted_amount')->exists()
+            || DB::table('amla_exports')->whereNotNull('file_deleted_at')->exists()) {
             throw new RuntimeException('AMLA records are kept forever, so the AMLA-B8 columns are not removed once used.');
         }
 
@@ -53,7 +57,8 @@ return new class extends Migration
         });
 
         Schema::table('amla_exports', function (Blueprint $table) {
-            $table->dropIndex(['created_at']);
+            $table->dropIndex(['file_deleted_at', 'created_at']);
+            $table->dropColumn('file_deleted_at');
         });
     }
 };

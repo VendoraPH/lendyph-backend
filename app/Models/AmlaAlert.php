@@ -36,8 +36,8 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
  * @property CarbonInterface $window_end
  * @property string $reason
  * @property list<array{label: string, value: string}> $indicators
- * @property string|null $counted_amount what the rule counted when the alert opened, the figure its reason states (null before AMLA-B8)
- * @property int|null $counted_transactions the transactions behind `counted_amount`
+ * @property string|null $counted_amount the peso figure the reason prints, set by the rule when the alert opened (null when the reason prints none, and before AMLA-B8)
+ * @property int|null $counted_transactions the transaction count behind it, as the rule counted it (null when the rule counts none)
  * @property bool $from_history
  * @property CarbonInterface|null $cleared_at
  * @property string|null $cleared_note

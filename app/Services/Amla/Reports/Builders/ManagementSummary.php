@@ -25,7 +25,8 @@ use Carbon\CarbonImmutable;
  * dashboard counts gate them: the alert lines need `amla:alerts`, the case
  * figures `amla:cases`, the CTR and STR filing figures their reading keys,
  * missed deadlines count only the filings the viewer may see (shown with any
- * reading key), and outstanding watchlist reviews need `amla:screening`.
+ * reading key), KYC completion needs `amla:cdd` (the worklist isn't built
+ * without it), and outstanding watchlist reviews need `amla:screening`.
  */
 final class ManagementSummary extends ComplianceReport
 {
@@ -72,8 +73,13 @@ final class ManagementSummary extends ComplianceReport
         $screened = (clone $events)->whereIn('id', AmlaEventScreening::query()->select('event_id'))->count();
         $today = CarbonImmutable::now('Asia/Manila')->toDateString();
         $missed = collect($this->deadlines->visibleTo($viewer))->filter(fn (array $filing) => $filing['due']['due_on'] < $today)->count();
-        $subjects = $this->worklist->subjects($viewer);
-        $verified = collect($subjects)->filter(fn (array $entry) => $entry['state']['status'] === 'verified')->count();
+        $kyc = null;
+
+        if ($viewer->can(AmlaAccess::CDD)) {
+            $subjects = $this->worklist->subjects($viewer);
+            $kyc = collect($subjects)->filter(fn (array $entry) => $entry['state']['status'] === 'verified')->count().' of '.count($subjects).' customers verified';
+        }
+
         $byStatus = fn (string $type) => AmlaReport::query()->where('type', $type)->get(['status'])->countBy('status')
             ->map(fn (int $count, string $status) => (AmlaReport::STATUS_WORDS[$status] ?? $status).': '.$count)->sort()->implode(', ') ?: 'None';
 
@@ -92,7 +98,7 @@ final class ManagementSummary extends ComplianceReport
             ...($viewer->canAny(Filings::CTR_READ) ? [['metric' => 'CTR filing status', 'value' => $byStatus(AmlaReport::CTR)]] : []),
             ...($viewer->canAny(Filings::STR_READ) ? [['metric' => 'STR filing status', 'value' => $byStatus(AmlaReport::STR)]] : []),
             ...($viewer->canAny([...Filings::CTR_READ, ...Filings::STR_READ]) ? [['metric' => 'Missed deadlines', 'value' => (string) $missed]] : []),
-            ['metric' => 'KYC completion', 'value' => $verified.' of '.count($subjects).' customers verified'],
+            ...($kyc !== null ? [['metric' => 'KYC completion', 'value' => $kyc]] : []),
             ...($viewer->can(AmlaAccess::SCREENING) ? [['metric' => 'Outstanding watchlist reviews', 'value' => (string) AmlaScreeningMatch::query()->where('status', AmlaScreeningMatch::PENDING)->count()]] : []),
             ['metric' => 'Transactions not yet harvested (failures)', 'value' => (string) AmlaEventFailure::query()->whereNull('resolved_at')->count()],
         ];

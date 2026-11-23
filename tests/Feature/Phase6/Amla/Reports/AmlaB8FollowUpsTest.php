@@ -11,6 +11,7 @@ use App\Models\SavingsTransaction;
 use App\Models\User;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
 use Tests\TestCase;
 use Tests\Traits\SetupLendyPH;
 
@@ -86,24 +87,34 @@ class AmlaB8FollowUpsTest extends TestCase
         $this->assertArrayNotHasKey('Open alerts', $screening);
     }
 
-    public function test_the_export_sweep_looks_only_at_recently_expired_exports_and_a_full_pass_sweeps_the_rest(): void
+    public function test_the_management_summary_shows_kyc_completion_only_with_amla_cdd(): void
+    {
+        $this->assertArrayNotHasKey('KYC completion', $this->summary($this->headOffice(['amla:view'])));
+        $this->assertArrayHasKey('KYC completion', $this->summary($this->headOffice(['amla:view', 'amla:cdd'])));
+    }
+
+    public function test_the_export_sweep_marks_each_swept_export_and_catches_up_after_a_three_day_gap(): void
     {
         Storage::fake('private');
         $user = $this->amlaUser(['amla:alerts', 'amla:export']);
         $this->actingAs($user)->postJson('/api/amla/compliance-reports/transaction_monitoring/exports', ['format' => 'csv'])->assertCreated();
-        $old = AmlaExport::query()->sole();
-        AmlaExport::query()->whereKey($old->id)->toBase()->update(['created_at' => Carbon::now()->subDays(3)]);
+        $first = AmlaExport::query()->sole();
         $this->actingAs($user)->postJson('/api/amla/compliance-reports/transaction_monitoring/exports', ['format' => 'csv'])->assertCreated();
-        $recent = AmlaExport::query()->whereKeyNot($old->id)->sole();
+        $second = AmlaExport::query()->whereKeyNot($first->id)->sole();
 
-        $this->travel(36)->minutes();
-        $this->artisan('amla:prune-exports')->assertSuccessful()->expectsOutput('1 expired AMLA export file(s) deleted.');
-        Storage::disk('private')->assertMissing($recent->file_path);
-        Storage::disk('private')->assertExists($old->file_path);
+        $this->artisan('amla:prune-exports')->assertSuccessful()->expectsOutput('0 expired AMLA export file(s) deleted.');
+        $this->assertNull($first->fresh()->file_deleted_at);
 
-        $this->artisan('amla:prune-exports', ['--full' => true])->assertSuccessful()->expectsOutput('1 expired AMLA export file(s) deleted.');
-        Storage::disk('private')->assertMissing($old->file_path);
-        $this->assertSame(2, AmlaExport::query()->count());
+        $this->travel(3)->days();
+        $this->artisan('amla:prune-exports')->assertSuccessful()->expectsOutput('2 expired AMLA export file(s) deleted.');
+        Storage::disk('private')->assertMissing($first->file_path);
+        Storage::disk('private')->assertMissing($second->file_path);
+        $this->assertNotNull($first->fresh()->file_deleted_at);
+        $this->assertSame($first->sha256, $first->fresh()->sha256);
+
+        Storage::disk('private')->put($first->file_path, 'restored by hand');
+        $this->artisan('amla:prune-exports')->assertSuccessful()->expectsOutput('0 expired AMLA export file(s) deleted.');
+        Storage::disk('private')->assertExists($first->file_path);
     }
 
     public function test_the_sixth_export_in_a_minute_answers_429_in_words(): void
@@ -116,7 +127,7 @@ class AmlaB8FollowUpsTest extends TestCase
         }
 
         $this->actingAs($user)->postJson('/api/amla/compliance-reports/transaction_monitoring/exports', ['format' => 'csv'])
-            ->assertTooManyRequests()->assertJsonPath('message', 'You can make 5 exports a minute. Wait a minute and try again.');
+            ->assertTooManyRequests()->assertJsonPath('message', 'Too many requests. Wait a minute and try again.');
         $this->assertSame(5, AmlaExport::query()->count());
 
         $this->travel(61)->seconds();
@@ -218,6 +229,25 @@ class AmlaB8FollowUpsTest extends TestCase
 
         $rows = collect($this->actingAs($auditor)->getJson('/api/amla/compliance-reports/audit_history?from=2026-11-20&to=2026-11-20')->assertOk()->json('data.rows'));
         $this->assertContains("Report {$report->reference}", $rows->pluck('subject')->all());
+    }
+
+    public function test_the_amla_log_names_an_orders_reference_only_to_sanctions_holders(): void
+    {
+        $officer = $this->headOffice(['amla:sanctions']);
+        $member = $this->member();
+        $id = $this->actingAs($officer)->postJson('/api/amla/orders', [
+            'reference' => 'RTC Branch 12 Civil Case 2026-77 v. Santos', 'authority' => 'court', 'received_on' => '2026-11-20', 'borrower_id' => $member->id,
+            'required_action' => 'Freeze the funds.', 'responsible_officer_id' => $officer->id, 'holds' => [],
+        ], ['Idempotency-Key' => (string) Str::uuid()])->assertCreated()->json('data.id');
+
+        $auditOnly = $this->actingAs($this->headOffice(['amla:audit']))->getJson('/api/amla/log?subject_type=order')->assertOk();
+        $this->assertSame("Order #{$id}", $auditOnly->json('data.0.subject_words'));
+        $this->assertStringNotContainsString('Civil Case', $auditOnly->getContent());
+        $rows = $this->actingAs($this->headOffice(['amla:audit']))->getJson('/api/amla/compliance-reports/audit_history?from=2026-11-20&to=2026-11-20')->assertOk();
+        $this->assertStringNotContainsString('Civil Case', $rows->getContent());
+
+        $this->actingAs($this->headOffice(['amla:audit', 'amla:sanctions']))->getJson('/api/amla/log?subject_type=order')->assertOk()
+            ->assertJsonPath('data.0.subject_words', 'Order RTC Branch 12 Civil Case 2026-77 v. Santos');
     }
 
     public function test_a_case_opened_from_an_alert_keeps_the_opening_note_as_its_first_note(): void
