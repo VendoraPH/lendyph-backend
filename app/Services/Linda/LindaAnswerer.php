@@ -28,6 +28,7 @@ use App\Services\Linda\Answers\OverdueAccountsAnswer;
 use App\Services\Linda\Answers\PaymentsAnswer;
 use App\Services\Linda\Answers\PortfolioSummaryAnswer;
 use App\Services\Linda\Answers\ReceiptLookupAnswer;
+use App\Services\Linda\Answers\ReminderSummaryAnswer;
 use App\Services\Linda\Answers\SavingsSummaryAnswer;
 use App\Services\Linda\Answers\ShareCapitalSummaryAnswer;
 use App\Services\Linda\Answers\UnsupportedAnswer;
@@ -68,6 +69,7 @@ final class LindaAnswerer
         'savings_summary' => SavingsSummaryAnswer::class,
         'share_capital_summary' => ShareCapitalSummaryAnswer::class,
         'cda_summary' => CdaSummaryAnswer::class,
+        'reminder_summary' => ReminderSummaryAnswer::class,
     ];
 
     /** The record numbers a lookup reads: receipts, loans (LN-, LA-) and members. */

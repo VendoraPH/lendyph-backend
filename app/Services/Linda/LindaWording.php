@@ -114,7 +114,7 @@ final class LindaWording
         return "I can't answer that question yet. Here's what I can answer for now:\n\n"
             .self::suggestions()
             ."\n\nI can also answer about payments, collection efficiency, members, the portfolio, income, expenses, savings, "
-            .'share capital, CDA deadlines, and branch and officer performance, look up a member, a loan or a receipt by name or '
+            .'share capital, payment reminders, CDA readiness and deadlines, and branch and officer performance, look up a member, a loan or a receipt by name or '
             .'number (BRW-…, LN-…, RCP-…), and tell you where a page is in the menu. '
             .'You can also name a period ("last month") or one of your branches.';
     }
