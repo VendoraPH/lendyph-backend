@@ -61,6 +61,12 @@ final class MemberRemindersAnswer extends LookupAnswer
         return $member instanceof Borrower ? $this->about($user, $member) : $member;
     }
 
+    /** A bare member code reads as the member lookup, so the hint keeps the word reminders. */
+    protected function askAgainHint(): string
+    {
+        return 'Ask again with the member code and the word reminders (for example, "BRW-000012 reminders").';
+    }
+
     private function about(User $user, Borrower $member): LindaReply
     {
         $loans = Loan::query()

@@ -170,13 +170,24 @@ class LindaMemberRemindersTest extends TestCase
     public function test_several_members_of_one_name_are_listed_to_choose_from(): void
     {
         $this->loanDue('2026-09-15');
-        $this->loanDue('2026-09-15');
+        $second = $this->loanDue('2026-09-15');
+        $this->queueRow($second);
+        $user = $this->headOffice();
 
-        $reply = $this->chat($this->headOffice(), 'Did Juan Dela Cruz receive his reminder?');
+        $reply = $this->chat($user, 'Did Juan Dela Cruz receive his reminder?');
 
         $this->assertStringStartsWith('I found 2 members named "Juan Dela Cruz" in your branches. Which one?', $reply['answer']);
         $this->assertCount(2, $reply['blocks'][0]['items']);
         $this->assertNeverAsked('several members');
+
+        // The hint keeps the reminders: a bare code would read as the member lookup.
+        $this->assertStringEndsWith('Which one? Ask again with the member code and the word reminders (for example, "BRW-000012 reminders").', $reply['answer']);
+        $code = $second->borrower->borrower_code;
+        $this->assertStringStartsWith('The latest reminder to Juan Dela Cruz ('.$code.')', $this->chat($user, $code.' reminders')['answer']);
+        $this->assertNeverAsked('the hinted reply');
+
+        // Other lookups keep their own hint.
+        $this->assertStringEndsWith('Which one? Ask again with the member code.', $this->chat($user, 'What does Juan Dela Cruz owe?')['answer']);
     }
 
     public function test_a_member_with_no_reminders_says_so(): void
