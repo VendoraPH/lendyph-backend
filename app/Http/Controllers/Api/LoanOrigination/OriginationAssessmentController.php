@@ -82,7 +82,7 @@ class OriginationAssessmentController extends Controller
     #[OA\Get(
         path: '/api/loan-origination/applications/{application}/assessment',
         summary: 'An application\'s current assessment',
-        description: 'Null before the first run.',
+        description: 'Null before the first run. `verified_inputs` ({monthly_income, debt_payments}) are the verified figures entered for that run, two-decimal strings, null when not verified; every viewer gets them, since they are the applicant\'s own figures and give back none of the member\'s withheld loan figures.',
         tags: ['Loan Origination'],
         security: [['sanctum' => []]],
         responses: [new OA\Response(response: 200, description: 'The current revision'), new OA\Response(response: 404, description: 'Not found or another branch\'s')],
@@ -98,7 +98,7 @@ class OriginationAssessmentController extends Controller
     #[OA\Post(
         path: '/api/loan-origination/applications/{application}/assessment/rerun',
         summary: 'Run an application\'s assessment',
-        description: 'Works out the figures on the server and stores them as the next revision. `verified_monthly_income` and `verified_debt_payments` are optional: left out they keep the previous run\'s, null clears them. `start_date` (Y-m-d) is the loan\'s planned start date, today when left out; the hand-off assesses again at the loan\'s own. From submitted to under assessment only (422 otherwise). Needs loan_origination:assess. Audited with ids and the result only.',
+        description: 'Works out the figures on the server and stores them as the next revision. `verified_monthly_income` and `verified_debt_payments` are optional: left out they keep the previous run\'s, null clears them; the revision sends them back as `verified_inputs` (two-decimal strings or null). `start_date` (Y-m-d) is the loan\'s planned start date, today when left out; the hand-off assesses again at the loan\'s own. From submitted to under assessment only (422 otherwise). Needs loan_origination:assess. Audited with ids and the result only.',
         tags: ['Loan Origination'],
         security: [['sanctum' => []]],
         responses: [

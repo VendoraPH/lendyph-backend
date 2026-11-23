@@ -92,6 +92,24 @@ it('keeps every run as its own revision, newest first in the history, and carrie
     $this->actingAs($staff)->getJson(lo4AssessUrl($application->id))->assertOk()->assertJsonPath('data.version', 3);
 });
 
+it('sends the verified figures each run was given, as two-decimal strings, null when not verified', function () {
+    $application = $this->originationApplication();
+    $staff = $this->originationStaff('loan_origination:view', 'loan_origination:assess');
+
+    $this->actingAs($staff)->postJson(lo4AssessUrl($application->id, '/rerun'))->assertCreated()
+        ->assertJsonPath('data.verified_inputs', ['monthly_income' => null, 'debt_payments' => null]);
+    $this->actingAs($staff)->postJson(lo4AssessUrl($application->id, '/rerun'), ['verified_monthly_income' => '25000.5', 'verified_debt_payments' => '1500'])->assertCreated()
+        ->assertJsonPath('data.verified_inputs', ['monthly_income' => '25000.50', 'debt_payments' => '1500.00']);
+    $this->actingAs($staff)->postJson(lo4AssessUrl($application->id, '/rerun'), ['verified_debt_payments' => null])->assertCreated()
+        ->assertJsonPath('data.verified_inputs', ['monthly_income' => '25000.50', 'debt_payments' => null]);
+    $this->actingAs($staff)->patchJson(lo4AssessUrl($application->id), ['officer_findings' => 'Payslips match.'])->assertOk()
+        ->assertJsonPath('data.verified_inputs', ['monthly_income' => '25000.50', 'debt_payments' => null]);
+
+    $this->actingAs($staff)->getJson(lo4AssessUrl($application->id, '/history'))->assertOk()
+        ->assertJsonPath('data.3.verified_inputs', ['monthly_income' => null, 'debt_payments' => null])
+        ->assertJsonPath('data.2.verified_inputs', ['monthly_income' => '25000.50', 'debt_payments' => '1500.00']);
+});
+
 it('saves the officer\'s findings as a new revision with the same figures, and never edits one', function () {
     $application = $this->originationApplication();
     $staff = $this->originationStaff('loan_origination:view', 'loan_origination:assess');
@@ -198,6 +216,7 @@ describe('a linked member\'s loans', function () {
             ->assertJsonPath('data.member_figures_hidden', true)
             ->assertJsonPath('data.figures.verified_monthly_income', 40000)
             ->assertJsonPath('data.figures.outside_debt_payments', 1500)
+            ->assertJsonPath('data.verified_inputs', ['monthly_income' => '40000.00', 'debt_payments' => '1500.00'])
             ->assertJsonPath('data.result', 'within_capacity')
             ->assertJsonPath('data.checks.dti', true);
         foreach (['lendy_debt_payments', 'monthly_debt_payments', 'disposable_income', 'dti_ratio', 'coverage_ratio', 'remaining_income'] as $figure) {

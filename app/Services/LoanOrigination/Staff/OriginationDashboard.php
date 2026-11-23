@@ -5,6 +5,7 @@ namespace App\Services\LoanOrigination\Staff;
 use App\Models\OriginationApplication;
 use App\Models\User;
 use App\Services\Dashboard\ApplicationTurnaround;
+use App\Services\Dashboard\ExecutiveOverview;
 use App\Services\Dashboard\LoanScope;
 use App\Services\LoanOrigination\ApplicationTransitions;
 use Brick\Math\BigDecimal;
@@ -36,7 +37,9 @@ use Illuminate\Support\Facades\DB;
  *   a window function.
  * - `turnaround` is EB-D2's ApplicationTurnaround on the loans the
  *   applications became, so it reads as the executive dashboard does.
- * - `previous` holds the KPIs for the period of the same length just before.
+ * - `previous` holds the KPIs for the period of the same length just before,
+ *   and `changes` each KPI's change from it, worked out here by the executive
+ *   dashboard's rule (never in the browser).
  * - Money is a two-decimal string.
  * - `amount_approved` and `turnaround` are loan figures, so they read null
  *   for a caller without `loans:view`.
@@ -56,6 +59,9 @@ final class OriginationDashboard
         'expired' => 'expired',
     ];
 
+    /** KPIs that are rates (percent), so their change is in points. */
+    private const RATE_KPIS = ['completion_rate', 'approval_rate'];
+
     public function __construct(
         private readonly ApplicationTurnaround $turnaround,
         private readonly ApplicationPresenter $presenter,
@@ -74,12 +80,15 @@ final class OriginationDashboard
 
         $statuses = $this->statusCounts($branchIds, $start, $end);
         $loans = $viewer->can('loans:view');
+        $kpis = $this->kpis($branchIds, $start, $end, $loans, $statuses);
+        $previous = $this->kpis($branchIds, $previousStart, $start, $loans);
 
         return [
             'period' => ['from' => $start->toDateString(), 'to' => $end->copy()->subDay()->toDateString()],
             'previous_period' => ['from' => $previousStart->toDateString(), 'to' => $start->copy()->subDay()->toDateString()],
-            'kpis' => $this->kpis($branchIds, $start, $end, $loans, $statuses),
-            'previous' => $this->kpis($branchIds, $previousStart, $start, $loans),
+            'kpis' => $kpis,
+            'previous' => $previous,
+            'changes' => self::changes($kpis, $previous),
             'trends' => $this->trends($branchIds, $start, $end),
             'by_status' => collect(OriginationApplication::STATUSES)->map(fn (string $status) => [
                 'status' => $status,
@@ -161,6 +170,32 @@ final class OriginationDashboard
             'completion_rate' => $total === 0 ? null : $this->oneDecimal($startedSubmitted * 100 / $total),
             'approval_rate' => $approved + $rejected === 0 ? null : $this->oneDecimal($approved * 100 / ($approved + $rejected)),
         ];
+    }
+
+    /**
+     * Each KPI's change from the period before, by the executive dashboard's
+     * rule (ExecutiveOverview::change()): a percentage of the previous
+     * figure, or points for a rate, two places; null when either figure is
+     * missing (withheld included) or the previous one is zero.
+     *
+     * @param  array<string, int|string|float|null>  $kpis
+     * @param  array<string, int|string|float|null>  $previous
+     * @return array<string, array{change: ?float, change_unit: 'percent'|'points'}>
+     */
+    private static function changes(array $kpis, array $previous): array
+    {
+        $changes = [];
+
+        foreach ($kpis as $key => $value) {
+            $isRate = in_array($key, self::RATE_KPIS, true);
+
+            $changes[$key] = [
+                'change' => ExecutiveOverview::change($value, $previous[$key] ?? null, $isRate),
+                'change_unit' => $isRate ? 'points' : 'percent',
+            ];
+        }
+
+        return $changes;
     }
 
     /**

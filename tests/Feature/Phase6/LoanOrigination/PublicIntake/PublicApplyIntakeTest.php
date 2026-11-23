@@ -7,6 +7,7 @@ use App\Models\OriginationConsent;
 use App\Models\OriginationDocument;
 use App\Models\OriginationLink;
 use App\Models\OriginationNote;
+use App\Models\OriginationProductSetting;
 use App\Models\OriginationSetting;
 use App\Models\User;
 use App\Services\LoanOrigination\Intake\ApplicantIntake;
@@ -98,6 +99,40 @@ it('keeps the link\'s branch, and otherwise takes the applicant\'s active branch
 
     $north->forceFill(['is_active' => false])->save();
     loPubSave($this, $this->link, $this->token, $draft)->assertUnprocessable()->assertJsonValidationErrors('draft.personal.branch_id');
+});
+
+it('names the chosen product\'s required fields, filled or not, keyed as missing_fields is, and nothing before a product is chosen', function () {
+    $this->getJson("/api/public-apply/{$this->link->token}/draft", $this->applicantSession($this->token))
+        ->assertOk()->assertJsonPath('data.required_fields', []);
+
+    OriginationProductSetting::query()->where('loan_product_id', $this->product->id)
+        ->update(['required_fields' => ['employment.employer_name', 'personal.postal_code']]);
+    $draft = $this->completeDraft($this->product->id);
+    $draft['personal']['postal_code'] = '';
+
+    $saved = loPubSave($this, $this->link, $this->token, $draft)->assertOk()->json('data');
+
+    expect($saved['required_fields'])->toBe(['draft.employment.employer_name', 'draft.personal.postal_code'])
+        ->and(array_keys($saved['missing_fields']))->toBe(['draft.personal.postal_code']);
+
+    $draft['employment']['income_source'] = 'farmer';
+    $draft['personal']['postal_code'] = '1110';
+    loPubSave($this, $this->link, $this->token, $draft)->assertOk();
+
+    $state = $this->getJson("/api/public-apply/{$this->link->token}/draft", $this->applicantSession($this->token))->assertOk()->json('data');
+    expect($state['required_fields'])->toBe(['draft.employment.employer_name', 'draft.personal.postal_code'])
+        ->and($state['draft']['employment']['employer_name'])->toBe('Acme')
+        ->and(array_key_exists('draft.employment.employer_name', $state['missing_fields']))->toBeFalse();
+
+    $this->travel(61)->seconds();
+    $resumed = $this->verifyCode($this->link, (string) $this->requestCode($this->link, null, 'resume')->assertOk()->json('data.test_mode.code'), null, 'resume')
+        ->assertOk()->json('data.application');
+    expect($resumed['required_fields'])->toBe(['draft.employment.employer_name', 'draft.personal.postal_code']);
+});
+
+it('reads no required fields for a product that requires none', function () {
+    loPubSave($this, $this->link, $this->token, $this->completeDraft($this->product->id))
+        ->assertOk()->assertJsonPath('data.required_fields', []);
 });
 
 it('brings an incomplete draft back to draft when it is saved again', function () {

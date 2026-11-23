@@ -314,9 +314,10 @@ final class ExecutiveOverview
     /**
      * The change from `$previous` to `$value`: points for a ratio, else a
      * percentage of the previous value, two places; null when either is
-     * missing, or the previous value is zero (undefined).
+     * missing, or the previous value is zero (undefined). Public so the loan
+     * origination dashboard reads its changes by the same rule.
      */
-    private static function change(mixed $value, mixed $previous, bool $isRatio): ?float
+    public static function change(mixed $value, mixed $previous, bool $isRatio): ?float
     {
         if ($value === null || $previous === null) {
             return null;
