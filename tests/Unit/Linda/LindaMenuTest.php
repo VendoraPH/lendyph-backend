@@ -42,18 +42,14 @@ class LindaMenuTest extends TestCase
             'Savings → Savings Interest' => '/savings/interest',
             'Savings → Savings Auto-Credit' => '/savings/auto-credit',
             'Savings → Dormant Accounts' => '/savings/dormant',
-            'Savings → Savings Products' => '/savings/products',
-            'Savings → Savings Settings' => '/savings/settings',
             'Collateral → Collateral Listing' => '/collaterals',
             'Collateral → Collateral Entry' => '/collaterals/new',
             'GCash' => '/gcash',
             'Credit Scoring → Dashboard' => '/credit-scoring',
             'Credit Scoring → Member Scores' => '/credit-scoring/borrowers',
             'Credit Scoring → Credit Assessment' => '/credit-scoring/assessment',
-            'Credit Scoring → Scorecard Configuration' => '/credit-scoring/scorecard-configuration',
             'Credit Scoring → Risk Monitoring' => '/credit-scoring/risk-monitoring',
             'Credit Scoring → Score History' => '/credit-scoring/score-history',
-            'Credit Scoring → Settings' => '/credit-scoring/settings',
             'CDA Compliance → CDA Dashboard' => '/cda',
             'CDA Compliance → Compliance Calendar' => '/cda/calendar',
             'CDA Compliance → CAPR' => '/cda/capr',
@@ -68,7 +64,6 @@ class LindaMenuTest extends TestCase
             'CDA Compliance → ATIR & ABR' => '/cda/tax-reports',
             'CDA Compliance → Compliance Documents' => '/cda/documents',
             'CDA Compliance → Submission History' => '/cda/submissions',
-            'CDA Compliance → CDA Settings' => '/cda/settings',
             'Member Portal → Portal Access' => '/member-portal',
             'Member Portal → Portal Requests' => '/member-portal/requests',
             'Member Portal → Portal Announcements' => '/member-portal/announcements',
@@ -86,7 +81,6 @@ class LindaMenuTest extends TestCase
             'Accounting → Period Closing' => '/accounting/period-closing',
             'Accounting → Opening Balances' => '/accounting/opening-balances',
             'Accounting → Allowance for Credit Losses' => '/accounting/allowance',
-            'Accounting → Settings' => '/accounting/settings',
             'User Management' => '/users',
             'Reports' => '/reports',
             'Documents' => '/printables',
@@ -102,6 +96,12 @@ class LindaMenuTest extends TestCase
             'Settings → Role and Permissions' => '/settings/user-roles',
             'Settings → Approval Workflow' => '/settings/approval-workflow',
             'Settings → GCash' => '/settings/gcash',
+            'Settings → Accounting' => '/settings/accounting',
+            'Settings → Savings Products' => '/settings/savings-products',
+            'Settings → Savings' => '/settings/savings',
+            'Settings → CDA' => '/settings/cda',
+            'Settings → Scorecard Configuration' => '/settings/scorecard-configuration',
+            'Settings → Credit Scoring' => '/settings/credit-scoring',
             'Settings → Member Portal' => '/settings/member-portal',
             'Settings → Linda' => '/settings/linda',
             'Settings → Data Import' => '/settings/data-import',
@@ -116,6 +116,14 @@ class LindaMenuTest extends TestCase
         $this->assertSame(['cda:view', 'branches:view_all', 'cda:view_mediation'], $needs['CDA Compliance → Mediation & Conciliation']);
         $this->assertSame(['settings:view', 'imports:process'], $needs['Settings → Data Import']);
         $this->assertSame(['accounting:view', 'expenses:view'], $needs['Accounting → Expenses & Payables']);
+
+        // Module settings moved under Settings (frontend #650) keep their own permissions.
+        $this->assertSame(['accounting:view', 'accounting:settings'], $needs['Settings → Accounting']);
+        $this->assertSame(['savings:view', 'savings:settings'], $needs['Settings → Savings Products']);
+        $this->assertSame(['savings:view', 'savings:settings'], $needs['Settings → Savings']);
+        $this->assertSame(['cda:view', 'branches:view_all'], $needs['Settings → CDA']);
+        $this->assertSame(['credit_scoring:view', 'credit_scoring:settings'], $needs['Settings → Scorecard Configuration']);
+        $this->assertSame(['credit_scoring:view', 'credit_scoring:settings'], $needs['Settings → Credit Scoring']);
     }
 
     /**
@@ -140,6 +148,19 @@ class LindaMenuTest extends TestCase
             'ceb unsaon pag-add og bag-ong member' => ['Unsaon pag-add og bag-ong member?', ['Members → New Member']],
             'ceb asa makita ang trial balance' => ['Asa nako makita ang trial balance?', ['Accounting → Trial Balance']],
             'ceb unsaon paghimo og loan application' => ['Unsaon paghimo og loan application?', ['Loans → New Application']],
+            // Module settings under Settings (frontend #650).
+            'en savings settings' => ['Where are the savings settings?', ['Settings → Savings']],
+            'en savings products' => ['How do I add a savings product?', ['Settings → Savings Products']],
+            'en cda settings page' => ['Where is the CDA settings page?', ['Settings → CDA']],
+            'en accounting settings' => ['Where are the accounting settings?', ['Settings → Accounting']],
+            'en credit scoring settings' => ['Where are the credit scoring settings?', ['Settings → Credit Scoring']],
+            'en scorecard' => ['Where is the scorecard?', ['Settings → Scorecard Configuration']],
+            'tl savings settings' => ['Saan ang savings settings?', ['Settings → Savings']],
+            'ceb cda settings' => ['Asa makita ang CDA settings?', ['Settings → CDA']],
+            // A module's own name still finds the module, not its settings.
+            'en savings' => ['Where is savings?', ['Savings → Savings Accounts']],
+            'en accounting' => ['Where is accounting?', ['Accounting → Dashboard']],
+            'en credit scoring' => ['Where is credit scoring?', ['Credit Scoring → Dashboard']],
         ];
     }
 
@@ -162,6 +183,7 @@ class LindaMenuTest extends TestCase
             'a record number' => ['Where is LN-000123?'],
             'an unknown task' => ['How do I approve a loan?'],
             'nothing asked' => ['Where?'],
+            'a module settings page by its bare name' => ['Where is CDA?'],
         ];
     }
 
