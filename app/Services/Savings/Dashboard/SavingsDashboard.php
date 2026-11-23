@@ -3,6 +3,7 @@
 namespace App\Services\Savings\Dashboard;
 
 use App\Services\Savings\Reports\GlControl;
+use App\Services\Savings\Reports\SavingsReports;
 use App\Services\Savings\SavingsMath;
 use Carbon\CarbonImmutable;
 
@@ -13,8 +14,10 @@ use Carbon\CarbonImmutable;
  *
  * - `kpis`: balances and time deposits at the end of the period (`date_to`),
  *   the period's flows ({@see DepositFigures}), accounts by today's status
- *   (statuses keep no history), time deposits maturing within 30 days of
- *   `date_to`, and the GL control as of `date_to`.
+ *   (statuses keep no history), interest accrued and not yet credited as of
+ *   today (the Balances report's `total_accrued_interest`, whatever the
+ *   period), time deposits maturing within 30 days of `date_to`, and the GL
+ *   control as of `date_to`.
  * - `series`: up to 12 months ending with `date_to`'s month, from the first
  *   month the scope holds a record: each month's closing balances (at
  *   `date_to` for the last) and flows. The balances are carried forward from
@@ -37,6 +40,7 @@ class SavingsDashboard
         private readonly DepositFigures $figures,
         private readonly DepositSummary $summary,
         private readonly GlControl $control,
+        private readonly SavingsReports $reports,
     ) {}
 
     /** @return array<string, mixed> */
@@ -67,6 +71,7 @@ class SavingsDashboard
                     'tax' => SavingsMath::pesos($flows['tax']),
                     'net' => SavingsMath::pesos($flows['interest'] - $flows['tax']),
                 ],
+                'accrued_interest' => SavingsMath::pesos($this->reports->accruedInterestToday($scope)),
                 'fees_charged' => ['count' => $flows['fee_count'], 'amount' => SavingsMath::pesos($flows['fees'])],
                 'share_capital_transfers' => ['count' => $flows['share_capital_count'], 'amount' => SavingsMath::pesos($flows['share_capital'])],
                 'time_deposit_interest_paid' => ['gross' => SavingsMath::pesos($tdInterest['gross']), 'tax' => SavingsMath::pesos($tdInterest['tax'])],

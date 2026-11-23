@@ -3,8 +3,10 @@
 namespace Tests\Feature\Savings\Insight;
 
 use App\Models\TimeDeposit;
+use App\Models\User;
 use App\Services\Savings\Dashboard\DepositFigures;
 use App\Services\Savings\Dashboard\SavingsDashboard;
+use App\Services\Savings\Reports\SavingsReports;
 use App\Services\Savings\SavingsLedger;
 use App\Services\Savings\SavingsMath;
 use Illuminate\Support\Carbon;
@@ -54,6 +56,32 @@ class SavingsDashboardTest extends TestCase
             ->assertJsonPath('data.kpis.interest_credited', ['gross' => '12.34', 'tax' => '2.47', 'net' => '9.87'])
             ->assertJsonPath('data.kpis.time_deposit_interest_paid', ['gross' => '80.00', 'tax' => '16.00'])
             ->assertJsonPath('data.kpis.maturing_30_days', ['count' => 1, 'principal' => '10000.00', 'maturity_amount' => '10050.00']);
+    }
+
+    /**
+     * Accrued interest (TASK 35): today's figure, as the Balances report's
+     * `total_accrued_interest` for the same branches and filters, whatever
+     * period the dashboard shows.
+     */
+    public function test_accrued_interest_is_the_balances_reports_figure_for_the_same_scope(): void
+    {
+        $dashboard = fn (User $user, string $query = ''): mixed => $this->actingAs($user)->getJson('/api/savings/dashboard'.$query)->assertOk()->json('data.kpis.accrued_interest');
+        $report = fn (User $user, string $query = ''): mixed => $this->actingAs($user)->getJson('/api/reports/savings/balances'.$query)->assertOk()->json('totals.total_accrued_interest');
+
+        $all = $report($this->admin);
+        $this->assertIsString($all);
+        $this->assertNotSame('0.00', $all, 'The history has interest accruing.');
+        $this->assertSame($all, $dashboard($this->admin));
+        $this->assertSame($all, $dashboard($this->admin, '?from=2026-10-01&to=2026-10-31'), 'Always as of today.');
+
+        foreach (["?branch_id={$this->far->id}", "?product_id={$this->junior->id}"] as $filter) {
+            $this->assertSame($report($this->admin, $filter), $dashboard($this->admin, $filter), $filter);
+        }
+
+        $viewer = $this->userWith(['savings:view', 'reports:view']);
+        $mine = $report($viewer);
+        $this->assertSame($mine, $dashboard($viewer));
+        $this->assertNotSame($all, $mine, "Far Branch's accounts are left out.");
     }
 
     public function test_the_period_defaults_to_this_month_to_today_and_refuses_bad_dates(): void
@@ -247,7 +275,9 @@ class SavingsDashboardTest extends TestCase
 
     /**
      * The series is worked out from one monthly flows query and the opening
-     * balances, so twelve months cost the same queries as three.
+     * balances, so twelve months cost the same queries as three. The accrued
+     * interest figure (TASK 35) adds the Balances report's own reads, one set
+     * per group of accounts sharing a first uncredited day, never per month.
      */
     public function test_the_query_count_does_not_grow_with_the_series(): void
     {
@@ -268,8 +298,14 @@ class SavingsDashboardTest extends TestCase
         $this->onDay('2027-12-15');
         $twelveMonths = $queries();
 
+        DB::flushQueryLog();
+        DB::enableQueryLog();
+        app(SavingsReports::class)->accruedInterestToday(['branch_ids' => null]);
+        $accrued = count(DB::getQueryLog());
+        DB::disableQueryLog();
+
         $this->assertSame($threeMonths, $twelveMonths);
-        $this->assertLessThanOrEqual(60, $twelveMonths);
+        $this->assertLessThanOrEqual(60 + $accrued, $twelveMonths);
     }
 
     /**
