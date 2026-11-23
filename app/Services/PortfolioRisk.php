@@ -267,6 +267,11 @@ final class PortfolioRisk
         $base->columns = null;
         $base->bindings['select'] = [];
 
-        return $base->reorder()->whereIn('loans.status', Loan::COLLECTIBLE_STATUSES)->select('loans.id');
+        // The caller's query as a subquery, so the status filter applies to
+        // every branch of any top-level OR in it.
+        return DB::table('loans')
+            ->whereIn('loans.id', $base->reorder()->select('loans.id'))
+            ->whereIn('loans.status', Loan::COLLECTIBLE_STATUSES)
+            ->select('loans.id');
     }
 }

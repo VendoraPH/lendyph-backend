@@ -212,6 +212,21 @@ class ParBasisTest extends TestCase
         $this->assertSame(2, $risk->parBy($everyLoan, ['loans.branch_id'])[(string) $this->branch->id]['par_1']['loans']);
     }
 
+    public function test_portfolio_risk_keeps_the_basis_on_every_branch_of_a_caller_s_or(): void
+    {
+        // A caller whose own conditions end in a top-level OR: the completed
+        // loan matches its first branch, and still stays out.
+        $loans = Loan::query()
+            ->where('loans.id', $this->loans['completed']->id)
+            ->orWhere('loans.id', $this->loans['late']->id);
+
+        $par = app(PortfolioRisk::class)->par($loans);
+
+        $this->assertEquals(60000, $par['portfolio_principal']);
+        $this->assertEquals(['amount' => 60000.0, 'ratio' => 100.0, 'loans' => 1], $par['par_1']);
+        $this->assertSame([$this->loans['late']->id], app(PortfolioRisk::class)->parLoans($loans, 'par_1')->get()->modelKeys());
+    }
+
     private function loan(int $daysLate, string $status = 'released'): Loan
     {
         $loan = $this->createReleasedLoan();
