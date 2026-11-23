@@ -14,6 +14,9 @@ use App\Models\User;
  * Every page is listed, the module pages shown only while their screens are
  * switched on (Savings, CDA, Credit Scoring, Member Portal, Linda,
  * Penalties) included: the backend can't read the frontend's build flags.
+ * Each module's settings page sits under Settings (frontend #650: Settings →
+ * Accounting, Savings Products, Savings, CDA, Scorecard Configuration and
+ * Credit Scoring), with its module's permissions as before.
  * Two pages are left out: Amortization BINHS (one cooperative's page) and
  * Loan Origination (no permission behind it on the server yet).
  *
@@ -27,9 +30,12 @@ final class LindaMenu
 {
     /**
      * [section, page (null for a section with no pages), route, the
-     * permissions needed, extra task phrases].
+     * permissions needed, extra task phrases, and whether the page's title
+     * alone names it (true when left out)]. A module's settings page under
+     * Settings is named "Savings", "CDA": alone, those words name the module,
+     * so only "Settings Savings" and its task phrases ("savings settings") find it.
      *
-     * @var list<array{0: string, 1: ?string, 2: string, 3: list<string>, 4?: list<string>}>
+     * @var list<array{0: string, 1: ?string, 2: string, 3: list<string>, 4?: list<string>, 5?: bool}>
      */
     private const ENTRIES = [
         ['Dashboard', null, '/dashboard', ['dashboard:view'], ['home']],
@@ -56,18 +62,14 @@ final class LindaMenu
         ['Savings', 'Savings Interest', '/savings/interest', ['savings:view'], ['interest run', 'savings interest run']],
         ['Savings', 'Savings Auto-Credit', '/savings/auto-credit', ['savings:view']],
         ['Savings', 'Dormant Accounts', '/savings/dormant', ['savings:view', 'reports:view'], ['dormant savings account']],
-        ['Savings', 'Savings Products', '/savings/products', ['savings:view', 'savings:settings'], ['add savings product']],
-        ['Savings', 'Savings Settings', '/savings/settings', ['savings:view', 'savings:settings']],
         ['Collateral', 'Collateral Listing', '/collaterals', ['collaterals:view'], ['collateral list', 'list of collateral']],
         ['Collateral', 'Collateral Entry', '/collaterals/new', ['collaterals:view', 'collaterals:create'], ['add collateral']],
         ['GCash', null, '/gcash', ['gcash:view'], ['cash in', 'cash out', 'gcash transaction']],
         ['Credit Scoring', 'Dashboard', '/credit-scoring', ['credit_scoring:view']],
         ['Credit Scoring', 'Member Scores', '/credit-scoring/borrowers', ['credit_scoring:view'], ['credit score', 'member credit score']],
         ['Credit Scoring', 'Credit Assessment', '/credit-scoring/assessment', ['credit_scoring:view']],
-        ['Credit Scoring', 'Scorecard Configuration', '/credit-scoring/scorecard-configuration', ['credit_scoring:view', 'credit_scoring:settings'], ['scorecard']],
         ['Credit Scoring', 'Risk Monitoring', '/credit-scoring/risk-monitoring', ['credit_scoring:view']],
         ['Credit Scoring', 'Score History', '/credit-scoring/score-history', ['credit_scoring:view']],
-        ['Credit Scoring', 'Settings', '/credit-scoring/settings', ['credit_scoring:view', 'credit_scoring:settings']],
         ['CDA Compliance', 'CDA Dashboard', '/cda', ['cda:view', 'branches:view_all']],
         ['CDA Compliance', 'Compliance Calendar', '/cda/calendar', ['cda:view', 'branches:view_all'], ['cda calendar']],
         ['CDA Compliance', 'CAPR', '/cda/capr', ['cda:view', 'branches:view_all']],
@@ -82,7 +84,6 @@ final class LindaMenu
         ['CDA Compliance', 'ATIR & ABR', '/cda/tax-reports', ['cda:view', 'branches:view_all', 'cda:view_tax'], ['atir', 'abr', 'cda tax report']],
         ['CDA Compliance', 'Compliance Documents', '/cda/documents', ['cda:view', 'branches:view_all'], ['cda document']],
         ['CDA Compliance', 'Submission History', '/cda/submissions', ['cda:view', 'branches:view_all'], ['cda submission']],
-        ['CDA Compliance', 'CDA Settings', '/cda/settings', ['cda:view', 'branches:view_all']],
         ['Member Portal', 'Portal Access', '/member-portal', ['member_portal:view'], ['activation code', 'portal activation code']],
         ['Member Portal', 'Portal Requests', '/member-portal/requests', ['member_portal:requests']],
         ['Member Portal', 'Portal Announcements', '/member-portal/announcements', ['member_portal:announcements'], ['add announcement']],
@@ -100,7 +101,6 @@ final class LindaMenu
         ['Accounting', 'Period Closing', '/accounting/period-closing', ['accounting:view', 'accounting:close'], ['close period', 'close month', 'year end close']],
         ['Accounting', 'Opening Balances', '/accounting/opening-balances', ['accounting:view', 'accounting:settings'], ['opening balance']],
         ['Accounting', 'Allowance for Credit Losses', '/accounting/allowance', ['accounting:view'], ['allowance']],
-        ['Accounting', 'Settings', '/accounting/settings', ['accounting:view', 'accounting:settings']],
         ['User Management', null, '/users', ['users:view'], ['user', 'add user', 'staff account', 'add staff account']],
         ['Reports', null, '/reports', ['reports:view'], ['report']],
         ['Documents', null, '/printables', ['reports:view'], ['document', 'printable', 'print document']],
@@ -116,6 +116,12 @@ final class LindaMenu
         ['Settings', 'Role and Permissions', '/settings/user-roles', ['settings:view'], ['role', 'permission', 'user role', 'add role']],
         ['Settings', 'Approval Workflow', '/settings/approval-workflow', ['settings:view'], ['approval chain', 'approver']],
         ['Settings', 'GCash', '/settings/gcash', ['settings:view'], ['gcash setting', 'gcash charge']],
+        ['Settings', 'Accounting', '/settings/accounting', ['accounting:view', 'accounting:settings'], ['accounting settings', 'default accounts'], false],
+        ['Settings', 'Savings Products', '/settings/savings-products', ['savings:view', 'savings:settings'], ['add savings product']],
+        ['Settings', 'Savings', '/settings/savings', ['savings:view', 'savings:settings'], ['savings settings'], false],
+        ['Settings', 'CDA', '/settings/cda', ['cda:view', 'branches:view_all'], ['cda settings'], false],
+        ['Settings', 'Scorecard Configuration', '/settings/scorecard-configuration', ['credit_scoring:view', 'credit_scoring:settings'], ['scorecard']],
+        ['Settings', 'Credit Scoring', '/settings/credit-scoring', ['credit_scoring:view', 'credit_scoring:settings'], ['credit scoring settings'], false],
         ['Settings', 'Member Portal', '/settings/member-portal', ['settings:view', 'member_portal:settings', 'branches:view_all'], ['member portal setting']],
         ['Settings', 'Linda', '/settings/linda', ['settings:view', 'linda:settings', 'branches:view_all'], ['linda setting', 'linda model']],
         ['Settings', 'Data Import', '/settings/data-import', ['settings:view', 'imports:process'], ['import', 'csv import', 'import member', 'import loan']],
@@ -204,7 +210,7 @@ final class LindaMenu
         $entries = [];
         foreach (self::ENTRIES as $row) {
             [$section, $page, $url, $needs] = $row;
-            $phrases = [...($row[4] ?? []), $page ?? $section];
+            $phrases = [...($row[4] ?? []), ...(($row[5] ?? true) ? [$page ?? $section] : [])];
 
             if ($page !== null) {
                 $phrases[] = $section.' '.$page;

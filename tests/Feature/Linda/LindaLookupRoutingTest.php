@@ -160,7 +160,8 @@ class LindaLookupRoutingTest extends LindaAnswersTestCase
 
     /**
      * D2's cost: one indexed read per table (members, staff and co-makers by
-     * last name, walk-ins by full name).
+     * last name, walk-ins by full name), and one read of the unlinked CDA
+     * officers by name (round 4; a small register).
      */
     public function test_the_full_name_check_reads_members_and_staff_by_an_indexed_last_name(): void
     {
@@ -175,7 +176,8 @@ class LindaLookupRoutingTest extends LindaAnswersTestCase
         DB::disableQueryLog();
 
         $this->assertSame(LindaNameCheck::MEMBER, $hit?->kind);
-        $this->assertCount(4, $queries);
+        $this->assertCount(5, $queries);
+        $this->assertStringContainsString('cda_officers', $queries[4]['query']);
     }
 
     /**

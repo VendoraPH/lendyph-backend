@@ -36,7 +36,8 @@ class StaffForAmlaCasesTest extends TestCase
     {
         $caller = $this->amlaUser(['amla:cases', 'branches:view_all']);
         $colleague = $this->amlaUser(['amla:cases', 'branches:view_all']);
-        $colleague->forceFill(['first_name' => 'Rosa', 'last_name' => 'Reyes', 'email' => 'rosa@example.test'])->save();
+        // A made-up surname no factory name can contain, so the search below finds her alone.
+        $colleague->forceFill(['first_name' => 'Rosa', 'last_name' => 'Xyzzavelle', 'email' => 'rosa@example.test'])->save();
         $elsewhere = $this->amlaUser(['amla:cases', 'branches:view_all']);
         $elsewhere->forceFill(['branch_id' => Branch::factory()->create()->id])->save();
         $branchOnly = $this->amlaUser(['amla:cases']);
@@ -60,7 +61,8 @@ class StaffForAmlaCasesTest extends TestCase
             $this->assertSame(['id', 'full_name'], array_keys($row));
         }
         $this->assertStringNotContainsString('rosa@example.test', $response->getContent());
-        $this->assertSame([$colleague->id], $this->ids($caller, '&search=Rosa'));
+        $this->assertSame([$colleague->id], $this->ids($caller, '&search=Xyzzavelle'));
+        $this->assertSame([$colleague->id], $this->ids($caller, '&search=Rosa Xyzzavelle'));
     }
 
     public function test_only_a_head_office_case_holder_may_ask_and_without_it_the_loan_rule_stands(): void

@@ -11,6 +11,7 @@ use App\Models\ReminderSetting;
 use App\Models\User;
 use App\Services\Reminders\ReminderClock;
 use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Http\Request;
 use Illuminate\Support\Carbon;
 
@@ -27,6 +28,9 @@ use Illuminate\Support\Carbon;
  * - `daily` is the 7 days ending on the date, oldest first.
  * - `sms` totals the date's month; the credit balance is not known (null).
  * - `test_mode` and `enabled` let a view-only role see the test-mode banner.
+ *
+ * counts() and failed() read the same figures for a range of days (Linda
+ * round 4): the day's counts are counts() over that one day.
  */
 final class ReminderDashboard
 {
@@ -47,34 +51,16 @@ final class ReminderDashboard
     {
         $date = Carbon::parse($filters['date'] ?? ReminderClock::today()->toDateString(), ReminderSetting::TIMEZONE)->startOfDay();
         $day = $date->toDateString();
-        $listFilters = array_diff_key($filters, array_flip(['date', 'date_from', 'date_to', 'status']));
+        $listFilters = self::listFilters($filters);
 
-        $items = fn (): Builder => $this->scope->filter($this->scope->visible(ReminderQueueItem::query(), $user), $listFilters, 'fire_date')->where('fire_date', $day);
+        $items = fn (): Builder => $this->items($user, $listFilters, $day, $day);
         $messages = fn (bool $withChannel = true): Builder => $this->scope->filter($this->scope->visible(ReminderMessage::query(), $user), $listFilters, 'send_date', $withChannel);
-
-        $handed = $messages()->where('send_date', $day)->whereIn('status', self::HANDED_OVER)
-            ->toBase()->selectRaw('channel, test_mode, COUNT(*) as aggregate')->groupBy('channel', 'test_mode')->get();
-        $count = fn (?string $channel, bool $logged) => (int) $handed
-            ->filter(fn ($row) => ($channel === null || $row->channel === $channel) && (bool) $row->test_mode === $logged)
-            ->sum('aggregate');
 
         $monthSms = fn (): Builder => $messages(false)->where('channel', 'sms')
             ->whereBetween('send_date', [$date->copy()->startOfMonth()->toDateString(), $date->copy()->endOfMonth()->toDateString()]);
 
         return [
-            'counts' => [
-                'today' => $items()->count(),
-                'sent' => $count(null, false),
-                'logged' => $count(null, true),
-                'pending' => $items()->whereIn('status', ['scheduled', 'queued', 'processing'])->count(),
-                'failed' => $items()->where('status', 'failed')->count(),
-                'sms_sent' => $count('sms', false),
-                'sms_logged' => $count('sms', true),
-                'emails_sent' => $count('email', false),
-                'emails_logged' => $count('email', true),
-                'upcoming_due' => $items()->where('due_date', '>=', $day)->distinct()->count('loan_id'),
-                'overdue' => $items()->where('due_date', '<', $day)->distinct()->count('loan_id'),
-            ],
+            'counts' => $this->counts($user, $filters, $day, $day),
             'sms' => [
                 'credits_remaining' => null,
                 'low_credit_threshold' => null,
@@ -91,9 +77,97 @@ final class ReminderDashboard
                     ->limit(25)->get(),
             )->resolve($request),
             'global_pause' => $this->globalPause($request),
-            'test_mode' => $this->mode->testMode(),
-            'enabled' => (bool) ReminderSetting::current()->enabled,
+            ...$this->mode(),
         ];
+    }
+
+    /**
+     * The dashboard's counts for the days `$from` to `$to` (Manila, both
+     * included), over the caller's visible loans and the list filters:
+     * reminders planned for those days (`today`), pending and failed among
+     * them, messages handed over on them, "sent" apart from "logged" and by
+     * channel, and the loans whose period was due on its reminder's day or
+     * later (`upcoming_due`) or before it (`overdue`).
+     *
+     * @param  array<string, mixed>  $filters
+     * @return array{today: int, sent: int, logged: int, pending: int, failed: int, sms_sent: int, sms_logged: int, emails_sent: int, emails_logged: int, upcoming_due: int, overdue: int}
+     */
+    public function counts(User $user, array $filters, string $from, string $to): array
+    {
+        $listFilters = self::listFilters($filters);
+        $items = fn (): Builder => $this->items($user, $listFilters, $from, $to);
+
+        $handed = $this->scope->filter($this->scope->visible(ReminderMessage::query(), $user), $listFilters, 'send_date')
+            ->whereBetween('send_date', [$from, $to])->whereIn('status', self::HANDED_OVER)
+            ->toBase()->selectRaw('channel, test_mode, COUNT(*) as aggregate')->groupBy('channel', 'test_mode')->get();
+        $count = fn (?string $channel, bool $logged) => (int) $handed
+            ->filter(fn ($row) => ($channel === null || $row->channel === $channel) && (bool) $row->test_mode === $logged)
+            ->sum('aggregate');
+
+        return [
+            'today' => $items()->count(),
+            'sent' => $count(null, false),
+            'logged' => $count(null, true),
+            'pending' => $items()->whereIn('status', ['scheduled', 'queued', 'processing'])->count(),
+            'failed' => $items()->where('status', 'failed')->count(),
+            'sms_sent' => $count('sms', false),
+            'sms_logged' => $count('sms', true),
+            'emails_sent' => $count('email', false),
+            'emails_logged' => $count('email', true),
+            'upcoming_due' => $items()->whereColumn('due_date', '>=', 'fire_date')->distinct()->count('loan_id'),
+            'overdue' => $items()->whereColumn('due_date', '<', 'fire_date')->distinct()->count('loan_id'),
+        ];
+    }
+
+    /**
+     * The failed reminders of the days `$from` to `$to` (the ones counts()
+     * counts as `failed`), the latest day first and in the dashboard's order
+     * within a day, at most `$limit`, with their member and loan.
+     *
+     * @param  array<string, mixed>  $filters
+     * @return Collection<int, ReminderQueueItem>
+     */
+    public function failed(User $user, array $filters, string $from, string $to, int $limit): Collection
+    {
+        return $this->items($user, self::listFilters($filters), $from, $to)
+            ->where('status', 'failed')
+            ->with(['loan:id,loan_account_number,application_number', 'borrower:id,branch_id,first_name,middle_name,last_name,suffix'])
+            ->orderByDesc('fire_date')->orderBy('scheduled_at')->orderBy('id')
+            ->limit($limit)
+            ->get();
+    }
+
+    /**
+     * Whether this deployment only logs its messages (`test_mode`), and
+     * whether reminders are on (`enabled`).
+     *
+     * @return array{test_mode: bool, enabled: bool}
+     */
+    public function mode(): array
+    {
+        return ['test_mode' => $this->mode->testMode(), 'enabled' => (bool) ReminderSetting::current()->enabled];
+    }
+
+    /**
+     * The visible queue rows planned for the days `$from` to `$to`.
+     *
+     * @param  array<string, mixed>  $listFilters
+     * @return Builder<ReminderQueueItem>
+     */
+    private function items(User $user, array $listFilters, string $from, string $to): Builder
+    {
+        return $this->scope->filter($this->scope->visible(ReminderQueueItem::query(), $user), $listFilters, 'fire_date')->whereBetween('fire_date', [$from, $to]);
+    }
+
+    /**
+     * The filters the counts apply: every one but the dates and `status`.
+     *
+     * @param  array<string, mixed>  $filters
+     * @return array<string, mixed>
+     */
+    private static function listFilters(array $filters): array
+    {
+        return array_diff_key($filters, array_flip(['date', 'date_from', 'date_to', 'status']));
     }
 
     /**

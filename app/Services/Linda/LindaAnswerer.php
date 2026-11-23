@@ -21,6 +21,7 @@ use App\Services\Linda\Answers\LoanLookupAnswer;
 use App\Services\Linda\Answers\LoanSummaryAnswer;
 use App\Services\Linda\Answers\LookupAnswer;
 use App\Services\Linda\Answers\MemberLookupAnswer;
+use App\Services\Linda\Answers\MemberRemindersAnswer;
 use App\Services\Linda\Answers\MemberSummaryAnswer;
 use App\Services\Linda\Answers\NotYetAnswer;
 use App\Services\Linda\Answers\OfficerPerformanceAnswer;
@@ -28,6 +29,7 @@ use App\Services\Linda\Answers\OverdueAccountsAnswer;
 use App\Services\Linda\Answers\PaymentsAnswer;
 use App\Services\Linda\Answers\PortfolioSummaryAnswer;
 use App\Services\Linda\Answers\ReceiptLookupAnswer;
+use App\Services\Linda\Answers\ReminderSummaryAnswer;
 use App\Services\Linda\Answers\SavingsSummaryAnswer;
 use App\Services\Linda\Answers\ShareCapitalSummaryAnswer;
 use App\Services\Linda\Answers\UnsupportedAnswer;
@@ -68,6 +70,7 @@ final class LindaAnswerer
         'savings_summary' => SavingsSummaryAnswer::class,
         'share_capital_summary' => ShareCapitalSummaryAnswer::class,
         'cda_summary' => CdaSummaryAnswer::class,
+        'reminder_summary' => ReminderSummaryAnswer::class,
     ];
 
     /** The record numbers a lookup reads: receipts, loans (LN-, LA-) and members. */
@@ -132,9 +135,10 @@ final class LindaAnswerer
      * branches, never by the model. By its number when it has one: a member
      * (BRW-), a loan (LN-, LA-) or a receipt (RCP-); else by the member's
      * name. A member named in a loan lookup is answered with the member and
-     * their loans; one named in a receipt lookup, with their latest payments.
-     * A number Linda doesn't look up gets a fixed reply, and a lookup that
-     * names nothing asks for the record.
+     * their loans; one named in a receipt lookup, with their latest payments;
+     * one in a lookup about reminders, with their latest reminders. A number
+     * Linda doesn't look up gets a fixed reply, and a lookup that names nothing
+     * asks for the record.
      */
     public function lookup(User $user, LindaLookupRequest $request): LindaReply
     {
@@ -152,6 +156,7 @@ final class LindaAnswerer
             in_array($prefix, ['LN', Loan::CODE_PREFIX], true) => LoanLookupAnswer::class,
             $request->kind === LindaLookupRequest::RECEIPT => ReceiptLookupAnswer::class,
             $request->kind === LindaLookupRequest::LOAN && $code === '' && $name === '' => LoanLookupAnswer::class,
+            $request->reminders && $request->kind === LindaLookupRequest::MEMBER => MemberRemindersAnswer::class,
             default => MemberLookupAnswer::class,
         });
 
@@ -167,7 +172,7 @@ final class LindaAnswerer
             return new LindaReply($answer->intent()->value, LindaWording::whichRecord($request->kind), 'no_target', answerFunction: $answer->name());
         }
 
-        return $answer->find($user, new LindaLookupRequest($request->kind, $request->intent, $code === '' ? null : $code, $name === '' ? null : $name));
+        return $answer->find($user, new LindaLookupRequest($request->kind, $request->intent, $code === '' ? null : $code, $name === '' ? null : $name, $request->reminders));
     }
 
     /** What Linda can answer, with the five suggested questions. */

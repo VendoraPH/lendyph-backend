@@ -54,6 +54,10 @@ use Throwable;
  * A follow-up keeps the period and branch of the question it follows
  * (LindaFollowUp, the rule `linda:evaluate` scores).
  *
+ * A member lookup, by code, by the lookup parser or by the full-name check,
+ * that mentions reminders ("Did Juan Dela Cruz receive his reminder?") is
+ * answered with that member's reminders, on the server like every lookup.
+ *
  * Errors answer through LindaHttpError: `monthly_limit` at the cap,
  * `ai_unavailable` when the model can't be asked and `data_unavailable` when
  * the figures can't be read. No question, answer or exception text is ever
@@ -72,6 +76,9 @@ final class LindaAssistant
 
     /** How many times a question is read again after a branch or product name is taken out. */
     private const REREAD_MAX = 3;
+
+    /** Words that make a member lookup about the member's payment reminders. */
+    private const REMINDER_WORDS = '/(?<![\pL\pN])(?:reminders?|paalala|pahinumdom|pahimangno|sms)(?![\pL\pN])/iu';
 
     public function __construct(
         private readonly LindaAnswerer $answerer,
@@ -119,7 +126,7 @@ final class LindaAssistant
         if ($lookup !== null) {
             $log->source = LindaQuestion::SOURCE_LOOKUP;
 
-            return $this->lookedUp($log, $started, $user, $lookup);
+            return $this->lookedUp($log, $started, $user, self::aboutReminders($lookup, $question));
         }
 
         if (! in_array(config('linda.driver'), ['fake', 'anthropic'], true)) {
@@ -180,6 +187,19 @@ final class LindaAssistant
         }
 
         return $lookup;
+    }
+
+    /**
+     * A member lookup that names its member and mentions reminders asks for
+     * that member's reminders; any other lookup is kept as it is.
+     */
+    private static function aboutReminders(LindaLookupRequest $lookup, #[\SensitiveParameter] string $question): LindaLookupRequest
+    {
+        if ($lookup->kind !== LindaLookupRequest::MEMBER || ($lookup->code === null && $lookup->name === null) || preg_match(self::REMINDER_WORDS, $question) !== 1) {
+            return $lookup;
+        }
+
+        return new LindaLookupRequest($lookup->kind, $lookup->intent, $lookup->code, $lookup->name, true);
     }
 
     /**
@@ -255,15 +275,16 @@ final class LindaAssistant
      * lookup (with no target when the read was capped); for a staff user, the
      * officer performance answer when it has officer or ranking words, for the
      * period it names (this month by default), else a fixed "not yet"; for a
-     * co-maker or a walk-in, a fixed "not yet". Any other capped read gets the
-     * neutral "not yet": it doesn't mean someone was named.
+     * co-maker, a walk-in or an unlinked CDA officer, a fixed "not yet". Any
+     * other capped read gets the neutral "not yet": it doesn't mean someone was
+     * named.
      *
      * @throws LindaHttpError data_unavailable
      */
     private function namedPerson(LindaQuestion $log, int $started, User $user, #[\SensitiveParameter] string $question, LindaNameCheck $named): LindaReply
     {
         if ($named->kind === LindaNameCheck::MEMBER) {
-            return $this->lookedUp($log, $started, $user, new LindaLookupRequest(LindaLookupRequest::MEMBER, LindaIntent::BorrowerLookup, null, $named->name));
+            return $this->lookedUp($log, $started, $user, self::aboutReminders(new LindaLookupRequest(LindaLookupRequest::MEMBER, LindaIntent::BorrowerLookup, null, $named->name), $question));
         }
 
         // A capped read named no one in particular: a neutral reply, kept local.

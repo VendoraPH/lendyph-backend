@@ -14,12 +14,22 @@ use App\Services\ReportService;
 /**
  * "How many active loans do we have?": released plus ongoing loans as of
  * today, the Portfolio Summary's `active_loans` with each branch's
- * `active_loan_count` (ReportService::loanBalanceSummary(), no dates).
+ * `active_loan_count` (ReportService::loanBalanceSummary(), no dates), and,
+ * from the same call, Outstanding (`total_outstanding`): the principal,
+ * interest, penalty and insurance premium still owed on collectible loans
+ * (released, ongoing and defaulted), as the Portfolio Summary labels it.
  *
- * It mirrors the Loans page's Active tab, so it needs `loans:view`.
+ * A question about "outstanding" (or a balance or what is still owed) leads
+ * with that amount; any other leads with the count.
+ *
+ * It mirrors the Loans page's Active tab, so it needs `loans:view`; the Loans
+ * list totals the same Outstanding (GET /loans `meta.totals`).
  */
 final class LoanSummaryAnswer extends Answer
 {
+    /** Words that ask for the amount still owed rather than the count. */
+    private const ASKS_OUTSTANDING = '/(?<![\pL\pN])(outstanding|balance|balanse|utang|natitira|nabilin|nahabilin)(?![\pL\pN])/u';
+
     public function __construct(private readonly ReportService $reports) {}
 
     public function intent(): LindaIntent
@@ -41,16 +51,27 @@ final class LoanSummaryAnswer extends Answer
     {
         $summary = $this->reports->loanBalanceSummary($scope->filters());
         $active = (int) $summary['active_loans'];
+        $owed = W::money($summary['total_outstanding']).' is outstanding';
+        $what = 'the principal, interest, penalty and insurance premium still owed on collectible loans, defaulted ones included.';
 
-        $answer = $active === 0
-            ? 'There are no active loans '.W::forScope($scope).' as of today, '.W::today().'.'
-            : W::asOfToday().', there '.($active === 1 ? 'is ' : 'are ').W::count($active, 'active loan').' '.W::forScope($scope).'.';
+        if ($question !== null && preg_match(self::ASKS_OUTSTANDING, mb_strtolower($question)) === 1) {
+            $answer = W::asOfToday().', '.$owed.' '.W::forScope($scope).': '.$what.' '
+                .($active === 0 ? 'There are no active loans.' : 'There '.($active === 1 ? 'is ' : 'are ').W::count($active, 'active loan').'.');
+        } else {
+            $answer = ($active === 0
+                ? 'There are no active loans '.W::forScope($scope).' as of today, '.W::today().'.'
+                : W::asOfToday().', there '.($active === 1 ? 'is ' : 'are ').W::count($active, 'active loan').' '.W::forScope($scope).'.')
+                .' '.$owed.': '.$what;
+        }
 
         if ($period !== null) {
             $answer .= ' '.W::todayOnly();
         }
 
-        $blocks = [LindaReply::stats([LindaReply::number('Active Loans', $active)], W::asOfToday())];
+        $blocks = [LindaReply::stats([
+            LindaReply::number('Active Loans', $active),
+            LindaReply::money('Outstanding', $summary['total_outstanding']),
+        ], W::asOfToday())];
 
         $branches = collect($summary['by_branch']);
         if ($branches->count() > 1) {

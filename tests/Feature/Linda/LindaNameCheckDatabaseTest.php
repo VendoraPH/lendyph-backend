@@ -3,6 +3,7 @@
 namespace Tests\Feature\Linda;
 
 use App\Models\Borrower;
+use App\Models\CdaOfficer;
 use App\Models\CoMaker;
 use App\Models\GCashNonMember;
 use App\Models\LindaQuestion;
@@ -144,6 +145,46 @@ class LindaNameCheckDatabaseTest extends LindaAnswersTestCase
         $response = $this->actingAs($this->asker)->postJson(self::URL, ['message' => 'Did Carmen Soriano cash in today?'])->assertOk();
         $this->assertSame([], $this->fake->requests);
         $this->assertSame(LindaWording::otherPersonNotYet(), $response->json('data.answer'));
+    }
+
+    /**
+     * Round 4 privacy review (Medium): an officer in the CDA register who isn't
+     * a linked member has a free-text name, which the trainings answer lists.
+     * Named in a question, it stays on the server, in either order.
+     *
+     * @return array<string, array{string}>
+     */
+    public static function officerQuestions(): array
+    {
+        return [
+            'first name first' => ['Has Ana Reyes completed her trainings?'],
+            'surname first' => ['Has Reyes, Ana completed her trainings?'],
+            'with a middle initial' => ['Has Ana B. Reyes completed her trainings?'],
+        ];
+    }
+
+    #[DataProvider('officerQuestions')]
+    public function test_an_unlinked_cda_officer_is_never_sent_to_the_model(string $question): void
+    {
+        CdaOfficer::factory()->create(['borrower_id' => null, 'name' => 'Ana Reyes', 'position' => 'treasurer']);
+
+        $response = $this->actingAs($this->asker)->postJson(self::URL, ['message' => $question])->assertOk();
+
+        $this->assertSame([], $this->fake->requests, 'The model was asked: '.$question);
+        $this->assertSame(LindaWording::otherPersonNotYet(), $response->json('data.answer'));
+        $this->assertSame(LindaQuestion::SOURCE_LOOKUP, LindaQuestion::query()->latest('id')->value('source'));
+        $this->assertSame(LindaNameCheck::CDA_OFFICER, LindaNameCheck::find($question)?->kind, $question);
+    }
+
+    public function test_a_removed_unlinked_officer_stays_local_and_a_linked_one_reads_as_the_member(): void
+    {
+        CdaOfficer::factory()->create(['borrower_id' => null, 'name' => 'Lorna Diaz'])->delete();
+        $this->assertSame(LindaNameCheck::CDA_OFFICER, LindaNameCheck::find('Is Lorna Diaz still an officer?')?->kind);
+
+        // A linked officer's name is the member's, so the member is found.
+        $member = $this->stored('Carlo', null, 'Mendoza');
+        CdaOfficer::factory()->create(['borrower_id' => $member->id, 'name' => null]);
+        $this->assertSame(LindaNameCheck::MEMBER, LindaNameCheck::find('Has Carlo Mendoza completed his trainings?')?->kind);
     }
 
     /**

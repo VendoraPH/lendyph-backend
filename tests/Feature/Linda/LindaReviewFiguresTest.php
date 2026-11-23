@@ -77,8 +77,9 @@ class LindaReviewFiguresTest extends LindaAnswersTestCase
         $this->releaseTo($this->member($this->branch, 'Ana', 'Cruz'));
         $answerer = app(LindaAnswerer::class);
 
-        $this->assertStringEndsWith('across all branches.', $answerer->answer($this->headOffice(), LindaIntent::LoanSummary, null, null)->answer);
-        $this->assertStringEndsWith('across all your branches.', $answerer->answer($this->userWith(['reports:view', 'loans:view'], $this->branch, $this->far), LindaIntent::LoanSummary, null, null)->answer);
-        $this->assertStringEndsWith('for Main Branch.', $answerer->answer($this->headOffice(), LindaIntent::LoanSummary, null, 'main')->answer);
+        // Round 4 adds the Outstanding sentence after the count's.
+        $this->assertStringContainsString('1 active loan across all branches.', $answerer->answer($this->headOffice(), LindaIntent::LoanSummary, null, null)->answer);
+        $this->assertStringContainsString('1 active loan across all your branches.', $answerer->answer($this->userWith(['reports:view', 'loans:view'], $this->branch, $this->far), LindaIntent::LoanSummary, null, null)->answer);
+        $this->assertStringContainsString('1 active loan for Main Branch.', $answerer->answer($this->headOffice(), LindaIntent::LoanSummary, null, 'main')->answer);
     }
 }

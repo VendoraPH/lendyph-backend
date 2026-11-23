@@ -97,7 +97,7 @@ abstract class LookupAnswer
         $listed = $found['members'];
         $answer = 'I found '.W::count($found['total'], 'member').' named "'.W::echoed($name).'" in your branches.'
             .($found['total'] > $max ? " Here are the first {$max}." : '')
-            .' Which one? Ask again with the member code.';
+            .' Which one? '.$this->askAgainHint();
 
         $items = $listed->map(fn (Borrower $member): array => [
             'title' => (string) $member->full_name,
@@ -115,6 +115,12 @@ abstract class LookupAnswer
             [],
             $listed->pluck('id')->all(),
         );
+    }
+
+    /** How to ask again for one of several members of one name. */
+    protected function askAgainHint(): string
+    {
+        return 'Ask again with the member code.';
     }
 
     protected static function listMax(): int
