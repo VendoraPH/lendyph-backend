@@ -138,6 +138,7 @@ class LindaAnswererTest extends LindaAnswersTestCase
                 'Net Disbursed' => $report['total_disbursed'],
                 'Loans Released' => $report['loans_released'],
                 'Principal Released' => $releases['total_principal'],
+                'Average Loan Size' => $this->reports()->borrowerReport($filters)['avg_loan_size'],
             ], $this->stats($reply));
             $this->assertSame(['/reports/disbursement_report?from='.$period->from->toDateString().'&to='.$period->to->toDateString()], $this->linkUrls($reply));
         }
@@ -153,7 +154,7 @@ class LindaAnswererTest extends LindaAnswersTestCase
         $reply = $this->answerer()->answer($this->headOffice(), LindaIntent::LoanSummary, null, null);
         $summary = $this->reports()->loanBalanceSummary(['branch_ids' => null]);
 
-        $this->assertSame(['Active Loans' => $summary['active_loans']], $this->stats($reply));
+        $this->assertEquals(['Active Loans' => $summary['active_loans'], 'Outstanding' => $summary['total_outstanding']], $this->stats($reply));
         $this->assertSame(5, $summary['active_loans']);
         $byBranch = [];
         foreach ($this->listItems($reply) as $item) {
@@ -165,7 +166,8 @@ class LindaAnswererTest extends LindaAnswersTestCase
         $this->assertSame(['/loans?tab=active'], $this->linkUrls($reply));
 
         $branch = $this->answerer()->answer($this->branchUser(), LindaIntent::LoanSummary, null, null);
-        $this->assertSame(['Active Loans' => 3], $this->stats($branch));
+        $this->assertSame(3, $this->stats($branch)['Active Loans']);
+        $this->assertEquals($this->reports()->loanBalanceSummary($this->scopeOf($this->branchUser()))['total_outstanding'], $this->stats($branch)['Outstanding']);
         $this->assertStringNotContainsString('Far Branch', json_encode($branch->toArray()));
     }
 
