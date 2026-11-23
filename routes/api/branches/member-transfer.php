@@ -10,8 +10,8 @@ use Illuminate\Support\Facades\Route;
 |
 | Required from routes/api.php inside the authenticated group. The path is
 | nested under {borrower}, never a fixed word beside `borrowers/{borrower}`.
-| It needs `borrowers:transfer` (TransferBorrowerRequest); a member the
-| caller can't see answers 404.
+| It needs `borrowers:transfer` and `borrowers:view` (TransferBorrowerRequest);
+| a member the caller can't see answers 404.
 */
 Route::post('borrowers/{borrower}/transfer', [BorrowerTransferController::class, 'store'])
     ->whereNumber('borrower')

@@ -10,8 +10,8 @@ use Symfony\Component\HttpKernel\Exception\HttpException;
 /**
  * A member's branch lock (Phase 6 MB-BE4), held around a member transfer and
  * around every write that copies the member's branch onto a new record: a
- * loan application, a time deposit placement and a member's GCash
- * transaction.
+ * loan application, a time deposit placement, a member's GCash transaction
+ * and a portal request.
  *
  * The two queue: a creation that starts while a transfer is being written
  * waits for it and then reads the new branch, and a transfer that starts

@@ -42,7 +42,7 @@ use Illuminate\Validation\ValidationException;
  * shared lock: a suspended or closed branch can't receive a member (MB-BE1).
  *
  * The move writes one audit row on the member, naming both branches in words,
- * with the reason; the model's own `updated` row is replaced, not added to.
+ * with the reason, filed under the source branch; the model's own `updated` row is replaced, not added to.
  */
 final class MemberTransfer
 {
@@ -110,8 +110,8 @@ final class MemberTransfer
             /** @var Branch $from */
             $from = Branch::query()->findOrFail($member->branch_id);
 
-            AuditLogService::withoutModelAuditing(fn () => $member->update(['branch_id' => $to->id]));
-
+            // Written before the move, in the same transaction, so the row is
+            // filed under the source branch, as an interbranch transfer is.
             AuditLogService::log(
                 'member_transferred',
                 $member,
@@ -126,6 +126,8 @@ final class MemberTransfer
                     $reason,
                 ),
             );
+
+            AuditLogService::withoutModelAuditing(fn () => $member->update(['branch_id' => $to->id]));
 
             return $member;
         }, conflictMessage: self::CONFLICT));

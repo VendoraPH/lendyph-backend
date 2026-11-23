@@ -21,7 +21,7 @@ class BorrowerTransferController extends Controller
     #[OA\Post(
         path: '/api/borrowers/{borrower}/transfer',
         summary: 'Transfer a member to another branch',
-        description: 'Needs borrowers:transfer and both branches in the caller\'s reach (or branches:view_all). Refused while the member has an open loan (draft to defaulted), savings account, time deposit, portal request or a GCash Cash In not yet paid, and when the destination is suspended or closed. Writes one audit row naming both branches.',
+        description: 'Needs borrowers:transfer and borrowers:view, and both branches in the caller\'s reach (or branches:view_all). Refused while the member has an open loan (draft to defaulted), savings account, time deposit, portal request or a GCash Cash In not yet paid, and when the destination is suspended or closed. Writes one audit row naming both branches, filed under the source branch.',
         tags: ['Borrowers'],
         security: [['sanctum' => []]],
         parameters: [new OA\Parameter(name: 'borrower', in: 'path', required: true, schema: new OA\Schema(type: 'integer'))],
@@ -34,8 +34,9 @@ class BorrowerTransferController extends Controller
         )),
         responses: [
             new OA\Response(response: 200, description: 'The member, in the new branch'),
-            new OA\Response(response: 403, description: 'Needs borrowers:transfer'),
+            new OA\Response(response: 403, description: 'Needs borrowers:transfer and borrowers:view'),
             new OA\Response(response: 404, description: 'Not found'),
+            new OA\Response(response: 409, description: 'The member is busy or changed at the same moment; try again'),
             new OA\Response(response: 422, description: 'Refused, in words'),
         ],
     )]

@@ -64,6 +64,8 @@ class MemberTransferTest extends TestCase
         $this->assertSame($this->admin->id, (int) $row->user_id);
         $this->assertSame(['branch_id' => $this->branch->id], $row->old_values);
         $this->assertSame(['branch_id' => $this->second->id], $row->new_values);
+        // Filed under the source branch, as an interbranch transfer is.
+        $this->assertSame($this->branch->id, (int) $row->branch_id);
         $this->assertSame(
             sprintf(
                 'Member %s (%s) was transferred from %s to "Second Branch" (SEC). Reason: %s',
