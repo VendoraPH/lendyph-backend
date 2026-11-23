@@ -52,7 +52,7 @@ use RuntimeException;
  * Mobiles are keyed by their keyed hash and sessions by their SHA-256, never
  * as typed. IP keys rely on TrustFrontendProxy for the visitor's address;
  * without its secret every visitor would share the frontend's, so links stay
- * closed until it is set (PublicPortal::NO_VISITOR_ADDRESS).
+ * closed until it is set (PublicPortal::NOT_READY).
  *
  * Production refuses to boot with the test-code mode on (origination
  * decision 7, risk 1).
