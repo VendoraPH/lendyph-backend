@@ -79,7 +79,7 @@ class CsvImportController extends Controller
     #[OA\Post(
         path: '/api/imports',
         summary: 'Open a CSV migration import run',
-        description: 'Declares the two files about to be uploaded and returns the server-chosen chunk size plus the number of chunks each file must be cut into. Refuses (409) while another run is still in progress.',
+        description: 'Declares the files about to be uploaded and returns the server-chosen chunk size plus the number of chunks each file must be cut into. The members file (`customers`) is required; the loans file is optional, and a loans file on its own is refused (422: it needs its members file in the same import). A members-only run skips the loans staging, product mapping and loans import and finishes normally. Refuses (409) while another run is still in progress.',
         tags: ['CSV Import'],
         security: [['sanctum' => []]],
         requestBody: new OA\RequestBody(
@@ -92,6 +92,7 @@ class CsvImportController extends Controller
                     new OA\Property(
                         property: 'files',
                         type: 'object',
+                        required: ['customers'],
                         properties: [
                             new OA\Property(property: 'customers', type: 'object', properties: [
                                 new OA\Property(property: 'filename', type: 'string', example: 'members.csv'),
@@ -112,7 +113,7 @@ class CsvImportController extends Controller
             new OA\Response(response: 201, description: 'Run opened; returns chunk_size and total_chunks per file'),
             new OA\Response(response: 403, description: 'Requires the imports:process permission'),
             new OA\Response(response: 409, description: 'Another run is still in progress'),
-            new OA\Response(response: 422, description: 'Validation failed (missing branch_id, oversize file, bad digest)'),
+            new OA\Response(response: 422, description: 'Validation failed (missing branch_id or members file, a loans file without its members file, oversize file, bad digest)'),
         ],
     )]
     public function store(StoreCsvImportRunRequest $request): JsonResponse

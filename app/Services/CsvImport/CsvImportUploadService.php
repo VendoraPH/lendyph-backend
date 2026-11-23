@@ -353,8 +353,14 @@ class CsvImportUploadService
                 'initiated_ip' => $actorIp,
             ]);
 
+            // The files the client declared: the members file always, the loans
+            // file when there is one (StoreCsvImportRunRequest).
             foreach (self::KINDS as $kind) {
-                $declared = $data['files'][$kind];
+                $declared = $data['files'][$kind] ?? null;
+
+                if ($declared === null) {
+                    continue;
+                }
 
                 $run->files()->create([
                     'kind' => $kind,
@@ -1251,9 +1257,12 @@ class CsvImportUploadService
 
         $files = $run->files()->orderBy('kind')->get();
 
-        if ($files->count() !== count(self::KINDS)) {
+        // A run carries its members file, and a loans file only beside it: a
+        // loan row finds its member through the members file of the same
+        // import, so a run with loans alone never gets as far as importing.
+        if (! $files->contains(fn (CsvImportFile $file): bool => $file->kind === 'customers')) {
             throw new HttpResponseException(response()->json([
-                'message' => "Import run #{$run->id} is missing one of its files.",
+                'message' => "Import run #{$run->id} has no members file. A loans file needs its members file in the same import.",
             ], 422));
         }
 
