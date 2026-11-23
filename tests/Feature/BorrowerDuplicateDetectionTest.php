@@ -179,13 +179,16 @@ it('answers 422, never 500, when a member edit sends a name or the birthdate as 
     ])->assertUnprocessable()->assertJsonValidationErrors($field);
 })->with(['first_name', 'middle_name', 'last_name', 'birthdate']);
 
-it('still checks a public registration whose birthdate is sent as a number', function (int|float $birthdate) {
+it('refuses a public registration whose birthdate is sent as a number, so a number cannot slip a duplicate past the check', function (int|float|string $birthdate) {
     createBorrower();
     $this->app['auth']->forgetGuards();
+    $before = Borrower::count();
 
-    // The `date` rule accepts 19900115, so the number must not skip the check.
+    // The duplicate check steps aside for a number; the birthdate's own rule
+    // (written year-month-day) refuses it.
     $this->postJson('/api/borrowers', registerPayload(['status' => 'pending', 'birthdate' => $birthdate]))
         ->assertUnprocessable()
-        ->assertJsonValidationErrors('first_name')
-        ->assertJsonMissingValidationErrors('birthdate');
-})->with([19900115, 19900115.0]);
+        ->assertJsonValidationErrors('birthdate');
+
+    expect(Borrower::count())->toBe($before);
+})->with([19900115, 19900115.0, '19900115']);

@@ -42,7 +42,10 @@ trait HasBorrowerRules
             'suffix' => ['nullable', 'string', 'max:20'],
             // Applicants must be at least 18 (PH age of majority for lending).
             // `before_or_equal:-18 years` also rejects future dates implicitly.
-            'birthdate' => ['nullable', 'date', 'after:1900-01-01', 'before_or_equal:-18 years'],
+            // Member dates are written year-month-day: `date` alone accepts a
+            // number (19900115), which the model's date cast then stores as a
+            // Unix timestamp (1970-08-19).
+            'birthdate' => ['nullable', 'date', 'date_format:Y-m-d', 'after:1900-01-01', 'before_or_equal:-18 years'],
             'civil_status' => ['nullable', 'string', 'in:single,married,widowed,separated,divorced'],
             'gender' => ['nullable', 'string', 'in:male,female'],
 
@@ -68,7 +71,7 @@ trait HasBorrowerRules
                 Rule::unique('borrowers', 'email')->ignore($ignoreId),
             ],
             'employer_or_business' => ['nullable', 'string', 'max:255'],
-            'date_hired' => ['nullable', 'date', 'after:1900-01-01', 'before_or_equal:today'],
+            'date_hired' => ['nullable', 'date', 'date_format:Y-m-d', 'after:1900-01-01', 'before_or_equal:today'],
             'monthly_income' => ['nullable', 'numeric', 'min:0', 'max:99999999.99'],
             'pledge_amount' => ['nullable', 'numeric', 'min:0', 'max:9999999.99'],
 
@@ -141,9 +144,12 @@ trait HasBorrowerRules
                 ? 'A member with this email already exists.'
                 : 'This email cannot be used. Please contact your branch to continue.',
             'pledge_amount.max' => 'The pledge amount may not exceed 9,999,999.99.',
+            'birthdate.date_format' => 'The birthdate must be a date written as year-month-day, such as 1990-01-15.',
             'birthdate.after' => 'The birthdate must be after January 1, 1900.',
             'birthdate.before_or_equal' => 'The applicant must be at least 18 years old.',
+            'date_hired.date_format' => 'The date hired must be a date written as year-month-day, such as 2020-06-01.',
             'date_hired.before_or_equal' => 'The date hired cannot be in the future.',
+            'membership_date.date_format' => 'The membership date must be a date written as year-month-day, such as 2026-01-15.',
         ];
     }
 }

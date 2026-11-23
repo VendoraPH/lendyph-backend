@@ -58,13 +58,13 @@ class NoDuplicateBorrower implements DataAwareRule, ValidationRule
         $birthdate = $this->data['birthdate'] ?? null;
 
         // The check compares text. A name or birthdate sent as anything else (a
-        // list, say) is left to that field's own rules, which answer 422; read
-        // here, it answered 500. A number still counts as a birthdate, since the
-        // `date` rule accepts one (19900115), so it can't be used to skip the check.
+        // list, a number) is left to that field's own rules, which answer 422
+        // (a birthdate is written year-month-day); read here, a list answered
+        // 500.
         if (! is_string($firstName)
             || ! is_string($lastName)
             || ! (is_string($middleName) || $middleName === null)
-            || ! (is_string($birthdate) || is_int($birthdate) || is_float($birthdate) || $birthdate === null)) {
+            || ! (is_string($birthdate) || $birthdate === null)) {
             return;
         }
 
