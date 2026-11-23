@@ -10,6 +10,7 @@ use App\Models\User;
 use App\Services\Accounting\AutomaticPoster;
 use App\Services\Savings\ApprovalGate;
 use App\Services\Savings\AvailableBalance;
+use App\Services\Savings\Notices\OpeningNotices;
 use App\Services\Savings\ProductRules;
 use App\Services\Savings\SavingsLedger;
 use App\Services\Savings\SavingsLocks;
@@ -40,6 +41,8 @@ use LogicException;
  * - A rollover ({@see self::rollover()}) is a new placement funded by the
  *   one it came from: no money moves and it posts no journal of its own,
  *   because the settlement credits the rolled-over amount to time deposits.
+ * - Either way the member and the branch's savings staff are told once it
+ *   commits (OpeningNotices).
  */
 class Placement
 {
@@ -55,6 +58,7 @@ class Placement
         private readonly AutomaticPoster $poster,
         private readonly ProductRules $rules,
         private readonly ApprovalGate $gate,
+        private readonly OpeningNotices $notices,
     ) {}
 
     /**
@@ -125,6 +129,7 @@ class Placement
         }
 
         $this->poster->timeDepositPlacement($deposit, $user->id);
+        $this->notices->timeDepositPlaced($deposit, $user->id);
 
         return $deposit;
     }
@@ -148,7 +153,7 @@ class Placement
         $product = SavingsProduct::query()->findOrFail($from->product_id);
         $figures = $this->quote->figures($product, $principal, $from->term_days, $placementDate, rollover: true, ratesOn: $from->maturity_date->toDateString());
 
-        return TimeDeposit::query()->create([
+        $deposit = TimeDeposit::query()->create([
             ...$this->contract($figures),
             'certificate_number' => $this->numbers->certificateNumber($placementDate),
             'borrower_id' => $from->borrower_id,
@@ -161,6 +166,10 @@ class Placement
             'rolled_over_from_id' => $from->id,
             'created_by' => $userId,
         ]);
+
+        $this->notices->timeDepositPlaced($deposit, $userId);
+
+        return $deposit;
     }
 
     /**
