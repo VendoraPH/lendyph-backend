@@ -202,7 +202,7 @@ final class AutomaticPoster
 
         Log::warning(
             "{$label}: a tax withheld at release was booked to a fallback account, because its own role has no account. "
-            .'Set it in Accounting → Settings → Default Accounts so later releases book it to its own payable account.',
+            .'Set it in Settings → Accounting → Default Accounts so later releases book it to its own payable account.',
             ['loan' => $label, 'fallbacks' => $fallbacks],
         );
     }

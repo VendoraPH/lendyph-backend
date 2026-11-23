@@ -256,7 +256,7 @@ class ReconciliationActionsTest extends TestCase
 
         $this->act('suspense', $reconciliation, $this->statementLine($reconciliation))
             ->assertStatus(422)
-            ->assertJsonPath('errors.account_mapping.0', 'Map a Suspense account in Accounting Settings first');
+            ->assertJsonPath('errors.account_mapping.0', 'Map a Suspense account in Settings → Accounting → Default Accounts first');
 
         $this->assertSame($before, $this->journalCount());
     }

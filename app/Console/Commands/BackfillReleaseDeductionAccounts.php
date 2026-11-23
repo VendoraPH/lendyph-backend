@@ -40,7 +40,7 @@ class BackfillReleaseDeductionAccounts extends Command
         }
 
         foreach ($result['skipped'] as $row) {
-            $this->warn(sprintf('  %s skipped: %s. Set it in Accounting → Settings → Default Accounts.', $row['role'], $row['reason']));
+            $this->warn(sprintf('  %s skipped: %s. Set it in Settings → Accounting → Default Accounts.', $row['role'], $row['reason']));
         }
 
         $this->info(sprintf(

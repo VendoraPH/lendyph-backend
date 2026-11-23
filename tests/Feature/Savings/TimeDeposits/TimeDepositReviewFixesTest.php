@@ -88,7 +88,7 @@ class TimeDepositReviewFixesTest extends TestCase
         $later = SavingsProduct::factory()->create(['name' => 'Passbook Savings']);
         $this->rate($later, null, '1.0000', '2026-12-01');
         $this->product->forceFill(['pretermination_product_id' => $later->id])->save();
-        $message = "{$this->product->name} pays early terminations at Passbook Savings' rate, which has none in force on Nov 10, 2026. Add one in Savings → Products.";
+        $message = "{$this->product->name} pays early terminations at Passbook Savings' rate, which has none in force on Nov 10, 2026. Add one in Settings → Savings Products.";
 
         $this->postJson('/api/savings/time-deposits/quote', collect($this->placementBody())->only(['product_id', 'principal', 'term_days', 'placement_date'])->all())
             ->assertUnprocessable()->assertJsonFragment(['product_id' => [$message]]);

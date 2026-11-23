@@ -49,7 +49,7 @@ trait ResolvesPostingAccounts
             throw ValidationException::withMessages([
                 'account_mapping' => [
                     "{$what} has to post to the {$roleLabel} account, and no account is mapped to that role yet. "
-                    .'Set it under Accounting → Settings → Default Accounts first. Nothing has been recorded.',
+                    .'Set it under Settings → Accounting → Default Accounts first. Nothing has been recorded.',
                 ],
             ]);
         }
@@ -64,7 +64,7 @@ trait ResolvesPostingAccounts
             throw ValidationException::withMessages([
                 'account_mapping' => [
                     "The {$roleLabel} role points at an account that no longer exists. Re-point it under "
-                    .'Accounting → Settings → Default Accounts. Nothing has been recorded.',
+                    .'Settings → Accounting → Default Accounts. Nothing has been recorded.',
                 ],
             ]);
         }

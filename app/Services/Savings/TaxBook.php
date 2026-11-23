@@ -28,7 +28,7 @@ class TaxBook
             $who = $holderType === SavingsTaxRule::HOLDER_MEMBER ? 'members' : 'walk-ins';
 
             throw ValidationException::withMessages(['tax' => [
-                "No withholding tax rule is in force for {$who} on ".CarbonImmutable::parse($date)->format('M j, Y').'. Add one in Savings → Settings.',
+                "No withholding tax rule is in force for {$who} on ".CarbonImmutable::parse($date)->format('M j, Y').'. Add one in Settings → Savings.',
             ]]);
         }
 

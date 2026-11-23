@@ -173,7 +173,7 @@ class CooperativeTemplateBackfill
             ->first();
 
         if ($mapping === null) {
-            return ['status' => 'skipped', 'reason' => 'it is not mapped; set it in Accounting → Settings → Default Accounts'];
+            return ['status' => 'skipped', 'reason' => 'it is not mapped; set it in Settings → Accounting → Default Accounts'];
         }
 
         $current = DB::table('accounting_accounts')->where('id', $mapping->accounting_account_id)->first(['id', 'code', 'name']);

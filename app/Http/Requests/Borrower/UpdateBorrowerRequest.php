@@ -64,7 +64,7 @@ class UpdateBorrowerRequest extends FormRequest
         );
     }
 
-    public const BRANCH_CHANGE_REFUSAL = "A member's branch is changed with Transfer to another branch, not by editing the member. An edit can only fill in a missing branch.";
+    public const BRANCH_CHANGE_REFUSAL = 'Use Transfer member to move this member to another branch. Editing the member can only fill in a missing branch.';
 
     /**
      * A plain edit can only fill in a missing branch (Phase 6, multi-branch

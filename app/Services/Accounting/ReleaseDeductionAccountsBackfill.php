@@ -55,7 +55,7 @@ use Illuminate\Support\Facades\DB;
  *
  * A skipped role stays unmapped: a release withholding that deduction is
  * refused with a message naming the role until someone sets it in
- * Accounting → Settings → Default Accounts. Each account added and each role
+ * Settings → Accounting → Default Accounts. Each account added and each role
  * mapped gets one audit row as a system change (no user). Posted journals are
  * never touched; only releases from then on use the new roles.
  *

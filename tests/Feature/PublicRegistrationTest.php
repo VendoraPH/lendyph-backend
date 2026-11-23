@@ -5,9 +5,12 @@ namespace Tests\Feature;
 use App\Models\Borrower;
 use App\Models\BorrowerSubmissionToken;
 use App\Models\Branch;
+use App\Models\Role;
 use App\Models\User;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
+use Spatie\Permission\PermissionRegistrar;
 use Tests\TestCase;
 
 class PublicRegistrationTest extends TestCase
@@ -496,6 +499,84 @@ class PublicRegistrationTest extends TestCase
 
         $this->assertStringContainsString($existing->borrower_code, $message);
         $this->assertStringContainsString('1985-03-04', $message);
+    }
+
+    /**
+     * "Create Anyway" (`force`) is a staff decision, made after seeing the
+     * match (re-scan, 2026-11-24): an anonymous caller's `force` is ignored,
+     * so the public form is always checked and a duplicate applicant gets the
+     * generic refusal, with nothing written.
+     */
+    public function test_an_anonymous_force_is_ignored_so_the_duplicate_check_still_applies(): void
+    {
+        $existing = $this->juanDelaCruz();
+        $before = Borrower::count();
+
+        $response = $this->postJson('/api/borrowers', $this->applicant(['status' => 'pending', 'force' => true]))->assertStatus(422);
+
+        $this->assertSame(['A similar member already exists. Please contact your branch to continue.'], $response->json('errors.first_name'));
+        $this->assertStringNotContainsString($existing->borrower_code, $response->getContent());
+        $this->assertSame($before, Borrower::count(), 'No second record.');
+
+        $this->postJson('/api/borrowers', $this->applicant(['status' => 'pending', 'force' => true, 'first_name' => 'Pedro', 'last_name' => 'Penduko']))
+            ->assertCreated()
+            ->assertJsonStructure(['data' => ['id', 'submission_token', 'expires_at']]);
+    }
+
+    public function test_staff_holding_borrowers_create_may_still_create_anyway_and_no_one_else(): void
+    {
+        $this->juanDelaCruz();
+        $creator = $this->staffWith(['borrowers:view', 'borrowers:create']);
+
+        $this->actingAs($creator)->postJson('/api/borrowers', $this->applicant(['status' => 'active']))
+            ->assertStatus(422)->assertJsonValidationErrors('first_name');
+        $this->actingAs($creator)->postJson('/api/borrowers', $this->applicant(['status' => 'active', 'force' => true]))
+            ->assertCreated();
+
+        $this->actingAs($this->staffWith(['borrowers:view']))->postJson('/api/borrowers', $this->applicant(['status' => 'active', 'force' => true]))
+            ->assertForbidden();
+    }
+
+    private function juanDelaCruz(): Borrower
+    {
+        return Borrower::factory()->create([
+            'branch_id' => $this->branch->id,
+            'first_name' => 'Juan',
+            'middle_name' => 'Dela',
+            'last_name' => 'Cruz',
+            'birthdate' => '1990-05-12',
+        ]);
+    }
+
+    /** @return array<string, mixed> a complete registration for Juan Dela Cruz, born 1990-05-12 */
+    private function applicant(array $overrides = []): array
+    {
+        return [
+            'branch_id' => $this->branch->id,
+            'first_name' => 'Juan',
+            'middle_name' => 'Dela',
+            'last_name' => 'Cruz',
+            'birthdate' => '1990-05-12',
+            'gender' => 'male',
+            'civil_status' => 'married',
+            'contact_number' => '09171234567',
+            'address' => '123 Mango St',
+            'city' => 'Butuan',
+            'province' => 'Agusan del Norte',
+            ...$overrides,
+        ];
+    }
+
+    /** @param  list<string>  $permissions */
+    private function staffWith(array $permissions): User
+    {
+        $role = Role::create(['name' => 'registration_probe_'.Str::lower(Str::random(8)), 'guard_name' => 'web']);
+        $role->givePermissionTo($permissions);
+        $user = User::factory()->inBranches($this->branch)->create();
+        $user->assignRole($role);
+        app(PermissionRegistrar::class)->forgetCachedPermissions();
+
+        return $user;
     }
 
     /**

@@ -7,6 +7,7 @@ use App\Models\SavingsAccount;
 use App\Models\SavingsProduct;
 use App\Models\User;
 use App\Services\Accounting\AutomaticPoster;
+use App\Services\Savings\Notices\OpeningNotices;
 use App\Services\Savings\ProductRules;
 use App\Services\Savings\SavingsLedger;
 use App\Services\Savings\SavingsMath;
@@ -25,7 +26,9 @@ use Illuminate\Validation\ValidationException;
  * step 2), so two openings for one member queue and the second sees the
  * first's account (409) instead of colliding on `open_key`; the account
  * number is the next one (step 6, retried on a collision); the opening
- * deposit goes through SavingsLedger and its journal is posted last.
+ * deposit goes through SavingsLedger and its journal is posted last. The
+ * member and the branch's savings staff are told once it commits
+ * (OpeningNotices).
  */
 class AccountOpener
 {
@@ -35,6 +38,7 @@ class AccountOpener
         private readonly AutomaticPoster $poster,
         private readonly LargeTransactionAlert $alert,
         private readonly ProductRules $rules,
+        private readonly OpeningNotices $notices,
     ) {}
 
     /**
@@ -114,6 +118,8 @@ class AccountOpener
             $this->poster->savingsTransaction($row, $user->id);
             $this->alert->afterPosting($row, [$user->id]);
         }
+
+        $this->notices->accountOpened($account, $deposit, $user->id);
 
         return $account->refresh();
     }

@@ -37,10 +37,10 @@ class CdaTemplates20262MigrationTest extends TestCase
         return require database_path(self::MIGRATION);
     }
 
-    /** The state before the migration ran: 2026.1 active, no 2026.2. */
+    /** The state before the migration ran: 2026.1 active, no 2026.2 (nor ATIR's later 2026.3). */
     private function before(): void
     {
-        DB::table('cda_report_templates')->where('version', '2026.2')->delete();
+        DB::table('cda_report_templates')->whereIn('version', ['2026.2', '2026.3'])->delete();
         DB::table('cda_report_templates')->where('version', '2026.1')->update(['status' => 'active', 'reason' => null]);
     }
 
@@ -62,7 +62,8 @@ class CdaTemplates20262MigrationTest extends TestCase
             $new = $this->template($type, '2026.2');
             $old = $this->template($type, '2026.1');
 
-            $this->assertSame(CdaReportTemplate::STATUS_ACTIVE, $new->status, $type);
+            // ATIR's 2026.2 has since been replaced by 2026.3 (CdaAtirTemplate20263MigrationTest).
+            $this->assertSame($type === 'atir' ? CdaReportTemplate::STATUS_RETIRED : CdaReportTemplate::STATUS_ACTIVE, $new->status, $type);
             $this->assertFalse($new->definition['meta']['verified'], "{$type} 2026.2 is still to verify.");
             $this->assertSame('2026-01-01', $new->effective_from->toDateString());
             $this->assertSame([], $validator->validate($new->definition, $type), "{$type} 2026.2 is valid.");
