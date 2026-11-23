@@ -351,7 +351,9 @@ class AppServiceProvider extends ServiceProvider
             // The public loan application (routes/api/public-apply/, every
             // route named `public-apply.*`) is anonymous for the same reason,
             // and LoanOriginationServiceProvider gives it its own limiters.
-            if ($request->routeIs('public-apply.*')) {
+            // Both the name and the path must say so, so a route named
+            // `public-apply.*` anywhere else is still metered here.
+            if ($request->routeIs('public-apply.*') && $request->is('api/public-apply/*')) {
                 return Limit::none();
             }
 
