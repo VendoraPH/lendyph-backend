@@ -73,6 +73,17 @@ final class CapacityAssessor
 
     public const NO_INSTALMENT = 'The monthly instalment couldn\'t be worked out from the product\'s schedule.';
 
+    public const FIRST_NAME_DIFFERS = 'The linked member\'s first name differs from the application\'s.';
+
+    public const LAST_NAME_DIFFERS = 'The linked member\'s last name differs from the application\'s.';
+
+    public const BIRTHDATE_DIFFERS = 'The linked member\'s date of birth differs from the application\'s.';
+
+    public const MOBILE_DIFFERS = 'The linked member\'s mobile number differs from the application\'s.';
+
+    /** The conflicts that say the linked member's record differs from the application. */
+    public const MEMBER_RECORD_CONFLICTS = [self::FIRST_NAME_DIFFERS, self::LAST_NAME_DIFFERS, self::BIRTHDATE_DIFFERS, self::MOBILE_DIFFERS];
+
     public function __construct(
         private readonly DraftRules $draftRules,
         private readonly LoanService $loans,
@@ -345,22 +356,22 @@ final class CapacityAssessor
         $conflicts = [];
 
         if (! $same($member->first_name, $personal['first_name'])) {
-            $conflicts[] = 'The linked member\'s first name differs from the application\'s.';
+            $conflicts[] = self::FIRST_NAME_DIFFERS;
         }
 
         if (! $same($member->last_name, $personal['last_name'])) {
-            $conflicts[] = 'The linked member\'s last name differs from the application\'s.';
+            $conflicts[] = self::LAST_NAME_DIFFERS;
         }
 
         if ($member->birthdate?->toDateString() !== ($personal['date_of_birth'] !== '' ? $personal['date_of_birth'] : null)) {
-            $conflicts[] = 'The linked member\'s date of birth differs from the application\'s.';
+            $conflicts[] = self::BIRTHDATE_DIFFERS;
         }
 
         $memberMobile = PhilippineMobile::normalise($member->contact_number);
         $applicantMobile = PhilippineMobile::normalise($application->mobile);
 
         if ($memberMobile !== null && $applicantMobile !== null && $memberMobile !== $applicantMobile) {
-            $conflicts[] = 'The linked member\'s mobile number differs from the application\'s.';
+            $conflicts[] = self::MOBILE_DIFFERS;
         }
 
         return $conflicts;

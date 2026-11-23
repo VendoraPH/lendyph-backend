@@ -14,8 +14,8 @@ use Throwable;
 /**
  * Payment capacity, in integer centavos rounded half up:
  * - income = the member's monthly income (for a loan handed off from an
- *   online application, the income it verified, from the loan's own
- *   profile) plus the application's other and business income;
+ *   online application, the income its assessment counted, from the loan's
+ *   own profile) plus the application's other and business income;
  * - existing debt = the monthly payment of the member's Lendy loans plus the
  *   declared outside debt payments;
  * - disposable = income - household expenses - existing debt;
@@ -105,10 +105,10 @@ final class Capacity
     /**
      * The member's capacity for `$data`'s application loan, or their own
      * without one. An application loan whose own profile records a monthly
-     * income (an online application's verified income, as its assessment
-     * counted it) is scored on that instead of the member record's income, so
-     * its ratio equals the assessment's; every other loan, and the member's
-     * own score, reads the member record.
+     * income (the income an online application's assessment counted,
+     * verified or declared) is scored on that instead of the member record's
+     * income, so its ratio equals the assessment's; every other loan, and the
+     * member's own score, reads the member record.
      */
     public static function from(MemberCreditData $data, Exposure $exposure, CreditScoringSetting $settings, LoanService $loans): self
     {

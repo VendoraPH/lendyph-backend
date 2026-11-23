@@ -21,9 +21,10 @@ use Illuminate\Support\Facades\Schema;
  * - `origination_documents.id_details`: the ID type and number staff record
  *   when they verify an applicant's ID, encrypted. The hand-off copies the ID
  *   to the member as their valid ID with them.
- * - `credit_application_profiles.monthly_income`: the application's verified
- *   monthly income, as its assessment counted it, which the hand-off records
- *   and Credit Scoring reads for that loan instead of the member record's.
+ * - `credit_application_profiles.monthly_income`: the monthly income the
+ *   application's assessment counted, verified or declared, which the
+ *   hand-off records and Credit Scoring reads for that loan instead of the
+ *   member record's.
  *
  * New table and columns only; no data fix. Running it again changes nothing.
  */

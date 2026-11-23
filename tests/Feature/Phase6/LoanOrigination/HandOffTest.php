@@ -12,6 +12,7 @@ use App\Models\LoanApprovalStep;
 use App\Models\OriginationApplication;
 use App\Models\OriginationAssessment;
 use App\Models\OriginationDocument;
+use App\Models\OriginationSetting;
 use App\Models\OriginationStatusHistory;
 use App\Models\ShareCapitalPledge;
 use App\Models\User;
@@ -22,6 +23,7 @@ use App\Services\CreditScoring\Exposure;
 use App\Services\CreditScoring\MemberCreditData;
 use App\Services\LoanListTotals;
 use App\Services\LoanOrigination\Assessment\AssessmentService;
+use App\Services\LoanOrigination\Assessment\CapacityAssessor;
 use App\Services\LoanOrigination\HandOff\ApplicationHandOff;
 use App\Services\LoanService;
 use App\Services\ValidIdService;
@@ -431,6 +433,88 @@ it('scores a linked member\'s loan on the application\'s verified income, so Cre
         ->and($this->ratioAsAssessed($scored))->toBe($assessment->figures['dti_ratio'])
         ->and($scored->toArray()['disposable_income'])->toBe($assessment->figures['disposable_income'])
         ->and((string) $member->fresh()->monthly_income)->toBe('15000.00');
+});
+
+it('scores a linked member\'s loan on the income its assessment counted when none was verified, leaving it unverified', function () {
+    $member = Borrower::factory()->create(['status' => 'active', 'branch_id' => Branch::query()->value('id'), 'monthly_income' => 15000]);
+    $application = $this->originationApplication('under_assessment', null, ['borrower_id' => $member->id]);
+    $this->originationDocuments($application);
+    $staff = $this->originationStaff(...LO4_HANDOFF);
+    $this->actingAs($staff)->postJson("/api/loan-origination/applications/{$application->id}/assessment/rerun", ['verified_debt_payments' => '1500'])->assertCreated();
+    $this->actingAs($staff)->postJson(lo4HandOffUrl($application->id), ['version' => $application->fresh()->version])->assertOk();
+    $loan = Loan::query()->findOrFail($application->fresh()->loan_id);
+    $assessment = OriginationAssessment::currentFor($application->fresh());
+    $profile = CreditApplicationProfile::query()->where('loan_id', $loan->id)->sole();
+
+    $data = MemberCreditData::load($member->id, $loan, now());
+    $scored = Capacity::from($data, Exposure::from($data, app(LoanListTotals::class)), CreditScoringSetting::current(), app(LoanService::class));
+
+    expect($assessment->figures['verified_monthly_income'])->toBeNull()
+        ->and($profile->monthly_income)->toBe($assessment->figures['eligible_monthly_income'])
+        ->and($profile->monthly_income)->toBe('40000.00')
+        ->and($profile->other_income)->toBeNull()
+        ->and($profile->income_verification)->toBeNull()
+        ->and($scored->toArray()['monthly_income'])->toBe('40000.00')
+        ->and($this->ratioAsAssessed($scored))->toBe($assessment->figures['dti_ratio']);
+});
+
+it('reads the latest assessment revision under a lock inside the loan transaction', function () {
+    $application = lo4Ready($this);
+    $locking = [];
+    DB::listen(function ($query) use (&$locking): void {
+        if (str_contains($query->sql, 'from `origination_assessments`') && str_ends_with($query->sql, 'for update')) {
+            $locking[] = $query->sql;
+        }
+    });
+
+    $this->actingAs($this->originationStaff(...LO4_HANDOFF))->postJson(lo4HandOffUrl($application->id), ['version' => $application->version])->assertOk();
+
+    expect($locking)->toHaveCount(1)
+        ->and($locking[0])->toContain('order by `version` desc');
+});
+
+it('needs the assessment to run again when a different pending member is linked after an assessment without one', function () {
+    // Unverified figures need further review with or without a member, so
+    // only the member's record tells the two assessments apart.
+    $application = $this->originationApplication();
+    $this->originationDocuments($application);
+    $staff = $this->originationStaff(...LO4_HANDOFF, ...['loan_origination:update']);
+    $this->actingAs($staff)->postJson("/api/loan-origination/applications/{$application->id}/assessment/rerun")->assertCreated()->assertJsonPath('data.result', 'further_review');
+    $other = Borrower::factory()->create(['status' => 'pending', 'branch_id' => Branch::query()->value('id'), 'first_name' => 'Pedro', 'last_name' => 'Reyes']);
+    $this->actingAs($staff)->postJson("/api/loan-origination/applications/{$application->id}/link-member", ['borrower_id' => $other->id, 'version' => $application->fresh()->version])->assertOk();
+
+    $this->actingAs($staff)->postJson(lo4HandOffUrl($application->id), ['version' => $application->fresh()->version])
+        ->assertUnprocessable()
+        ->assertJsonPath('errors.assessment.0', 'The application changed after it was assessed. Run the assessment again.');
+
+    expect(Loan::query()->count())->toBe(0)
+        ->and(Document::query()->where('documentable_type', Borrower::class)->where('documentable_id', $other->id)->count())->toBe(0);
+});
+
+it('files the ID under its own type, not as the member\'s valid ID, when the assessment lists differences from the linked member\'s record', function () {
+    $member = Borrower::factory()->create(['status' => 'active', 'branch_id' => Branch::query()->value('id'), 'first_name' => 'Pedro', 'last_name' => 'Reyes']);
+    $application = lo4Ready($this, [], '40000', ['borrower_id' => $member->id]);
+    expect(OriginationAssessment::currentFor($application)->conflicts)->toContain(CapacityAssessor::FIRST_NAME_DIFFERS);
+
+    $this->actingAs($this->originationStaff(...LO4_HANDOFF))->postJson(lo4HandOffUrl($application->id), ['version' => $application->version])->assertOk();
+
+    $types = Document::query()->where('documentable_type', Borrower::class)->where('documentable_id', $member->id)->orderBy('type')->pluck('type')->all();
+    expect($types)->toBe(['government_id', 'proof_of_address', 'proof_of_income'])
+        ->and(app(ValidIdService::class)->grouped($member))->toHaveCount(0);
+});
+
+it('refuses, in words, a hand-off that creates the member without a verified ID recording its type and number', function () {
+    $types = collect(OriginationSetting::current()->document_types)->map(fn (array $type) => [...$type, 'required' => $type['type'] === 'government_id' ? false : $type['required']])->all();
+    OriginationSetting::current()->forceFill(['document_types' => $types])->save();
+    $application = lo4Ready($this);
+    DB::table('origination_documents')->where('application_id', $application->id)->where('type', 'government_id')->update(['status' => 'rejected']);
+
+    $this->actingAs($this->originationStaff(...LO4_HANDOFF))->postJson(lo4HandOffUrl($application->id), ['version' => $application->fresh()->version])
+        ->assertUnprocessable()
+        ->assertJsonPath('errors.documents.0', 'Approving the new member\'s registration needs a valid ID. Verify the applicant\'s ID, with its ID type and number, before submitting for approval.');
+
+    expect(Loan::query()->count())->toBe(0)
+        ->and($application->fresh()->borrower_id)->toBeNull();
 });
 
 it('answers 409 while another hand-off of the same application holds its lock, and creates nothing', function () {

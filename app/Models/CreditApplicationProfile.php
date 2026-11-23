@@ -14,9 +14,10 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
  * field takes its factor out of the score rather than costing points.
  *
  * `monthly_income` is set only by an online application's hand-off: the
- * income its assessment verified and counted. Credit Scoring then scores that
- * loan on it instead of the member record's income (Capacity::from()); staff
- * don't enter it.
+ * monthly income its assessment counted, verified or declared
+ * (`income_verification` says which). Credit Scoring then scores that loan on
+ * it instead of the member record's income (Capacity::from()); staff don't
+ * enter it.
  */
 class CreditApplicationProfile extends Model
 {

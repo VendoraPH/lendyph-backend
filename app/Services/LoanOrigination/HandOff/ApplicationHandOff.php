@@ -47,12 +47,13 @@ use Throwable;
  * When: one hand-off of an application at a time (a per-application lock;
  * a second answers 409), for an application under assessment, not handed off
  * yet (409 naming its loan otherwise), at the version the client read (409),
- * with every required document verified and each verified ID recording its
- * ID type and number (422 in words), and a current assessment that still
- * matches its request and member and still holds for the loan: assessed again
- * at the loan's start date and the product's current rate on its verified
- * figures, it reaches the same result and instalment (422, "Run the
- * assessment again", otherwise).
+ * with every required document verified, each verified ID recording its ID
+ * type and number and, when the hand-off makes the member, a verified ID
+ * among them (422 in words), and a current assessment that still matches its
+ * request and member and still holds for the loan: assessed again at the
+ * loan's start date and the product's current rate on its verified figures,
+ * it lists the same conflicts and reaches the same result and instalment
+ * (422, "Run the assessment again", otherwise).
  *
  * Step one, the member: the linked member, or a new pending registration
  * (ApplicantMember). It is its own write, so when step two fails the member
@@ -68,7 +69,9 @@ use Throwable;
  * - the application's link to the loan, re-checked under its row lock with
  *   the assessment revision and the required documents;
  * - the verified documents copied to the member's documents, each under its
- *   member document type: the ID as the member's valid ID (MemberDocuments);
+ *   member document type: the ID as the member's valid ID (MemberDocuments),
+ *   unless the assessment found the member's record different from the
+ *   application;
  * - the Credit Scoring application profile from the assessed figures;
  * - the application's move to For Approval (actor `handoff`);
  * - then the loan's submit, which seeds the approval chain. An above-capacity
@@ -81,6 +84,10 @@ final class ApplicationHandOff
     public const MEMBER_REFUSAL = 'Handing this application off creates its member, which needs the permission to create members.';
 
     public const BUSY = 'This application is being submitted for approval right now. Refresh to see its current status.';
+
+    public const CHANGED = 'The application changed after it was assessed. Run the assessment again.';
+
+    public const NO_VALID_ID = 'Approving the new member\'s registration needs a valid ID. Verify the applicant\'s ID, with its ID type and number, before submitting for approval.';
 
     /**
      * Longest a hand-off holds its application's lock: a hand-off slowed by
@@ -138,6 +145,7 @@ final class ApplicationHandOff
         $assessment = $this->currentAssessment($application);
         $startDate = $input['start_date'] ?? Carbon::now()->toDateString();
         $this->assertStillHolds($application, $assessment, $startDate);
+        $this->assertNewMemberHasValidId($application, $assessment);
 
         $member = $application->borrower_id === null
             ? $this->createMember($application, $user, $assessment, (bool) ($input['force_new_member'] ?? false))
@@ -211,7 +219,7 @@ final class ApplicationHandOff
         }
 
         if (! $this->stillMatches($assessment, $application)) {
-            throw ValidationException::withMessages(['assessment' => 'The application changed after it was assessed. Run the assessment again.']);
+            throw ValidationException::withMessages(['assessment' => self::CHANGED]);
         }
 
         $this->assertDocumentsReady($application);
@@ -242,11 +250,15 @@ final class ApplicationHandOff
     /**
      * The assessment still holds for the loan this hand-off makes: assessed
      * again on its verified figures, at the loan's start date and the
-     * product's current rate, it reaches the same result and the same
-     * instalment. The busiest month of a weekly, bi-weekly or daily loan
-     * moves with its start date, and a rate change moves every instalment,
-     * so either can take a loan above capacity past the Policy Exception
-     * chain.
+     * product's current rate, it lists the same conflicts and reaches the
+     * same result and the same instalment.
+     *
+     * - The conflicts name every difference between the application and the
+     *   member's record, so a different person's pending registration linked
+     *   after an assessment that had no member needs a new run (CHANGED).
+     * - The busiest month of a weekly, bi-weekly or daily loan moves with its
+     *   start date, and a rate change moves every instalment, so either can
+     *   take a loan above capacity past the Policy Exception chain.
      */
     private function assertStillHolds(OriginationApplication $application, OriginationAssessment $assessment, string $startDate): void
     {
@@ -257,12 +269,45 @@ final class ApplicationHandOff
             $startDate,
         );
 
+        if ($again->conflicts !== $assessment->conflicts) {
+            throw ValidationException::withMessages(['assessment' => self::CHANGED]);
+        }
+
         if ($again->result !== $assessment->result || $again->figures['proposed_monthly_installment'] !== ($assessment->figures['proposed_monthly_installment'] ?? null)) {
             throw ValidationException::withMessages(['assessment' => sprintf(
                 'The result or the instalment is different for a loan starting on %s at the product\'s current rate. Run the assessment again with that start date.',
                 Carbon::parse($startDate)->format('M j, Y'),
             )]);
         }
+    }
+
+    /**
+     * A member this hand-off makes (the assessment counted none) is a pending
+     * registration, which can't be approved, nor its loan released, without
+     * a valid ID. So one of the verified documents must be an ID
+     * (MemberDocuments::isId()) recording its ID type and number, even when
+     * the settings make the ID optional or name it differently (422 in
+     * words). Checked before the member is made and again in the loan
+     * transaction.
+     */
+    private function assertNewMemberHasValidId(OriginationApplication $application, OriginationAssessment $assessment): void
+    {
+        if ($assessment->borrower_id !== null) {
+            return;
+        }
+
+        $ids = $this->verifiedDocuments($application)
+            ->filter(fn (OriginationDocument $document) => MemberDocuments::isId($document->type) && MemberDocuments::idDetails($document) !== null);
+
+        if ($ids->isEmpty()) {
+            throw ValidationException::withMessages(['documents' => self::NO_VALID_ID]);
+        }
+    }
+
+    /** Whether the assessment found the member's record different from the application in any way. */
+    private static function recordDiffers(OriginationAssessment $assessment): bool
+    {
+        return array_intersect($assessment->conflicts, CapacityAssessor::MEMBER_RECORD_CONFLICTS) !== [];
     }
 
     /**
@@ -371,17 +416,22 @@ final class ApplicationHandOff
             throw $this->alreadyHandedOff($locked);
         }
 
+        // A locking read sees the latest revision, not the transaction's
+        // snapshot, so a run saved after the snapshot is never missed.
+        $latestRevision = (int) OriginationAssessment::query()->where('application_id', $locked->id)->orderByDesc('version')->lockForUpdate()->value('id');
+
         if ($locked->version !== $application->version || $locked->status !== 'under_assessment' || $locked->borrower_id !== $member->id
-            || OriginationAssessment::currentFor($locked)?->id !== $assessment->id) {
+            || $latestRevision !== (int) $assessment->id) {
             throw LoanWriteTransaction::conflict(ApplicationTransitions::STALE);
         }
 
         $this->assertDocumentsReady($locked);
+        $this->assertNewMemberHasValidId($locked, $assessment);
 
         $locked->loan_id = $loan->id;
         $locked->save();
 
-        $this->copyDocuments($locked, $member, $user, $copied);
+        $this->copyDocuments($locked, $member, $assessment, $user, $copied);
         $this->writeProfile($loan, $locked, $assessment, $user);
 
         $this->transitions->move(
@@ -408,22 +458,33 @@ final class ApplicationHandOff
      * ID type key and carrying its number, where ValidIdService keeps valid
      * IDs; any other under its own type, labelled with the application.
      *
+     * The ID becomes the member's valid ID only when the assessment found no
+     * difference between the application and the member's record; otherwise
+     * it is kept under its own type, so one person's ID is never filed as
+     * another's.
+     *
      * @param  list<string>  $copied
      */
-    private function copyDocuments(OriginationApplication $application, Borrower $member, User $user, array &$copied): void
+    private function copyDocuments(OriginationApplication $application, Borrower $member, OriginationAssessment $assessment, User $user, array &$copied): void
     {
         $reference = $application->reference_number ?? '#'.$application->id;
+        $asValidId = ! self::recordDiffers($assessment);
 
         foreach ($this->verifiedDocuments($application) as $document) {
             $version = $document->currentVersion;
             $label = $this->documentLabel($document->type);
-            $type = MemberDocuments::memberType($document->type);
             $isId = MemberDocuments::isId($document->type);
             $id = $isId ? MemberDocuments::idDetails($document) : null;
 
             if ($isId && $id === null) {
                 throw ValidationException::withMessages(['documents' => MemberDocuments::unrecordedIdMessage($label)]);
             }
+
+            if (! $asValidId) {
+                $id = null;
+            }
+
+            $type = $id === null ? $document->type : MemberDocuments::memberType($document->type);
 
             $bytes = $version === null ? null : Storage::disk($version->disk)->get($version->path);
 
@@ -467,26 +528,23 @@ final class ApplicationHandOff
 
     /**
      * The application's figures for Credit Scoring (credit_application_profiles):
-     * the verified monthly income as the assessment counted it (Credit
-     * Scoring scores this loan on it, not on the member record's income),
-     * household expenses, the debt payments counted outside Lendy, other
-     * regular income (when the income wasn't verified as a whole) and the
-     * stability details. Credit Scoring then reads this loan's capacity on
-     * the same figures the assessment used.
+     * the monthly income the assessment counted, verified or declared, other
+     * regular income included (Credit Scoring scores this loan on it, not on
+     * the member record's income; `income_verification` says verified only
+     * when it was), household expenses, the debt payments counted outside
+     * Lendy and the stability details. Credit Scoring then reads this loan's
+     * capacity on the same figures the assessment used.
      */
     private function writeProfile(Loan $loan, OriginationApplication $application, OriginationAssessment $assessment, User $user): void
     {
         $draft = $this->draftRules->normalize($application->draft ?? []);
-        $declared = $this->draftRules->declaredTotals($draft);
         $verified = $assessment->inputs['verified_monthly_income'] ?? null;
-        $other = collect($declared['income'])->firstWhere('key', 'other_regular_income');
         $years = trim((string) $draft['personal']['years_at_residence']);
         $loansCount = $draft['expenses']['has_existing_loans'] === true ? count($draft['expenses']['existing_loans']) : 0;
 
         CreditApplicationProfile::query()->create([
             'loan_id' => $loan->id,
-            'monthly_income' => $verified === null ? null : $assessment->figures['eligible_monthly_income'],
-            'other_income' => $verified === null ? ($other['monthly'] ?? null) : null,
+            'monthly_income' => $assessment->figures['eligible_monthly_income'],
             'household_expenses' => $assessment->figures['monthly_expenses'],
             'outside_debt_payments' => $assessment->figures['outside_debt_payments'],
             'outside_lenders_count' => $loansCount,
