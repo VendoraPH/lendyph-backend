@@ -82,8 +82,19 @@ class ProvisioningPrincipalBasisTest extends TestCase
         );
         $this->assertSame(['amount', 'count', 'rate', 'rate_percent', 'required_allowance'], array_keys($report['buckets']['1_30']));
         $this->assertSame(['amount', 'count', 'required_allowance', 'effective_rate'], array_keys($report['totals']));
-        $this->assertStringContainsString('principal_basis', $report['policy_note']);
-        $this->assertStringContainsString('POLICY', $report['policy_note']);
+    }
+
+    public function test_the_policy_note_reads_in_words(): void
+    {
+        // The Provisioning report prints this note to users as is, so it holds
+        // no keys and no talk of how the code stores the rates.
+        $note = $this->report()['policy_note'];
+
+        $this->assertStringContainsString('policy', $note);
+        $this->assertStringNotContainsString('principal_basis', $note);
+        $this->assertStringNotContainsString('class constant', $note);
+        $this->assertStringNotContainsString('settings table', $note);
+        $this->assertStringNotContainsString('POLICY', $note);
     }
 
     public function test_the_report_date_is_the_basis_date(): void
