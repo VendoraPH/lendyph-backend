@@ -1220,10 +1220,15 @@ class ReportService
             ->when($filters['date_from'] ?? null, fn ($q, $d) => $q->where('released_at', '>=', self::dayStart($d)))
             ->when($filters['date_to'] ?? null, fn ($q, $d) => $q->where('released_at', '<', self::nextDayStart($d)));
 
-        $loanIds = (clone $query)->select('loans.id');
+        // PAR, the outstanding breakdown and `overdue` cover the collectible
+        // loans of the same filters (one basis, Arvin 2026-11-19), as the daily snapshots,
+        // the aging and CDA do: a completed or restructured loan with a period
+        // still marked unpaid is in none of them. So the breakdown adds up to
+        // `total_outstanding`, and PAR's denominator is `outstanding_principal`.
+        $collectibleQuery = (clone $query)->whereIn('loans.status', Loan::COLLECTIBLE_STATUSES);
 
         $scheduleAgg = DB::table('amortization_schedules')
-            ->whereIn('loan_id', $loanIds)
+            ->whereIn('loan_id', (clone $collectibleQuery)->select('loans.id'))
             ->selectRaw('
                 COALESCE(SUM('.AmortizationSchedule::remainingPrincipalSql().'), 0) as outstanding_principal,
                 COALESCE(SUM('.AmortizationSchedule::remainingInterestSql().'), 0) as outstanding_interest,
@@ -1247,12 +1252,13 @@ class ReportService
             ? app(PortfolioOutstanding::class)->totals(self::branchScope($filters), null, null, $scope)
             : $collectible;
 
-        // Also from the bare due date. This block feeds the balance summary's
-        // `overdue` figures alongside the PAR ratio below and is read with
-        // them, so the two must be struck the same way. See the note on
-        // overdueScheduleQuery() for why that is the due date and not grace.
+        // Also from the bare due date, on the same collectible loans as PAR.
+        // This block feeds the balance summary's `overdue` figures alongside
+        // the PAR ratio below and is read with them, so the two must be struck
+        // the same way. See the note on overdueScheduleQuery() for why that is
+        // the due date and not grace.
         $overdueAgg = DB::table('amortization_schedules')
-            ->whereIn('loan_id', $loanIds)
+            ->whereIn('loan_id', (clone $collectibleQuery)->select('loans.id'))
             ->whereIn('status', AmortizationSchedule::UNPAID_STATUSES)
             ->where('due_date', '<', $today)
             ->selectRaw('
@@ -1266,15 +1272,20 @@ class ReportService
         $portfolio = (clone $query)
             ->selectRaw('
                 COUNT(*) as loan_count,
-                COALESCE(SUM(principal_amount), 0) as total_released,
-                COALESCE(SUM(insurance_remaining_balance), 0) as insurance_remaining
+                COALESCE(SUM(principal_amount), 0) as total_released
             ')
             ->first();
 
+        // The premium owed, by LoanListTotals' rule (never below zero), on the
+        // same collectible loans as `total_outstanding`.
+        $insuranceRemaining = round((float) (clone $collectibleQuery)
+            ->selectRaw('COALESCE(SUM(GREATEST(loans.insurance_remaining_balance, 0)), 0) as insurance_remaining')
+            ->value('insurance_remaining'), 2);
+
         $activeLoans = (clone $query)->whereIn('status', ['released', 'ongoing'])->count();
 
-        // Portfolio at Risk 1, 30, 60 and 90 (PortfolioRisk) over the same
-        // loans: the unpaid principal of every loan whose oldest unpaid period
+        // Portfolio at Risk 1, 30, 60 and 90 (PortfolioRisk) over the
+        // collectible loans: the unpaid principal of every loan whose oldest unpaid period
         // is more than n days past due, over their unpaid principal. The
         // numerator is the loan's WHOLE remaining principal, not just the late
         // instalment; that is what makes it "at risk". From the due date, grace
@@ -1283,7 +1294,7 @@ class ReportService
         // overdueScheduleQuery(); see the comment there, and do not make one
         // grace-aware without the other. PAR 30 is `at_risk_amount` and
         // `par_ratio`, unchanged.
-        $risk = app(PortfolioRisk::class)->par($query);
+        $risk = app(PortfolioRisk::class)->par($collectibleQuery);
         $par30 = $risk['par_'.self::PAR_THRESHOLD_DAYS];
 
         // Aging by loan over the collectible loans of the same scope and
@@ -1297,7 +1308,7 @@ class ReportService
         );
 
         $outstandingPrincipal = round((float) ($scheduleAgg->outstanding_principal ?? 0), 2);
-        $outstandingBalance = round($outstandingPrincipal + (float) ($portfolio->insurance_remaining ?? 0), 2);
+        $outstandingBalance = round($outstandingPrincipal + $insuranceRemaining, 2);
         $outstanding = [
             'principal' => $outstandingPrincipal,
             'interest' => round((float) ($scheduleAgg->outstanding_interest ?? 0), 2),
@@ -1323,8 +1334,9 @@ class ReportService
             // unpaid principal, as on the loan pages.
             'total_outstanding' => $collectible['total_outstanding'],
             'outstanding_principal' => $collectible['outstanding_principal'],
-            // Deprecated alias with its old meaning, principal plus premium:
-            // read `total_outstanding` or `outstanding_principal`.
+            // Deprecated alias, principal plus premium, on the collectible
+            // loans, like the breakdown: read `total_outstanding` or
+            // `outstanding_principal`.
             'outstanding_balance' => $outstandingBalance,
             'at_risk_amount' => $par30['amount'],
             // Whole percent, e.g. 12.5 means 12.5%.
@@ -1337,9 +1349,9 @@ class ReportService
             'par_30' => $risk['par_30'],
             'par_60' => $risk['par_60'],
             'par_90' => $risk['par_90'],
-            // The PAR ratios' denominator: the unpaid principal of the same
-            // ever-released loans (`outstanding.principal`), not the
-            // collectible-only `outstanding_principal`.
+            // The PAR ratios' denominator: the unpaid principal of the
+            // collectible loans, equal to `outstanding_principal` and
+            // `outstanding.principal`.
             'par_portfolio_principal' => $risk['portfolio_principal'],
             // What the collectible loans' periods past their due date AND grace
             // still owe, and how many loans, as of today whatever the release
@@ -1348,12 +1360,13 @@ class ReportService
             'past_due_amount' => $pastDue['overdue_amount'],
             'past_due_loan_count' => $pastDue['overdue_count'],
             'aging_by_loan' => $agingByLoan,
-            // `total` is principal + interest + penalty, the composition the
-            // three lines above it make up; `balance` is the headline figure,
-            // principal + insurance.
+            // On the collectible loans: principal + interest + penalty +
+            // insurance is `total_outstanding`. `total` is principal + interest
+            // + penalty, the composition the three lines above it make up;
+            // `balance` is the deprecated headline, principal + insurance.
             'outstanding' => [
                 ...$outstanding,
-                'insurance' => round((float) ($portfolio->insurance_remaining ?? 0), 2),
+                'insurance' => $insuranceRemaining,
                 'balance' => $outstandingBalance,
                 'total' => self::sumOfFigures($outstanding),
             ],
@@ -1431,12 +1444,11 @@ class ReportService
                 loans.branch_id,
                 COUNT(loans.id) as loan_count,
                 COALESCE(SUM(loans.principal_amount), 0) as total_released,
-                COALESCE(SUM(schedule_totals.remaining_principal), 0)
-                    + COALESCE(SUM(loans.insurance_remaining_balance), 0) as outstanding_balance,
+                COALESCE(SUM(CASE WHEN loans.status IN ('.$collectible.') THEN COALESCE(schedule_totals.remaining_principal, 0) + GREATEST(loans.insurance_remaining_balance, 0) END), 0) as outstanding_balance,
                 COALESCE(SUM(CASE WHEN loans.status IN ('.$collectible.') THEN schedule_totals.remaining_principal END), 0) as outstanding_principal,
                 COALESCE(SUM(CASE WHEN loans.status IN ('.$collectible.') THEN COALESCE(schedule_totals.remaining_total, 0) + GREATEST(loans.insurance_remaining_balance, 0) END), 0) as total_outstanding,
                 COUNT(CASE WHEN loans.status IN ('.$active.') THEN 1 END) as active_loan_count
-            ', [...Loan::COLLECTIBLE_STATUSES, ...Loan::COLLECTIBLE_STATUSES, ...Loan::ACTIVE_STATUSES])
+            ', [...Loan::COLLECTIBLE_STATUSES, ...Loan::COLLECTIBLE_STATUSES, ...Loan::COLLECTIBLE_STATUSES, ...Loan::ACTIVE_STATUSES])
             ->get()
             ->keyBy(fn ($row) => (int) $row->branch_id);
 
@@ -1451,7 +1463,8 @@ class ReportService
                     'total_released' => round((float) ($row->total_released ?? 0), 2),
                     'total_outstanding' => round((float) ($row->total_outstanding ?? 0), 2),
                     'outstanding_principal' => round((float) ($row->outstanding_principal ?? 0), 2),
-                    // Deprecated alias: principal plus premium.
+                    // Deprecated alias: principal plus premium, on the
+                    // collectible loans like the summary's.
                     'outstanding_balance' => round((float) ($row->outstanding_balance ?? 0), 2),
                     // Released plus ongoing, the headline `active_loans`
                     // counted per branch.
@@ -2834,9 +2847,9 @@ class ReportService
                 COALESCE(SUM(CASE WHEN loans.status IN ('.$collectible.') THEN schedule_totals.remaining_principal END), 0) as outstanding_principal,
                 COALESCE(SUM(CASE WHEN loans.status IN ('.$collectible.') THEN COALESCE(schedule_totals.remaining_total, 0) + GREATEST(loans.insurance_remaining_balance, 0) END), 0) as total_outstanding,
                 COALESCE(SUM(loans.insurance_remaining_balance), 0) as insurance_remaining,
-                COALESCE(SUM(schedule_totals.overdue_amount), 0) as overdue_amount,
-                COALESCE(SUM(CASE WHEN schedule_totals.is_at_risk = 1 THEN schedule_totals.remaining_principal ELSE 0 END), 0) as at_risk_amount
-            ', [...Loan::COLLECTIBLE_STATUSES, ...Loan::COLLECTIBLE_STATUSES])
+                COALESCE(SUM(CASE WHEN loans.status IN ('.$collectible.') THEN schedule_totals.overdue_amount END), 0) as overdue_amount,
+                COALESCE(SUM(CASE WHEN loans.status IN ('.$collectible.') AND schedule_totals.is_at_risk = 1 THEN schedule_totals.remaining_principal ELSE 0 END), 0) as at_risk_amount
+            ', [...Loan::COLLECTIBLE_STATUSES, ...Loan::COLLECTIBLE_STATUSES, ...Loan::COLLECTIBLE_STATUSES, ...Loan::COLLECTIBLE_STATUSES])
             ->orderByRaw('total_released DESC')
             ->get();
 
@@ -2851,8 +2864,11 @@ class ReportService
         $weightedRate = (float) $rows->sum(fn ($r) => (float) $r->avg_interest_rate * (int) $r->loan_count);
 
         $products = $rows->map(function ($row) use ($grandReleased, $grandOutstandingPrincipal) {
-            // Every ever-released loan: the deprecated alias and PAR read this.
+            // The deprecated alias keeps every ever-released loan (round fz);
+            // PAR is over the collectible loans' unpaid principal (one basis,
+            // Arvin 2026-11-19).
             $remainingPrincipal = round((float) $row->remaining_principal, 2);
+            $collectiblePrincipal = round((float) $row->outstanding_principal, 2);
             $released = round((float) $row->total_released, 2);
             $atRisk = round((float) $row->at_risk_amount, 2);
 
@@ -2871,7 +2887,7 @@ class ReportService
                 'overdue_amount' => round((float) $row->overdue_amount, 2),
                 'at_risk_amount' => $atRisk,
                 // Whole percent, e.g. 12.5 means 12.5%.
-                'par_ratio' => $remainingPrincipal > 0 ? round($atRisk / $remainingPrincipal * 100, 2) : 0.0,
+                'par_ratio' => $collectiblePrincipal > 0 ? round($atRisk / $collectiblePrincipal * 100, 2) : 0.0,
                 'portfolio_share' => $grandReleased > 0 ? round($released / $grandReleased * 100, 2) : 0.0,
                 // Its share of the unpaid principal of every product's
                 // collectible loans, whole percent to two places; null when
@@ -2901,8 +2917,8 @@ class ReportService
                 'avg_interest_rate' => $grandLoanCount > 0 ? round($weightedRate / $grandLoanCount, self::RATE_SCALE) : 0.0,
                 'overdue_amount' => round($grandOverdue, 2),
                 'at_risk_amount' => round($grandAtRisk, 2),
-                'par_ratio' => $grandRemainingPrincipal > 0
-                    ? round($grandAtRisk / $grandRemainingPrincipal * 100, 2)
+                'par_ratio' => $grandOutstandingPrincipal > 0
+                    ? round($grandAtRisk / $grandOutstandingPrincipal * 100, 2)
                     : 0.0,
             ],
             'generated_at' => now()->toDateTimeString(),
@@ -3090,10 +3106,10 @@ class ReportService
             COALESCE(SUM(CASE WHEN loans.status IN ('.$collectible.') THEN schedule_totals.remaining_principal END), 0) as outstanding_principal,
             COALESCE(SUM(CASE WHEN loans.status IN ('.$collectible.') THEN COALESCE(schedule_totals.remaining_total, 0) + GREATEST(loans.insurance_remaining_balance, 0) END), 0) as total_outstanding,
             COALESCE(SUM(loans.insurance_remaining_balance), 0) as insurance_remaining,
-            COALESCE(SUM(schedule_totals.overdue_amount), 0) as overdue_amount,
-            COALESCE(SUM(CASE WHEN schedule_totals.is_at_risk = 1 THEN schedule_totals.remaining_principal ELSE 0 END), 0) as at_risk_amount,
+            COALESCE(SUM(CASE WHEN loans.status IN ('.$collectible.') THEN schedule_totals.overdue_amount END), 0) as overdue_amount,
+            COALESCE(SUM(CASE WHEN loans.status IN ('.$collectible.') AND schedule_totals.is_at_risk = 1 THEN schedule_totals.remaining_principal ELSE 0 END), 0) as at_risk_amount,
             COUNT(DISTINCT CASE WHEN loans.status IN ('.$collectible.') THEN loans.borrower_id END) as active_borrowers',
-            [...$releasedBindings, ...$releasedBindings, ...Loan::COLLECTIBLE_STATUSES, ...Loan::COLLECTIBLE_STATUSES, ...Loan::COLLECTIBLE_STATUSES],
+            [...$releasedBindings, ...$releasedBindings, ...Loan::COLLECTIBLE_STATUSES, ...Loan::COLLECTIBLE_STATUSES, ...Loan::COLLECTIBLE_STATUSES, ...Loan::COLLECTIBLE_STATUSES, ...Loan::COLLECTIBLE_STATUSES],
         )
             ->orderByRaw('released_amount DESC')
             ->get();
@@ -3103,8 +3119,11 @@ class ReportService
         }
 
         return $rows->map(function ($row) use ($dimension) {
-            // Every ever-released loan: the deprecated alias and PAR read this.
+            // The deprecated alias keeps every ever-released loan (round fz);
+            // PAR is over the collectible loans' unpaid principal (one basis,
+            // Arvin 2026-11-19).
             $remainingPrincipal = round((float) $row->remaining_principal, 2);
+            $collectiblePrincipal = round((float) $row->outstanding_principal, 2);
             $atRisk = round((float) $row->at_risk_amount, 2);
             $name = trim((string) $row->dimension_name);
 
@@ -3135,7 +3154,7 @@ class ReportService
                 'overdue_amount' => round((float) $row->overdue_amount, 2),
                 'at_risk_amount' => $atRisk,
                 // Whole percent, e.g. 12.5 means 12.5%.
-                'par_ratio' => $remainingPrincipal > 0 ? round($atRisk / $remainingPrincipal * 100, 2) : 0.0,
+                'par_ratio' => $collectiblePrincipal > 0 ? round($atRisk / $collectiblePrincipal * 100, 2) : 0.0,
                 'active_borrowers' => (int) $row->active_borrowers,
             ]);
         })->values()->all();

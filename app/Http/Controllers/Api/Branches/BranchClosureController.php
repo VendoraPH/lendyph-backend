@@ -16,7 +16,7 @@ use OpenApi\Attributes as OA;
 /**
  * Closing a branch (Phase 6, multi-branch decision 3): one user asks with an
  * effective date and a reason, and a different user approves. Refused while
- * the checklist isn't clear. Every route needs `branches:manage` plus
+ * the branch is active (suspend it first) or the checklist isn't clear. Every route needs `branches:manage` plus
  * `branches:view_all` (BranchStatusRequest); a hidden branch answers 404.
  */
 class BranchClosureController extends Controller
@@ -26,7 +26,7 @@ class BranchClosureController extends Controller
     #[OA\Get(
         path: '/api/branches/{branch}/closure',
         summary: 'Closure checklist and the waiting request',
-        description: 'What still keeps the branch open (open loans, savings and time deposits, money in its cash and bank accounts, pending approvals and requests, assigned users), whether it can close, and the request waiting, if any.',
+        description: 'What still keeps the branch open (open loans, savings and time deposits, money in its cash and bank accounts, pending approvals and requests, assigned users), whether it can close (`can_close`: suspended, not the main office, checklist clear), and the request waiting, if any.',
         tags: ['Branches'],
         security: [['sanctum' => []]],
         parameters: [new OA\Parameter(name: 'branch', in: 'path', required: true, schema: new OA\Schema(type: 'integer'))],
@@ -48,8 +48,7 @@ class BranchClosureController extends Controller
         return response()->json(['data' => [
             'branch_id' => $branch->id,
             'status' => $branch->status,
-            'can_close' => $branch->status !== Branch::STATUS_CLOSED
-                && ! $branch->is_main_office
+            'can_close' => $this->status->closable($branch)
                 && collect($checklist)->every(fn (array $item): bool => $item['clear']),
             'checklist' => $checklist,
             'request' => $waiting === null ? null : new BranchClosureResource($waiting),
@@ -74,7 +73,7 @@ class BranchClosureController extends Controller
             new OA\Response(response: 403, description: 'Needs branches:manage and branches:view_all'),
             new OA\Response(response: 404, description: 'Not found'),
             new OA\Response(response: 409, description: 'A request is already waiting'),
-            new OA\Response(response: 422, description: 'Refused, in words (checklist not clear, main office, closed)'),
+            new OA\Response(response: 422, description: 'Refused, in words (still active: suspend it first; checklist not clear; main office; closed)'),
         ],
     )]
     public function store(RequestBranchClosureRequest $request, Branch $branch): JsonResponse
@@ -87,7 +86,7 @@ class BranchClosureController extends Controller
     #[OA\Post(
         path: '/api/branches/{branch}/closure/approve',
         summary: 'Approve the waiting request and close the branch',
-        description: 'By a different user from the one who asked. The checklist is checked again; the branch closes on the effective date.',
+        description: 'By a different user from the one who asked. The branch must still be suspended and the checklist is checked again; the branch closes on the effective date.',
         tags: ['Branches'],
         security: [['sanctum' => []]],
         parameters: [new OA\Parameter(name: 'branch', in: 'path', required: true, schema: new OA\Schema(type: 'integer'))],

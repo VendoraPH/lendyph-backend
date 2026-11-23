@@ -10,7 +10,7 @@ use Illuminate\Pagination\LengthAwarePaginator;
 /**
  * The loans behind the executive dashboard's PAR card (Phase 6 EB-D1): the
  * Portfolio Summary's own PAR loans (PortfolioRisk::parLoans() over the same
- * ever-released loans, branches and product and officer filters), so their
+ * collectible loans, branches and product and officer filters), so their
  * count and principal are its `par_n`. PAR's basis is the summary's; a change
  * to it applies here by itself.
  *
@@ -32,7 +32,7 @@ final class ParLoans
     public function page(string $par, ?array $scope, LoanScope $loanScope, int $page, int $perPage): array
     {
         $loans = Loan::query()
-            ->whereIn('loans.status', Loan::EVER_RELEASED_STATUSES)
+            ->whereIn('loans.status', Loan::COLLECTIBLE_STATUSES)
             ->when($scope !== null, fn ($q) => $q->whereIn('loans.branch_id', $scope))
             ->tap($loanScope->loans());
 

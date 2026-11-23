@@ -22,7 +22,7 @@ class BranchStatusController extends Controller
     #[OA\Patch(
         path: '/api/branches/{branch}/status',
         summary: 'Suspend or reactivate a branch',
-        description: 'Active or suspended, with a reason. A closed branch stays closed, and the main office stays active. Closing goes through the closure request.',
+        description: 'Active or suspended, with a reason. A closed branch stays closed, and the main office stays active. Closing goes through the closure request. A branch waiting to close isn\'t reactivated until its closure request is rejected or cancelled (422).',
         tags: ['Branches'],
         security: [['sanctum' => []]],
         parameters: [new OA\Parameter(name: 'branch', in: 'path', required: true, schema: new OA\Schema(type: 'integer'))],

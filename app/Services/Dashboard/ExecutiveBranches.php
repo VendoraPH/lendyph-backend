@@ -117,7 +117,7 @@ final class ExecutiveBranches
         $efficiency = $this->reports->collectionEfficiency([...$filters, ...$dates]);
 
         $pastDue = $this->listTotals->grouped($this->loans(Loan::COLLECTIBLE_STATUSES, $scope, $loanScope), ['loans.branch_id']);
-        $par = $this->risk->parBy($this->loans(Loan::EVER_RELEASED_STATUSES, $scope, $loanScope), ['loans.branch_id']);
+        $par = $this->risk->parBy($this->loans(Loan::COLLECTIBLE_STATUSES, $scope, $loanScope), ['loans.branch_id']);
         $flowRows = collect($flow['by_branch'])->filter(fn (array $row): bool => $row['branch_id'] !== null)->keyBy('branch_id');
         $efficiencyRows = collect($efficiency['by_branch'])->keyBy('branch_id');
 

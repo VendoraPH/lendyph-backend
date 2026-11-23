@@ -445,7 +445,7 @@ class ReportController extends Controller
     #[OA\Get(
         path: '/api/reports/loan-balance-summary',
         summary: 'Loan Balance Summary',
-        description: 'Aggregate portfolio, outstanding, and overdue amounts by branch. `total_outstanding` is everything owed (principal, interest, penalty, premium) and `outstanding_principal` the unpaid principal, on the collectible loans (released, ongoing, defaulted) by the rule of GET /loans `meta.totals`, so they agree with the loan pages to the centavo, and with no date range `outstanding_principal` equals the Dashboard\'s `total_portfolio`. `by_branch[]` and `by_branch_totals` carry both too. Each `by_branch[]` row also carries `active_loan_count` (released and ongoing loans). `outstanding_balance` is a deprecated alias with its old meaning, principal plus premium.',
+        description: 'Aggregate portfolio, outstanding, and overdue amounts by branch. `total_outstanding` is everything owed (principal, interest, penalty, premium) and `outstanding_principal` the unpaid principal, on the collectible loans (released, ongoing, defaulted) by the rule of GET /loans `meta.totals`, so they agree with the loan pages to the centavo, and with no date range `outstanding_principal` equals the Dashboard\'s `total_portfolio`. `by_branch[]` and `by_branch_totals` carry both too. Each `by_branch[]` row also carries `active_loan_count` (released and ongoing loans). `outstanding_balance` is a deprecated alias, principal plus premium, on the collectible loans, like the breakdown. PAR (`par_1` to `par_90`, `par_portfolio_principal`), the `outstanding` breakdown and `overdue` (periods past their bare due date) cover the same collectible loans, so `outstanding.principal` equals `outstanding_principal` and principal + interest + penalty + insurance equals `total_outstanding`.',
         tags: ['Reports'],
         security: [['sanctum' => []]],
         parameters: [
@@ -761,7 +761,7 @@ class ReportController extends Controller
     #[OA\Get(
         path: '/api/reports/portfolio-by-product',
         summary: 'Loan Portfolio by Product',
-        description: 'Loan count, amount released, `total_outstanding` (everything owed) and `outstanding_principal` (unpaid principal) on the collectible loans, `outstanding` (a deprecated alias, principal plus premium, on every ever-released loan), average rate, overdue amount and PAR ratio per loan product. Date filters apply to release date, matching the Loan Balance Summary.',
+        description: 'Loan count, amount released, `total_outstanding` (everything owed) and `outstanding_principal` (unpaid principal) on the collectible loans, `outstanding` (a deprecated alias, principal plus premium, on every ever-released loan), average rate, and `overdue_amount`, PAR ratio and `at_risk_amount` on the collectible loans, per loan product. Date filters apply to release date, matching the Loan Balance Summary.',
         tags: ['Reports'],
         security: [['sanctum' => []]],
         parameters: [
@@ -821,7 +821,7 @@ class ReportController extends Controller
     #[OA\Get(
         path: '/api/reports/performance',
         summary: 'Officer / Branch Performance',
-        description: '`total_outstanding` is everything owed and `outstanding_principal` the unpaid principal, on the collectible loans; `outstanding` is a deprecated alias, principal plus premium, on every ever-released loan. Loans released and amounts collected for the period (`collected` leaves out the insurance premium payments collected, stated as `insurance_collected`), alongside outstanding portfolio, overdue amount, PAR ratio and active borrowers as of today, grouped by account officer and mirrored by branch. Loans with no officer appear as an Unassigned row.',
+        description: '`total_outstanding` is everything owed and `outstanding_principal` the unpaid principal, on the collectible loans; `outstanding` is a deprecated alias, principal plus premium, on every ever-released loan; `overdue_amount` and PAR (`at_risk_amount`, `par_ratio`) cover the collectible loans too. Loans released and amounts collected for the period (`collected` leaves out the insurance premium payments collected, stated as `insurance_collected`), alongside outstanding portfolio, overdue amount, PAR ratio and active borrowers as of today, grouped by account officer and mirrored by branch. Loans with no officer appear as an Unassigned row.',
         tags: ['Reports'],
         security: [['sanctum' => []]],
         parameters: [

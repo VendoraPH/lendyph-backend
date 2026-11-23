@@ -164,14 +164,14 @@ class PortfolioRiskTest extends TestCase
     }
 
     /**
-     * Where the two rules part, each is the documented one: PAR measures every
-     * ever-released loan from its oldest period still marked unpaid; the aging
-     * measures collectible loans from their oldest period with something left
-     * owing (PortfolioRisk's docblock).
+     * Both measure the collectible loans (one PAR basis, 2026-11-19). Where
+     * they part, each is the documented rule: PAR dates a loan by its oldest
+     * period still marked unpaid; the aging by its oldest period with
+     * something left owing (PortfolioRisk's docblock).
      */
     public function test_par_and_the_aging_differ_only_where_their_documented_rules_do(): void
     {
-        // A completed loan with a stray unpaid period: in PAR, not in the aging.
+        // A completed loan with a stray unpaid period: in neither.
         $stray = $this->createReleasedLoan();
         $this->dueDaysAgo($stray, 1, 10);
         DB::table('loans')->where('id', $stray->id)->update(['status' => 'completed']);
@@ -191,8 +191,8 @@ class PortfolioRiskTest extends TestCase
         $summary = $this->summary();
         $buckets = collect($summary['aging_by_loan']['buckets'])->keyBy('bucket');
 
-        $this->assertEquals(['amount' => 110000, 'ratio' => 100.0, 'loans' => 2], $summary['par_1']);
-        $this->assertEquals(['amount' => 50000, 'ratio' => 45.45, 'loans' => 1], $summary['par_30']);
+        $this->assertEquals(['amount' => 50000, 'ratio' => 100.0, 'loans' => 1], $summary['par_1']);
+        $this->assertEquals(['amount' => 50000, 'ratio' => 100.0, 'loans' => 1], $summary['par_30']);
         $this->assertSame(1, $buckets['1_30']['loans'], 'The marked loan, by its owing period; the completed loan is not aged.');
         $this->assertSame(0, $buckets['31_60']['loans']);
         $this->assertEquals(50000, $summary['aging_by_loan']['totals']['principal']);
