@@ -1,5 +1,6 @@
 <?php
 
+use App\Models\ApprovalWorkflowSetting;
 use App\Models\AuditLog;
 use App\Models\Borrower;
 use App\Models\Branch;
@@ -10,13 +11,19 @@ use App\Models\Loan;
 use App\Models\LoanApprovalStep;
 use App\Models\OriginationApplication;
 use App\Models\OriginationAssessment;
+use App\Models\OriginationDocument;
 use App\Models\OriginationStatusHistory;
 use App\Models\ShareCapitalPledge;
+use App\Models\User;
 use App\Services\CreditScoring\Capacity;
 use App\Services\CreditScoring\Exposure;
 use App\Services\CreditScoring\MemberCreditData;
 use App\Services\LoanListTotals;
+use App\Services\LoanOrigination\Assessment\AssessmentService;
+use App\Services\LoanOrigination\HandOff\ApplicationHandOff;
 use App\Services\LoanService;
+use App\Services\ValidIdService;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
 use Tests\Feature\Phase6\LoanOrigination\OriginationFixtures;
@@ -155,7 +162,7 @@ it('records the application details on the loan for Credit Scoring', function ()
         ->and($profile->created_by)->toBe($staff->id);
 });
 
-it('sends an above-capacity or insufficient-information result to the Policy Exception chain with its explanation', function () {
+it('sends an above-capacity result to the Policy Exception chain with its explanation', function () {
     $application = lo4Ready($this, ['employment' => ['gross_monthly_income' => '9000']], '9000');
 
     $this->actingAs($this->originationStaff(...LO4_HANDOFF))->postJson(lo4HandOffUrl($application->id), ['version' => $application->version])->assertOk();
@@ -166,19 +173,70 @@ it('sends an above-capacity or insufficient-information result to the Policy Exc
         ->and($loan->policy_exception_details)->toContain('debt-to-income ratio');
 });
 
-it('copies the verified documents to the member\'s documents', function () {
+it('sends an insufficient-information result to the Policy Exception chain with its explanation', function () {
+    $application = $this->originationApplication('under_assessment', null, [], ['employment' => ['gross_monthly_income' => '']]);
+    $this->originationDocuments($application);
+    $staff = $this->originationStaff(...LO4_HANDOFF);
+    $this->actingAs($staff)->postJson("/api/loan-origination/applications/{$application->id}/assessment/rerun", ['verified_debt_payments' => '1500'])
+        ->assertCreated()->assertJsonPath('data.result', 'insufficient_information');
+
+    $this->actingAs($staff)->postJson(lo4HandOffUrl($application->id), ['version' => $application->fresh()->version])
+        ->assertOk()->assertJsonPath('data.loan.policy_exception', true);
+    $loan = Loan::query()->findOrFail($application->fresh()->loan_id);
+
+    expect($loan->policy_exception_details)->toBe('Online application '.$application->reference_number.': Insufficient information: no monthly income was given.')
+        ->and(LoanApprovalStep::query()->where('loan_id', $loan->id)->exists())->toBeTrue();
+});
+
+it('copies the verified documents to the member\'s documents, the government ID as their valid ID with its type and number', function () {
     $application = lo4Ready($this);
     $this->actingAs($this->originationStaff(...LO4_HANDOFF))->postJson(lo4HandOffUrl($application->id), ['version' => $application->version])->assertOk();
-    $memberId = $application->fresh()->borrower_id;
+    $member = Borrower::query()->findOrFail($application->fresh()->borrower_id);
 
-    $documents = Document::query()->where('documentable_type', Borrower::class)->where('documentable_id', $memberId)->orderBy('type')->get();
+    $documents = Document::query()->where('documentable_type', Borrower::class)->where('documentable_id', $member->id)->orderBy('type')->get()->keyBy('type');
 
-    expect($documents->pluck('type')->all())->toBe(['government_id', 'proof_of_address', 'proof_of_income'])
-        ->and($documents->first()->label)->toBe('Valid government ID (online application '.$application->reference_number.')');
+    expect($documents->keys()->all())->toBe(['proof_of_address', 'proof_of_income', 'valid_id'])
+        ->and($documents['proof_of_income']->label)->toBe('Proof of income (online application '.$application->reference_number.')')
+        ->and($documents['valid_id']->only(['label', 'custom_type_name', 'id_number', 'side']))->toBe(['label' => 'drivers_license', 'custom_type_name' => null, 'id_number' => 'N01-23-456789', 'side' => null])
+        ->and(app(ValidIdService::class)->grouped($member)->sole())->toMatchArray(['type' => 'drivers_license', 'id_number' => 'N01-23-456789'])
+        ->and($documents['valid_id']->file_path)->toStartWith(ValidIdService::directoryFor($member).'/');
     foreach ($documents as $document) {
         Storage::disk('private')->assertExists($document->file_path);
-        expect($document->file_path)->toStartWith("documents/{$document->type}/borrower/{$memberId}/");
+        expect($document->file_path)->toStartWith("documents/{$document->type}/borrower/{$member->id}/");
     }
+});
+
+it('refuses, in words, a verified government ID whose type and number weren\'t recorded', function () {
+    $application = lo4Ready($this);
+    OriginationDocument::query()->where('application_id', $application->id)->where('type', 'government_id')->sole()->update(['id_details' => null]);
+
+    $this->actingAs($this->originationStaff(...LO4_HANDOFF))->postJson(lo4HandOffUrl($application->id), ['version' => $application->fresh()->version])
+        ->assertUnprocessable()
+        ->assertJsonPath('errors.documents.0', 'Valid government ID was verified without its ID type and number. Request a replacement and verify the new file with them.');
+
+    expect(Loan::query()->count())->toBe(0)
+        ->and($application->fresh()->borrower_id)->toBeNull();
+});
+
+it('hands off a new applicant whose verified ID lets their registration be approved, and the loan released', function () {
+    ApprovalWorkflowSetting::query()->updateOrCreate(['type' => ApprovalWorkflowSetting::TYPE_NORMAL], ['steps' => [
+        ['id' => 'submit', 'name' => 'Submit', 'role' => 'super_admin', 'kind' => 'submit'],
+        ['id' => 'release', 'name' => 'Release', 'role' => 'super_admin', 'kind' => 'release'],
+    ]]);
+    $application = lo4Ready($this);
+    $admin = User::query()->where('username', 'super_admin')->firstOrFail();
+
+    $this->actingAs($admin)->postJson(lo4HandOffUrl($application->id), ['version' => $application->version])->assertOk();
+    $application->refresh();
+    $member = Borrower::query()->findOrFail($application->borrower_id);
+    expect($member->status)->toBe('pending')
+        ->and(Loan::query()->findOrFail($application->loan_id)->status)->toBe('approved');
+
+    $this->actingAs($admin)->patchJson("/api/borrowers/{$member->id}/approve-registration")->assertOk()->assertJsonPath('data.status', 'active');
+    $this->actingAs($admin)->patchJson("/api/loans/{$application->loan_id}/release")->assertOk();
+
+    expect(Loan::query()->findOrFail($application->loan_id)->status)->toBe('released')
+        ->and($application->fresh()->status)->toBe('converted');
 });
 
 it('links an already linked member and never overwrites their record', function () {
@@ -315,6 +373,100 @@ it('writes an audit row on the application with ids only', function () {
 
     expect($row->new_values)->toBe(['loan_id' => $application->fresh()->loan_id, 'borrower_id' => $application->fresh()->borrower_id, 'policy_exception' => false])
         ->and((string) $row->description)->not->toContain('Maria');
+});
+
+it('re-checks the capacity at the loan\'s start date, so a weekly loan whose busiest month changes is assessed again first', function () {
+    $product = $this->originationProduct(['frequency' => 'weekly', 'term' => 3]);
+    $application = $this->originationApplication('under_assessment', $product, [], ['loan' => ['frequency' => 'weekly', 'term' => '3']]);
+    $this->originationDocuments($application);
+    $staff = $this->originationStaff(...LO4_HANDOFF);
+    $rerun = "/api/loan-origination/applications/{$application->id}/assessment/rerun";
+    $this->actingAs($staff)->postJson($rerun, ['verified_monthly_income' => '40000', 'verified_debt_payments' => '1500'])->assertCreated();
+
+    // Assessed from Thursday Nov 19, when December holds five instalments;
+    // from Monday Nov 23 no month holds more than four.
+    $this->actingAs($staff)->postJson(lo4HandOffUrl($application->id), ['version' => $application->fresh()->version, 'start_date' => '2026-11-23'])
+        ->assertUnprocessable()
+        ->assertJsonPath('errors.assessment.0', 'The result or the instalment is different for a loan starting on Nov 23, 2026 at the product\'s current rate. Run the assessment again with that start date.');
+    expect(Loan::query()->count())->toBe(0)
+        ->and($application->fresh()->borrower_id)->toBeNull();
+
+    $this->actingAs($staff)->postJson($rerun, ['start_date' => '2026-11-23'])->assertCreated()->assertJsonPath('data.start_date', '2026-11-23');
+    $this->actingAs($staff)->postJson(lo4HandOffUrl($application->id), ['version' => $application->fresh()->version, 'start_date' => '2026-11-23'])->assertOk();
+
+    $loan = Loan::query()->sole();
+    $proposed = Capacity::proposedPayment($loan, app(LoanService::class));
+    expect($loan->start_date->toDateString())->toBe('2026-11-23')
+        ->and(OriginationAssessment::currentFor($application->fresh())->figures['proposed_monthly_installment'])->toBe(number_format($proposed['centavos'] / 100, 2, '.', ''));
+});
+
+it('re-checks the capacity at the product\'s current rate', function () {
+    $application = lo4Ready($this);
+    $application->loanProduct->update(['interest_rate' => 3.5]);
+
+    $this->actingAs($this->originationStaff(...LO4_HANDOFF))->postJson(lo4HandOffUrl($application->id), ['version' => $application->version])
+        ->assertUnprocessable()
+        ->assertJsonPath('errors.assessment.0', 'The result or the instalment is different for a loan starting on Nov 19, 2026 at the product\'s current rate. Run the assessment again with that start date.');
+    expect(Loan::query()->count())->toBe(0);
+});
+
+it('scores a linked member\'s loan on the application\'s verified income, so Credit Scoring\'s ratio equals the assessment\'s', function () {
+    $member = Borrower::factory()->create(['status' => 'active', 'branch_id' => Branch::query()->value('id'), 'monthly_income' => 15000]);
+    $application = lo4Ready($this, [], '40000', ['borrower_id' => $member->id]);
+    $this->actingAs($this->originationStaff(...LO4_HANDOFF))->postJson(lo4HandOffUrl($application->id), ['version' => $application->version])->assertOk();
+    $loan = Loan::query()->findOrFail($application->fresh()->loan_id);
+    $assessment = OriginationAssessment::currentFor($application->fresh());
+
+    $data = MemberCreditData::load($member->id, $loan, now());
+    $scored = Capacity::from($data, Exposure::from($data, app(LoanListTotals::class)), CreditScoringSetting::current(), app(LoanService::class));
+
+    expect(CreditApplicationProfile::query()->where('loan_id', $loan->id)->sole()->monthly_income)->toBe('40000.00')
+        ->and($scored->toArray()['monthly_income'])->toBe('40000.00')
+        ->and($scored->debtServiceRatioText())->toBe($assessment->figures['dti_ratio'])
+        ->and($scored->toArray()['disposable_income'])->toBe($assessment->figures['disposable_income'])
+        ->and((string) $member->fresh()->monthly_income)->toBe('15000.00');
+});
+
+it('answers 409 while another hand-off of the same application holds its lock, and creates nothing', function () {
+    $application = lo4Ready($this);
+    $lock = Cache::lock(ApplicationHandOff::lockKey($application->id), 60);
+    expect($lock->get())->toBeTrue();
+
+    $this->actingAs($this->originationStaff(...LO4_HANDOFF))->postJson(lo4HandOffUrl($application->id), ['version' => $application->version])
+        ->assertStatus(409)
+        ->assertJsonPath('message', ApplicationHandOff::BUSY);
+
+    $lock->release();
+    expect(Loan::query()->count())->toBe(0)
+        ->and(Borrower::query()->where('status', 'pending')->count())->toBe(0)
+        ->and($application->fresh()->borrower_id)->toBeNull();
+});
+
+it('re-checks the required documents inside the loan transaction, so one rejected meanwhile stops the hand-off', function () {
+    $application = lo4Ready($this);
+    Loan::created(function () use ($application): void {
+        DB::table('origination_documents')->where('application_id', $application->id)->where('type', 'proof_of_income')->update(['status' => 'rejected']);
+    });
+
+    $this->actingAs($this->originationStaff(...LO4_HANDOFF))->postJson(lo4HandOffUrl($application->id), ['version' => $application->version])
+        ->assertUnprocessable()
+        ->assertJsonPath('errors.documents.0', 'Verify these documents first: Proof of income.');
+
+    expect(Loan::query()->count())->toBe(0)
+        ->and($application->fresh()->status)->toBe('under_assessment');
+});
+
+it('answers 409 when the assessment was run again while the hand-off was under way', function () {
+    $application = lo4Ready($this);
+    $staff = $this->originationStaff(...LO4_HANDOFF);
+    Loan::created(function () use ($application, $staff): void {
+        app(AssessmentService::class)->run($application->fresh(), $staff, []);
+    });
+
+    $this->actingAs($staff)->postJson(lo4HandOffUrl($application->id), ['version' => $application->version])->assertStatus(409);
+
+    expect(Loan::query()->count())->toBe(0)
+        ->and($application->fresh()->status)->toBe('under_assessment');
 });
 
 describe('linking a member', function () {

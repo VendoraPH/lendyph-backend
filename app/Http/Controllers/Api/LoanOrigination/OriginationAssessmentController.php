@@ -63,7 +63,7 @@ class OriginationAssessmentController extends Controller
             ->paginate(min(max((int) $request->integer('per_page', 25), 1), 100));
 
         return response()->json([
-            'data' => collect($page->items())->map(fn (OriginationAssessment $a) => $this->presenter->present($a, $a->application))->all(),
+            'data' => collect($page->items())->map(fn (OriginationAssessment $a) => $this->presenter->present($a, $a->application, $request->user()))->all(),
             'links' => ['first' => $page->url(1), 'last' => $page->url($page->lastPage()), 'prev' => $page->previousPageUrl(), 'next' => $page->nextPageUrl()],
             'meta' => [
                 'current_page' => $page->currentPage(),
@@ -92,13 +92,13 @@ class OriginationAssessmentController extends Controller
         abort_unless($request->user()->can('loan_origination:view'), 403, self::READ_REFUSAL);
         $current = OriginationAssessment::currentFor($application);
 
-        return response()->json(['success' => true, 'data' => $current === null ? null : $this->presenter->present($current, $application)]);
+        return response()->json(['success' => true, 'data' => $current === null ? null : $this->presenter->present($current, $application, $request->user())]);
     }
 
     #[OA\Post(
         path: '/api/loan-origination/applications/{application}/assessment/rerun',
         summary: 'Run an application\'s assessment',
-        description: 'Works out the figures on the server and stores them as the next revision. `verified_monthly_income` and `verified_debt_payments` are optional: left out they keep the previous run\'s, null clears them. From submitted to under assessment only (422 otherwise). Needs loan_origination:assess. Audited with ids and the result only.',
+        description: 'Works out the figures on the server and stores them as the next revision. `verified_monthly_income` and `verified_debt_payments` are optional: left out they keep the previous run\'s, null clears them. `start_date` (Y-m-d) is the loan\'s planned start date, today when left out; the hand-off assesses again at the loan\'s own. From submitted to under assessment only (422 otherwise). Needs loan_origination:assess. Audited with ids and the result only.',
         tags: ['Loan Origination'],
         security: [['sanctum' => []]],
         responses: [
@@ -111,7 +111,7 @@ class OriginationAssessmentController extends Controller
     {
         $assessment = $this->assessments->run($application, $request->user(), $request->figures());
 
-        return response()->json(['success' => true, 'message' => 'Assessment saved.', 'data' => $this->presenter->present($assessment, $application->refresh())], 201);
+        return response()->json(['success' => true, 'message' => 'Assessment saved.', 'data' => $this->presenter->present($assessment, $application->refresh(), $request->user())], 201);
     }
 
     #[OA\Patch(
@@ -126,7 +126,7 @@ class OriginationAssessmentController extends Controller
     {
         $assessment = $this->assessments->saveNotes($application, $request->user(), $request->notes());
 
-        return response()->json(['success' => true, 'message' => 'Notes saved.', 'data' => $this->presenter->present($assessment, $application->refresh())]);
+        return response()->json(['success' => true, 'message' => 'Notes saved.', 'data' => $this->presenter->present($assessment, $application->refresh(), $request->user())]);
     }
 
     #[OA\Get(
@@ -143,7 +143,7 @@ class OriginationAssessmentController extends Controller
 
         $revisions = OriginationAssessment::query()->where('application_id', $application->id)->orderByDesc('version')->get();
 
-        return response()->json(['success' => true, 'data' => $revisions->map(fn (OriginationAssessment $a) => $this->presenter->present($a, $application))->all()]);
+        return response()->json(['success' => true, 'data' => $revisions->map(fn (OriginationAssessment $a) => $this->presenter->present($a, $application, $request->user()))->all()]);
     }
 
     #[OA\Get(

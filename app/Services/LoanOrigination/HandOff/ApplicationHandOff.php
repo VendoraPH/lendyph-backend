@@ -19,13 +19,16 @@ use App\Services\CreditScoring\Exposure;
 use App\Services\CreditScoring\MemberCreditData;
 use App\Services\LoanListTotals;
 use App\Services\LoanOrigination\ApplicationTransitions;
+use App\Services\LoanOrigination\Assessment\CapacityAssessor;
 use App\Services\LoanOrigination\Assessment\RequiredDocuments;
 use App\Services\LoanOrigination\DraftRules;
 use App\Services\LoanService;
 use App\Services\LoanWriteTransaction;
 use Illuminate\Auth\Access\AuthorizationException;
+use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Http\Exceptions\HttpResponseException;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\Validator;
@@ -40,10 +43,15 @@ use Throwable;
  * Who: `loan_origination:convert` and `loans:create`, plus
  * `borrowers:create` when the hand-off creates the member (403 in words).
  *
- * When: an application under assessment, not handed off yet (409 naming its
- * loan otherwise), at the version the client read (409), with a current
- * assessment that still matches its request and member, and every required
- * document verified (422 in words).
+ * When: one hand-off of an application at a time (a per-application lock;
+ * a second answers 409), for an application under assessment, not handed off
+ * yet (409 naming its loan otherwise), at the version the client read (409),
+ * with every required document verified and each verified ID recording its
+ * ID type and number (422 in words), and a current assessment that still
+ * matches its request and member and still holds for the loan: assessed again
+ * at the loan's start date and the product's current rate on its verified
+ * figures, it reaches the same result and instalment (422, "Run the
+ * assessment again", otherwise).
  *
  * Step one, the member: the linked member, or a new pending registration
  * (ApplicantMember). It is its own write, so when step two fails the member
@@ -55,8 +63,10 @@ use Throwable;
  * - the draft loan from StoreLoanRequest's own rules: the product's terms,
  *   the requested amount, term and frequency, a start date of today (or the
  *   one sent), the product's fees, and the assigned officer;
- * - the application's link to the loan, re-checked under its row lock;
- * - the verified documents copied to the member's documents;
+ * - the application's link to the loan, re-checked under its row lock with
+ *   the assessment revision and the required documents;
+ * - the verified documents copied to the member's documents, each under its
+ *   member document type: the ID as the member's valid ID (MemberDocuments);
  * - the Credit Scoring application profile from the assessed figures;
  * - the application's move to For Approval (actor `handoff`);
  * - then the loan's submit, which seeds the approval chain. An above-capacity
@@ -68,8 +78,20 @@ final class ApplicationHandOff
 {
     public const MEMBER_REFUSAL = 'Handing this application off creates its member, which needs the permission to create members.';
 
+    public const BUSY = 'This application is being submitted for approval right now. Refresh to see its current status.';
+
+    /**
+     * Longest a hand-off holds its application's lock: a hand-off slowed by
+     * lock waits finishes well inside it, and one killed midway frees the
+     * application after it at most.
+     */
+    public const LOCK_SECONDS = 120;
+
     /** The policy exception details column holds 2,000 characters. */
     private const DETAILS_MAX = 2000;
+
+    /** @var array<string, string>|null the settings' document labels, by type, read once */
+    private ?array $labels = null;
 
     public function __construct(
         private readonly ApplicationTransitions $transitions,
@@ -79,23 +101,48 @@ final class ApplicationHandOff
         private readonly LoanService $loans,
         private readonly BranchWriteGuard $branches,
         private readonly LoanListTotals $totals,
+        private readonly CapacityAssessor $assessor,
     ) {}
+
+    /** The cache lock one hand-off of an application holds. */
+    public static function lockKey(int $applicationId): string
+    {
+        return "loan-origination:hand-off:{$applicationId}";
+    }
 
     /**
      * @param  array{version: int, start_date?: ?string, account_officer_id?: ?int, scb_amount?: string|int|float|null, force_new_member?: bool}  $input
      */
     public function handOff(OriginationApplication $application, User $user, array $input): HandOffResult
     {
+        $lock = Cache::lock(self::lockKey((int) $application->getKey()), self::LOCK_SECONDS);
+
+        if (! $lock->get()) {
+            throw LoanWriteTransaction::conflict(self::BUSY);
+        }
+
+        try {
+            return $this->handOffHoldingLock($application->refresh(), $user, $input);
+        } finally {
+            $lock->release();
+        }
+    }
+
+    /** @param  array{version: int, start_date?: ?string, account_officer_id?: ?int, scb_amount?: string|int|float|null, force_new_member?: bool}  $input */
+    private function handOffHoldingLock(OriginationApplication $application, User $user, array $input): HandOffResult
+    {
         $this->authorize($user, $application->borrower_id === null);
         $this->assertReady($application, (int) $input['version']);
         $assessment = $this->currentAssessment($application);
+        $startDate = $input['start_date'] ?? Carbon::now()->toDateString();
+        $this->assertStillHolds($application, $assessment, $startDate);
 
         $member = $application->borrower_id === null
             ? $this->createMember($application, $user, $assessment, (bool) ($input['force_new_member'] ?? false))
             : Borrower::query()->findOrFail($application->borrower_id);
         $application->refresh();
 
-        $validated = $this->loanData($application, $member, $assessment, $input, $user);
+        $validated = $this->loanData($application, $member, $assessment, $input, $user, $startDate);
         $copied = [];
 
         try {
@@ -158,13 +205,55 @@ final class ApplicationHandOff
             throw ValidationException::withMessages(['assessment' => 'The application changed after it was assessed. Run the assessment again.']);
         }
 
+        $this->assertDocumentsReady($application);
+
+        return $assessment;
+    }
+
+    /**
+     * Every required document verified, and each verified ID recording its
+     * ID type and number (422 in words). Checked before the member is made
+     * and again under the application's lock in the loan transaction.
+     */
+    private function assertDocumentsReady(OriginationApplication $application): void
+    {
         $unverified = $this->documents->unverifiedLabels($application);
 
         if ($unverified !== []) {
             throw ValidationException::withMessages(['documents' => 'Verify these documents first: '.implode(', ', $unverified).'.']);
         }
 
-        return $assessment;
+        foreach ($this->verifiedDocuments($application) as $document) {
+            if (MemberDocuments::isId($document->type) && MemberDocuments::idDetails($document) === null) {
+                throw ValidationException::withMessages(['documents' => MemberDocuments::unrecordedIdMessage($this->documentLabel($document->type))]);
+            }
+        }
+    }
+
+    /**
+     * The assessment still holds for the loan this hand-off makes: assessed
+     * again on its verified figures, at the loan's start date and the
+     * product's current rate, it reaches the same result and the same
+     * instalment. The busiest month of a weekly, bi-weekly or daily loan
+     * moves with its start date, and a rate change moves every instalment,
+     * so either can take a loan above capacity past the Policy Exception
+     * chain.
+     */
+    private function assertStillHolds(OriginationApplication $application, OriginationAssessment $assessment, string $startDate): void
+    {
+        $again = $this->assessor->assess(
+            $application,
+            $assessment->inputs['verified_monthly_income'] ?? null,
+            $assessment->inputs['verified_debt_payments'] ?? null,
+            $startDate,
+        );
+
+        if ($again->result !== $assessment->result || $again->figures['proposed_monthly_installment'] !== ($assessment->figures['proposed_monthly_installment'] ?? null)) {
+            throw ValidationException::withMessages(['assessment' => sprintf(
+                'The result or the instalment is different for a loan starting on %s at the product\'s current rate. Run the assessment again with that start date.',
+                Carbon::parse($startDate)->format('M j, Y'),
+            )]);
+        }
     }
 
     /**
@@ -233,7 +322,7 @@ final class ApplicationHandOff
      * @param  array<string, mixed>  $input
      * @return array<string, mixed>
      */
-    private function loanData(OriginationApplication $application, Borrower $member, OriginationAssessment $assessment, array $input, User $user): array
+    private function loanData(OriginationApplication $application, Borrower $member, OriginationAssessment $assessment, array $input, User $user, string $startDate): array
     {
         $draft = $this->draftRules->normalize($application->draft ?? []);
         $product = LoanProduct::query()->findOrFail($application->loan_product_id);
@@ -246,7 +335,7 @@ final class ApplicationHandOff
             'term' => $application->requested_term,
             'frequency' => $assessment->frequency,
             'purpose' => trim($draft['loan']['purpose']) === '' ? null : mb_substr(trim($draft['loan']['purpose']), 0, 500),
-            'start_date' => $input['start_date'] ?? Carbon::now()->toDateString(),
+            'start_date' => $startDate,
             'account_officer_id' => array_key_exists('account_officer_id', $input) ? $input['account_officer_id'] : $application->assigned_officer_id,
             'scb_amount' => $input['scb_amount'] ?? ($product->scb_required ? (string) ($product->min_scb ?? 0) : 0),
             'policy_exception' => $assessment->goesToPolicyException(),
@@ -273,9 +362,12 @@ final class ApplicationHandOff
             throw $this->alreadyHandedOff($locked);
         }
 
-        if ($locked->version !== $application->version || $locked->status !== 'under_assessment' || $locked->borrower_id !== $member->id) {
+        if ($locked->version !== $application->version || $locked->status !== 'under_assessment' || $locked->borrower_id !== $member->id
+            || OriginationAssessment::currentFor($locked)?->id !== $assessment->id) {
             throw LoanWriteTransaction::conflict(ApplicationTransitions::STALE);
         }
+
+        $this->assertDocumentsReady($locked);
 
         $locked->loan_id = $loan->id;
         $locked->save();
@@ -301,17 +393,29 @@ final class ApplicationHandOff
         );
     }
 
-    /** @param  list<string>  $copied */
+    /**
+     * Each verified document, as the member document type it maps to
+     * (MemberDocuments): the ID as the member's valid ID, labelled with its
+     * ID type key and carrying its number, where ValidIdService keeps valid
+     * IDs; any other under its own type, labelled with the application.
+     *
+     * @param  list<string>  $copied
+     */
     private function copyDocuments(OriginationApplication $application, Borrower $member, User $user, array &$copied): void
     {
-        $labels = collect(OriginationSetting::current()->document_types ?? [])->pluck('label', 'type');
         $reference = $application->reference_number ?? '#'.$application->id;
-        $verified = OriginationDocument::query()->where('application_id', $application->id)->where('status', 'verified')
-            ->with('currentVersion')->orderBy('id')->get();
 
-        foreach ($verified as $document) {
+        foreach ($this->verifiedDocuments($application) as $document) {
             $version = $document->currentVersion;
-            $label = (string) ($labels[$document->type] ?? ucfirst(str_replace('_', ' ', $document->type)));
+            $label = $this->documentLabel($document->type);
+            $type = MemberDocuments::memberType($document->type);
+            $isId = MemberDocuments::isId($document->type);
+            $id = $isId ? MemberDocuments::idDetails($document) : null;
+
+            if ($isId && $id === null) {
+                throw ValidationException::withMessages(['documents' => MemberDocuments::unrecordedIdMessage($label)]);
+            }
+
             $bytes = $version === null ? null : Storage::disk($version->disk)->get($version->path);
 
             if ($bytes === null) {
@@ -319,13 +423,15 @@ final class ApplicationHandOff
             }
 
             $extension = pathinfo($version->file_name, PATHINFO_EXTENSION) ?: 'pdf';
-            $path = "documents/{$document->type}/borrower/{$member->id}/".$version->public_id.'.'.strtolower($extension);
+            $path = "documents/{$type}/borrower/{$member->id}/".$version->public_id.'.'.strtolower($extension);
             Storage::disk('private')->put($path, $bytes);
             $copied[] = $path;
 
             $member->documents()->create([
-                'type' => $document->type,
-                'label' => "{$label} (online application {$reference})",
+                'type' => $type,
+                'label' => $id === null ? "{$label} (online application {$reference})" : $id['type'],
+                'custom_type_name' => $id['custom_type_name'] ?? null,
+                'id_number' => $id['id_number'] ?? null,
                 'file_path' => $path,
                 'original_filename' => Document::cleanOriginalFilename($version->file_name),
                 'mime_type' => $version->mime_type,
@@ -335,8 +441,25 @@ final class ApplicationHandOff
         }
     }
 
+    /** @return Collection<int, OriginationDocument> */
+    private function verifiedDocuments(OriginationApplication $application): Collection
+    {
+        return OriginationDocument::query()->where('application_id', $application->id)->where('status', 'verified')
+            ->with('currentVersion')->orderBy('id')->get();
+    }
+
+    /** A document type's label in the settings, else the type in words. */
+    private function documentLabel(string $type): string
+    {
+        $this->labels ??= collect(OriginationSetting::current()->document_types ?? [])->pluck('label', 'type')->all();
+
+        return (string) ($this->labels[$type] ?? ucfirst(str_replace('_', ' ', $type)));
+    }
+
     /**
      * The application's figures for Credit Scoring (credit_application_profiles):
+     * the verified monthly income as the assessment counted it (Credit
+     * Scoring scores this loan on it, not on the member record's income),
      * household expenses, the debt payments counted outside Lendy, other
      * regular income (when the income wasn't verified as a whole) and the
      * stability details. Credit Scoring then reads this loan's capacity on
@@ -353,6 +476,7 @@ final class ApplicationHandOff
 
         CreditApplicationProfile::query()->create([
             'loan_id' => $loan->id,
+            'monthly_income' => $verified === null ? null : $assessment->figures['eligible_monthly_income'],
             'other_income' => $verified === null ? ($other['monthly'] ?? null) : null,
             'household_expenses' => $assessment->figures['monthly_expenses'],
             'outside_debt_payments' => $assessment->figures['outside_debt_payments'],

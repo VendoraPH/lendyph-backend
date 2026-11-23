@@ -7,6 +7,7 @@ use App\Models\Branch;
 use App\Models\Loan;
 use App\Models\LoanProduct;
 use App\Models\OriginationSetting;
+use App\Models\Role;
 use App\Models\User;
 use App\Services\LoanService;
 use Illuminate\Support\Facades\DB;
@@ -78,4 +79,16 @@ it('is read and saved with the online application settings, by company-wide sett
 
     $this->putJson('/api/loan-origination/settings', ['general' => ['require_approved_member' => 'maybe']])->assertUnprocessable()
         ->assertJsonValidationErrors(['general.require_approved_member']);
+});
+
+it('can\'t be changed by a settings holder without access to all branches, 403 in words', function () {
+    $role = Role::query()->create(['name' => 'spec-lo4-settings:'.uniqid(), 'guard_name' => 'web']);
+    $role->syncPermissions(['loan_origination:view', 'loan_origination:settings']);
+    $branchUser = tap(User::factory()->create(['branch_id' => Branch::query()->value('id')]), fn (User $u) => $u->assignRole($role));
+
+    $this->actingAs($branchUser)->putJson('/api/loan-origination/settings', ['general' => ['require_approved_member' => false]])
+        ->assertForbidden()
+        ->assertJsonPath('message', 'Online application settings apply to every branch, so changing them needs the online applications settings permission and access to all branches.');
+
+    expect(OriginationSetting::current()->require_approved_member)->toBeTrue();
 });

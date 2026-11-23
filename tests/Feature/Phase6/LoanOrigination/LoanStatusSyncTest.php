@@ -101,15 +101,42 @@ it('follows its loan\'s approval and release, ending as Converted to Loan', func
         ->and(OriginationStatusHistory::query()->where('application_id', $application->id)->orderBy('id')->pluck('to_status')->all())->toBe(['approved', 'converted']);
 });
 
-it('follows an approved loan sent back for approval, and a loan back to draft', function () {
+it('follows an approved loan sent back for approval', function () {
     lo4ShortChain();
     [$loan, $application] = lo4Followed($this);
 
     $loan->fresh()->update(['status' => 'for_review']);
     expect($application->fresh()->status)->toBe('pending_approval');
+});
+
+it('leaves the application For Approval when its loan goes back to draft, and follows the loan once it is submitted again', function () {
+    [$loan, $application] = lo4Followed($this);
 
     $loan->fresh()->update(['status' => 'draft']);
-    expect($application->fresh()->status)->toBe('under_assessment');
+    expect($application->fresh()->status)->toBe('pending_approval')
+        ->and($application->fresh()->loan_id)->toBe($loan->id);
+
+    $loan->fresh()->update(['status' => 'for_review']);
+    app(LoanService::class)->reject($loan->fresh(), $this->admin, 'Short on income');
+
+    expect($application->fresh()->status)->toBe('rejected')
+        ->and(OriginationStatusHistory::query()->where('application_id', $application->id)->pluck('to_status')->all())->toBe(['rejected']);
+});
+
+it('reads the application under a row lock before moving it', function () {
+    [$loan, $application] = lo4Followed($this);
+    $reads = [];
+    DB::listen(function ($query) use (&$reads): void {
+        if (str_contains($query->sql, 'from `origination_applications` where `loan_id`')) {
+            $reads[] = $query->sql;
+        }
+    });
+
+    app(LoanService::class)->reject($loan, $this->admin, 'Short on income');
+
+    expect($reads)->toHaveCount(1)
+        ->and($reads[0])->toEndWith('for update')
+        ->and($application->fresh()->status)->toBe('rejected');
 });
 
 it('touches no application for a loan that didn\'t come from one', function () {

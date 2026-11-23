@@ -9,7 +9,10 @@ use App\Models\LoanProduct;
 use App\Models\User;
 use App\Services\CreditScoring\Capacity;
 use App\Services\CreditScoring\Centavos;
+use App\Services\CreditScoring\Exposure;
+use App\Services\CreditScoring\MemberCreditData;
 use App\Services\CreditScoring\Recalculator;
+use App\Services\LoanListTotals;
 use App\Services\LoanService;
 use Tests\Feature\CreditScoring\Engine\CreditFixtures;
 use Tests\TestCase;
@@ -102,6 +105,40 @@ it('assesses a loan application from its previewed schedule and declared details
     $factors = $score->factors->keyBy('factor_key');
     expect($factors['debt_service_ratio']->points_earned)->toBe(12)
         ->and($factors['payment_cover']->points_earned)->toBe(10);
+});
+
+it('scores an application loan on the monthly income its own profile records, and the member\'s own score on the member record\'s', function () {
+    $member = $this->member(['monthly_income' => 35000]);
+    $product = LoanProduct::factory()->create(['interest_rate' => 0, 'term' => 6, 'frequency' => 'monthly']);
+    $loan = Loan::factory()->create([
+        'borrower_id' => $member->id,
+        'branch_id' => $member->branch_id,
+        'loan_product_id' => $product->id,
+        'status' => 'draft',
+        'principal_amount' => 30000,
+        'interest_rate' => 0,
+        'interest_method' => 'straight',
+        'term' => 6,
+        'frequency' => 'monthly',
+        'start_date' => '2026-11-10',
+        'maturity_date' => '2027-05-10',
+        'created_by' => User::query()->value('id'),
+    ]);
+    CreditApplicationProfile::query()->create([
+        'loan_id' => $loan->id,
+        'monthly_income' => 50000,
+        'other_income' => 1000,
+        'household_expenses' => 20000,
+        'outside_debt_payments' => 5000,
+    ]);
+    $capacity = function (?Loan $application) use ($member): Capacity {
+        $data = MemberCreditData::load($member->id, $application, now());
+
+        return Capacity::from($data, Exposure::from($data, app(LoanListTotals::class)), CreditScoringSetting::current(), app(LoanService::class));
+    };
+
+    expect($capacity($loan->fresh())->toArray()['monthly_income'])->toBe('51000.00')
+        ->and($capacity(null)->toArray()['monthly_income'])->toBe('36000.00');
 });
 
 it('bands the ratio on the same two decimals it shows', function () {

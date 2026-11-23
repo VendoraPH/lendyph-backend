@@ -15,15 +15,20 @@ use Carbon\CarbonImmutable;
 /**
  * An assessment revision as a PDF, made on the server through the CDA
  * exports' locked-down dompdf renderer (no remote fetches, no scripts). It
- * prints what the screen shows: the request, the figures, the limits and the
- * result in words, ₱ with two decimals. It names the applicant and the
- * reference only: no contact details, address or draft.
+ * prints what the screen shows the downloader: the request, the figures, the
+ * limits and the result in words, ₱ with two decimals, with the figures that
+ * count a linked member's loans left out ("—") for a downloader who may not
+ * see them (MemberLoanFigures). It names the applicant and the reference
+ * only: no contact details, address or draft.
  */
 final class AssessmentPdf
 {
     public const MARK = 'Online application assessment · internal';
 
-    public function __construct(private readonly PdfRenderer $pdf) {}
+    public function __construct(
+        private readonly PdfRenderer $pdf,
+        private readonly MemberLoanFigures $memberLoans,
+    ) {}
 
     public function render(OriginationAssessment $assessment, OriginationApplication $application, User $user, string $documentStatus): string
     {
@@ -33,7 +38,9 @@ final class AssessmentPdf
     public function content(OriginationAssessment $assessment, OriginationApplication $application, User $user, string $documentStatus): ExportContent
     {
         $assessment->loadMissing(['ruleRevision', 'creator', 'loanProduct']);
-        $figures = $assessment->figures;
+        $hidden = $this->memberLoans->hiddenFrom($user, $assessment);
+        $figures = $hidden ? MemberLoanFigures::withheld($assessment->figures) : $assessment->figures;
+        $explanation = $hidden ? CapacityAssessor::explanationWithoutFigures($assessment) : (string) $assessment->explanation;
         $limits = $assessment->thresholds;
         $generatedAt = CarbonImmutable::now('Asia/Manila')->format('M j, Y g:i A');
         $by = trim((string) $user->full_name) !== '' ? (string) $user->full_name : (string) $user->username;
@@ -72,7 +79,7 @@ final class AssessmentPdf
             ]],
             ['key' => 'result', 'title' => 'Result', 'kind' => 'fields', 'fields' => [
                 $field('Result', OriginationAssessment::RESULT_LABELS[$assessment->result].($assessment->provisional ? ' (provisional)' : '')),
-                $field('Explanation', (string) $assessment->explanation),
+                $field('Explanation', $explanation),
                 $field('Missing information', $assessment->missing_information === [] ? 'None' : implode(' ', $assessment->missing_information)),
                 $field('Conflicts', $assessment->conflicts === [] ? 'None' : implode(' ', $assessment->conflicts)),
                 $field('Officer\'s findings', $assessment->officer_findings),

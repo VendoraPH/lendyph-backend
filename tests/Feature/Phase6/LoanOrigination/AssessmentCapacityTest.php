@@ -14,6 +14,8 @@ use App\Services\CreditScoring\MemberCreditData;
 use App\Services\LoanListTotals;
 use App\Services\LoanOrigination\Assessment\CapacityAssessor;
 use App\Services\LoanService;
+use Brick\Math\BigDecimal;
+use Brick\Math\RoundingMode;
 use Carbon\Carbon;
 use Tests\Feature\Phase6\LoanOrigination\OriginationFixtures;
 use Tests\TestCase;
@@ -68,25 +70,50 @@ it('answers no proposed payment for no rows', function () {
     expect(Capacity::proposedPaymentFromRows([], 6, TermUnit::Months))->toBeNull();
 });
 
-it('judges DTI on Capacity\'s two-decimal ratio, so exactly the maximum passes', function () {
+it('judges DTI exactly, (debt + instalment) × 100 against the maximum × income, and shows Capacity\'s two-decimal ratio', function () {
     $at = CapacityAssessor::judge(1_000_000, 0, 0, 400_000, lo4Limits());
+    $justOver = CapacityAssessor::judge(1_000_000, 0, 100_000, 300_040, lo4Limits());
     $over = CapacityAssessor::judge(1_000_000, 0, 0, 400_100, lo4Limits());
 
     expect($at['dti'])->toBe('40.00')
         ->and($at['checks']['dti'])->toBeTrue()
+        ->and($justOver['dti'])->toBe('40.00')
+        ->and($justOver['checks']['dti'])->toBeFalse()
         ->and($over['dti'])->toBe('40.01')
         ->and($over['checks']['dti'])->toBeFalse()
+        ->and(CapacityAssessor::judge(1_000_000, 0, 0, 125_000, lo4Limits('12.5'))['checks']['dti'])->toBeTrue()
+        ->and(CapacityAssessor::judge(1_000_000, 0, 0, 125_001, lo4Limits('12.5'))['checks']['dti'])->toBeFalse()
         ->and($at['dti'])->toBe(Capacity::calculate(1_000_000, 0, 0, 400_000, CreditScoringSetting::current())->debtServiceRatioText());
 });
 
-it('judges coverage exactly against the minimum, never on a rounded ratio', function () {
+it('judges coverage exactly against the minimum, and shows it rounded down so a shortfall never reads as the minimum', function () {
     $exact = CapacityAssessor::judge(1_000_000, 0, 0, 800_000, lo4Limits('100'));
     $justUnder = CapacityAssessor::judge(1_000_000, 0, 0, 800_001, lo4Limits('100'));
+    $above = CapacityAssessor::judge(1_000_000, 0, 0, 300_000, lo4Limits('100'));
 
     expect($exact['coverage'])->toBe('1.25')
         ->and($exact['checks']['coverage'])->toBeTrue()
-        ->and($justUnder['coverage'])->toBe('1.25')
-        ->and($justUnder['checks']['coverage'])->toBeFalse();
+        ->and($justUnder['coverage'])->toBe('1.24')
+        ->and($justUnder['checks']['coverage'])->toBeFalse()
+        ->and($above['coverage'])->toBe('3.33');
+});
+
+it('assesses at the start date it is given, today by default', function () {
+    $product = $this->originationProduct(['frequency' => 'weekly', 'term' => 3]);
+    $application = $this->originationApplication('under_assessment', $product, [], ['loan' => ['frequency' => 'weekly', 'term' => '3']]);
+    $loans = app(LoanService::class);
+    $instalmentFrom = fn (string $date) => Capacity::proposedPaymentFromRows($loans->formPreview([
+        'loan_product_id' => $product->id, 'principal_amount' => 30000, 'interest_rate' => 2.0, 'term' => 3, 'frequency' => 'weekly', 'start_date' => $date,
+    ])['amortization']['rows'], 3, TermUnit::Months)['centavos'];
+
+    $today = lo4Assessor()->assess($application, '40000', '1500');
+    $monday = lo4Assessor()->assess($application, '40000', '1500', '2026-11-23');
+
+    expect($today->request['start_date'])->toBe('2026-11-19')
+        ->and($monday->request['start_date'])->toBe('2026-11-23')
+        ->and($today->figures['proposed_monthly_installment'])->toBe(number_format($instalmentFrom('2026-11-19') / 100, 2, '.', ''))
+        ->and($monday->figures['proposed_monthly_installment'])->toBe(number_format($instalmentFrom('2026-11-23') / 100, 2, '.', ''))
+        ->and($monday->figures['proposed_monthly_installment'])->not->toBe($today->figures['proposed_monthly_installment']);
 });
 
 it('judges remaining income as disposable income less the instalment, against the minimum in pesos', function () {
@@ -128,7 +155,7 @@ it('assesses an application from the loan form\'s preview and Capacity, figure f
         ->and($outcome->figures['proposed_monthly_installment'])->toBe(number_format($instalment['centavos'] / 100, 2, '.', ''))
         ->and($outcome->figures['disposable_income'])->toBe($capacity->toArray()['disposable_income'])
         ->and($outcome->figures['dti_ratio'])->toBe($capacity->debtServiceRatioText())
-        ->and($outcome->figures['coverage_ratio'])->toBe(number_format(round($capacity->paymentCover(), 2), 2, '.', ''))
+        ->and($outcome->figures['coverage_ratio'])->toBe((string) BigDecimal::of($capacity->disposableCentavos)->dividedBy($instalment['centavos'], 2, RoundingMode::Down))
         ->and($outcome->figures['remaining_income'])->toBe(number_format(($capacity->disposableCentavos - $instalment['centavos']) / 100, 2, '.', ''))
         ->and($outcome->request)->toMatchArray(['loan_product_id' => $application->loan_product_id, 'requested_amount' => '30000.00', 'requested_term' => 6, 'frequency' => 'monthly', 'start_date' => '2026-11-19']);
 });

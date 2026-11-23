@@ -1,10 +1,15 @@
 <?php
 
 use App\Exceptions\OriginationRecordIsAppendOnlyException;
+use App\Models\AmortizationSchedule;
 use App\Models\AuditLog;
+use App\Models\Borrower;
 use App\Models\Branch;
+use App\Models\Loan;
 use App\Models\OriginationApplication;
 use App\Models\OriginationAssessment;
+use App\Models\User;
+use App\Services\LoanOrigination\Assessment\AssessmentPdf;
 use Illuminate\Support\Facades\DB;
 use Tests\Feature\Phase6\LoanOrigination\OriginationFixtures;
 use Tests\TestCase;
@@ -136,6 +141,84 @@ it('refuses to assess an application already handed off, closed or not yet submi
         ->assertUnprocessable()
         ->assertJsonPath('errors.status.0', fn (string $m) => str_contains($m, 'can\'t be assessed'));
 })->with(['draft', 'pending_approval', 'rejected', 'withdrawn']);
+
+it('runs at the start date sent, today by default, and validates it as a date', function () {
+    $application = $this->originationApplication();
+    $staff = $this->originationStaff('loan_origination:view', 'loan_origination:assess');
+
+    $this->actingAs($staff)->postJson(lo4AssessUrl($application->id, '/rerun'))->assertCreated()->assertJsonPath('data.start_date', '2026-11-19');
+    $this->actingAs($staff)->postJson(lo4AssessUrl($application->id, '/rerun'), ['start_date' => '2026-12-01'])->assertCreated()->assertJsonPath('data.start_date', '2026-12-01');
+    $this->actingAs($staff)->postJson(lo4AssessUrl($application->id, '/rerun'), ['start_date' => '12/01/2026'])
+        ->assertUnprocessable()->assertJsonPath('errors.start_date.0', 'Enter the start date as a date, like 2026-11-19.');
+});
+
+/** An application linked to a matching member of $branch who has a loan being repaid, assessed on verified figures. */
+function lo4LinkedAssessed(TestCase $test, ?Branch $branch = null): OriginationApplication
+{
+    $branch ??= Branch::query()->orderBy('id')->firstOrFail();
+    $application = $test->originationApplication();
+    $personal = $application->draft['personal'];
+    $member = Borrower::factory()->create([
+        'status' => 'active', 'branch_id' => $branch->id, 'first_name' => $personal['first_name'], 'last_name' => $personal['last_name'],
+        'birthdate' => $personal['date_of_birth'], 'contact_number' => '09171234567',
+    ]);
+    $loan = Loan::factory()->create([
+        'borrower_id' => $member->id, 'branch_id' => $branch->id, 'status' => 'ongoing', 'principal_amount' => 12000,
+        'released_at' => now()->subMonths(2), 'created_by' => User::query()->value('id'),
+    ]);
+    AmortizationSchedule::factory()->create([
+        'loan_id' => $loan->id, 'period_number' => 3, 'due_date' => '2026-12-10',
+        'principal_due' => 2000, 'interest_due' => 240, 'total_due' => 2240,
+        'principal_paid' => 0, 'interest_paid' => 0, 'penalty_paid' => 0, 'status' => 'pending',
+    ]);
+    DB::table('origination_applications')->where('id', $application->id)->update(['borrower_id' => $member->id]);
+    $test->actingAs($test->originationStaff('loan_origination:view', 'loan_origination:assess'))
+        ->postJson(lo4AssessUrl($application->id, '/rerun'), ['verified_monthly_income' => '40000', 'verified_debt_payments' => '1500'])
+        ->assertCreated()->assertJsonPath('data.result', 'within_capacity');
+
+    return $application->fresh();
+}
+
+describe('a linked member\'s loans', function () {
+    it('shows the figures that count the member\'s loans to a viewer who may see their loans in their branch', function () {
+        $application = lo4LinkedAssessed($this);
+
+        $this->actingAs($this->originationStaff('loan_origination:view', 'loans:view', 'borrowers:view'))->getJson(lo4AssessUrl($application->id))->assertOk()
+            ->assertJsonPath('data.member_figures_hidden', false)
+            ->assertJsonPath('data.figures.lendy_debt_payments', fn ($v) => $v > 0)
+            ->assertJsonPath('data.figures.monthly_debt_payments', fn ($v) => $v > 1500)
+            ->assertJsonPath('data.explanation', fn (string $text) => str_contains($text, '%'));
+    });
+
+    it('withholds them, and every figure worked out from them, from a viewer without the loan or member permission or the member\'s branch', function (array $permissions, bool $elsewhere) {
+        $application = lo4LinkedAssessed($this, $elsewhere ? Branch::factory()->create() : null);
+        $viewer = $this->originationStaff('loan_origination:view', ...$permissions);
+
+        $response = $this->actingAs($viewer)->getJson(lo4AssessUrl($application->id))->assertOk()
+            ->assertJsonPath('data.member_figures_hidden', true)
+            ->assertJsonPath('data.figures.verified_monthly_income', 40000)
+            ->assertJsonPath('data.figures.outside_debt_payments', 1500)
+            ->assertJsonPath('data.result', 'within_capacity')
+            ->assertJsonPath('data.checks.dti', true);
+        foreach (['lendy_debt_payments', 'monthly_debt_payments', 'disposable_income', 'dti_ratio', 'coverage_ratio', 'remaining_income'] as $figure) {
+            expect($response->json("data.figures.{$figure}"))->toBeNull();
+        }
+        $withoutFigures = 'Within capacity: the debt-to-income ratio is within the 40% maximum, the coverage ratio meets the 1.25 minimum and the remaining income meets the ₱0.00 minimum, on verified figures.';
+        expect($response->json('data.explanation'))->toBe($withoutFigures);
+
+        $this->actingAs($viewer)->getJson(lo4AssessUrl($application->id, '/history'))->assertOk()->assertJsonPath('data.0.figures.lendy_debt_payments', null);
+        $this->actingAs($viewer)->getJson('/api/loan-origination/assessments')->assertOk()->assertJsonPath('data.0.figures.lendy_debt_payments', null);
+        $pdf = app(AssessmentPdf::class)->content(OriginationAssessment::currentFor($application), $application, $viewer, 'No documents are required');
+        $printed = collect($pdf->sections)->flatMap(fn (array $section) => $section['fields'])->pluck('display', 'label');
+        expect($printed['Debt payments on Lendy loans'])->toBe('—')
+            ->and($printed['Disposable income'])->toBe('—')
+            ->and($printed['Explanation'])->toBe($withoutFigures);
+    })->with([
+        'without loans:view' => [['borrowers:view'], false],
+        'without borrowers:view' => [['loans:view'], false],
+        'with both, the member in another branch' => [['loans:view', 'borrowers:view'], true],
+    ]);
+});
 
 it('validates the verified amounts as pesos with at most two decimals', function () {
     $application = $this->originationApplication();

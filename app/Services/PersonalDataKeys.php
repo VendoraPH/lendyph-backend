@@ -63,7 +63,7 @@ final class PersonalDataKeys
      * scored with them. The notice acknowledgement stays.
      */
     public const CREDIT_APPLICATION_PROFILE = [
-        'other_income', 'business_income', 'household_expenses', 'outside_debt_payments', 'outside_lenders_count',
+        'monthly_income', 'other_income', 'business_income', 'household_expenses', 'outside_debt_payments', 'outside_lenders_count',
         'employment_status', 'business_start_date', 'years_at_residence', 'verified_references_count',
         'income_verification',
     ];

@@ -18,8 +18,14 @@ use Illuminate\Support\Facades\Schema;
  * - `origination_settings.require_approved_member`: a loan isn't released
  *   while its member's registration isn't approved. On by default, so new
  *   releases follow it from the deploy; nothing already released changes.
+ * - `origination_documents.id_details`: the ID type and number staff record
+ *   when they verify an applicant's ID, encrypted. The hand-off copies the ID
+ *   to the member as their valid ID with them.
+ * - `credit_application_profiles.monthly_income`: the application's verified
+ *   monthly income, as its assessment counted it, which the hand-off records
+ *   and Credit Scoring reads for that loan instead of the member record's.
  *
- * New table and column only; no data fix. Running it again changes nothing.
+ * New table and columns only; no data fix. Running it again changes nothing.
  */
 return new class extends Migration
 {
@@ -62,10 +68,34 @@ return new class extends Migration
                 $table->boolean('require_approved_member')->default(true)->after('default_branch_id');
             });
         }
+
+        if (! Schema::hasColumn('origination_documents', 'id_details')) {
+            Schema::table('origination_documents', function (Blueprint $table): void {
+                $table->text('id_details')->nullable()->after('notes');
+            });
+        }
+
+        if (! Schema::hasColumn('credit_application_profiles', 'monthly_income')) {
+            Schema::table('credit_application_profiles', function (Blueprint $table): void {
+                $table->decimal('monthly_income', 14, 2)->nullable()->after('loan_id');
+            });
+        }
     }
 
     public function down(): void
     {
+        if (Schema::hasColumn('credit_application_profiles', 'monthly_income')) {
+            Schema::table('credit_application_profiles', function (Blueprint $table): void {
+                $table->dropColumn('monthly_income');
+            });
+        }
+
+        if (Schema::hasColumn('origination_documents', 'id_details')) {
+            Schema::table('origination_documents', function (Blueprint $table): void {
+                $table->dropColumn('id_details');
+            });
+        }
+
         if (Schema::hasColumn('origination_settings', 'require_approved_member')) {
             Schema::table('origination_settings', function (Blueprint $table): void {
                 $table->dropColumn('require_approved_member');

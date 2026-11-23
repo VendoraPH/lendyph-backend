@@ -7,6 +7,7 @@ use App\Models\Borrower;
 use App\Models\CreditScoringSetting;
 use App\Models\LoanProduct;
 use App\Models\OriginationApplication;
+use App\Models\OriginationAssessment;
 use App\Models\OriginationRuleRevision;
 use App\Services\Accounting\Money;
 use App\Services\CreditScoring\Capacity;
@@ -37,16 +38,19 @@ use Illuminate\Validation\ValidationException;
  *   ones, plus the linked member's Lendy loans by Credit Scoring's Exposure;
  * - instalment: Credit Scoring's rule (Capacity::proposedPaymentFromRows())
  *   on the schedule of the loan form's own preview (LoanService::formPreview()),
- *   at the product's rate and a start date of today;
+ *   at the product's current rate and the start date given (today by
+ *   default). The busiest calendar month of a weekly, bi-weekly or daily loan
+ *   moves with its start date, so the hand-off assesses again at the loan's;
  * - disposable income and the debt-to-income ratio: Capacity::calculate().
  *
- * The limits (judge()), with the product's override where one is set and
- * never rounded:
- * - DTI at most the maximum, read on Capacity's two-decimal ratio, as Credit
- *   Scoring reads its own levels, so a 40% maximum and Credit Scoring's 40%
- *   caution level agree on the same loan;
- * - coverage (disposable income ÷ instalment) at least the minimum, compared
- *   exactly; it is shown to two decimals, half up;
+ * The limits (judge()), with the product's override where one is set, each
+ * compared exactly and never on a rounded figure:
+ * - DTI at most the maximum: (debt + instalment) × 100 ≤ maximum × income.
+ *   It is shown as Capacity's two-decimal ratio, half up, the figure Credit
+ *   Scoring shows for the same loan;
+ * - coverage (disposable income ÷ instalment) at least the minimum; it is
+ *   shown to two decimals rounded down, so a shortfall never reads as the
+ *   minimum;
  * - remaining income (disposable income less the instalment) at least the
  *   minimum in pesos.
  *
@@ -63,15 +67,22 @@ final class CapacityAssessor
 
     public const NO_VERIFIED_DEBT = 'The verified monthly debt payments haven\'t been entered yet.';
 
+    public const NO_INCOME = 'No monthly income was given.';
+
+    public const NO_INSTALMENT = 'The monthly instalment couldn\'t be worked out from the product\'s schedule.';
+
     public function __construct(
         private readonly DraftRules $draftRules,
         private readonly LoanService $loans,
         private readonly LoanListTotals $totals,
     ) {}
 
-    public function assess(OriginationApplication $application, ?string $verifiedIncome = null, ?string $verifiedDebt = null): AssessmentOutcome
+    /**
+     * @param  ?string  $startDate  the loan's start date (Y-m-d), today when null
+     */
+    public function assess(OriginationApplication $application, ?string $verifiedIncome = null, ?string $verifiedDebt = null, ?string $startDate = null): AssessmentOutcome
     {
-        $today = Carbon::now()->toDateString();
+        $startDate ??= Carbon::now()->toDateString();
         $revision = OriginationRuleRevision::current();
         $rules = $revision->rules;
         $draft = $this->draftRules->normalize($application->draft ?? []);
@@ -97,7 +108,7 @@ final class CapacityAssessor
             'requested_amount' => $application->requested_amount === null ? null : (string) $application->requested_amount,
             'requested_term' => $application->requested_term,
             'frequency' => $frequency,
-            'start_date' => $today,
+            'start_date' => $startDate,
         ];
         $instalment = $this->instalment($product, $request);
 
@@ -109,11 +120,11 @@ final class CapacityAssessor
         $hardMissing = [];
 
         if ($eligible === null) {
-            $hardMissing[] = 'No monthly income was given.';
+            $hardMissing[] = self::NO_INCOME;
         }
 
         if ($instalment === null) {
-            $hardMissing[] = 'The monthly instalment couldn\'t be worked out from the product\'s schedule.';
+            $hardMissing[] = self::NO_INSTALMENT;
         }
 
         $missing = $hardMissing;
@@ -169,7 +180,7 @@ final class CapacityAssessor
             ],
             thresholds: $thresholds,
             checks: $judged['checks'],
-            explanation: $this->explain($result, $judged, $thresholds, $hardMissing, $missing, $conflicts, $provisional),
+            explanation: self::explain($result, $judged, $judged['checks'], $thresholds, $hardMissing, $missing, $conflicts, $provisional),
             missingInformation: $missing,
             conflicts: $conflicts,
             borrowerId: $application->borrower_id === null ? null : (int) $application->borrower_id,
@@ -191,10 +202,11 @@ final class CapacityAssessor
         $capacity = Capacity::calculate($incomeCentavos, $expensesCentavos, $existingDebtCentavos, $instalmentCentavos, CreditScoringSetting::current());
         $hasInstalment = $instalmentCentavos !== null && $instalmentCentavos > 0;
         $disposable = $capacity->disposableCentavos;
+        $income = $capacity->incomeCentavos;
 
-        $dti = $hasInstalment ? $capacity->debtServiceRatioText() : null;
+        $dti = $hasInstalment && $income !== null ? $capacity->debtServiceRatioText() : null;
         $coverage = $hasInstalment && $disposable !== null
-            ? (string) BigDecimal::of($disposable)->dividedBy($instalmentCentavos, 2, RoundingMode::HalfUp)
+            ? (string) BigDecimal::of($disposable)->dividedBy($instalmentCentavos, 2, RoundingMode::Down)
             : null;
         $remaining = $hasInstalment && $disposable !== null ? $disposable - $instalmentCentavos : null;
 
@@ -204,7 +216,8 @@ final class CapacityAssessor
             'coverage' => $coverage,
             'remaining_centavos' => $remaining,
             'checks' => [
-                'dti' => $dti === null ? null : BigDecimal::of($dti)->isLessThanOrEqualTo($thresholds['max_dti']),
+                'dti' => $dti === null ? null : BigDecimal::of($existingDebtCentavos + $instalmentCentavos)->multipliedBy(100)
+                    ->isLessThanOrEqualTo(BigDecimal::of($thresholds['max_dti'])->multipliedBy($income)),
                 'coverage' => $coverage === null ? null : BigDecimal::of($disposable)->isGreaterThanOrEqualTo(BigDecimal::of($thresholds['min_coverage'])->multipliedBy($instalmentCentavos)),
                 'remaining_income' => $remaining === null ? null : BigDecimal::of($remaining)->isGreaterThanOrEqualTo(BigDecimal::of($thresholds['min_remaining_income'])->multipliedBy(100)),
             ],
@@ -350,29 +363,51 @@ final class CapacityAssessor
     }
 
     /**
-     * @param  array{capacity: Capacity, dti: ?string, coverage: ?string, remaining_centavos: ?int, checks: array{dti: ?bool, coverage: ?bool, remaining_income: ?bool}}  $judged
+     * A revision's explanation without any figure worked out from the debts
+     * it counted: for a viewer the linked member's loans are withheld from
+     * (MemberLoanFigures). The same sentence, with each ratio and amount named
+     * but not given.
+     */
+    public static function explanationWithoutFigures(OriginationAssessment $assessment): string
+    {
+        $missing = $assessment->missing_information;
+
+        return self::explain(
+            $assessment->result,
+            null,
+            $assessment->checks,
+            $assessment->thresholds,
+            array_values(array_intersect($missing, [self::NO_INCOME, self::NO_INSTALMENT])),
+            $missing,
+            $assessment->conflicts,
+            $assessment->provisional,
+        );
+    }
+
+    /**
+     * @param  ?array{capacity: Capacity, dti: ?string, coverage: ?string, remaining_centavos: ?int}  $judged  null names each figure without giving it
+     * @param  array{dti?: ?bool, coverage?: ?bool, remaining_income?: ?bool}  $checks
      * @param  array{max_dti: string, min_coverage: string, min_remaining_income: string}  $limits
      * @param  list<string>  $hardMissing
      * @param  list<string>  $missing
      * @param  list<string>  $conflicts
      */
-    private function explain(string $result, array $judged, array $limits, array $hardMissing, array $missing, array $conflicts, bool $provisional): string
+    private static function explain(string $result, ?array $judged, array $checks, array $limits, array $hardMissing, array $missing, array $conflicts, bool $provisional): string
     {
         if ($result === 'insufficient_information' && $hardMissing !== []) {
             return 'Insufficient information: '.self::lowerFirst(implode(' ', $hardMissing));
         }
 
-        $dti = $judged['dti'] === null ? null : "the debt-to-income ratio of {$judged['dti']}%";
-        $coverage = $judged['coverage'] === null ? null : "the coverage ratio of {$judged['coverage']}";
-        $remaining = $judged['remaining_centavos'] === null ? null : 'the remaining income of '.Money::format($judged['remaining_centavos']);
+        $dti = $judged === null ? 'the debt-to-income ratio' : ($judged['dti'] === null ? null : "the debt-to-income ratio of {$judged['dti']}%");
+        $coverage = $judged === null ? 'the coverage ratio' : ($judged['coverage'] === null ? null : "the coverage ratio of {$judged['coverage']}");
+        $remaining = $judged === null ? 'the remaining income' : ($judged['remaining_centavos'] === null ? null : 'the remaining income of '.Money::format($judged['remaining_centavos']));
         $minimumIncome = Money::format(Centavos::of($limits['min_remaining_income']));
-        $checks = $judged['checks'];
 
         if ($result === 'above_capacity') {
             $reasons = array_values(array_filter([
-                $checks['dti'] === false ? "{$dti} is above the {$limits['max_dti']}% maximum" : null,
-                $checks['coverage'] === false ? "{$coverage} is below the {$limits['min_coverage']} minimum" : null,
-                $checks['remaining_income'] === false ? "{$remaining} is below the {$minimumIncome} minimum" : null,
+                ($checks['dti'] ?? null) === false ? "{$dti} is above the {$limits['max_dti']}% maximum" : null,
+                ($checks['coverage'] ?? null) === false ? "{$coverage} is below the {$limits['min_coverage']} minimum" : null,
+                ($checks['remaining_income'] ?? null) === false ? "{$remaining} is below the {$minimumIncome} minimum" : null,
             ]));
 
             return 'Above capacity: '.self::sentence($reasons).'.';

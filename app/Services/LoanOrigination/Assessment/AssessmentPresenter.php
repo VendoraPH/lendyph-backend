@@ -5,6 +5,7 @@ namespace App\Services\LoanOrigination\Assessment;
 use App\Http\Resources\Savings\SavingsUserRef;
 use App\Models\OriginationApplication;
 use App\Models\OriginationAssessment;
+use App\Models\User;
 
 /**
  * An assessment revision in the shape of #615's `Assessment` type. Money and
@@ -12,17 +13,25 @@ use App\Models\OriginationAssessment;
  * the online application settings do; a figure that couldn't be worked out
  * is null. Every figure is the server's: the screen adds nothing up.
  *
+ * The figures that count a linked member's Lendy loans read null, with an
+ * explanation that doesn't give them, for a viewer who may not see that
+ * member's loans (MemberLoanFigures); `member_figures_hidden` says so.
+ *
  * Public so the application detail (LO-B3) can show the current revision the
  * same way.
  */
 final class AssessmentPresenter
 {
-    public function __construct(private readonly RequiredDocuments $documents) {}
+    public function __construct(
+        private readonly RequiredDocuments $documents,
+        private readonly MemberLoanFigures $memberLoans,
+    ) {}
 
     /** @return array<string, mixed> */
-    public function present(OriginationAssessment $assessment, OriginationApplication $application): array
+    public function present(OriginationAssessment $assessment, OriginationApplication $application, User $viewer): array
     {
         $assessment->loadMissing(['ruleRevision', 'creator', 'loanProduct']);
+        $hidden = $this->memberLoans->hiddenFrom($viewer, $assessment);
 
         return [
             'id' => $assessment->id,
@@ -41,11 +50,12 @@ final class AssessmentPresenter
             'result_label' => OriginationAssessment::RESULT_LABELS[$assessment->result],
             'provisional' => $assessment->provisional,
             'policy_exception' => $assessment->goesToPolicyException(),
-            'figures' => array_map(self::number(...), $assessment->figures),
+            'figures' => array_map(self::number(...), $hidden ? MemberLoanFigures::withheld($assessment->figures) : $assessment->figures),
+            'member_figures_hidden' => $hidden,
             'thresholds' => array_map(self::number(...), $assessment->thresholds),
             'checks' => $assessment->checks,
             'instalment_basis' => $assessment->instalment_basis,
-            'explanation' => (string) $assessment->explanation,
+            'explanation' => $hidden ? CapacityAssessor::explanationWithoutFigures($assessment) : (string) $assessment->explanation,
             'missing_information' => $assessment->missing_information,
             'conflicts' => $assessment->conflicts,
             'document_status' => $this->documents->status($application),

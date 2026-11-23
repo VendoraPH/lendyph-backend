@@ -11,15 +11,20 @@ use Illuminate\Support\Facades\Log;
  * Keeps a handed-off application in step with its loan (origination §3.1,
  * Phase 6 decision 9), as the portal's LoanObserver follows a release. It
  * runs inside the loan write's own transaction, after the loan's row lock,
- * and moves the application through ApplicationTransitions as the `loan`
- * actor, with a history row naming the loan:
+ * reads the application under its own row lock (loan, then application, the
+ * order the hand-off takes them in), and moves it through
+ * ApplicationTransitions as the `loan` actor, with a history row naming the
+ * loan:
  *
  * - for approval (submitted, or an approved loan sent back): For Approval;
  * - approved: Approved;
  * - rejected: Rejected;
  * - released: Converted to Loan;
- * - void (before release): Withdrawn;
- * - back to draft: Under Assessment, so it can be handed off again.
+ * - void (before release): Withdrawn.
+ *
+ * A loan back to draft leaves its application where it is: the application
+ * keeps its loan, so it can't be assessed or handed off again, and follows
+ * the loan once it is submitted again.
  *
  * A loan that didn't come from an application costs one indexed read. An
  * application already at the status is left as it is. One that can't follow
@@ -37,7 +42,6 @@ class LoanStatusObserver
         'rejected' => 'rejected',
         'released' => 'converted',
         'void' => 'withdrawn',
-        'draft' => 'under_assessment',
     ];
 
     private const WORDS = [
@@ -46,7 +50,6 @@ class LoanStatusObserver
         'rejected' => 'was rejected',
         'released' => 'was released',
         'void' => 'was voided',
-        'draft' => 'is back to draft',
     ];
 
     public function __construct(private readonly ApplicationTransitions $transitions) {}
@@ -57,7 +60,7 @@ class LoanStatusObserver
             return;
         }
 
-        $application = OriginationApplication::query()->where('loan_id', $loan->getKey())->first();
+        $application = OriginationApplication::query()->where('loan_id', $loan->getKey())->lockForUpdate()->first();
 
         if ($application === null) {
             return;

@@ -119,9 +119,13 @@ trait OriginationFixtures
         return tap(User::factory()->create(['branch_id' => Branch::query()->orderBy('id')->value('id')]), fn (User $u) => $u->assignRole($role));
     }
 
+    /** The ID details a verified government ID of these fixtures records. */
+    public const ORIGINATION_ID = ['type' => 'drivers_license', 'custom_type_name' => null, 'id_number' => 'N01-23-456789'];
+
     /**
      * Every settings document type, uploaded and set to $status, each with a
-     * small file on the private disk.
+     * small file on the private disk. A verified government ID records its ID
+     * type and number, as verifying it does.
      */
     public function originationDocuments(OriginationApplication $application, string $status = 'verified'): void
     {
@@ -134,6 +138,7 @@ trait OriginationFixtures
                 'public_id' => (string) Str::ulid(),
                 'type' => $type,
                 'status' => $status,
+                'id_details' => $type === 'government_id' && $status === 'verified' ? self::ORIGINATION_ID : null,
             ]);
 
             $version = OriginationDocumentVersion::query()->create([

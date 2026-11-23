@@ -10,7 +10,8 @@ use Illuminate\Foundation\Http\FormRequest;
  * verified monthly income and debt payments `loan_origination:assess`
  * holders enter (origination decision 15). Each is optional: left out it
  * keeps the previous run's, null clears it. Pesos, at most two decimals,
- * never rounded.
+ * never rounded. `start_date` is the loan's planned start date, today when
+ * left out: the hand-off assesses again at the loan's own.
  */
 class RunAssessmentRequest extends FormRequest
 {
@@ -33,6 +34,7 @@ class RunAssessmentRequest extends FormRequest
         return [
             'verified_monthly_income' => $money,
             'verified_debt_payments' => $money,
+            'start_date' => ['sometimes', 'nullable', 'date_format:Y-m-d'],
         ];
     }
 
@@ -40,7 +42,7 @@ class RunAssessmentRequest extends FormRequest
     public function messages(): array
     {
         $words = ['verified_monthly_income' => 'verified monthly income', 'verified_debt_payments' => 'verified monthly debt payments'];
-        $messages = [];
+        $messages = ['start_date.date_format' => 'Enter the start date as a date, like 2026-11-19.'];
 
         foreach ($words as $field => $label) {
             $messages["{$field}.numeric"] = "Enter the {$label} as an amount in pesos, like 25000.";
@@ -52,12 +54,12 @@ class RunAssessmentRequest extends FormRequest
         return $messages;
     }
 
-    /** @return array{verified_monthly_income?: ?string, verified_debt_payments?: ?string} */
+    /** @return array{verified_monthly_income?: ?string, verified_debt_payments?: ?string, start_date?: ?string} */
     public function figures(): array
     {
         $out = [];
 
-        foreach (['verified_monthly_income', 'verified_debt_payments'] as $field) {
+        foreach (['verified_monthly_income', 'verified_debt_payments', 'start_date'] as $field) {
             if ($this->exists($field)) {
                 $value = $this->validated($field);
                 $out[$field] = $value === null ? null : (string) $value;

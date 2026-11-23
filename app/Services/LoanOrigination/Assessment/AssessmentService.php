@@ -18,8 +18,10 @@ use Illuminate\Validation\ValidationException;
  * - An application is assessed from its submission until its hand-off: once
  *   it is For Approval it follows its loan, and a closed one is done.
  * - A run takes the verified monthly income and debt payments sent; one left
- *   out keeps the previous revision's, and null clears it. The officer's
- *   notes carry forward to the new run.
+ *   out keeps the previous revision's, and null clears it. It assesses a loan
+ *   starting on the start date sent, today by default, which the hand-off
+ *   checks against the loan's. The officer's notes carry forward to the new
+ *   run.
  * - Both lock the application row, so two runs at once number their
  *   revisions one after the other.
  * - Each writes an audit row on the application with ids and the result
@@ -33,7 +35,7 @@ final class AssessmentService
     public function __construct(private readonly CapacityAssessor $assessor) {}
 
     /**
-     * @param  array{verified_monthly_income?: ?string, verified_debt_payments?: ?string}  $input
+     * @param  array{verified_monthly_income?: ?string, verified_debt_payments?: ?string, start_date?: ?string}  $input
      */
     public function run(OriginationApplication $application, User $user, array $input): OriginationAssessment
     {
@@ -47,6 +49,7 @@ final class AssessmentService
                 $locked,
                 $this->carried($input, 'verified_monthly_income', $previous),
                 $this->carried($input, 'verified_debt_payments', $previous),
+                $input['start_date'] ?? null,
             );
 
             $assessment = OriginationAssessment::query()->create([

@@ -12,6 +12,11 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
  * details, verified references, income verification, and when the member
  * acknowledged the credit assessment notice. Every field is optional; a blank
  * field takes its factor out of the score rather than costing points.
+ *
+ * `monthly_income` is set only by an online application's hand-off: the
+ * income its assessment verified and counted. Credit Scoring then scores that
+ * loan on it instead of the member record's income (Capacity::from()); staff
+ * don't enter it.
  */
 class CreditApplicationProfile extends Model
 {
@@ -20,11 +25,11 @@ class CreditApplicationProfile extends Model
     public const INCOME_VERIFICATIONS = ['verified', 'failed'];
 
     /**
-     * The application details: what staff enter and what the score reads.
-     * The notice fields are not details.
+     * The application details: what staff enter (or a hand-off records) and
+     * what the score reads. The notice fields are not details.
      */
     public const DETAIL_FIELDS = [
-        'other_income', 'business_income', 'household_expenses', 'outside_debt_payments', 'outside_lenders_count',
+        'monthly_income', 'other_income', 'business_income', 'household_expenses', 'outside_debt_payments', 'outside_lenders_count',
         'employment_status', 'business_start_date', 'years_at_residence', 'verified_references_count', 'income_verification',
     ];
 
@@ -44,6 +49,7 @@ class CreditApplicationProfile extends Model
 
     protected $fillable = [
         'loan_id',
+        'monthly_income',
         'other_income',
         'business_income',
         'household_expenses',
@@ -63,6 +69,7 @@ class CreditApplicationProfile extends Model
     protected function casts(): array
     {
         return [
+            'monthly_income' => 'decimal:2',
             'other_income' => 'decimal:2',
             'business_income' => 'decimal:2',
             'household_expenses' => 'decimal:2',
