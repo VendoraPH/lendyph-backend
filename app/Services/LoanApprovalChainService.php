@@ -6,11 +6,14 @@ use App\Models\ApprovalWorkflowSetting;
 use App\Models\Loan;
 use App\Models\LoanApprovalStep;
 use App\Models\User;
+use App\Services\Approvals\StepMinimum;
+use Brick\Math\BigDecimal;
 use Illuminate\Auth\Access\AuthorizationException;
 use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Database\Eloquent\ModelNotFoundException;
 use Illuminate\Http\Exceptions\HttpResponseException;
 use Illuminate\Support\Collection as SupportCollection;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
 
 /**
@@ -86,7 +89,7 @@ class LoanApprovalChainService
         // promotion branch at the bottom of this method would silently skip.
         $submitter ??= auth()->user() ?? $loan->createdByUser;
 
-        $chain = $this->chainFor($loan);
+        $chain = $this->keptSteps($loan, $this->chainFor($loan), 'submit', $submitter);
 
         // Destructive re-seed, NOT idempotent: this drops any existing chain
         // for the loan, and being a query-builder delete it fires no model
@@ -188,6 +191,9 @@ class LoanApprovalChainService
             // taken again from what its source owes now.
             if ($step->kind === LoanApprovalStep::KIND_SUBMIT) {
                 $this->loanService->retakeRestructureTerms($loan, 'submission', $user);
+                $this->reseedAfter($loan, $step, $user);
+            } else {
+                $this->assertNoLeftOutStepApplies($loan, $step);
             }
 
             $step->update([
@@ -691,7 +697,11 @@ class LoanApprovalChainService
                 throw new AuthorizationException('You can\'t submit this loan for approval.');
             }
 
-            $chain = $this->chainFor($loan);
+            // The chain as seeding will leave it (steps whose minimum is above
+            // the loan's amount left out), so `last_approve` is right. Nothing
+            // is written or audited here.
+            $amount = $this->principalOf($loan);
+            $chain = array_values(array_filter($this->chainFor($loan), fn (array $step): bool => StepMinimum::applies($step, $amount)));
             $next = $chain[1] ?? null;
 
             if ($next === null) {
@@ -1009,10 +1019,188 @@ class LoanApprovalChainService
                 'status' => is_string($step['status'] ?? null) && trim($step['status']) !== ''
                     ? mb_substr($step['status'], 0, 100)
                     : null,
+                StepMinimum::KEY => StepMinimum::normalise($step[StepMinimum::KEY] ?? null),
             ];
         }
 
+        // A minimum the save would have refused (on the Submit, first
+        // approval or Release step) keeps its step: never fewer approvals.
+        foreach (array_keys($clean) as $index) {
+            if (StepMinimum::refusalFor($clean, $index) !== null) {
+                $clean[$index][StepMinimum::KEY] = null;
+            }
+        }
+
         return $clean;
+    }
+
+    /**
+     * The steps of $chain that apply to this loan's principal (Phase 6 MB-BE6,
+     * multi-branch decision 10): a step whose `min_principal` is above the
+     * principal is left out, with one audit row in words. A chain that carries
+     * any minimum is copied onto the loan (`loans.approval_chain`) the first
+     * time it is seeded, so a re-submit sets it again from the same steps.
+     *
+     * @param  list<array<string, mixed>>  $chain
+     * @return list<array<string, mixed>>
+     */
+    private function keptSteps(Loan $loan, array $chain, string $when, ?User $actor): array
+    {
+        if (! collect($chain)->contains(fn (array $step): bool => ($step[StepMinimum::KEY] ?? null) !== null)) {
+            return $chain;
+        }
+
+        if ($when === 'submit') {
+            DB::table('loans')->where('id', $loan->getKey())->update(['approval_chain' => json_encode($chain)]);
+        }
+
+        $principal = $this->principalOf($loan);
+        $kept = array_values(array_filter($chain, fn (array $step): bool => StepMinimum::applies($step, $principal)));
+        $leftOut = array_values(array_filter($chain, fn (array $step): bool => ! StepMinimum::applies($step, $principal)));
+
+        if ($leftOut !== []) {
+            $phrases = array_map(fn (array $step): string => '"'.$step['name'].'"', $leftOut);
+            $minimums = array_map(fn (array $step): string => StepMinimum::pesos($step[StepMinimum::KEY]), $leftOut);
+
+            AuditLogService::log(
+                action: 'loan_approval_steps_left_out',
+                auditable: $loan,
+                newValues: [
+                    'principal' => $principal,
+                    'when' => $when,
+                    'left_out' => array_map(fn (array $step): array => [
+                        'step_id' => $step['id'],
+                        'name' => $step['name'],
+                        'role' => $step['role'],
+                        'min_principal' => $step[StepMinimum::KEY],
+                    ], $leftOut),
+                ],
+                description: count($leftOut) === 1
+                    ? "Loan {$loan->application_number}: step {$phrases[0]} left out, because the {$this->amountWords($loan)} of ".StepMinimum::pesos($principal)." is below its minimum of {$minimums[0]}."
+                    : "Loan {$loan->application_number}: steps ".implode(', ', array_map(fn (string $name, string $minimum): string => "{$name} (from {$minimum})", $phrases, $minimums))
+                        .' left out, because the '.$this->amountWords($loan).' of '.StepMinimum::pesos($principal).' is below their minimums.',
+                userId: $actor?->id,
+            );
+        }
+
+        return $kept;
+    }
+
+    /**
+     * Re-submitting (a sign-off on the Submit step after a send-back) sets the
+     * rest of the round again from the loan's copied chain, at the principal
+     * it has now: a step whose minimum is now met comes back, one whose
+     * minimum is no longer met is left out. Every step after the Submit step
+     * is still waiting at this point, so no sign-off is lost. A loan with no
+     * copied chain (no minimums, or submitted before this change) keeps its
+     * round as it is.
+     */
+    private function reseedAfter(Loan $loan, LoanApprovalStep $submit, User $user): void
+    {
+        $chain = is_array($loan->approval_chain) ? $loan->approval_chain : null;
+
+        if ($chain === null) {
+            return;
+        }
+
+        $submitIndex = collect($chain)->search(fn (array $step): bool => $step['kind'] === LoanApprovalStep::KIND_SUBMIT);
+        $tail = array_slice($chain, $submitIndex === false ? 1 : $submitIndex + 1);
+
+        $later = $loan->approvalSteps()
+            ->where('round', $submit->round)
+            ->where('step_order', '>', $submit->step_order)
+            ->orderBy('step_order')
+            ->get();
+
+        $kept = $this->keptSteps($loan, $tail, 're-submit', $user);
+
+        if ($later->pluck('step_id')->all() === array_column($kept, 'id')) {
+            return;
+        }
+
+        $loan->approvalSteps()->whereKey($later->modelKeys())->delete();
+
+        foreach (array_values($kept) as $offset => $step) {
+            LoanApprovalStep::create([
+                'loan_id' => $loan->id,
+                'round' => $submit->round,
+                'step_order' => $submit->step_order + 1 + $offset,
+                'step_id' => $step['id'],
+                'name' => $step['name'],
+                'status_label' => $step['status'] ?? null,
+                'role' => $step['role'],
+                'kind' => $step['kind'],
+                'status' => LoanApprovalStep::STATUS_WAITING,
+            ]);
+        }
+
+        AuditLogService::log(
+            action: 'loan_approval_chain_reseeded',
+            auditable: $loan,
+            oldValues: ['round' => $submit->round, 'step_ids' => $later->pluck('step_id')->all()],
+            newValues: ['round' => $submit->round, 'step_ids' => array_column($kept, 'id'), 'principal' => $this->principalOf($loan)],
+            description: "Loan {$loan->application_number} re-submitted with {$this->amountWords($loan)} ".StepMinimum::pesos($this->principalOf($loan))
+                .': its approval steps after Submit are now '.implode(', ', array_map(fn (array $step): string => '"'.$step['name'].'"', $kept)).'.',
+            userId: $user->id,
+        );
+    }
+
+    /**
+     * A sign-off on any other step is refused while a step the loan's chain
+     * left out now applies: the principal was raised past its minimum after
+     * submitting. Sending the loan back to the Submit step sets the chain
+     * again (reseedAfter()).
+     */
+    private function assertNoLeftOutStepApplies(Loan $loan, LoanApprovalStep $step): void
+    {
+        $chain = is_array($loan->approval_chain) ? $loan->approval_chain : null;
+
+        if ($chain === null) {
+            return;
+        }
+
+        $inRound = $loan->approvalSteps()->where('round', $step->round)->pluck('step_id')->all();
+        $principal = $this->principalOf($loan);
+
+        foreach ($chain as $configured) {
+            if (! in_array($configured['id'], $inRound, true) && StepMinimum::applies($configured, $principal)) {
+                throw ValidationException::withMessages([
+                    'approval' => ['The '.$this->amountWords($loan).' is now '.StepMinimum::pesos($principal).", so the \"{$configured['name']}\" step (from "
+                        .StepMinimum::pesos($configured[StepMinimum::KEY]).') applies. Send the loan back to the Submit step so its approval chain is set again.'],
+                ]);
+            }
+        }
+    }
+
+    /**
+     * The amount a step's minimum is compared with, as stored now, read past
+     * the model so an edit made since the loan was loaded counts.
+     *
+     * A restructure is measured by the larger of its new principal and the
+     * amount restructured (`restructure_outstanding`): writing a large balance
+     * off into a small loan must not skip the step that balance needs
+     * (permission review, Medium; Arvin's standard pick).
+     */
+    private function principalOf(Loan $loan): string
+    {
+        $row = DB::table('loans')->where('id', $loan->getKey())
+            ->first(['principal_amount', 'source_loan_id', 'restructure_outstanding']);
+
+        $principal = BigDecimal::of((string) ($row?->principal_amount ?? '0'));
+
+        if ($row?->source_loan_id !== null && $row?->restructure_outstanding !== null) {
+            $principal = BigDecimal::max($principal, BigDecimal::of((string) $row->restructure_outstanding));
+        }
+
+        return (string) $principal->toScale(2);
+    }
+
+    /**
+     * What principalOf() measures, in words.
+     */
+    private function amountWords(Loan $loan): string
+    {
+        return $loan->source_loan_id !== null ? 'amount restructured' : 'principal';
     }
 
     /**
