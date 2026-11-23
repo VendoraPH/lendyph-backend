@@ -14,7 +14,9 @@ use Illuminate\Support\Facades\Log;
  * reads the application under its own row lock (loan, then application, the
  * order the hand-off takes them in), and moves it through
  * ApplicationTransitions as the `loan` actor, with a history row naming the
- * loan:
+ * loan. The application is found by a plain read and then locked by its id,
+ * so a loan with no application takes no lock on the applications' loan
+ * index (a locking read that matches nothing would hold its gap):
  *
  * - for approval (submitted, or an approved loan sent back): For Approval;
  * - approved: Approved;
@@ -60,9 +62,16 @@ class LoanStatusObserver
             return;
         }
 
-        $application = OriginationApplication::query()->where('loan_id', $loan->getKey())->lockForUpdate()->first();
+        $applicationId = OriginationApplication::query()->where('loan_id', $loan->getKey())->value('id');
 
-        if ($application === null) {
+        if ($applicationId === null) {
+            return;
+        }
+
+        /** @var OriginationApplication|null $application */
+        $application = OriginationApplication::query()->whereKey($applicationId)->lockForUpdate()->first();
+
+        if ($application === null || $application->loan_id !== (int) $loan->getKey()) {
             return;
         }
 

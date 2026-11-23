@@ -123,19 +123,27 @@ it('leaves the application For Approval when its loan goes back to draft, and fo
         ->and(OriginationStatusHistory::query()->where('application_id', $application->id)->pluck('to_status')->all())->toBe(['rejected']);
 });
 
-it('reads the application under a row lock before moving it', function () {
+it('reads its loan\'s application under a row lock before moving it, and locks nothing for a loan without one', function () {
     [$loan, $application] = lo4Followed($this);
-    $reads = [];
-    DB::listen(function ($query) use (&$reads): void {
-        if (str_contains($query->sql, 'from `origination_applications` where `loan_id`')) {
-            $reads[] = $query->sql;
+    $product = LoanProduct::factory()->create(['interest_rate' => 2, 'term' => 6, 'frequency' => 'monthly', 'min_amount' => 1000]);
+    $other = app(LoanService::class)->createLoan(['borrower_id' => $loan->borrower_id, 'loan_product_id' => $product->id, 'principal_amount' => 30000, 'start_date' => '2026-11-19'], $this->admin);
+    app(LoanService::class)->submitForReview($other, $this->admin);
+    $locking = [];
+    DB::listen(function ($query) use (&$locking): void {
+        if (str_starts_with($query->sql, 'select * from `origination_applications`') && str_ends_with($query->sql, 'for update')) {
+            $locking[] = $query->sql;
         }
     });
 
+    app(LoanService::class)->reject($other->fresh(), $this->admin, 'Short on income');
+    expect($locking)->toBe([]);
+
     app(LoanService::class)->reject($loan, $this->admin, 'Short on income');
 
-    expect($reads)->toHaveCount(1)
-        ->and($reads[0])->toEndWith('for update')
+    // The observer's own read of the application, then move()'s re-check:
+    // both locking, both by id, never by the loan.
+    expect($locking)->toHaveCount(2)
+        ->and(collect($locking)->every(fn (string $sql) => str_contains($sql, 'where `origination_applications`.`id` = ?')))->toBeTrue()
         ->and($application->fresh()->status)->toBe('rejected');
 });
 
