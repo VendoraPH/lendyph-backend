@@ -94,9 +94,14 @@ class StoreCsvImportRunRequest extends FormRequest
             // `array:customers,loans` rejects unknown keys outright rather than
             // ignoring them, so a client that sends `members` learns it named
             // the file wrong here instead of at assemble time.
+            //
+            // The members file is required and the loans file is optional: a
+            // cooperative may have no loans to carry over, or be adding a batch
+            // of new members. A loans file on its own is refused, since its rows
+            // find their members through the members file of the same import.
             'files' => ['required', 'array:customers,loans'],
             'files.customers' => ['required', 'array:filename,size_bytes,sha256'],
-            'files.loans' => ['required', 'array:filename,size_bytes,sha256'],
+            'files.loans' => ['sometimes', 'array:filename,size_bytes,sha256'],
 
             'files.*.filename' => ['required', 'string', 'max:255'],
             'files.*.size_bytes' => ['required', 'integer', 'min:1', 'max:'.$maxBytes],
@@ -109,6 +114,10 @@ class StoreCsvImportRunRequest extends FormRequest
         $maxMb = (int) round(app(CsvImportUploadService::class)->maxFileBytes() / 1048576);
 
         return [
+            'files.required' => 'Choose the members file to import.',
+            'files.customers.required' => $this->has('files.loans')
+                ? 'A loans file needs its members file in the same import.'
+                : 'Choose the members file to import.',
             'branch_id.required' => 'Choose the branch these members and loans belong to. Every imported loan needs one, and the file cannot supply it.',
             'branch_id.exists' => 'Choose one of your own branches for this import.',
             'files.*.size_bytes.max' => "That file is larger than the {$maxMb} MB import limit.",
