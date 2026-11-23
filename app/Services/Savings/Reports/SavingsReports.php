@@ -112,9 +112,7 @@ class SavingsReports
                 $totals['available'] += $figures['available'];
             }
 
-            foreach ($this->accrued->forMany($accounts) as $figures) {
-                $totals['accrued'] += $figures['gross'];
-            }
+            $totals['accrued'] += $this->accruedOf($accounts);
         });
 
         return [
@@ -125,6 +123,34 @@ class SavingsReports
             'total_available' => $today ? SavingsMath::pesos($totals['available']) : null,
             'total_accrued_interest' => $today ? SavingsMath::pesos($totals['accrued']) : null,
         ];
+    }
+
+    /**
+     * Today's accrued interest on every account the balances report lists for
+     * today, in centavos: its `total_accrued_interest`, over the same accounts
+     * and the same sum, for the Savings dashboard (TASK 35). Accrued interest
+     * has no history, so `as_of` is always today.
+     */
+    public function accruedInterestToday(array $filters): int
+    {
+        $total = 0;
+
+        $this->balancesQuery(['as_of' => now()->toDateString()] + $filters)->setEagerLoads([])->reorder()
+            ->chunkById(self::CHUNK, function (Collection $accounts) use (&$total): void {
+                $total += $this->accruedOf($accounts);
+            });
+
+        return $total;
+    }
+
+    /**
+     * The accounts' interest accrued and not yet credited, gross, in centavos.
+     *
+     * @param  Collection<int, SavingsAccount>  $accounts
+     */
+    private function accruedOf(Collection $accounts): int
+    {
+        return array_sum(array_column($this->accrued->forMany($accounts), 'gross'));
     }
 
     // ── Transactions ──

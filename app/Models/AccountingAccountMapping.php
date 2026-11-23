@@ -95,7 +95,7 @@ class AccountingAccountMapping extends Model
     ];
 
     /**
-     * Each role in words, as the Accounting Settings screen labels it
+     * Each role in words, as the Settings → Accounting screen labels it
      * (`mapping-fields.ts` in the frontend). Messages name a role through
      * {@see self::label()}, never by its stored key.
      *

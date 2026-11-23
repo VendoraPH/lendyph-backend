@@ -602,9 +602,9 @@ class ReportController extends Controller
     #[OA\Get(
         path: '/api/reports/borrowers/list',
         summary: 'Members behind the Member Report\'s cards',
-        description: 'Every member who is active or new, by name as displayed then id, paginated over members. `meta.counts` '
-            .'(`active`, `new`, `repeat`) equal the cards of GET /api/reports/borrowers for the same filters. A repeat member who '
-            .'is neither active nor new is on the `repeat` count and not in the rows. `outstanding` is everything still owed today '
+        description: 'Every member who is active, new or repeat, by name as displayed then id, paginated over members. `meta.counts` '
+            .'(`active`, `new`, `repeat`) equal the cards of GET /api/reports/borrowers for the same filters, and each row carries '
+            .'`is_active`, `is_new` and `is_repeat`. `outstanding` is everything still owed today '
             .'on the loans `active_loans` counts, with the meaning of `total_outstanding`.',
         tags: ['Reports'],
         security: [['sanctum' => []]],

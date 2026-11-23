@@ -97,7 +97,7 @@ class Quote
         $rate = $this->rates->rateOn($product->id, $termDays, $priced->toDateString());
 
         if ($rate === null) {
-            $this->refuse('term_days', "{$product->name} has no rate in force for {$termDays} days on {$priced->format('M j, Y')}. Add one in Savings → Products.");
+            $this->refuse('term_days', "{$product->name} has no rate in force for {$termDays} days on {$priced->format('M j, Y')}. Add one in Settings → Savings Products.");
         }
 
         $annualRate = SavingsMath::rateString(SavingsMath::rateUnits((string) $rate));
@@ -152,7 +152,7 @@ class Quote
             $regular = SavingsProduct::query()->whereKey($product->pretermination_product_id)->value('name') ?? 'its regular product';
             $owner = str_ends_with($regular, 's') ? "{$regular}'" : "{$regular}'s";
 
-            $this->refuse('product_id', "{$product->name} pays early terminations at {$owner} rate, which has none in force on {$date->format('M j, Y')}. Add one in Savings → Products.");
+            $this->refuse('product_id', "{$product->name} pays early terminations at {$owner} rate, which has none in force on {$date->format('M j, Y')}. Add one in Settings → Savings Products.");
         }
 
         return SavingsMath::rateString(SavingsMath::rateUnits((string) $rate));

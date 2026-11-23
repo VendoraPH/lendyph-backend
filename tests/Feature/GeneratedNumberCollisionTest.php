@@ -328,6 +328,30 @@ class GeneratedNumberCollisionTest extends TestCase
         $this->assertSame($before + 1, Borrower::count());
     }
 
+    /**
+     * "Create Anyway" is for staff only: an anonymous caller's `force` skips
+     * neither the duplicate check nor its re-check under the lock.
+     */
+    public function test_an_anonymous_force_does_not_skip_the_recheck_under_the_lock(): void
+    {
+        $send = $this->anonymousRegistration(['force' => true]);
+        $this->failOnInsertInto('borrowers', self::DEADLOCK, times: 1);
+        $twin = $this->landOnFirstRollback(fn (): Borrower => Borrower::factory()->create([
+            'branch_id' => $this->branch->id,
+            'first_name' => 'Anonymous',
+            'middle_name' => null,
+            'last_name' => 'Applicant',
+            'birthdate' => '1990-01-15',
+        ]));
+        $before = Borrower::count();
+
+        $response = $send()->assertStatus(422);
+
+        $this->assertSame(['A similar member already exists. Please contact your branch to continue.'], $response->json('errors.first_name'));
+        $this->assertStringNotContainsString($twin()->borrower_code, $response->getContent());
+        $this->assertSame($before + 1, Borrower::count(), 'Only the twin was created.');
+    }
+
     public function test_an_anonymous_registration_with_a_key_skips_the_recheck_and_reads_the_winner_back(): void
     {
         $key = (string) Str::uuid();

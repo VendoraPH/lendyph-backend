@@ -56,7 +56,7 @@ class CdaTrainingRequest extends CdaFormRequest
             'title.required' => 'Give the training\'s title.',
             'title.string' => 'Give the training\'s title.',
             'title.max' => 'The title can be at most 255 characters.',
-            'requirement_key.regex' => 'A requirement key is lower-case letters, digits and underscores, as in CDA settings.',
+            'requirement_key.regex' => 'A requirement key is lower-case letters, digits and underscores, as in Settings → CDA.',
             'requirement_key.max' => 'A requirement key can be at most 80 characters.',
             'training_type.max' => 'The training type can be at most 40 characters.',
             'is_mandatory.boolean' => 'Say whether the training is mandatory (yes or no).',

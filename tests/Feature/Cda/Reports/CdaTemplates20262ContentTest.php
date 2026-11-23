@@ -81,7 +81,8 @@ class CdaTemplates20262ContentTest extends TestCase
         $period = $this->openYear();
 
         foreach (CdaReport::query()->with('template')->where('period_id', $period->id)->get() as $report) {
-            $this->assertSame('2026.2', $report->template->version, $report->report_type);
+            // ATIR is on 2026.3 since it reads its location fields from the profile.
+            $this->assertSame($report->report_type === 'atir' ? '2026.3' : '2026.2', $report->template->version, $report->report_type);
             $this->refreshed($report);
 
             foreach (CdaReportValue::query()->where('report_id', $report->id)->whereNotNull('source_key')->get() as $row) {

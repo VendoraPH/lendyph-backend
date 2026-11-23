@@ -97,13 +97,14 @@ final class BorrowerRegistration
      * collision. The lock comes first: a plain read before it would fix a
      * snapshot from before the other save committed.
      *
-     * Not for "Create Anyway" (`force`), and not for a registration with a
+     * Not for staff's "Create Anyway" (StoreBorrowerRequest::forced(); an
+     * anonymous `force` is ignored), and not for a registration with a
      * `registration_uuid`: there the unique index decides, and the loser reads
      * the winner's row back rather than being refused.
      */
     private function refuseDuplicateUnderLock(StoreBorrowerRequest $request): void
     {
-        if ($request->boolean('force') || $request->filled('registration_uuid')) {
+        if ($request->forced() || $request->filled('registration_uuid')) {
             return;
         }
 

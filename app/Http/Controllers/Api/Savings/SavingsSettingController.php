@@ -219,7 +219,7 @@ class SavingsSettingController extends Controller
             $one = count($missing) === 1;
 
             return 'The savings books are not ready: the '.collect($missing)->map(Str::lower(...))->join(', ', ' and ')
-                .' posting '.($one ? 'role still has' : 'roles still have').' no account. Set '.($one ? 'it' : 'them').' in Accounting → Settings → Default Accounts.';
+                .' posting '.($one ? 'role still has' : 'roles still have').' no account. Set '.($one ? 'it' : 'them').' in Settings → Accounting → Default Accounts.';
         }
 
         if ($result['created'] === [] && $result['mapped'] === []) {

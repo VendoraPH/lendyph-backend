@@ -2011,9 +2011,9 @@ class ReportService
 
     /**
      * One page of the members behind the Member Report's cards: everyone who
-     * is active or new, by name as displayed then id, a total order across
-     * pages. `outstanding` is everything still owed today (`total_outstanding`)
-     * on the loans `active_loans` counts.
+     * is active, new or repeat (memberCounts()), by name as displayed then id,
+     * a total order across pages. `outstanding` is everything still owed
+     * today (`total_outstanding`) on the loans `active_loans` counts.
      *
      * Costs the same queries for any page size: the page, its count, its
      * branches, the page's active loans, and their figures.
@@ -2038,6 +2038,7 @@ class ReportService
             ->selectRaw("({$newSql}) as is_new_member", $newBindings)
             ->where(fn ($q) => $q
                 ->where('member_loans.active_loans', '>', 0)
+                ->orWhere('member_loans.loans_released', '>=', self::REPEAT_MEMBER_LOANS)
                 ->orWhereRaw($newSql, $newBindings))
             ->with('branch:id,name')
             ->orderByRaw(self::BORROWER_NAME_SQL)
