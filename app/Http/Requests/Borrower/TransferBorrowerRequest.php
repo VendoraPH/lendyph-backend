@@ -9,8 +9,9 @@ use Illuminate\Validation\Rule;
 
 /**
  * Move a member to another branch (Phase 6, multi-branch decision 7):
- * `borrowers:transfer`, a destination among the caller's own branches (any
- * with `branches:view_all`) and a reason.
+ * `borrowers:transfer` plus `borrowers:view` (the answer is the member's
+ * full record), a destination among the caller's own branches (any with
+ * `branches:view_all`) and a reason.
  *
  * The member's own branch is checked by the route binding: a member the
  * caller can't see answers 404. A destination the caller can't see reads
@@ -18,11 +19,11 @@ use Illuminate\Validation\Rule;
  */
 class TransferBorrowerRequest extends FormRequest
 {
-    public const REFUSAL = 'Transferring a member to another branch needs the member transfer permission.';
+    public const REFUSAL = 'Transferring a member to another branch needs the member transfer and member view permissions.';
 
     public function authorize(): bool
     {
-        return $this->user()->can('borrowers:transfer');
+        return $this->user()->can('borrowers:transfer') && $this->user()->can('borrowers:view');
     }
 
     /** @throws AuthorizationException */

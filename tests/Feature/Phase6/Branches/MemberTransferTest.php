@@ -14,6 +14,8 @@ use App\Models\SavingsAccount;
 use App\Models\TimeDeposit;
 use App\Models\User;
 use App\Services\AuditLogService;
+use App\Services\Branches\MemberTransfer;
+use Illuminate\Database\Eloquent\ModelNotFoundException;
 use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\TestCase;
 use Tests\Traits\SetupLendyPH;
@@ -141,15 +143,47 @@ class MemberTransferTest extends TestCase
 
         $this->postJson("/api/borrowers/{$member->id}/transfer", ['branch_id' => $this->second->id, 'reason' => self::REASON])
             ->assertForbidden()
-            ->assertJsonPath('message', 'Transferring a member to another branch needs the member transfer permission.');
+            ->assertJsonPath('message', 'Transferring a member to another branch needs the member transfer and member view permissions.');
 
         $this->assertSame($this->branch->id, (int) $member->fresh()->branch_id);
+    }
+
+    public function test_the_transfer_permission_alone_cant_read_the_members_record(): void
+    {
+        $member = $this->member();
+        $this->actingAs($this->staffIn([$this->branch, $this->second], ['borrowers:transfer']));
+
+        $this->postJson("/api/borrowers/{$member->id}/transfer", ['branch_id' => $this->second->id, 'reason' => self::REASON])
+            ->assertForbidden()
+            ->assertJsonPath('message', 'Transferring a member to another branch needs the member transfer and member view permissions.');
+
+        $this->assertSame($this->branch->id, (int) $member->fresh()->branch_id);
+    }
+
+    public function test_the_callers_reach_is_checked_again_on_the_members_branch_under_the_lock(): void
+    {
+        $member = $this->member();
+        // The member moved to a branch this caller can't see after the route
+        // bound it.
+        $third = Branch::factory()->create(['name' => 'Third Branch', 'code' => 'THR']);
+        $caller = $this->staffIn([$this->branch, $this->second], ['borrowers:transfer', 'borrowers:view']);
+        $bound = $member->replicate()->forceFill(['id' => $member->id]);
+        Borrower::query()->whereKey($member->id)->update(['branch_id' => $third->id]);
+
+        try {
+            app(MemberTransfer::class)->transfer($bound, $this->second->id, self::REASON, $caller);
+            $this->fail('A member in a branch the caller can no longer see was transferred.');
+        } catch (ModelNotFoundException) {
+            // 404, as for a member the caller never saw.
+        }
+
+        $this->assertSame($third->id, (int) $member->fresh()->branch_id);
     }
 
     public function test_a_branch_user_holding_both_branches_may_transfer(): void
     {
         $member = $this->member();
-        $this->actingAs($this->staffIn([$this->branch, $this->second], ['borrowers:transfer']));
+        $this->actingAs($this->staffIn([$this->branch, $this->second], ['borrowers:transfer', 'borrowers:view']));
 
         $this->postJson("/api/borrowers/{$member->id}/transfer", ['branch_id' => $this->second->id, 'reason' => self::REASON])->assertOk();
 
@@ -159,7 +193,7 @@ class MemberTransferTest extends TestCase
     public function test_a_member_in_a_branch_the_caller_cant_see_answers_404(): void
     {
         $member = $this->member();
-        $this->actingAs($this->staffIn([$this->second], ['borrowers:transfer']));
+        $this->actingAs($this->staffIn([$this->second], ['borrowers:transfer', 'borrowers:view']));
 
         $this->postJson("/api/borrowers/{$member->id}/transfer", ['branch_id' => $this->second->id, 'reason' => self::REASON])
             ->assertNotFound();
@@ -170,7 +204,7 @@ class MemberTransferTest extends TestCase
     public function test_a_destination_the_caller_cant_see_reads_like_a_missing_one(): void
     {
         $member = $this->member();
-        $this->actingAs($this->staffIn([$this->branch], ['borrowers:transfer']));
+        $this->actingAs($this->staffIn([$this->branch], ['borrowers:transfer', 'borrowers:view']));
 
         foreach ([$this->second->id, 999_999] as $branchId) {
             $this->postJson("/api/borrowers/{$member->id}/transfer", ['branch_id' => $branchId, 'reason' => self::REASON])

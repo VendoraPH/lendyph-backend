@@ -4,6 +4,7 @@ namespace Tests\Feature\Phase6\Branches;
 
 use App\Models\GCashNonMember;
 use App\Models\GCashTier;
+use App\Models\LoanProduct;
 use App\Models\TimeDeposit;
 use App\Services\Branches\MemberLock;
 use Closure;
@@ -52,6 +53,39 @@ class MemberLockOnCreateTest extends TestCase
         $this->postJson('/api/gcash/transactions', ['borrower_id' => $this->member->id, 'type' => 'cash_in', 'amount' => 1000])->assertCreated();
 
         $this->assertTrue($held(), "The member's branch lock wasn't held when the GCash transaction was written.");
+    }
+
+    public function test_a_loan_application_reads_the_members_branch_holding_the_members_lock(): void
+    {
+        $product = LoanProduct::factory()->create(['interest_rate' => 3.0, 'interest_method' => 'straight', 'term' => 6, 'frequency' => 'monthly']);
+        // The request's own rule reads it first (MemberBranchTakesNew); the
+        // read the branch guard uses is the last one.
+        $reads = [];
+
+        DB::listen(function (QueryExecuted $query) use (&$reads): void {
+            if (! str_starts_with(strtolower($query->sql), 'select `branch_id` from `borrowers`')) {
+                return;
+            }
+
+            $probe = Cache::lock(MemberLock::key($this->member->id), 60);
+            $free = $probe->get();
+
+            if ($free) {
+                $probe->release();
+            }
+
+            $reads[] = ! $free;
+        });
+
+        $this->postJson('/api/loans', [
+            'borrower_id' => $this->member->id,
+            'loan_product_id' => $product->id,
+            'principal_amount' => 10000,
+            'start_date' => now()->toDateString(),
+        ])->assertCreated();
+
+        $this->assertNotEmpty($reads, "The member's branch was never read.");
+        $this->assertTrue(end($reads), "The member's branch was read for the branch guard before the member's lock was taken.");
     }
 
     public function test_a_held_lock_answers_409_in_words_without_waiting_inside_a_transaction(): void

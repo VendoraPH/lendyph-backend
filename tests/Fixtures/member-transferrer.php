@@ -15,6 +15,7 @@
  */
 
 use App\Models\Borrower;
+use App\Models\User;
 use App\Services\Branches\MemberTransfer;
 use Illuminate\Contracts\Console\Kernel;
 use Illuminate\Database\Events\QueryExecuted;
@@ -40,7 +41,7 @@ DB::listen(function (QueryExecuted $query) use (&$paused, $marker, $pause): void
 });
 
 try {
-    app(MemberTransfer::class)->transfer(Borrower::query()->findOrFail((int) $memberId), (int) $branchId, 'Lock test');
+    app(MemberTransfer::class)->transfer(Borrower::query()->findOrFail((int) $memberId), (int) $branchId, 'Lock test', User::query()->where('username', 'super_admin')->firstOrFail());
 
     fwrite(STDOUT, sprintf('ok at %.6F', microtime(true)));
     exit(0);

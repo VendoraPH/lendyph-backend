@@ -41,7 +41,7 @@ class BorrowerTransferController extends Controller
     )]
     public function store(TransferBorrowerRequest $request, Borrower $borrower): BorrowerResource
     {
-        $moved = $this->transfer->transfer($borrower, (int) $request->validated('branch_id'), $request->validated('reason'));
+        $moved = $this->transfer->transfer($borrower, (int) $request->validated('branch_id'), $request->validated('reason'), $request->user());
 
         return new BorrowerResource($moved->load('branch', 'approvedBy', 'rejectedBy'));
     }

@@ -6,7 +6,12 @@ use App\Models\Borrower;
 use App\Models\Branch;
 use App\Models\Loan;
 use App\Models\LoanProduct;
+use App\Services\Branches\MemberLock;
+use App\Services\LoanService;
+use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
+use Symfony\Component\HttpKernel\Exception\HttpException;
 use Symfony\Component\Process\Process;
 use Tests\TestCase;
 use Tests\Traits\SetupLendyPH;
@@ -115,6 +120,63 @@ class MemberTransferLockTest extends TestCase
         $response->assertCreated();
         $this->assertSame($second->id, (int) $member->fresh()->branch_id);
         $this->assertSame($second->id, (int) Loan::query()->findOrFail($response->json('data.id'))->branch_id, 'the loan was written in the branch the member left');
+    }
+
+    public function test_a_transfer_colliding_with_a_release_waits_and_refuses_instead_of_deadlocking(): void
+    {
+        $this->seedAndLogin();
+        $second = Branch::factory()->create(['name' => 'Second Branch', 'code' => 'SEC']);
+        $member = Borrower::factory()->create(['branch_id' => $this->branch->id, 'status' => 'active']);
+        $product = LoanProduct::factory()->create(['interest_rate' => 3.0, 'interest_method' => 'straight', 'term' => 6, 'frequency' => 'monthly']);
+        $loans = app(LoanService::class);
+        $loan = $loans->createLoan(['borrower_id' => $member->id, 'loan_product_id' => $product->id, 'principal_amount' => 10000, 'start_date' => now()->toDateString()], $this->admin);
+        $loans->submitForReview($loan);
+        $loans->approve($loan->fresh(), $this->admin, 'Approved for the collision test');
+
+        $marker = sys_get_temp_dir().'/member-transfer-lock-'.bin2hex(random_bytes(6));
+        $release = $this->startTheFixture('loan-releaser.php', [(string) $loan->id, (string) $this->admin->id, $marker, (string) self::PAUSE]);
+
+        try {
+            $this->waitForTheMarker($release, $marker);
+
+            $response = $this->postJson("/api/borrowers/{$member->id}/transfer", ['branch_id' => $second->id, 'reason' => 'Moved for work.']);
+
+            $release->wait();
+        } finally {
+            @unlink($marker);
+            $release->stop(0);
+        }
+
+        $this->assertSame(0, $release->getExitCode(), 'the release failed: '.$release->getOutput().$release->getErrorOutput());
+        $this->assertMatchesRegularExpression('/^ok released at \d+\.\d+$/', $release->getOutput());
+
+        $response->assertUnprocessable()
+            ->assertJsonValidationErrors(['branch_id' => "This member can't be transferred while they have 1 loan still being paid. Loans, savings, time deposits, portal requests and GCash Cash Ins stay in the branch where they were opened, so close or settle them first."]);
+        $this->assertSame($this->branch->id, (int) $member->fresh()->branch_id);
+    }
+
+    public function test_a_busy_member_lock_waits_at_most_five_seconds_outside_a_transaction_even_on_a_frozen_clock(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2026-11-19 10:00:00', 'Asia/Manila'));
+        $held = Cache::lock(MemberLock::key(424242), 60);
+        $held->get();
+        $this->assertSame(0, DB::transactionLevel());
+        $started = microtime(true);
+
+        try {
+            MemberLock::whileHeld(424242, fn (): string => 'written');
+            $this->fail('A busy member lock let the write through.');
+        } catch (HttpException $e) {
+            $this->assertSame(409, $e->getStatusCode());
+            $this->assertSame(MemberLock::BUSY, $e->getMessage());
+        } finally {
+            $held->release();
+            Carbon::setTestNow();
+        }
+
+        $waited = microtime(true) - $started;
+        $this->assertGreaterThanOrEqual(4.9, $waited, 'it gave up before its five seconds');
+        $this->assertLessThan(7.0, $waited, 'it waited past its five seconds');
     }
 
     /** @param  list<string>  $arguments */

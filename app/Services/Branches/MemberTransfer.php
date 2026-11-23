@@ -9,10 +9,13 @@ use App\Models\Loan;
 use App\Models\PortalRequest;
 use App\Models\SavingsAccount;
 use App\Models\TimeDeposit;
+use App\Models\User;
 use App\Services\AuditLogService;
+use App\Services\BranchAccess;
+use App\Services\LoanWriteTransaction;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
-use Illuminate\Support\Facades\DB;
+use Illuminate\Database\Eloquent\ModelNotFoundException;
 use Illuminate\Validation\ValidationException;
 
 /**
@@ -27,11 +30,15 @@ use Illuminate\Validation\ValidationException;
  * - a GCash Cash In not yet paid (the new branch couldn't mark it paid).
  *
  * The transfer holds the member's branch lock (MemberLock), which loan
- * creation, time deposit placement and member GCash creation also take, so
- * none of those copies the old branch around a move. Inside it, the check
- * runs under the member's row lock and reads those records with locking
- * reads, so a record written for the member by any other path at the same
- * moment is seen too (the transfer waits for it). The destination is read under a
+ * creation, time deposit placement, member GCash creation and portal request
+ * submission also take, so none of those copies the old branch around a
+ * move. Inside it, the transfer reads the member's loans with a locking read,
+ * then locks the member's row (the order a release and an extension take),
+ * then reads the other records with locking reads, so a record written for
+ * the member by any other path at the same moment is seen too (the transfer
+ * waits for it). A collision that still deadlocks answers 409 in words
+ * (LoanWriteTransaction), and the caller's reach is re-checked on the
+ * member's branch under the lock (404). The destination is read under a
  * shared lock: a suspended or closed branch can't receive a member (MB-BE1).
  *
  * The move writes one audit row on the member, naming both branches in words,
@@ -52,12 +59,28 @@ final class MemberTransfer
     /** Loans not yet released: a draft, one for approval and an approved one. */
     private const UNRELEASED_LOAN_STATUSES = ['draft', 'for_review', 'approved'];
 
-    /** @throws ValidationException */
-    public function transfer(Borrower $borrower, int $toBranchId, string $reason): Borrower
+    public const CONFLICT = 'This member changed at the same moment. Reload and try again.';
+
+    /**
+     * @throws ValidationException
+     * @throws ModelNotFoundException when `$by` can no longer see the member's branch
+     */
+    public function transfer(Borrower $borrower, int $toBranchId, string $reason, User $by): Borrower
     {
-        return MemberLock::whileHeld($borrower->getKey(), fn (): Borrower => DB::transaction(function () use ($borrower, $toBranchId, $reason): Borrower {
+        return MemberLock::whileHeld($borrower->getKey(), fn (): Borrower => LoanWriteTransaction::run(function () use ($borrower, $toBranchId, $reason, $by): Borrower {
+            // The member's loans first, in one id-ordered statement, then the
+            // member: the order a release and an extension take (the loan,
+            // then the member, through FormerMemberGuard), so the two queue
+            // instead of deadlocking.
+            $loanStatuses = Loan::query()->where('borrower_id', $borrower->getKey())->orderBy('id')->sharedLock()->pluck('status')->all();
+
             /** @var Borrower $member */
             $member = Borrower::query()->whereKey($borrower->getKey())->lockForUpdate()->firstOrFail();
+
+            // The caller's reach, re-checked on the branch the member is in now.
+            if (! app(BranchAccess::class)->canSee($by, $member->branch_id === null ? null : (int) $member->branch_id)) {
+                throw (new ModelNotFoundException)->setModel(Borrower::class, [$member->getKey()]);
+            }
 
             if ($member->branch_id === null) {
                 self::refuse('This member has no branch yet. Assign one by editing the member.');
@@ -75,7 +98,7 @@ final class MemberTransfer
                 self::refuse("{$to->auditName()} {$words}, so it can't receive members.");
             }
 
-            $open = $this->stillOpen((int) $member->id);
+            $open = $this->stillOpen((int) $member->id, $loanStatuses);
 
             if ($open !== []) {
                 self::refuse(sprintf(
@@ -105,21 +128,24 @@ final class MemberTransfer
             );
 
             return $member;
-        }));
+        }, conflictMessage: self::CONFLICT));
     }
 
     /**
      * What still holds the member in their branch, in words ("1 loan still
-     * being paid", "2 open savings accounts"). Locking reads: they see rows
-     * committed by now and wait for rows being written for the member.
+     * being paid", "2 open savings accounts"). The loans were read with a
+     * locking read before the member; the rest are locking reads too: they
+     * see rows committed by now and wait for rows being written for the
+     * member.
      *
+     * @param  list<string>  $loanStatuses
      * @return list<string>
      */
-    private function stillOpen(int $memberId): array
+    private function stillOpen(int $memberId, array $loanStatuses): array
     {
         $counts = [
-            'collectible' => $this->count(Loan::query()->whereIn('status', Loan::COLLECTIBLE_STATUSES), $memberId),
-            'unreleased' => $this->count(Loan::query()->whereIn('status', self::UNRELEASED_LOAN_STATUSES), $memberId),
+            'collectible' => count(array_intersect($loanStatuses, Loan::COLLECTIBLE_STATUSES)),
+            'unreleased' => count(array_intersect($loanStatuses, self::UNRELEASED_LOAN_STATUSES)),
             'savings' => $this->count(SavingsAccount::query()->where('status', '!=', SavingsAccount::STATUS_CLOSED), $memberId),
             'deposits' => $this->count(TimeDeposit::query()->whereIn('status', BranchStatus::OPEN_TIME_DEPOSIT_STATUSES), $memberId),
             'portal' => $this->count(PortalRequest::query()->whereIn('status', PortalRequest::OPEN_STATUSES), $memberId),
