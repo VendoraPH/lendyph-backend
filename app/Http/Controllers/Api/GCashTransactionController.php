@@ -9,6 +9,7 @@ use App\Http\Resources\GCashTransactionResource;
 use App\Models\GCashTransaction;
 use App\Services\Branches\MemberLock;
 use App\Services\GCashService;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
@@ -32,7 +33,29 @@ class GCashTransactionController extends Controller
             new OA\Parameter(name: 'per_page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', default: 25)),
         ],
         responses: [
-            new OA\Response(response: 200, description: 'Paginated GCash transactions. A caller without branches:view_all sees their branches\' members\' rows and the walk-in rows recorded in their branches; walk-in rows with no branch need branches:view_all.'),
+            new OA\Response(
+                response: 200,
+                description: 'Paginated GCash transactions. A caller without branches:view_all sees their branches\' members\' rows and the walk-in rows recorded in their branches; walk-in rows with no branch need branches:view_all. `meta.totals` covers the same rows.',
+                content: new OA\JsonContent(properties: [
+                    new OA\Property(property: 'data', type: 'array', items: new OA\Items(ref: '#/components/schemas/GCashTransaction')),
+                    new OA\Property(property: 'meta', type: 'object', properties: [
+                        new OA\Property(property: 'totals', type: 'object', description: 'Every row the list\'s scope and filters match, `status` included, on every page, not just this one, summed in SQL. Pesos are two-decimal strings. A pending Cash In counts whenever the `status` filter lets it into the list (no filter, or `pending`), and `pending` is the part of each figure still pending. A pending Cash In\'s charge is not income until it is paid, so `charges` can be more than GET /gcash/reports/income `total_income` for the same days.', properties: [
+                            new OA\Property(property: 'count', type: 'integer', example: 12),
+                            new OA\Property(property: 'amount', type: 'string', description: 'The Amount column: Cash In and Cash Out together.', example: '23000.00'),
+                            new OA\Property(property: 'cash_in', type: 'string', description: 'Cash In amounts.', example: '15000.00'),
+                            new OA\Property(property: 'cash_out', type: 'string', description: 'Cash Out amounts.', example: '8000.00'),
+                            new OA\Property(property: 'charges', type: 'string', description: 'The Charge column, pending Cash Ins included.', example: '240.00'),
+                            new OA\Property(property: 'total', type: 'string', description: 'The Total column: a Cash In\'s amount plus its charge, a Cash Out\'s amount less its charge.', example: '23140.00'),
+                            new OA\Property(property: 'pending', type: 'object', description: 'The pending (not yet paid) Cash Ins among those rows.', properties: [
+                                new OA\Property(property: 'count', type: 'integer', example: 2),
+                                new OA\Property(property: 'amount', type: 'string', example: '3000.00'),
+                                new OA\Property(property: 'charges', type: 'string', example: '40.00'),
+                                new OA\Property(property: 'total', type: 'string', example: '3040.00'),
+                            ]),
+                        ]),
+                    ]),
+                ]),
+            ),
             new OA\Response(response: 403, description: 'Missing gcash:view permission'),
         ],
     )]
@@ -47,8 +70,10 @@ class GCashTransactionController extends Controller
             'per_page' => ['nullable', 'integer', 'min:1'],
         ])['per_page'] ?? 25);
 
-        $transactions = GCashTransaction::query()
-            ->with(['borrower', 'nonMember', 'transactor'])
+        // The list's rows: its scope and every filter. The page and
+        // `meta.totals` both read it, so the totals always describe exactly
+        // the rows the list pages through.
+        $matching = fn (): Builder => GCashTransaction::query()
             // A member's row follows the member's branch, a walk-in's the
             // branch it was recorded in (GCashTransaction::scopeVisibleTo).
             ->visibleTo($request->user())
@@ -56,14 +81,18 @@ class GCashTransactionController extends Controller
             ->when($request->query('status'), fn ($q, $s) => $q->where('status', $s))
             ->when($request->query('borrower_id'), fn ($q, $b) => $q->where('borrower_id', $b))
             ->when($request->query('start_date'), fn ($q, $d) => $q->whereDate('transaction_date', '>=', $d))
-            ->when($request->query('end_date'), fn ($q, $d) => $q->whereDate('transaction_date', '<=', $d))
+            ->when($request->query('end_date'), fn ($q, $d) => $q->whereDate('transaction_date', '<=', $d));
+
+        $transactions = $matching()
+            ->with(['borrower', 'nonMember', 'transactor'])
             ->latest('transaction_date')
             // Tiebreak on the key so transactions stamped in the same second
             // keep one order across pages. See DeterministicPaginationTest.
             ->orderByDesc('id')
             ->paginate(min($perPage, 100));
 
-        return GCashTransactionResource::collection($transactions);
+        return GCashTransactionResource::collection($transactions)
+            ->additional(['meta' => ['totals' => $this->gcash->listTotals($matching())]]);
     }
 
     #[OA\Get(
