@@ -275,8 +275,9 @@ final class LindaAssistant
      * lookup (with no target when the read was capped); for a staff user, the
      * officer performance answer when it has officer or ranking words, for the
      * period it names (this month by default), else a fixed "not yet"; for a
-     * co-maker or a walk-in, a fixed "not yet". Any other capped read gets the
-     * neutral "not yet": it doesn't mean someone was named.
+     * co-maker, a walk-in or an unlinked CDA officer, a fixed "not yet". Any
+     * other capped read gets the neutral "not yet": it doesn't mean someone was
+     * named.
      *
      * @throws LindaHttpError data_unavailable
      */

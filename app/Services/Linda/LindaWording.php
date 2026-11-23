@@ -341,11 +341,11 @@ final class LindaWording
     }
 
     /**
-     * For a question that names a co-maker or a GCash walk-in: answered
-     * locally, never by the model (D2).
+     * For a question that names a co-maker, a GCash walk-in or a CDA officer
+     * who isn't a linked member: answered locally, never by the model (D2).
      */
     public static function otherPersonNotYet(): string
     {
-        return 'I can\'t look up co-makers or walk-ins yet. Open the loan or the GCash page to see them.';
+        return 'I can\'t look up co-makers, walk-ins or CDA officers yet. Open the loan, the GCash page or Officers & Trainings to see them.';
     }
 }
