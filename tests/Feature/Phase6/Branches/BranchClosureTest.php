@@ -87,9 +87,15 @@ class BranchClosureTest extends TestCase
     public function test_a_branch_waiting_to_close_cannot_become_the_main_office(): void
     {
         $this->requestClosure();
-        // Reactivated with the request still waiting: only the request stops the move.
-        $this->patchStatus('active', 'Reopened')->assertOk();
 
+        // A branch waiting to close is suspended, and it can't be reactivated
+        // while the request waits, so the move is refused on its status.
+        $this->putJson("/api/branches/{$this->quiet->id}/main-office", ['reason' => 'Head office moved'])
+            ->assertUnprocessable()
+            ->assertJsonPath('errors.branch.0', 'Only an active branch can be the main office.');
+
+        // A status set outside the API still meets the waiting request.
+        Branch::query()->whereKey($this->quiet->id)->update(['status' => 'active']);
         $this->putJson("/api/branches/{$this->quiet->id}/main-office", ['reason' => 'Head office moved'])
             ->assertUnprocessable()
             ->assertJsonPath('errors.branch.0', 'A request to close this branch is waiting. Reject or cancel it before making it the main office.');
@@ -276,10 +282,26 @@ class BranchClosureTest extends TestCase
         $this->assertFalse($this->getJson("/api/branches/{$active->id}/closure")->assertOk()->json('data.can_close'));
     }
 
-    public function test_approval_is_refused_when_the_branch_was_reactivated_after_the_request(): void
+    public function test_reactivation_is_refused_while_a_request_waits_and_goes_ahead_after_a_cancel(): void
     {
         $this->requestClosure();
+
+        $this->patchStatus('active', 'Back in business')
+            ->assertUnprocessable()
+            ->assertJsonPath('errors.branch.0', 'A request to close this branch is waiting. Reject or cancel it before reactivating the branch.');
+        $this->assertSame('suspended', $this->quiet->fresh()->status);
+        $this->assertSame('pending', BranchClosure::query()->where('branch_id', $this->quiet->id)->sole()->status);
+
+        $this->deleteJson("/api/branches/{$this->quiet->id}/closure")->assertOk();
         $this->patchStatus('active', 'Back in business')->assertOk();
+        $this->assertSame('active', $this->quiet->fresh()->status);
+    }
+
+    public function test_approval_re_checks_the_status_under_the_lock(): void
+    {
+        $this->requestClosure();
+        // A status set outside the API, past the reactivation guard.
+        Branch::query()->whereKey($this->quiet->id)->update(['status' => 'active']);
 
         $this->actingAs($this->checker);
         $this->postJson("/api/branches/{$this->quiet->id}/closure/approve")

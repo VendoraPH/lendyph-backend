@@ -25,7 +25,8 @@ use Symfony\Component\HttpKernel\Exception\HttpException;
  * `branches:view_all` first (BranchStatusRequest).
  *
  * - Active and suspended change back and forth with a reason. The main
- *   office stays active, and a closed branch stays closed.
+ *   office stays active, a closed branch stays closed, and a branch waiting
+ *   to close isn't reactivated until its request is rejected or cancelled.
  * - Closing takes a second person: one user asks with an effective date (not
  *   after today) and a reason, and a different user approves. Both steps are
  *   refused while the branch is active (suspend it first, Arvin 2026-11-19)
@@ -65,6 +66,15 @@ class BranchStatus
             $locked = Branch::query()->whereKey($branch->getKey())->lockForUpdate()->firstOrFail();
 
             $this->assertCanMove($locked, $to);
+
+            // A branch waiting to close stays suspended until its request is
+            // rejected or cancelled. Read under the branch row's lock and then
+            // the request's, the order the approval and the main-office move
+            // take, so a reactivation and an approval never both go ahead.
+            if ($to === Branch::STATUS_ACTIVE
+                && BranchClosure::query()->where('branch_id', $locked->id)->where('status', BranchClosure::STATUS_PENDING)->lockForUpdate()->exists()) {
+                throw ValidationException::withMessages(['branch' => ['A request to close this branch is waiting. Reject or cancel it before reactivating the branch.']]);
+            }
 
             if ($locked->status === $to) {
                 throw ValidationException::withMessages(['status' => ["This branch is already {$to}."]]);

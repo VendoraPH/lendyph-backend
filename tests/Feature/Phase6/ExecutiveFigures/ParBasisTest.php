@@ -2,8 +2,10 @@
 
 namespace Tests\Feature\Phase6\ExecutiveFigures;
 
+use App\Models\Branch;
 use App\Models\Loan;
 use App\Models\PortfolioDailySnapshot;
+use App\Services\PortfolioRisk;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use Tests\TestCase;
@@ -135,6 +137,79 @@ class ParBasisTest extends TestCase
             $this->assertEquals($summary['at_risk_amount'], $figures['at_risk_amount']);
             $this->assertEquals($summary['par_ratio'], $figures['par_ratio']);
         }
+    }
+
+    public function test_overdue_covers_the_collectible_loans_from_the_bare_due_date(): void
+    {
+        $summary = $this->report('loan-balance-summary');
+        $overdue = $summary['overdue'];
+
+        // The late and defaulted loans' first periods: ₱10,000.00 principal and
+        // ₱1,800.00 interest each, plus the late one's ₱500.00 penalty.
+        $this->assertEquals(20000, $overdue['principal']);
+        $this->assertEquals(3600, $overdue['interest']);
+        $this->assertEquals(500, $overdue['penalty']);
+        $this->assertSame(2, $overdue['loan_count']);
+        $this->assertEquals(24100, $overdue['total']);
+        $this->assertLessThanOrEqual($summary['outstanding']['principal'], $overdue['principal']);
+    }
+
+    public function test_portfolio_by_product_and_performance_read_overdue_on_the_same_basis(): void
+    {
+        $products = $this->report('portfolio-by-product');
+        $performance = $this->report('performance');
+        $mainRow = collect($performance['by_branch'])->firstWhere('branch_id', $this->branch->id);
+
+        $this->assertEquals(24100, $products['totals']['overdue_amount']);
+        $this->assertEquals(0, collect($products['products'])->firstWhere('product_id', $this->loans['completed']->loan_product_id)['overdue_amount']);
+        $this->assertEquals(24100, $mainRow['overdue_amount']);
+        $this->assertEquals(24100, $performance['by_branch_totals']['overdue_amount']);
+    }
+
+    public function test_the_branch_product_and_release_date_filters_keep_one_basis(): void
+    {
+        // The late loan's product holds the completed loan too; the defaulted
+        // loan moves to another branch in the same product.
+        $product = $this->loans['late']->loan_product_id;
+        $other = Branch::factory()->create();
+        DB::table('loans')->where('id', $this->loans['completed']->id)->update(['loan_product_id' => $product]);
+        DB::table('loans')->where('id', $this->loans['defaulted']->id)->update(['loan_product_id' => $product, 'branch_id' => $other->id]);
+
+        $summary = $this->getJson("/api/reports/loan-balance-summary?branch_id={$this->branch->id}&product_id={$product}&date_from=2026-11-19&date_to=2026-11-19")
+            ->assertOk()->json('data');
+
+        $this->assertEquals(['amount' => 60000, 'ratio' => 100.0, 'loans' => 1], $summary['par_1']);
+        $this->assertEquals(60000, $summary['par_portfolio_principal']);
+        $this->assertEquals($summary['outstanding_principal'], $summary['par_portfolio_principal']);
+        $this->assertEquals($summary['outstanding_principal'], $summary['outstanding']['principal']);
+        $this->assertEquals(400, $summary['outstanding']['insurance']);
+        $this->assertEquals(
+            $summary['total_outstanding'],
+            round($summary['outstanding']['principal'] + $summary['outstanding']['interest'] + $summary['outstanding']['penalty'] + $summary['outstanding']['insurance'], 2),
+        );
+        $this->assertEquals(['principal' => 10000, 'interest' => 1800, 'penalty' => 500, 'loan_count' => 1, 'total' => 12300], $summary['overdue']);
+
+        $none = $this->getJson("/api/reports/loan-balance-summary?branch_id={$this->branch->id}&product_id={$product}&date_from=2026-11-20&date_to=2026-11-20")
+            ->assertOk()->json('data');
+        $this->assertEquals(['amount' => 0, 'ratio' => 0, 'loans' => 0], $none['par_1']);
+        $this->assertEquals(0, $none['outstanding']['total']);
+        $this->assertSame(0, $none['overdue']['loan_count']);
+    }
+
+    public function test_portfolio_risk_measures_only_collectible_loans_whatever_it_is_given(): void
+    {
+        $risk = app(PortfolioRisk::class);
+        $everyLoan = Loan::query();
+
+        $par = $risk->par($everyLoan);
+        $this->assertEquals(180000, $par['portfolio_principal']);
+        $this->assertSame(2, $par['par_1']['loans']);
+
+        $this->assertEqualsCanonicalizing(
+            [$this->loans['late']->id, $this->loans['defaulted']->id],
+            $risk->parLoans($everyLoan, 'par_1')->get()->modelKeys(),
+        );
+        $this->assertSame(2, $risk->parBy($everyLoan, ['loans.branch_id'])[(string) $this->branch->id]['par_1']['loans']);
     }
 
     private function loan(int $daysLate, string $status = 'released'): Loan
