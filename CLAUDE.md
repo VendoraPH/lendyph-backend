@@ -57,7 +57,6 @@ These guards don't run in a filtered run of just your own tests, so run the full
   - If only the line numbers moved, renumber the expected list.
   - A genuinely new status write must lock and assert through `CollateralPledgeGuard` first.
 - **Other guards:**
-  - `BranchAssignmentIsDisplayOnlyTest`: a user's branch must never scope what they can see.
   - `CreditScoringRolePermissionsTest` and `CreditScoringPlaceholderRoutesTest`: the `credit_scoring:view`, `credit_scoring:override` and `credit_scoring:settings` permissions are seeded for `admin` and `super_admin` only, and every `/api/credit-scoring/*` route answers 501 to a caller holding its permission (403 without it) until the module is built.
   - The arch tests in `tests/Unit/*ArchTest.php`.
 
@@ -69,7 +68,6 @@ These guards don't run in a filtered run of just your own tests, so run the full
 - A request goes `Api/*Controller` → FormRequest (`app/Http/Requests`, grouped by domain) → service in `app/Services` → `JsonResource` (`app/Http/Resources`) or `{message, data}`.
 - Business logic lives in services: `LoanService`, `RepaymentService`, `LoanAdjustmentService`, `LoanApprovalChainService`, `ReportService`, `Services/Accounting/`, `Services/CsvImport/`.
 - Models enforce invariants in `booted()`: sequence codes (`LA-`, `LN-`, `RCP-`, `ADJ-`, …) and journal immutability.
-- There are no Actions, Policies, Observers, Events, Jobs, Mail or Notifications.
 - The middleware priority tweaks in `bootstrap/app.php` are load-bearing. Read their comments before touching them.
 
 **Auth and permissions.**
