@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\Staff\ListStaffRequest;
 use App\Http\Resources\StaffResource;
+use App\Models\Role;
 use App\Models\User;
 use App\Services\Amla\Foundation\AmlaAccess;
 use App\Services\BranchAccess;
@@ -32,15 +33,17 @@ class StaffController extends Controller
         description: 'Active users only, as `{id, full_name}` — the same `full_name` a loan returns for '
             .'`account_officer`. Allowed for any caller holding `loans:create`, `loans:update` or '
             .'`loans:restructure` (the new-loan, loan-detail and restructure pickers), or with `for=savings` '
-            .'`savings:create` (the savings opening form\'s account officer). `for=amla_cases` (the AMLA case '
-            .'assignee picker) needs `amla:cases` with `branches:view_all` and lists only active staff holding both; this is not user '
+            .'`savings:create` (the savings opening form\'s account officer), with `for=origination` '
+            .'`loan_origination:update`, listing only the active holders of `loan_origination:update` '
+            .'(the online applications\' assign picker), or with `for=amla_cases` `amla:cases` and '
+            .'`branches:view_all`, listing only the active staff holding both (the AMLA case assignee picker); this is not user '
             .'management and does not require `users:view`. `search` matches first name, last '
             .'name or "first last", never username or email. Ordered by first name, last name, then id. '
             .'`per_page` is clamped to 1..100.',
         tags: ['Staff'],
         security: [['sanctum' => []]],
         parameters: [
-            new OA\Parameter(name: 'for', in: 'query', required: false, description: '`savings`: the savings opening form; also allowed with `savings:create`. `amla_cases`: the AMLA case assignee picker; only with `amla:cases` and `branches:view_all`.', schema: new OA\Schema(type: 'string', enum: ['savings', 'amla_cases'])),
+            new OA\Parameter(name: 'for', in: 'query', required: false, description: '`savings`: the savings opening form; also allowed with `savings:create`. `origination`: the online applications\' assign picker; needs `loan_origination:update` and lists only its holders. `amla_cases`: the AMLA case assignee picker; only with `amla:cases` and `branches:view_all`.', schema: new OA\Schema(type: 'string', enum: ['savings', 'origination', 'amla_cases'])),
             new OA\Parameter(name: 'search', in: 'query', required: false, description: 'Matches first name, last name, or "first last". Max 100 characters.', schema: new OA\Schema(type: 'string', maxLength: 100)),
             new OA\Parameter(name: 'per_page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', default: 15, minimum: 1, maximum: 100)),
             new OA\Parameter(name: 'page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', default: 1, minimum: 1)),
@@ -69,7 +72,7 @@ class StaffController extends Controller
                 ]),
             ),
             new OA\Response(response: 401, description: 'Unauthenticated'),
-            new OA\Response(response: 403, description: 'Holds none of loans:create, loans:update or loans:restructure (nor savings:create with for=savings); with for=amla_cases, lacks amla:cases or branches:view_all'),
+            new OA\Response(response: 403, description: 'Holds none of loans:create, loans:update or loans:restructure (nor savings:create with for=savings); with for=origination, lacks loan_origination:update; with for=amla_cases, lacks amla:cases or branches:view_all'),
             new OA\Response(response: 422, description: 'Validation error'),
         ],
     )]
@@ -82,6 +85,14 @@ class StaffController extends Controller
             // Staff sharing one of the caller's branches (all of them with
             // `branches:view_all`).
             ->visibleTo($request->user())
+            // The online applications' assign picker lists only who could be
+            // assigned: holders of `loan_origination:update` through an
+            // active role (admin and super_admin always count) or directly.
+            ->when($request->forOrigination(), fn (Builder $query) => $query->where(fn (Builder $users) => $users
+                ->whereHas('roles', fn (Builder $roles) => $roles
+                    ->where(fn (Builder $active) => $active->where('roles.is_active', true)->orWhereIn('roles.name', Role::PROTECTED_KEYS))
+                    ->whereHas('permissions', fn (Builder $p) => $p->where('name', 'loan_origination:update')))
+                ->orWhereHas('permissions', fn (Builder $p) => $p->where('name', 'loan_origination:update'))))
             // Only what StaffResource emits (full_name is built from the two
             // name columns), so nothing else is even read into memory.
             ->select(['id', 'first_name', 'last_name'])

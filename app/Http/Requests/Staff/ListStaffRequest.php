@@ -37,6 +37,12 @@ use Illuminate\Foundation\Http\FormRequest;
  * rows are narrowed to the staff a case can be assigned to (see
  * StaffController). Names only, like every other row.
  *
+ * `?for=origination` (Phase 6, LO-B3) is the online applications' assign
+ * picker: the caller needs `loan_origination:update`, and the rows are only
+ * the staff who could be assigned, the active holders of
+ * `loan_origination:update` in the caller's branches (StaffController).
+ * Holding a loan permission doesn't open it, since its rows differ.
+ *
  * `$this->authorize()` in the controller takes one ability, hence a
  * FormRequest for the `canAny()`.
  */
@@ -48,12 +54,19 @@ class ListStaffRequest extends FormRequest
     /** The AMLA case assignee picker. */
     public const FOR_AMLA_CASES = 'amla_cases';
 
+    /** The online applications' assign picker (LO-B3). */
+    public const FOR_ORIGINATION = 'origination';
+
     public function authorize(): bool
     {
         $user = $this->user();
 
         if ($this->forAmlaCases()) {
             return $user->can(AmlaAccess::CASES) && $user->can(BranchAccess::VIEW_ALL);
+        }
+
+        if ($this->query('for') === self::FOR_ORIGINATION) {
+            return $user->can('loan_origination:update');
         }
 
         return $user->canAny(['loans:create', 'loans:update', 'loans:restructure'])
@@ -72,7 +85,7 @@ class ListStaffRequest extends FormRequest
     public function rules(): array
     {
         return [
-            'for' => ['nullable', 'string', 'in:'.self::FOR_SAVINGS.','.self::FOR_AMLA_CASES],
+            'for' => ['nullable', 'string', 'in:'.self::FOR_SAVINGS.','.self::FOR_AMLA_CASES.','.self::FOR_ORIGINATION],
             'search' => ['nullable', 'string', 'max:100'],
             'per_page' => ['nullable', 'integer', 'min:1'],
             'page' => ['nullable', 'integer', 'min:1'],
@@ -83,9 +96,14 @@ class ListStaffRequest extends FormRequest
     public function messages(): array
     {
         return [
-            'for.string' => 'The staff list can be asked for the savings opening form (for=savings), the AMLA case assignee (for=amla_cases), or without either.',
-            'for.in' => 'The staff list can be asked for the savings opening form (for=savings), the AMLA case assignee (for=amla_cases), or without either.',
+            'for.string' => 'The staff list can be asked for the savings opening form (for=savings), the AMLA case assignee (for=amla_cases) or the online applications\' assign picker (for=origination), or without any of them.',
+            'for.in' => 'The staff list can be asked for the savings opening form (for=savings), the AMLA case assignee (for=amla_cases) or the online applications\' assign picker (for=origination), or without any of them.',
         ];
+    }
+
+    public function forOrigination(): bool
+    {
+        return $this->validated('for') === self::FOR_ORIGINATION;
     }
 
     /**
