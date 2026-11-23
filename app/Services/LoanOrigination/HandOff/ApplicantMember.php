@@ -6,10 +6,13 @@ use App\Http\Requests\Borrower\StoreBorrowerRequest;
 use App\Models\Borrower;
 use App\Models\OriginationApplication;
 use App\Models\User;
+use App\Services\BorrowerDuplicateDetector;
 use App\Services\BorrowerRegistration;
+use App\Services\BranchAccess;
 use App\Services\LoanOrigination\DraftRules;
 use App\Support\PhilippineMobile;
 use Illuminate\Routing\Redirector;
+use Illuminate\Validation\ValidationException;
 
 /**
  * Step one of the hand-off for an applicant who isn't a member yet
@@ -18,8 +21,17 @@ use Illuminate\Routing\Redirector;
  * application's details are put through StoreBorrowerRequest itself (its
  * rules, the round fz required member fields, the duplicate check and the
  * branch rules, as the staff member handing it off) and saved by
- * BorrowerRegistration::createBorrower(). Membership approval stays as it is:
- * a pending registration gets no membership date or number until approved.
+ * BorrowerRegistration::createBorrower(), which checks for a duplicate again
+ * under the newest member's lock. Membership approval stays as it is: a
+ * pending registration gets no membership date or number until approved.
+ *
+ * An applicant who matches a member already on record (the duplicate
+ * detector POST /borrowers uses) is refused first, in words that point to
+ * linking that member; the member is named only to staff who can see their
+ * branch. Only the staff member handing off may choose "Create anyway"
+ * (`force_new_member`, which needs `borrowers:create`): the request is built
+ * from the form's own fields, so nothing the applicant sends can skip the
+ * check.
  *
  * Its monthly income is the verified income when staff entered it, else the
  * applicant's main declared income line. Nothing about the applicant's
@@ -30,17 +42,55 @@ final class ApplicantMember
     public function __construct(
         private readonly DraftRules $draftRules,
         private readonly BorrowerRegistration $registration,
+        private readonly BorrowerDuplicateDetector $duplicates,
+        private readonly BranchAccess $branches,
     ) {}
 
-    /** @param  bool  $force  create even when a similar member exists ("Create anyway") */
+    /** @param  bool  $force  create even when a similar member exists (staff's "Create anyway") */
     public function create(OriginationApplication $application, User $user, ?string $verifiedIncome, bool $force): Borrower
     {
-        $form = StoreBorrowerRequest::create('/api/borrowers', 'POST', $this->attributes($application, $verifiedIncome, $force));
+        $attributes = $this->attributes($application, $verifiedIncome, $force);
+
+        if (! $force) {
+            $this->refuseKnownMember($attributes, $user);
+        }
+
+        $form = StoreBorrowerRequest::create('/api/borrowers', 'POST', $attributes);
         $form->setContainer(app())->setRedirector(app(Redirector::class));
         $form->setUserResolver(fn () => $user);
         $form->validateResolved();
 
         return $this->registration->createBorrower($form);
+    }
+
+    /**
+     * Refuse, in words, an applicant who matches a member already on record:
+     * staff link that member instead, or choose "Create anyway".
+     *
+     * @param  array<string, mixed>  $attributes
+     *
+     * @throws ValidationException
+     */
+    private function refuseKnownMember(array $attributes, User $user): void
+    {
+        $match = $this->duplicates->findDuplicate(
+            firstName: (string) ($attributes['first_name'] ?? ''),
+            middleName: $attributes['middle_name'] ?? null,
+            lastName: (string) ($attributes['last_name'] ?? ''),
+            birthdate: $attributes['birthdate'] ?? null,
+        );
+
+        if ($match === null) {
+            return;
+        }
+
+        $who = $this->branches->canSee($user, $match->branch_id === null ? null : (int) $match->branch_id)
+            ? "{$match->full_name} ({$match->borrower_code}), already a member"
+            : 'a member already on record';
+
+        throw ValidationException::withMessages([
+            'member' => "The applicant matches {$who}. Link that member to the application, or create a new member anyway.",
+        ]);
     }
 
     /**

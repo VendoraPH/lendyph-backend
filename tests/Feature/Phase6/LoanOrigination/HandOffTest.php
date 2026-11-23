@@ -574,6 +574,67 @@ it('answers 409 when the assessment was run again while the hand-off was under w
         ->and($application->fresh()->status)->toBe('under_assessment');
 });
 
+describe('an applicant who is already a member', function () {
+    /** A member with the applicant's own name and birthdate. */
+    function lo4ExistingMember(OriginationApplication $application): Borrower
+    {
+        $personal = $application->draft['personal'];
+
+        return Borrower::factory()->create([
+            'status' => 'active', 'branch_id' => Branch::query()->value('id'), 'first_name' => $personal['first_name'],
+            'middle_name' => $personal['middle_name'], 'last_name' => $personal['last_name'], 'birthdate' => $personal['date_of_birth'],
+        ]);
+    }
+
+    it('is never made a second member: refused in words that point to linking them, whatever force the applicant\'s draft carries', function () {
+        $application = lo4Ready($this);
+        $existing = lo4ExistingMember($application);
+        $draft = $application->draft;
+        $application->forceFill(['draft' => [...$draft, 'force' => true, 'personal' => [...$draft['personal'], 'force' => true]]])->save();
+
+        $this->actingAs($this->originationStaff(...LO4_HANDOFF))->postJson(lo4HandOffUrl($application->id), ['version' => $application->fresh()->version])
+            ->assertUnprocessable()
+            ->assertJsonPath('errors.member.0', "The applicant matches {$existing->full_name} ({$existing->borrower_code}), already a member. Link that member to the application, or create a new member anyway.");
+
+        expect(Borrower::query()->where('last_name', $existing->last_name)->count())->toBe(1)
+            ->and(Loan::query()->count())->toBe(0)
+            ->and($application->fresh()->borrower_id)->toBeNull();
+    });
+
+    it('names no one to staff who can\'t see the member\'s branch', function () {
+        $application = lo4Ready($this);
+        $existing = lo4ExistingMember($application);
+        DB::table('borrowers')->where('id', $existing->id)->update(['branch_id' => Branch::factory()->create()->id]);
+
+        $this->actingAs($this->originationStaff(...LO4_HANDOFF))->postJson(lo4HandOffUrl($application->id), ['version' => $application->version])
+            ->assertUnprocessable()
+            ->assertJsonPath('errors.member.0', 'The applicant matches a member already on record. Link that member to the application, or create a new member anyway.');
+    });
+
+    it('makes a new member when staff choose "Create anyway", and checks again under the newest member\'s lock otherwise, as POST /borrowers does', function () {
+        $application = lo4Ready($this);
+        $existing = lo4ExistingMember($application);
+        $staff = $this->originationStaff(...LO4_HANDOFF);
+        $locked = [];
+        DB::listen(function ($query) use (&$locked): void {
+            // The duplicate check's lock reads only the id; the member number's reads the row.
+            if (str_starts_with($query->sql, 'select `id` from `borrowers`') && str_ends_with($query->sql, 'order by `id` desc limit 1 for update')) {
+                $locked[] = $query->sql;
+            }
+        });
+
+        $this->actingAs($staff)->postJson(lo4HandOffUrl($application->id), ['version' => $application->version, 'force_new_member' => true])->assertOk();
+        $created = Borrower::query()->findOrFail($application->fresh()->borrower_id);
+
+        $other = lo4Ready($this);
+        $this->actingAs($staff)->postJson(lo4HandOffUrl($other->id), ['version' => $other->version])->assertOk();
+
+        expect($created->id)->not->toBe($existing->id)
+            ->and($created->status)->toBe('pending')
+            ->and($locked)->toHaveCount(1);
+    });
+});
+
 describe('linking a member (LO-B3\'s route)', function () {
     it('needs the assessment to run again before the hand-off once a member is linked', function () {
         $member = Borrower::factory()->create(['status' => 'active', 'branch_id' => Branch::query()->value('id')]);
