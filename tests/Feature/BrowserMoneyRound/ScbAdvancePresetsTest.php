@@ -8,6 +8,7 @@ use App\Models\Loan;
 use App\Models\LoanProduct;
 use App\Models\ShareCapitalLedger;
 use App\Services\LoanService;
+use Illuminate\Support\Facades\DB;
 use Tests\Feature\BrowserMoneyRound\Concerns\BuildsReleasedLoans;
 use Tests\TestCase;
 use Tests\Traits\SetupLendyPH;
@@ -112,6 +113,9 @@ class ScbAdvancePresetsTest extends TestCase
 
     public function test_a_borrower_who_is_not_a_member_gets_no_build_up_in_the_preset(): void
     {
+        // Released to a pending registration on purpose: the approved-member
+        // setting (Phase 6, on by default) would refuse it first, so it is off here.
+        DB::table('origination_settings')->update(['require_approved_member' => false]);
         // A pending borrower is not a member yet and holds no share capital.
         // ₱61,234.57: ₱10,205.76 principal and ₱1,837.04 interest on period 1.
         $borrower = Borrower::factory()->create(['branch_id' => $this->branch->id, 'status' => 'pending']);

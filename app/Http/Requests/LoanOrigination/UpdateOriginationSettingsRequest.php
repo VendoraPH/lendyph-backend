@@ -6,6 +6,7 @@ use App\Models\OriginationSetting;
 use App\Services\LoanOrigination\ApplicationReference;
 use App\Services\LoanOrigination\DraftRules;
 use App\Services\LoanOrigination\Files\OriginationFileStore;
+use Closure;
 use Illuminate\Auth\Access\AuthorizationException;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Rule;
@@ -51,6 +52,7 @@ class UpdateOriginationSettingsRequest extends FormRequest
         return [
             'general' => ['sometimes', 'array'],
             'general.online_applications_enabled' => ['sometimes', 'required', 'boolean'],
+            'general.require_approved_member' => ['sometimes', 'required', 'boolean'],
             'general.default_branch_id' => ['sometimes', 'nullable', 'integer', Rule::exists('branches', 'id')->where('is_active', true)],
             'general.reference_format' => ['sometimes', 'required', 'string', 'regex:/^[A-Z]{2,5}-YYYY-NNNNNN$/'],
             'general.draft_expiration_days' => ['sometimes', 'required', 'integer', 'between:1,365'],
@@ -90,7 +92,17 @@ class UpdateOriginationSettingsRequest extends FormRequest
             'documents.retention_days' => ['sometimes', 'required', 'integer', 'between:30,3650'],
             'documents.types' => ['sometimes', 'array', 'max:30'],
             'documents.types.*' => ['array'],
-            'documents.types.*.type' => ['required', 'string', 'regex:/^[a-z][a-z0-9_]{1,49}$/', 'distinct'],
+            'documents.types.*.type' => [
+                'required', 'string', 'regex:/^[a-z][a-z0-9_]{1,49}$/', 'distinct',
+                // A member's valid ID is its own document type (ValidIdService);
+                // the hand-off files the applicant's ID there from
+                // government_id. The member document upload's own test.
+                function (string $attribute, mixed $value, Closure $fail): void {
+                    if (is_string($value) && preg_replace('/[^a-z0-9]/', '', strtolower($value)) === 'validid') {
+                        $fail('A document type\'s key can\'t read as "valid ID", which members\' own valid IDs use. The applicant\'s ID is government_id.');
+                    }
+                },
+            ],
             'documents.types.*.label' => ['required', 'string', 'max:100'],
             'documents.types.*.description' => ['nullable', 'string', 'max:500'],
             'documents.types.*.required' => ['required', 'boolean'],
@@ -148,6 +160,7 @@ class UpdateOriginationSettingsRequest extends FormRequest
         };
 
         return [
+            'general.require_approved_member.boolean' => 'Choose whether a loan is released only to an approved member.',
             'general.default_branch_id.exists' => 'Choose an active branch.',
             'general.default_branch_id.integer' => 'Choose an active branch.',
             'general.reference_format.regex' => 'The reference format must read like OA-YYYY-NNNNNN: 2 to 5 capital letters, then -YYYY-NNNNNN.',

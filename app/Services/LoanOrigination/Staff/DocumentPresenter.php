@@ -6,6 +6,8 @@ use App\Models\OriginationDocument;
 use App\Models\OriginationDocumentVersion;
 use App\Models\OriginationProductSetting;
 use App\Models\OriginationSetting;
+use App\Services\Amla\Cdd\IdTypes;
+use App\Services\LoanOrigination\HandOff\MemberDocuments;
 
 /**
  * An application document as staff screens read it: its type in words, the
@@ -60,7 +62,9 @@ final class DocumentPresenter
 
     /**
      * File names are shown only with $fileNames (the contacts rule): an
-     * applicant's file name can hold their name or address.
+     * applicant's file name can hold their name or address. So are an ID's
+     * recorded number and the name of an "Others" ID type; its type key and
+     * words always show (`id_document` says verifying it records them).
      *
      * @param  list<string>  $requiredTypes
      * @return array<string, mixed>
@@ -68,6 +72,8 @@ final class DocumentPresenter
     public function present(OriginationDocument $document, array $requiredTypes = [], bool $fileNames = false): array
     {
         $current = $document->currentVersion;
+        $isId = MemberDocuments::isId($document->type);
+        $id = $isId ? MemberDocuments::idDetails($document) : null;
 
         return [
             'id' => $document->id,
@@ -88,6 +94,10 @@ final class DocumentPresenter
             'verified_at' => $document->verified_at?->toIso8601String(),
             'rejection_reason' => $document->rejection_reason,
             'notes' => $document->notes,
+            'id_document' => $isId,
+            'id_type' => $id['type'] ?? null,
+            'id_type_label' => $id === null ? null : ($fileNames && $id['custom_type_name'] !== null ? $id['custom_type_name'] : IdTypes::words($id['type'])),
+            'id_number' => $fileNames ? ($id['id_number'] ?? null) : null,
             'versions' => $document->versions->map(fn (OriginationDocumentVersion $version) => [
                 'id' => $version->id,
                 'public_id' => $version->public_id,

@@ -11,6 +11,7 @@ use App\Models\OriginationProductSetting;
 use App\Models\OriginationStatusHistory;
 use App\Models\User;
 use App\Services\LoanOrigination\ApplicationTransitions;
+use App\Services\LoanOrigination\Assessment\AssessmentPresenter;
 use App\Services\LoanOrigination\DraftRules;
 use App\Services\Portal\Read\ProfileReader;
 use App\Support\PhilippineMobile;
@@ -27,7 +28,10 @@ use App\Support\PhilippineMobile;
  * (`member_matches_hidden`).
  *
  * Money comes from the server: `declared_totals` is DraftRules'. The
- * assessment is LO-B4's and reads null here until it ships.
+ * assessment is LO-B4's: the list row carries the current revision's result,
+ * and the detail the revision itself as the assessment screen shows it to
+ * the viewer (AssessmentPresenter, with its rule on a linked member's loan
+ * figures); both read null before the first run.
  */
 final class ApplicationPresenter
 {
@@ -43,6 +47,7 @@ final class ApplicationPresenter
         private readonly ApplicationTransitions $transitions,
         private readonly DocumentPresenter $documents,
         private readonly MemberMatches $matches,
+        private readonly AssessmentPresenter $assessments,
     ) {}
 
     /**
@@ -66,7 +71,7 @@ final class ApplicationPresenter
             'status' => $application->status,
             'status_label' => ApplicationTransitions::label($application->status),
             'is_test' => (bool) $application->is_test,
-            'assessment_result' => null,
+            'assessment_result' => $application->latestAssessment?->result,
             'assigned_officer_id' => $application->assigned_officer_id,
             'assigned_officer_name' => $application->assignedOfficer?->full_name,
             'completion_percent' => (int) $application->completion_percent,
@@ -85,7 +90,7 @@ final class ApplicationPresenter
     public function detail(OriginationApplication $application, User $viewer): array
     {
         $application->loadMissing([
-            'branch', 'loanProduct', 'assignedOfficer',
+            'branch', 'loanProduct', 'assignedOfficer', 'latestAssessment',
             'documents.currentVersion', 'documents.versions', 'documents.verifier',
             'notes.author', 'history.user', 'consents',
         ]);
@@ -116,7 +121,7 @@ final class ApplicationPresenter
             )),
             'documents' => $application->documents->sortBy('id')
                 ->map(fn (OriginationDocument $d) => $this->documents->present($d, $required, $contacts))->values()->all(),
-            'assessment' => null,
+            'assessment' => $application->latestAssessment === null ? null : $this->assessments->present($application->latestAssessment, $application, $viewer),
             'notes' => $application->notes->sortBy('id')->map(fn (OriginationNote $note) => [
                 'id' => $note->id,
                 'body' => $note->body,

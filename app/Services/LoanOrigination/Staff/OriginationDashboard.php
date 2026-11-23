@@ -98,7 +98,7 @@ final class OriginationDashboard
             ),
             'recent' => $this->base($branchIds)
                 ->whereNotNull('submitted_at')
-                ->with(['branch:id,name', 'loanProduct:id,name', 'assignedOfficer:id,first_name,last_name'])
+                ->with(['branch:id,name', 'loanProduct:id,name', 'assignedOfficer:id,first_name,last_name', 'latestAssessment'])
                 ->orderByDesc('submitted_at')->orderByDesc('id')
                 ->limit(10)->get()
                 ->map(fn (OriginationApplication $application) => $this->presenter->summary($application, $viewer))
