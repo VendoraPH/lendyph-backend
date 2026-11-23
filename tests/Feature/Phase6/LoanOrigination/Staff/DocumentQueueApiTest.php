@@ -54,7 +54,7 @@ it('verifies, rejects and asks for a replacement, each audited and moving the ap
     $address = lo3Document($application, 'proof_of_address', 'uploaded');
     $user = lo3Staff($this->main, 'loan_origination:update');
 
-    $this->actingAs($user)->postJson("/api/loan-origination/documents/{$id->id}/verify", ['notes' => 'Matches the applicant.'])
+    $this->actingAs($user)->postJson("/api/loan-origination/documents/{$id->id}/verify", ['notes' => 'Matches the applicant.', 'id_type' => 'drivers_license', 'id_number' => 'N01-23-456789'])
         ->assertOk()->assertJsonPath('data.status', 'verified')->assertJsonPath('data.verified_by_name', $user->full_name);
 
     $this->actingAs($user)->postJson("/api/loan-origination/documents/{$income->id}/reject", ['reason' => 'Blurry.'])
@@ -78,7 +78,8 @@ it('refuses document decisions without loan_origination:update, on a closed appl
     $this->actingAs(lo3Staff($this->main, 'loan_origination:view'))->postJson("/api/loan-origination/documents/{$document->id}/verify")->assertForbidden();
 
     $closed = lo3Document(lo3Application('withdrawn'));
-    $this->actingAs($user)->postJson("/api/loan-origination/documents/{$closed->id}/verify")->assertUnprocessable();
+    $this->actingAs($user)->postJson("/api/loan-origination/documents/{$closed->id}/verify", ['id_type' => 'passport', 'id_number' => 'P1234567A'])
+        ->assertUnprocessable()->assertJsonValidationErrors(['document']);
 
     $elsewhere = lo3Document(lo3Application('submitted', ['branch_id' => $this->other->id]));
     $this->actingAs($user)->postJson("/api/loan-origination/documents/{$elsewhere->id}/verify")->assertNotFound();

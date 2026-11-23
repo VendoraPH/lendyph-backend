@@ -5,6 +5,7 @@ namespace App\Services\LoanOrigination\HandOff;
 use App\Models\OriginationDocument;
 use App\Services\Amla\Cdd\IdTypes;
 use App\Services\ValidIdService;
+use Illuminate\Validation\Rule;
 
 /**
  * How an online application's documents become the member's at the hand-off
@@ -35,6 +36,56 @@ final class MemberDocuments
     public static function isId(string $applicationType): bool
     {
         return self::memberType($applicationType) === ValidIdService::DOCUMENT_TYPE;
+    }
+
+    /**
+     * What verifying an ID takes (LO-B3's verify): the ID type, one of the
+     * member valid ID type keys, its name for "others", and the number, as a
+     * member's valid ID upload takes them (ValidIdService).
+     *
+     * @return array<string, list<mixed>>
+     */
+    public static function rules(): array
+    {
+        return [
+            'id_type' => ['required', 'string', Rule::in(array_keys(IdTypes::TYPES))],
+            'custom_type_name' => ['nullable', 'string', 'max:100', 'required_if:id_type,'.IdTypes::OTHERS],
+            'id_number' => ['required', 'string', 'max:100'],
+        ];
+    }
+
+    /** @return array<string, string> */
+    public static function messages(): array
+    {
+        return [
+            'id_type.required' => 'Choose the ID type.',
+            'id_type.string' => 'Choose the ID type from the list.',
+            'id_type.in' => 'Choose the ID type from the list.',
+            'custom_type_name.required_if' => 'Enter the ID type\'s name.',
+            'custom_type_name.string' => 'The ID type\'s name must be text.',
+            'custom_type_name.max' => 'The ID type\'s name can be at most 100 characters.',
+            'id_number.required' => 'Enter the ID number.',
+            'id_number.string' => 'The ID number must be text.',
+            'id_number.max' => 'The ID number can be at most 100 characters.',
+        ];
+    }
+
+    /**
+     * The ID details to record from input validated by rules(), trimmed;
+     * the type's name is kept for "others" only.
+     *
+     * @param  array<string, mixed>  $validated
+     * @return array{type: string, custom_type_name: ?string, id_number: string}
+     */
+    public static function fromInput(array $validated): array
+    {
+        $type = (string) $validated['id_type'];
+
+        return [
+            'type' => $type,
+            'custom_type_name' => $type === IdTypes::OTHERS ? trim((string) ($validated['custom_type_name'] ?? '')) : null,
+            'id_number' => trim((string) $validated['id_number']),
+        ];
     }
 
     /**
