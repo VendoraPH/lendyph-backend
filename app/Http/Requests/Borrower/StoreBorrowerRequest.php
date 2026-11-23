@@ -159,7 +159,7 @@ class StoreBorrowerRequest extends FormRequest
      * frontend's "Create Anyway" after staff have seen the match, sent by a
      * signed-in user holding `borrowers:create`. An anonymous caller's `force`
      * is ignored, so a public registration is always checked, here and again
-     * under the lock (BorrowerController::refuseDuplicateUnderLock()).
+     * under the lock (BorrowerRegistration::refuseDuplicateUnderLock()).
      */
     public function forced(): bool
     {
