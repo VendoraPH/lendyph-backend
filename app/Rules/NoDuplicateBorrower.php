@@ -13,8 +13,9 @@ use Illuminate\Contracts\Validation\ValidationRule;
  * Rejects a borrower create/update if a similar borrower already exists.
  *
  * Attached to the `first_name` field so the error surfaces there in the standard
- * `{errors: {first_name: [...]}}` validation envelope. Clients can pass
- * `force=true` in the request to bypass this rule (see StoreBorrowerRequest).
+ * `{errors: {first_name: [...]}}` validation envelope. Staff can pass
+ * `force=true` to bypass this rule; on a create it takes `borrowers:create`,
+ * and an anonymous caller's `force` is ignored (StoreBorrowerRequest::forced()).
  *
  * The failure message is deliberately two-tiered. Public registration is
  * anonymous, and the exact-match tier needs only first+middle+last name — so

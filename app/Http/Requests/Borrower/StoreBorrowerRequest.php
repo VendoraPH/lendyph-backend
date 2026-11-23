@@ -100,9 +100,8 @@ class StoreBorrowerRequest extends FormRequest
 
         $firstNameRules = ['required', 'string', 'max:255'];
 
-        // Duplicate check is bypassed when the caller explicitly sends force=true
-        // (used by the frontend's "Create Anyway" confirmation dialog in PR #105).
-        if (! $this->boolean('force')) {
+        // Staff may skip the duplicate check with "Create Anyway" (forced()).
+        if (! $this->forced()) {
             $firstNameRules[] = new NoDuplicateBorrower(
                 ignoreId: $ignoreId,
                 revealDetails: (bool) $this->user(),
@@ -153,6 +152,18 @@ class StoreBorrowerRequest extends FormRequest
     public function messages(): array
     {
         return $this->borrowerMessages();
+    }
+
+    /**
+     * Whether this create skips the duplicate-member check: `force`, the
+     * frontend's "Create Anyway" after staff have seen the match, sent by a
+     * signed-in user holding `borrowers:create`. An anonymous caller's `force`
+     * is ignored, so a public registration is always checked, here and again
+     * under the lock (BorrowerController::refuseDuplicateUnderLock()).
+     */
+    public function forced(): bool
+    {
+        return $this->boolean('force') && $this->user()?->can('borrowers:create') === true;
     }
 
     private function findExistingRegistration(): ?Borrower

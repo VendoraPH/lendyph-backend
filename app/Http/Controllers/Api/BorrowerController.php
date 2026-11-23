@@ -225,8 +225,8 @@ Create a new borrower profile.
 1. **Exact match** — same normalized first+middle+last (case/whitespace insensitive) → always rejected
 2. **Fuzzy match** — Levenshtein distance ≤ 2 on normalized full name, *and* birthdate matches
 
-Pass `force=true` in the body to bypass the duplicate check (frontend "Create Anyway" flow).
-On a duplicate rejection, the error message in `errors.first_name[0]` contains the matched borrower's code and DOB.
+A signed-in user holding `borrowers:create` may pass `force=true` in the body to bypass the duplicate check (frontend "Create Anyway" flow). An anonymous caller's `force` is ignored: the public registration form is always checked.
+On a duplicate rejection, the error message in `errors.first_name[0]` contains the matched borrower's code and DOB (staff only; anonymous callers get a generic message).
 
 **Idempotency (public registration):** an anonymous caller may send a client-generated `registration_uuid`
 (UUID **v4**, e.g. the browser's `crypto.randomUUID()`). A retry is honoured — same 201 shape, same borrower
@@ -274,7 +274,7 @@ DESC,
                     new OA\Property(property: 'spouse_occupation', type: 'string'),
                     new OA\Property(property: 'branch_id', type: 'integer', example: 1, description: 'Required for authenticated (operator) creates; optional for anonymous submissions (admin assigns during review).'),
                     new OA\Property(property: 'registration_uuid', type: 'string', format: 'uuid', example: '9f1c1a5e-6f2a-4a2e-9f1c-1a5e6f2a4a2e', description: 'Client-generated idempotency key (UUID v4) for the public registration form. Resending the same key inside the 15-minute submission window, with the same first name, last name and birthdate, returns the borrower the first attempt created instead of a duplicate.'),
-                    new OA\Property(property: 'force', type: 'boolean', example: false, description: 'Bypass the duplicate-borrower check (use for "Create Anyway" confirmation)'),
+                    new OA\Property(property: 'force', type: 'boolean', example: false, description: 'Bypass the duplicate-borrower check (use for "Create Anyway" confirmation). Staff with borrowers:create only; ignored for anonymous callers.'),
                     new OA\Property(property: 'status', type: 'string', enum: ['active', 'inactive', 'blacklisted', 'pending'], description: 'Anonymous (public registration) requests must set this to "pending".'),
                 ],
             ),
@@ -417,13 +417,14 @@ DESC,
      * collision. The lock comes first: a plain read before it would fix a
      * snapshot from before the other save committed.
      *
-     * Not for "Create Anyway" (`force`), and not for a registration with a
+     * Not for staff's "Create Anyway" (StoreBorrowerRequest::forced(); an
+     * anonymous `force` is ignored), and not for a registration with a
      * `registration_uuid`: there the unique index decides, and the loser reads
      * the winner's row back rather than being refused.
      */
     private function refuseDuplicateUnderLock(StoreBorrowerRequest $request): void
     {
-        if ($request->boolean('force') || $request->filled('registration_uuid')) {
+        if ($request->forced() || $request->filled('registration_uuid')) {
             return;
         }
 
