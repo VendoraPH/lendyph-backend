@@ -3256,7 +3256,8 @@ class ReportService
                     : 0.0,
             ],
             'rates' => self::PROVISION_RATES,
-            'policy_note' => 'Provision rates are POLICY, not arithmetic. They are a class constant only because there is no settings table for them yet; each cooperative board may set its own ladder. principal_basis applies the same rates to each past-due loan\'s outstanding principal, in the bucket of its oldest unpaid instalment: the base the allowance posting books.',
+            // Printed to users as is (the Provisioning report's note), so words only.
+            'policy_note' => "The provisioning rates are the cooperative's policy, not a figure worked out from the data; each cooperative's board may set its own.",
             'generated_at' => now()->toDateTimeString(),
             'principal_basis' => $principalBasis,
         ];
