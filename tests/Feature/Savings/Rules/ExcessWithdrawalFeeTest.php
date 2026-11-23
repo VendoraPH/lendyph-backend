@@ -384,7 +384,7 @@ class ExcessWithdrawalFeeTest extends TestCase
 
         $this->putJson("/api/savings/products/{$this->product->id}", ['is_active' => true])->assertUnprocessable()
             ->assertJsonPath('errors.is_active.0', 'The product can\'t be turned on yet: the '.AccountingAccountMapping::labelList(['other_fee_income'])
-                .' posting role has no account. Set up savings in the books from Savings Settings first.');
+                .' posting role has no account. Set up savings in the books from Settings → Savings first.');
 
         $this->product->forceFill(['excess_withdrawal_fee' => null])->save();
         $this->putJson("/api/savings/products/{$this->product->id}", ['is_active' => true])->assertOk();

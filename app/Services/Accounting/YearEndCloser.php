@@ -87,7 +87,7 @@ final class YearEndCloser
 
     private const CLOSED_YEAR_INDEX = 'accounting_year_closes_closed_year_unique';
 
-    private const SETTINGS_HINT = 'Choose an equity account for it in Accounting → Settings → Default Accounts.';
+    private const SETTINGS_HINT = 'Choose an equity account for it in Settings → Accounting → Default Accounts.';
 
     public function __construct(
         private PeriodCalendar $calendar,

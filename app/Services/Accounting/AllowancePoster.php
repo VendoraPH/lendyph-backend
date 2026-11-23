@@ -254,7 +254,7 @@ final class AllowancePoster
 
         foreach (self::ACCOUNTS as $role => $name) {
             if (! $map->has($role)) {
-                $reasons[] = "The {$name} default account isn't set: choose it in Accounting Settings, under Default Accounts.";
+                $reasons[] = "The {$name} default account isn't set: choose it in Settings → Accounting → Default Accounts.";
             }
         }
 

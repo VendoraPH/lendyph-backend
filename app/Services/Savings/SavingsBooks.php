@@ -30,7 +30,7 @@ use Illuminate\Validation\ValidationException;
  * skipped with the reason. Each account added and each role mapped writes one
  * audit row: a system change (no user) from the command and the migration, or
  * in the name of the staff member who pressed "Set up savings in the books"
- * in Savings Settings. No chart, nothing written. Posted journals are never
+ * in Settings → Savings. No chart, nothing written. Posted journals are never
  * touched.
  *
  * The 2026_11_10_500200 migration does the same on deploy, written with the
@@ -145,7 +145,7 @@ class SavingsBooks
 
             throw ValidationException::withMessages(['is_active' => [
                 'The product can\'t be turned on yet: the '.AccountingAccountMapping::labelList($missing)
-                .' posting '.($one ? 'role has' : 'roles have').' no account. Set up savings in the books from Savings Settings first.',
+                .' posting '.($one ? 'role has' : 'roles have').' no account. Set up savings in the books from Settings → Savings first.',
             ]]);
         }
     }

@@ -301,7 +301,7 @@ class MemberTransferTest extends TestCase
 
         $this->putJson("/api/borrowers/{$member->id}", ['branch_id' => $this->second->id])
             ->assertUnprocessable()
-            ->assertJsonValidationErrors(['branch_id' => "A member's branch is changed with Transfer to another branch, not by editing the member. An edit can only fill in a missing branch."]);
+            ->assertJsonValidationErrors(['branch_id' => 'Use Transfer member to move this member to another branch. Editing the member can only fill in a missing branch.']);
 
         $this->assertSame($this->branch->id, (int) $member->fresh()->branch_id);
     }

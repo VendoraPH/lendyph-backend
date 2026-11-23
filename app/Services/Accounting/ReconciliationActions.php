@@ -62,7 +62,7 @@ class ReconciliationActions
 
     public const ALREADY_MATCHED = 'This statement line is already matched';
 
-    public const SUSPENSE_UNMAPPED = 'Map a Suspense account in Accounting Settings first';
+    public const SUSPENSE_UNMAPPED = 'Map a Suspense account in Settings → Accounting → Default Accounts first';
 
     public const COLLISION = 'Another change to this reconciliation was saved at the same time. Reload and try again.';
 

@@ -96,7 +96,7 @@ class SavingsProductsApiTest extends TestCase
             ->assertUnprocessable()->assertJsonValidationErrors('is_active')->json('errors.is_active.0');
 
         $this->assertStringContainsString('Savings deposits', $message);
-        $this->assertStringEndsWith('Set up savings in the books from Savings Settings first.', $message);
+        $this->assertStringEndsWith('Set up savings in the books from Settings → Savings first.', $message);
         $this->assertStringNotContainsString('system administrator', $message);
         $this->assertFalse(SavingsProduct::query()->findOrFail($id)->is_active);
     }
@@ -127,7 +127,7 @@ class SavingsProductsApiTest extends TestCase
 
         $this->postJson('/api/savings/products', $body)
             ->assertUnprocessable()->assertJsonValidationErrors('is_active')
-            ->assertJsonFragment(['The product can\'t be turned on yet: the Time deposits posting role has no account. Set up savings in the books from Savings Settings first.']);
+            ->assertJsonFragment(['The product can\'t be turned on yet: the Time deposits posting role has no account. Set up savings in the books from Settings → Savings first.']);
 
         $this->postJson('/api/savings/products', [...$body, 'is_active' => false])
             ->assertCreated()

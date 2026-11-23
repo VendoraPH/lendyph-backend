@@ -228,7 +228,7 @@ class YearEndPreviewTest extends TestCase
         $this->assertNull($preview['net_surplus_account']);
         $this->assertFalse($preview['can_close']);
         $this->assertSame(
-            ['The net surplus account is not set. Choose an equity account for it in Accounting → Settings → Default Accounts.'],
+            ['The net surplus account is not set. Choose an equity account for it in Settings → Accounting → Default Accounts.'],
             $preview['blocking_reasons'],
         );
     }
@@ -243,7 +243,7 @@ class YearEndPreviewTest extends TestCase
         $this->assertSame('1010', $preview['net_surplus_account']['code']);
         $this->assertFalse($preview['can_close']);
         $this->assertSame(
-            ['The net surplus account, 1010 Cash on Hand, is not an equity account. Choose an equity account for it in Accounting → Settings → Default Accounts.'],
+            ['The net surplus account, 1010 Cash on Hand, is not an equity account. Choose an equity account for it in Settings → Accounting → Default Accounts.'],
             $preview['blocking_reasons'],
         );
     }
@@ -263,7 +263,7 @@ class YearEndPreviewTest extends TestCase
         $this->assertSame('3050', $preview['net_surplus_account']['code']);
         $this->assertFalse($preview['can_close']);
         $this->assertSame(
-            ["Retained earnings or net surplus can't post to 3050 Opening Balance Equity, the opening balance equity account: the year's result would be mixed into the opening balances. Choose an equity account for it in Accounting → Settings → Default Accounts."],
+            ["Retained earnings or net surplus can't post to 3050 Opening Balance Equity, the opening balance equity account: the year's result would be mixed into the opening balances. Choose an equity account for it in Settings → Accounting → Default Accounts."],
             $preview['blocking_reasons'],
         );
         $this->closeYear()->assertUnprocessable()->assertJsonPath('errors.year', $preview['blocking_reasons']);
@@ -276,7 +276,7 @@ class YearEndPreviewTest extends TestCase
         AccountingAccount::query()->whereKey($this->account('3030'))->update(['is_active' => false]);
 
         $this->assertSame(
-            ["The net surplus account, 3030 Retained Earnings, can't take postings because it is inactive. Choose an equity account for it in Accounting → Settings → Default Accounts."],
+            ["The net surplus account, 3030 Retained Earnings, can't take postings because it is inactive. Choose an equity account for it in Settings → Accounting → Default Accounts."],
             $this->preview()['blocking_reasons'],
         );
     }
