@@ -698,10 +698,14 @@ class CsvImportProcessor
         // an absence in `audit_logs` that nobody notices until an auditor asks.
         // If you add a write here, decide explicitly whether it belongs in the
         // run's summary row (self::finalise()) and put it there.
-        AuditLogService::withoutModelAuditing(function () use ($run, $rows, $shape): void {
+        // Asked again here, not only at staging: a run can wait days on its
+        // product mapping, and its starter can lose the access meanwhile.
+        $membershipAllowed = $shape === CsvImportSchema::CUSTOMERS && $run->starterMayEditMembers();
+
+        AuditLogService::withoutModelAuditing(function () use ($run, $rows, $shape, $membershipAllowed): void {
             foreach ($rows as $row) {
                 $outcome = $shape === CsvImportSchema::CUSTOMERS
-                    ? $this->importCustomerRow($run, $row)
+                    ? $this->importCustomerRow($run, $row, $membershipAllowed)
                     : $this->importLoanRow($run, $row);
 
                 $this->stamp($row, $outcome);
@@ -709,7 +713,7 @@ class CsvImportProcessor
         });
     }
 
-    private function importCustomerRow(CsvImportRun $run, CsvImportRow $row): RowOutcome
+    private function importCustomerRow(CsvImportRun $run, CsvImportRow $row, bool $membershipAllowed): RowOutcome
     {
         $normalized = NormalizedRow::fromPayload((array) $row->normalized);
 
@@ -730,6 +734,10 @@ class CsvImportProcessor
 
         if ($match->needsReview()) {
             return RowOutcome::skipped($match->outcome, (string) $match->reason, $match->borrower?->id);
+        }
+
+        if (! $membershipAllowed && $this->carriesMembership($normalized)) {
+            return RowOutcome::failed(CustomerRowNormalizer::MEMBERSHIP_NEEDS_MEMBER_EDIT, CustomerRowNormalizer::MEMBERSHIP_NEEDS_MEMBER_EDIT_MESSAGE);
         }
 
         // Asked here rather than at staging: in this transaction the rows
@@ -1114,6 +1122,20 @@ class CsvImportProcessor
         }
 
         return $items;
+    }
+
+    /**
+     * Whether a staged member row holds a value in any membership column.
+     */
+    private function carriesMembership(NormalizedRow $normalized): bool
+    {
+        foreach (CustomerRowNormalizer::MEMBERSHIP_FIELDS as $field) {
+            if ($normalized->value($field) !== null) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**

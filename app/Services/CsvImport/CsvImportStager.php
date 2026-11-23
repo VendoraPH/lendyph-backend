@@ -110,7 +110,7 @@ class CsvImportStager
         $this->clearPreviousStaging($file);
 
         $result = $this->reader->readFromDisk(CsvImportReader::PII_DISK, $file->assembled_path, $shape);
-        $mayImportMembership = $shape === CsvImportSchema::CUSTOMERS && $this->starterMayEditMembers($file);
+        $mayImportMembership = $shape === CsvImportSchema::CUSTOMERS && ($file->run?->starterMayEditMembers() ?? false);
 
         $batch = [];
         $staged = 0;
@@ -306,19 +306,6 @@ class CsvImportStager
     private function shapeFor(CsvImportFile $file): string
     {
         return $file->kind === 'loans' ? CsvImportSchema::LOANS : CsvImportSchema::CUSTOMERS;
-    }
-
-    /**
-     * Whether the run may carry the membership columns: the staff member who
-     * started it must also be able to edit members (`borrowers:update`, which
-     * sets a membership date and type on the member's profile), on top of the
-     * `imports:process` every import needs. A run whose starter has since
-     * left (`initiated_by` is nullOnDelete) can credit nobody, so it carries
-     * none. Decided once per file, here, where the rows are accepted.
-     */
-    private function starterMayEditMembers(CsvImportFile $file): bool
-    {
-        return $file->run?->initiatedBy?->can('borrowers:update') ?? false;
     }
 
     /**

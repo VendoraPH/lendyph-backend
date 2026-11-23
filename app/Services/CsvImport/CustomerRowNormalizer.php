@@ -69,6 +69,14 @@ class CustomerRowNormalizer
      */
     public const MEMBERSHIP_FIELDS = ['membership_date', 'member_type', 'membership_number'];
 
+    /**
+     * The refusal for a membership column the run may not carry, at staging
+     * here and again at the import pass (CsvImportProcessor), in one wording.
+     */
+    public const MEMBERSHIP_NEEDS_MEMBER_EDIT = 'membership_needs_member_edit';
+
+    public const MEMBERSHIP_NEEDS_MEMBER_EDIT_MESSAGE = 'Only staff who can edit members can import membership details, and the person who started this import can\'t. Leave Membership Date, Member Type and Membership Number blank, or have someone who can edit members start the import.';
+
     public function __construct(private readonly ValueNormalizer $values = new ValueNormalizer) {}
 
     /**
@@ -237,12 +245,17 @@ class CustomerRowNormalizer
      * 30 characters the column holds. Refused, never shortened, since two
      * numbers cut down to one are a clash.
      *
-     * The member-code form (BRW-000123) is refused as well. Member codes and
+     * Anything that starts like a member code (BRW) is refused as well, its
+     * look-alikes included (BRW000123, BRW-00O123). Member codes and
      * membership numbers share one sign-in, where a membership number wins
      * (MemberNumber::find()), and the app gives member codes out itself. An
      * imported one would take over the sign-in of the member who holds that
      * code, or block the member the app gives it to next. Left blank, the
      * member's own code is used.
+     *
+     * So is a spreadsheet placeholder (`-`, `N/A`, `0`), which would become
+     * that member's sign-in number: a number needs a digit, and one that is
+     * nothing but zeros is not a number.
      *
      * Whether another member already holds the number is the import pass's
      * question (CsvImportProcessor), since only it can see the rows written
@@ -270,8 +283,21 @@ class CustomerRowNormalizer
             return null;
         }
 
-        if (preg_match('/^'.Borrower::CODE_PREFIX.'-\d+$/', $number) === 1) {
-            $notes->fail('membership_number', 'membership_number_member_code', "\"{$value}\" reads as a member code, which the app gives out itself. Leave Membership Number blank and the member's own code is used.");
+        if (str_starts_with($number, Borrower::CODE_PREFIX)) {
+            $notes->fail('membership_number', 'membership_number_member_code', "\"{$value}\" starts like a member code (".Borrower::CODE_PREFIX.'), which the app gives out itself. Leave Membership Number blank and the member\'s own code is used.');
+
+            return null;
+        }
+
+        if (preg_match('/\d/', $number) !== 1) {
+            $notes->fail('membership_number', 'membership_number_placeholder', "\"{$value}\" has no digits, so it reads as a spreadsheet placeholder rather than a membership number. Leave the cell blank if the member has none.");
+
+            return null;
+        }
+
+        // Its digits all zero and no letters: `0`, `000`, `00-00`.
+        if (preg_match('/^[^A-Z1-9]+$/', $number) === 1) {
+            $notes->fail('membership_number', 'membership_number_placeholder', "\"{$value}\" is nothing but zeros, so it reads as a spreadsheet placeholder rather than a membership number. Leave the cell blank if the member has none.");
 
             return null;
         }
@@ -299,7 +325,7 @@ class CustomerRowNormalizer
                 continue;
             }
 
-            $notes->fail($field, 'membership_needs_member_edit', 'Only staff who can edit members can import membership details, and the person who started this import can\'t. Leave Membership Date, Member Type and Membership Number blank, or have someone who can edit members start the import.');
+            $notes->fail($field, self::MEMBERSHIP_NEEDS_MEMBER_EDIT, self::MEMBERSHIP_NEEDS_MEMBER_EDIT_MESSAGE);
 
             return;
         }

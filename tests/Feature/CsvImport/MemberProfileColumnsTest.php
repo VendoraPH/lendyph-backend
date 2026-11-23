@@ -19,6 +19,7 @@ use App\Services\CsvImport\ImportTick;
 use App\Services\CsvImport\NormalizedRow;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
 use InvalidArgumentException;
 use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\TestCase;
@@ -273,7 +274,13 @@ class MemberProfileColumnsTest extends TestCase
             'member type not a type' => [['member_type' => 'Premium'], 'member_type', 'member_type_invalid', 'Write Regular or Associate'],
             'membership number too long' => [['membership_number' => str_repeat('7', 31)], 'membership_number', 'membership_number_too_long', '30 characters'],
             'membership number reads as a member code' => [['membership_number' => 'brw-000123'], 'membership_number', 'membership_number_member_code', 'member code'],
+            'membership number like a member code, no dash' => [['membership_number' => 'BRW000123'], 'membership_number', 'membership_number_member_code', 'starts like a member code (BRW)'],
+            'membership number like a member code, a letter O' => [['membership_number' => 'BRW-00O123'], 'membership_number', 'membership_number_member_code', 'starts like a member code (BRW)'],
             'membership number with a character it cannot hold' => [['membership_number' => 'NIÑO-01'], 'membership_number', 'membership_number_invalid', 'letters, numbers and punctuation'],
+            'membership number a dash placeholder' => [['membership_number' => '-'], 'membership_number', 'membership_number_placeholder', 'has no digits'],
+            'membership number N/A' => [['membership_number' => 'N/A'], 'membership_number', 'membership_number_placeholder', 'has no digits'],
+            'membership number a zero' => [['membership_number' => '0'], 'membership_number', 'membership_number_placeholder', 'nothing but zeros'],
+            'membership number zeros and a dash' => [['membership_number' => '00-00'], 'membership_number', 'membership_number_placeholder', 'nothing but zeros'],
         ];
     }
 
@@ -305,6 +312,14 @@ class MemberProfileColumnsTest extends TestCase
         $this->assertSame('1985-04-12', $row->value('date_hired'), 'the birthdate itself is not before the birthdate');
         $this->assertSame('associate', $row->value('member_type'));
         $this->assertSame('2019-00101', $row->value('membership_number'));
+
+        // A real number may hold zeros, and letters other than a member code's.
+        foreach (['BC-000', 'A1', '10', 'BR-0007'] as $number) {
+            $this->assertTrue(
+                $this->normalize($this->customerRow('V-003', ['membership_number' => $number]), mayImportMembership: true)->isValid(),
+                "{$number} is a membership number",
+            );
+        }
     }
 
     public function test_a_refused_value_is_never_imported(): void
@@ -373,10 +388,7 @@ class MemberProfileColumnsTest extends TestCase
     {
         $this->seedForImport();
 
-        $importer = User::factory()->create();
-        $role = Role::create(['name' => 'csv_importer_only', 'guard_name' => 'web', 'is_active' => true]);
-        $role->givePermissionTo('imports:process');
-        $importer->assignRole($role);
+        [$importer] = $this->staffWith(['imports:process']);
         $this->assertTrue($importer->can('imports:process'));
         $this->assertFalse($importer->can('borrowers:update'));
 
@@ -409,6 +421,64 @@ class MemberProfileColumnsTest extends TestCase
         $this->assertSame('invalid', CsvImportRow::where('csv_import_file_id', $orphanFile->id)->value('status'));
     }
 
+    public function test_access_lost_after_staging_fails_the_rows_that_carry_membership_columns(): void
+    {
+        $this->seedForImport();
+
+        [$starter, $role] = $this->staffWith(['imports:process', 'borrowers:update']);
+
+        $run = $this->makeRun(['initiated_by' => $starter->id]);
+        $file = $this->makeFile($run, 'customers', [
+            $this->customerRow('L-001', ['membership_date' => '2010-03-15']),
+            $this->customerRow('L-002', ['date_hired' => '2012-06-01']),
+        ]);
+
+        $this->assertSame(2, (new CsvImportStager)->stage($file)->valid, 'the starter could edit members when the rows were staged');
+
+        // While the run waited (on its product mapping, say), the role lost it.
+        $role->revokePermissionTo('borrowers:update');
+
+        $this->runToIdle($run);
+
+        $lost = CsvImportRow::where('csv_import_file_id', $file->id)->where('line_number', 2)->firstOrFail();
+        $this->assertSame('failed', $lost->result);
+        $this->assertSame('membership_needs_member_edit', $lost->result_category);
+        $this->assertStringContainsString('Only staff who can edit members can import membership details', (string) $lost->result_message);
+        $this->assertFalse(Borrower::where('external_account_no', 'L-001')->exists());
+
+        // A row with no membership value imports as usual.
+        $this->assertSame('2012-06-01', Borrower::where('external_account_no', 'L-002')->firstOrFail()->date_hired?->toDateString());
+    }
+
+    public function test_an_inactive_starter_carries_no_membership_columns_at_staging_or_at_import(): void
+    {
+        $this->seedForImport();
+
+        // Inactive when the rows are staged: refused there, though the role grants it.
+        [$inactive] = $this->staffWith(['imports:process', 'borrowers:update']);
+        $inactive->forceFill(['status' => 'inactive'])->save();
+
+        $run = $this->makeRun(['initiated_by' => $inactive->id]);
+        $file = $this->makeFile($run, 'customers', [$this->customerRow('I-001', ['member_type' => 'Associate'])]);
+        (new CsvImportStager)->stage($file);
+
+        $staged = CsvImportRow::where('csv_import_file_id', $file->id)->firstOrFail();
+        $this->assertSame('invalid', $staged->status);
+        $this->assertSame('membership_needs_member_edit', $staged->errors[0]['code']);
+
+        // Active when staged, deactivated before the import pass: refused there.
+        [$starter] = $this->staffWith(['imports:process', 'borrowers:update']);
+        $run = $this->makeRun(['initiated_by' => $starter->id]);
+        $file = $this->makeFile($run, 'customers', [$this->customerRow('I-002', ['membership_number' => 'BC-0200'])]);
+        $this->assertSame(1, (new CsvImportStager)->stage($file)->valid);
+
+        $starter->forceFill(['status' => 'inactive'])->save();
+        $this->runToIdle($run);
+
+        $this->assertSame('membership_needs_member_edit', CsvImportRow::where('csv_import_file_id', $file->id)->value('result_category'));
+        $this->assertFalse(Borrower::where('external_account_no', 'I-002')->exists());
+    }
+
     // ------------------------------------------------------------------
     // Helpers
     // ------------------------------------------------------------------
@@ -429,6 +499,23 @@ class MemberProfileColumnsTest extends TestCase
         }
 
         $this->fail("The run did not settle within {$maxTicks} ticks.");
+    }
+
+    /**
+     * A staff user holding exactly these permissions, through a role of their own.
+     *
+     * @param  list<string>  $permissions
+     * @return array{0: User, 1: Role}
+     */
+    private function staffWith(array $permissions): array
+    {
+        $role = Role::create(['name' => 'csv_test_'.strtolower(Str::random(8)), 'guard_name' => 'web', 'is_active' => true]);
+        $role->givePermissionTo($permissions);
+
+        $user = User::factory()->create();
+        $user->assignRole($role);
+
+        return [$user, $role];
     }
 
     /**

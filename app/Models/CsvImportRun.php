@@ -149,4 +149,24 @@ class CsvImportRun extends Model
             'approved_by' => $this->initiated_by,
         ];
     }
+
+    /**
+     * Whether this run may carry the membership columns (Membership Date,
+     * Member Type and Membership Number): the staff member who started it
+     * must still be active and able to edit members (`borrowers:update`,
+     * which sets a membership date and type on the member's profile), on top
+     * of the `imports:process` every import needs.
+     *
+     * Read fresh on every call. The staging pass asks it and so does the
+     * import pass, which can come days later (a run waits on its product
+     * mapping), and the starter can lose the access in between. A starter who
+     * has since left (`initiated_by` is nullOnDelete) credits nobody, so that
+     * run carries none.
+     */
+    public function starterMayEditMembers(): bool
+    {
+        $user = $this->initiated_by === null ? null : User::query()->find($this->initiated_by);
+
+        return $user !== null && $user->status !== 'inactive' && $user->can('borrowers:update');
+    }
 }
