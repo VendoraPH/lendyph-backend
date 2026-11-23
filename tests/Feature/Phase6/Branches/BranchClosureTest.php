@@ -18,6 +18,7 @@ use App\Services\AuditLogService;
 use App\Services\BranchAccess;
 use Carbon\Carbon;
 use Illuminate\Database\UniqueConstraintViolationException;
+use Illuminate\Testing\TestResponse;
 use Tests\TestCase;
 use Tests\Traits\PostsJournals;
 use Tests\Traits\SetupLendyPH;
@@ -41,7 +42,7 @@ class BranchClosureTest extends TestCase
     {
         parent::setUp();
         $this->seedAndLogin();
-        $this->quiet = Branch::factory()->create(['name' => 'Quiet Branch', 'code' => 'QUI']);
+        $this->quiet = Branch::factory()->create(['name' => 'Quiet Branch', 'code' => 'QUI', 'status' => 'suspended']);
         $this->checker = User::factory()->inBranches($this->branch)->create(['first_name' => 'Carla', 'last_name' => 'Reyes']);
         $this->checker->givePermissionTo(['branches:manage', BranchAccess::VIEW_ALL]);
     }
@@ -57,7 +58,7 @@ class BranchClosureTest extends TestCase
             ->assertJsonPath('data.requested_by.id', $this->admin->id)
             ->json('data.id');
 
-        $this->assertSame('active', $this->quiet->fresh()->status);
+        $this->assertSame('suspended', $this->quiet->fresh()->status);
 
         $this->actingAs($this->checker);
         $this->postJson("/api/branches/{$this->quiet->id}/closure/approve", ['note' => 'Checked'])
@@ -86,6 +87,8 @@ class BranchClosureTest extends TestCase
     public function test_a_branch_waiting_to_close_cannot_become_the_main_office(): void
     {
         $this->requestClosure();
+        // Reactivated with the request still waiting: only the request stops the move.
+        $this->patchStatus('active', 'Reopened')->assertOk();
 
         $this->putJson("/api/branches/{$this->quiet->id}/main-office", ['reason' => 'Head office moved'])
             ->assertUnprocessable()
@@ -107,7 +110,7 @@ class BranchClosureTest extends TestCase
             ->assertForbidden()
             ->assertJsonPath('message', 'You asked to close this branch, so someone else has to approve it.');
 
-        $this->assertSame('active', $this->quiet->fresh()->status);
+        $this->assertSame('suspended', $this->quiet->fresh()->status);
     }
 
     public function test_a_requester_who_cancels_and_asks_again_still_cannot_approve(): void
@@ -119,7 +122,7 @@ class BranchClosureTest extends TestCase
         $this->postJson("/api/branches/{$this->quiet->id}/closure/approve")
             ->assertForbidden()
             ->assertJsonPath('message', 'You asked to close this branch, so someone else has to approve it.');
-        $this->assertSame('active', $this->quiet->fresh()->status);
+        $this->assertSame('suspended', $this->quiet->fresh()->status);
     }
 
     public function test_the_database_lets_one_request_wait_per_branch(): void
@@ -187,7 +190,7 @@ class BranchClosureTest extends TestCase
             ->assertUnprocessable()
             ->assertJsonPath('errors.branch.0', "This branch can't be closed yet: 1 assigned user.");
 
-        $this->assertSame('active', $this->quiet->fresh()->status);
+        $this->assertSame('suspended', $this->quiet->fresh()->status);
         $this->assertSame('pending', BranchClosure::query()->where('branch_id', $this->quiet->id)->sole()->status);
     }
 
@@ -218,6 +221,7 @@ class BranchClosureTest extends TestCase
 
     public function test_the_main_office_and_a_closed_branch_cannot_be_closed(): void
     {
+        $this->patchStatus('active', 'Reopened')->assertOk();
         $this->putJson("/api/branches/{$this->quiet->id}/main-office", ['reason' => 'x'])->assertOk();
         $this->postJson("/api/branches/{$this->quiet->id}/closure", ['effective_on' => now()->toDateString(), 'reason' => 'x'])
             ->assertUnprocessable()
@@ -250,7 +254,7 @@ class BranchClosureTest extends TestCase
             ->assertJsonPath('message', 'You asked to close this branch, so someone else has to reject it. You can cancel it instead.');
         $this->deleteJson("/api/branches/{$this->quiet->id}/closure")->assertOk()->assertJsonPath('data.status', 'cancelled');
 
-        $this->assertSame('active', $this->quiet->fresh()->status);
+        $this->assertSame('suspended', $this->quiet->fresh()->status);
         $this->postJson("/api/branches/{$this->quiet->id}/closure/approve")
             ->assertNotFound()
             ->assertJsonPath('message', 'No request to close this branch is waiting.');
@@ -258,6 +262,47 @@ class BranchClosureTest extends TestCase
             ['branch_closure_requested', 'branch_closure_rejected', 'branch_closure_requested', 'branch_closure_cancelled'],
             $this->auditRows($this->quiet->id)->pluck('action')->all(),
         );
+    }
+
+    public function test_an_active_branch_s_closure_request_is_refused_until_it_is_suspended(): void
+    {
+        $active = Branch::factory()->create(['name' => 'Busy Branch', 'code' => 'BUS']);
+
+        $this->postJson("/api/branches/{$active->id}/closure", ['effective_on' => now()->toDateString(), 'reason' => 'Closing'])
+            ->assertUnprocessable()
+            ->assertJsonPath('errors.branch.0', 'This branch is still active. Suspend it before asking to close it.');
+
+        $this->assertFalse(BranchClosure::query()->where('branch_id', $active->id)->exists());
+        $this->assertFalse($this->getJson("/api/branches/{$active->id}/closure")->assertOk()->json('data.can_close'));
+    }
+
+    public function test_approval_is_refused_when_the_branch_was_reactivated_after_the_request(): void
+    {
+        $this->requestClosure();
+        $this->patchStatus('active', 'Back in business')->assertOk();
+
+        $this->actingAs($this->checker);
+        $this->postJson("/api/branches/{$this->quiet->id}/closure/approve")
+            ->assertUnprocessable()
+            ->assertJsonPath('errors.branch.0', 'This branch is still active. Suspend it before asking to close it.');
+
+        $this->assertSame('active', $this->quiet->fresh()->status);
+        $this->assertSame('pending', BranchClosure::query()->where('branch_id', $this->quiet->id)->sole()->status);
+    }
+
+    public function test_a_branch_suspended_through_its_status_then_closes(): void
+    {
+        $branch = Branch::factory()->create(['name' => 'Old Branch', 'code' => 'OLD']);
+        $this->quiet = $branch;
+
+        $this->patchStatus('suspended', 'Winding down')->assertOk();
+        $this->assertTrue($this->getJson("/api/branches/{$branch->id}/closure")->assertOk()->json('data.can_close'));
+        $this->requestClosure();
+
+        $this->actingAs($this->checker);
+        $this->postJson("/api/branches/{$branch->id}/closure/approve")->assertOk()->assertJsonPath('data.status', 'approved');
+
+        $this->assertSame('closed', $branch->fresh()->status);
     }
 
     public function test_closure_needs_branch_management_and_view_all(): void
@@ -276,6 +321,11 @@ class BranchClosureTest extends TestCase
     private function requestClosure(): void
     {
         $this->postJson("/api/branches/{$this->quiet->id}/closure", ['effective_on' => now()->toDateString(), 'reason' => 'Closing'])->assertCreated();
+    }
+
+    private function patchStatus(string $status, string $reason): TestResponse
+    {
+        return $this->patchJson("/api/branches/{$this->quiet->id}/status", ['status' => $status, 'reason' => $reason]);
     }
 
     private function words(string $date): string

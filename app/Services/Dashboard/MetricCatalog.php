@@ -201,11 +201,11 @@ final class MetricCatalog
         ];
         $late = fn (int $days): string => $days === 1 ? '1 day or more' : "more than {$days} days";
         // PAR's denominator is the Portfolio Summary's par_portfolio_principal (loan-balance-summary),
-        // always equal to its outstanding.principal. The wording below stays in words for users.
+        // equal to its outstanding_principal and outstanding.principal. The wording below stays in words for users.
         $par = fn (int $days): array => $balance(
             "Portfolio at Risk {$days}",
-            "Over every loan ever released in the scope (released, ongoing, completed, defaulted or restructured): the unpaid principal of the loans whose oldest period still marked unpaid is {$late($days)} past its due date, as a share of the unpaid principal of every loan ever released in the scope. It equals the gross loan portfolio unless a completed or restructured loan still has a period marked unpaid. The whole unpaid principal of each late loan counts, not just the late period. Grace is not applied. A period marked unpaid counts as the oldest even when nothing is left owing on it.",
-            "Unpaid principal of loans {$late($days)} past due ÷ unpaid principal of every ever-released loan in the scope × 100",
+            "Over the released, ongoing and defaulted loans in the scope, as of today: the unpaid principal of the loans whose oldest period still marked unpaid is {$late($days)} past its due date, as a share of the gross loan portfolio. The whole unpaid principal of each late loan counts, not just the late period. Grace is not applied. A period marked unpaid counts as the oldest even when nothing is left owing on it.",
+            "Unpaid principal of loans {$late($days)} past due ÷ gross loan portfolio × 100",
             'percent',
         );
 
@@ -238,7 +238,7 @@ final class MetricCatalog
             'par_90' => $par(90),
             'aging_by_loan' => $balance(
                 'Loan Aging',
-                'Each collectible loan (released, ongoing or defaulted) in one bucket by its oldest period with something left owing (current, 1–30, 31–60, 61–90, 91–120 and over 120 days past its due date), with the loans and their unpaid principal in each and each bucket\'s share of the gross loan portfolio. Unlike PAR, a period marked unpaid with nothing left owing is passed over, and completed and restructured loans are not aged.',
+                'Each collectible loan (released, ongoing or defaulted) in one bucket by its oldest period with something left owing (current, 1–30, 31–60, 61–90, 91–120 and over 120 days past its due date), with the loans and their unpaid principal in each and each bucket\'s share of the gross loan portfolio. Unlike PAR, a period marked unpaid with nothing left owing is passed over.',
                 'Bucket principal ÷ gross loan portfolio × 100',
                 'money',
                 false,

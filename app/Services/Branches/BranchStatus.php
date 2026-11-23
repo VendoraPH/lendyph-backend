@@ -28,8 +28,9 @@ use Symfony\Component\HttpKernel\Exception\HttpException;
  *   office stays active, and a closed branch stays closed.
  * - Closing takes a second person: one user asks with an effective date (not
  *   after today) and a reason, and a different user approves. Both steps are
- *   refused while the checklist isn't clear, and approval checks it again
- *   under the branch's row lock. The requester may cancel; another user may
+ *   refused while the branch is active (suspend it first, Arvin 2026-11-19)
+ *   or the checklist isn't clear, and approval checks both again under the
+ *   branch's row lock. The requester may cancel; another user may
  *   reject with a note.
  * - Each step writes one audit row on the branch, in words.
  *
@@ -323,6 +324,17 @@ class BranchStatus
         return $closure;
     }
 
+    /**
+     * Whether a branch may be asked to close, or its closure approved, apart
+     * from the checklist: not closed, not the main office, and suspended first
+     * (Arvin, 2026-11-19). Read on the branch row its caller locked, so a
+     * status change can't slip in between.
+     */
+    public function closable(Branch $branch): bool
+    {
+        return $branch->status === Branch::STATUS_SUSPENDED && ! $branch->is_main_office;
+    }
+
     /** @throws ValidationException */
     private function assertClosable(Branch $branch): void
     {
@@ -332,6 +344,10 @@ class BranchStatus
 
         if ($branch->is_main_office) {
             throw ValidationException::withMessages(['branch' => ['The main office stays open. Make another branch the main office first.']]);
+        }
+
+        if (! $this->closable($branch)) {
+            throw ValidationException::withMessages(['branch' => ['This branch is still active. Suspend it before asking to close it.']]);
         }
     }
 

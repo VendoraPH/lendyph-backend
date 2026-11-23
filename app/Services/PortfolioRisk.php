@@ -30,17 +30,17 @@ use Illuminate\Support\Facades\DB;
  * and their unpaid principal in each and each bucket's share of it. The
  * 91–120 / over 120 ladder is the allowance's (Accounting round C) and stays.
  *
- * The two rules part in two places, each kept as its report has always had it:
- * - Which loans: PAR measures whatever loans it is given (the Loan Balance
- *   Summary passes every ever-released loan, completed and restructured
- *   included); the aging measures collectible loans only.
- * - Which period dates a loan: PAR takes the oldest period still marked
- *   unpaid (pending, partial or overdue), even with nothing left owing on it;
- *   the aging takes the oldest such period with something left owing
- *   (AmortizationSchedule::remainingTotalSql() > 0).
- * On a book with neither (a completed or restructured loan's periods all
- * paid or closed, as they are), PAR 1 equals the aging's buckets past
- * current, loans and principal alike.
+ * Which loans: PAR measures whatever loans it is given. Every caller passes
+ * the collectible loans (released, ongoing, defaulted), the aging's own set:
+ * one PAR basis (Arvin, 2026-11-19), so a completed or restructured loan with
+ * a period still marked unpaid is in neither.
+ *
+ * Which period dates a loan is where the two rules still part, each kept as
+ * its report has always had it: PAR takes the oldest period still marked
+ * unpaid (pending, partial or overdue), even with nothing left owing on it;
+ * the aging takes the oldest such period with something left owing
+ * (AmortizationSchedule::remainingTotalSql() > 0). Without such a period,
+ * PAR 1 equals the aging's buckets past current, loans and principal alike.
  *
  * Reads only, never writes, and takes the loans to measure as a query, so a
  * report passes its own statuses, branch scope, release dates and filters.

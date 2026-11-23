@@ -230,6 +230,28 @@ class SnapshotLinesTest extends TestCase
         $this->assertSame('succeeded', $runs[1]->status);
     }
 
+    /**
+     * One PAR basis (Arvin, 2026-11-19): the collectible loans, on the
+     * Portfolio Summary as in the snapshot and so the history. A restructured
+     * loan with a period still marked unpaid is in neither.
+     */
+    public function test_history_par_equals_the_portfolio_summary_with_a_restructured_loan_still_marked_unpaid(): void
+    {
+        $this->book();
+        $restructured = $this->loanIn($this->branch, $this->second, grace: 0, daysLate: 45);
+        DB::table('loans')->where('id', $restructured->id)->update(['status' => 'restructured']);
+
+        $this->artisan('portfolio:snapshot')->assertSuccessful();
+
+        $summary = $this->getJson('/api/reports/loan-balance-summary')->assertOk()->json('data');
+        $history = $this->getJson('/api/dashboard/history?date=2026-11-19')->assertOk()->json('data.points.0.figures');
+
+        foreach (['par_1', 'par_30', 'par_60', 'par_90'] as $par) {
+            $this->assertEquals($summary[$par], $history[$par], "One PAR basis on every screen: {$par}.");
+        }
+        $this->assertEquals($summary['outstanding_principal'], $summary['par_portfolio_principal']);
+    }
+
     public function test_an_empty_book_records_a_day_with_no_lines(): void
     {
         $this->artisan('portfolio:snapshot')->assertSuccessful();

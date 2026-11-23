@@ -151,6 +151,8 @@ class InterbranchInTransitReportTest extends TestCase
         $this->pending($this->north, $this->south);
 
         $this->actingAs($this->admin);
+        // Suspended first: an active branch's closure is refused before its checklist is read.
+        $this->patchJson("/api/branches/{$this->south->id}/status", ['status' => 'suspended', 'reason' => 'Winding down'])->assertOk();
         $checklist = collect($this->getJson("/api/branches/{$this->south->id}/closure")->assertOk()->json('data.checklist'))->keyBy('key');
         $this->assertSame(['key' => 'transfers_in_transit', 'label' => 'Transfers in transit', 'count' => 1, 'amount' => null, 'clear' => false], $checklist['transfers_in_transit']);
         $this->assertSame(1, $checklist['pending_approvals']['count']);
