@@ -73,13 +73,15 @@ final class AuditHistory extends ComplianceReport
 
     public function rows(User $viewer, ReportFilters $filters): array
     {
-        return AmlaLogEntry::query()->with('user')->whereBetween('created_at', $filters->moments())
-            ->orderBy('id')->get()
+        $entries = AmlaLogEntry::query()->with('user')->whereBetween('created_at', $filters->moments())->orderBy('id')->get();
+        $references = AmlaLog::references($entries, $viewer);
+
+        return $entries
             ->map(fn (AmlaLogEntry $entry) => [
                 'at' => $entry->created_at?->format('M j, Y g:i A'),
                 'action' => AmlaLog::actionWords($entry->action),
                 'by' => $entry->actor_type === 'system' ? 'System' : ReportNames::user($entry->user),
-                'subject' => AmlaLog::subjectWords($entry->subject_type, $entry->subject_id),
+                'subject' => AmlaLog::subjectWords($entry->subject_type, $entry->subject_id, $references["{$entry->subject_type}:{$entry->subject_id}"] ?? null),
             ])->values()->all();
     }
 }

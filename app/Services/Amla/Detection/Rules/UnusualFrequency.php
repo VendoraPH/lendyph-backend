@@ -65,6 +65,7 @@ final class UnusualFrequency extends DetectionRule
                 self::indicator('Transactions this week', (string) $events->count()),
                 self::indicator('Earlier weekly average ('.$days.' days)', $average),
             ],
+            countedTransactions: $events->count(),
         );
     }
 }

@@ -59,6 +59,8 @@ final class GCashAnomalies extends DetectionRule
                 self::indicator('Total', self::peso($total)),
                 self::indicator('Wallet reference', null),
             ],
+            countedCentavos: $total,
+            countedTransactions: $events->count(),
         );
     }
 }

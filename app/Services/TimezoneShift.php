@@ -332,6 +332,9 @@ class TimezoneShift
         'origination_rule_revisions' => ['created_at'],
         'origination_settings' => ['created_at', 'updated_at'],
         'origination_status_history' => ['created_at'],
+        // Added 2026-11-19 with the public application (LO-B2), for the same reason.
+        'origination_otp_challenges' => ['closed_at', 'created_at', 'expires_at', 'verified_at'],
+        'origination_sessions' => ['created_at', 'ended_at', 'expires_at', 'last_used_at', 'submitted_at'],
         // Added 2026-11-19 with loan origination staff processing (LO-B3), for
         // the same reason.
         'origination_applicant_messages' => ['created_at'],
@@ -393,7 +396,7 @@ class TimezoneShift
         // Phase 6 AMLA-B7 (2026-11-23): report exports and set-aside asks, well
         // after the cutover.
         'amla_ctr_set_asides' => ['created_at', 'decided_at', 'updated_at'],
-        'amla_exports' => ['created_at'],
+        'amla_exports' => ['created_at', 'file_deleted_at'],
         // Added 2026-11-19 with the executive dashboard's alert thresholds
         // (Phase 6 EB-C), well after the cutover, for the same reason.
         'dashboard_settings' => ['created_at', 'updated_at'],

@@ -20,7 +20,8 @@ use Tests\Traits\SetupLendyPH;
 /**
  * Phase 6 FX-2 (multi-branch audit D2, D3, D5, D11): branch records are
  * audited in words, only a whole-cooperative user edits them, and a member
- * keeps their branch while savings or a time deposit is open there.
+ * keeps their branch while savings or a time deposit is open there (moves go
+ * through the transfer since MB-BE4).
  */
 class BranchIntegrityTest extends TestCase
 {
@@ -157,7 +158,7 @@ class BranchIntegrityTest extends TestCase
         $this->putJson("/api/branches/{$this->second->id}", ['is_active' => false])->assertForbidden();
     }
 
-    // D5 and D11 -------------------------------------------------------
+    // D5 and D11, through the transfer (MB-BE4) -------------------------------------------------------
 
     public function test_a_member_with_an_open_savings_account_keeps_their_branch(): void
     {
@@ -165,9 +166,9 @@ class BranchIntegrityTest extends TestCase
             $member = $this->member();
             SavingsAccount::factory()->create(['borrower_id' => $member->id, 'branch_id' => $this->branch->id, 'status' => $status]);
 
-            $this->putJson("/api/borrowers/{$member->id}", ['branch_id' => $this->second->id])
+            $this->postJson("/api/borrowers/{$member->id}/transfer", ['branch_id' => $this->second->id, 'reason' => 'Moved.'])
                 ->assertUnprocessable()
-                ->assertJsonValidationErrors(['branch_id' => "This member can't move to another branch while they have 1 open savings account. Loans, savings and time deposits stay in the branch where they were opened, so the member keeps that branch until these are closed."]);
+                ->assertJsonValidationErrors(['branch_id' => "This member can't be transferred while they have 1 open savings account. Loans, savings, time deposits, portal requests and GCash Cash Ins stay in the branch where they were opened, so close or settle them first."]);
 
             $this->assertSame($this->branch->id, (int) $member->fresh()->branch_id, "A {$status} account must block the move.");
         }
@@ -179,9 +180,9 @@ class BranchIntegrityTest extends TestCase
             $member = $this->member();
             TimeDeposit::factory()->create(['borrower_id' => $member->id, 'status' => $status]);
 
-            $this->putJson("/api/borrowers/{$member->id}", ['branch_id' => $this->second->id])
+            $this->postJson("/api/borrowers/{$member->id}/transfer", ['branch_id' => $this->second->id, 'reason' => 'Moved.'])
                 ->assertUnprocessable()
-                ->assertJsonValidationErrors(['branch_id' => "This member can't move to another branch while they have 1 open time deposit. Loans, savings and time deposits stay in the branch where they were opened, so the member keeps that branch until these are closed."]);
+                ->assertJsonValidationErrors(['branch_id' => "This member can't be transferred while they have 1 open time deposit. Loans, savings, time deposits, portal requests and GCash Cash Ins stay in the branch where they were opened, so close or settle them first."]);
         }
     }
 
@@ -193,7 +194,7 @@ class BranchIntegrityTest extends TestCase
             TimeDeposit::factory()->create(['borrower_id' => $member->id, 'status' => $status]);
         }
 
-        $this->putJson("/api/borrowers/{$member->id}", ['branch_id' => $this->second->id])->assertOk();
+        $this->postJson("/api/borrowers/{$member->id}/transfer", ['branch_id' => $this->second->id, 'reason' => 'Moved.'])->assertOk();
         $this->assertSame($this->second->id, (int) $member->fresh()->branch_id);
     }
 
@@ -206,12 +207,12 @@ class BranchIntegrityTest extends TestCase
         SavingsAccount::factory()->count(2)->create(['borrower_id' => $member->id, 'branch_id' => $this->branch->id]);
         TimeDeposit::factory()->create(['borrower_id' => $member->id]);
 
-        $message = $this->putJson("/api/borrowers/{$member->id}", ['branch_id' => $this->second->id])
+        $message = $this->postJson("/api/borrowers/{$member->id}/transfer", ['branch_id' => $this->second->id, 'reason' => 'Moved.'])
             ->assertUnprocessable()
             ->json('errors.branch_id.0');
 
         $this->assertSame(
-            "This member can't move to another branch while they have 1 loan still being paid, 1 loan application not yet released, 2 open savings accounts and 1 open time deposit. Loans, savings and time deposits stay in the branch where they were opened, so the member keeps that branch until these are closed.",
+            "This member can't be transferred while they have 1 loan still being paid, 1 loan application not yet released, 2 open savings accounts and 1 open time deposit. Loans, savings, time deposits, portal requests and GCash Cash Ins stay in the branch where they were opened, so close or settle them first.",
             $message,
         );
         $this->assertStringNotContainsString('move this member', $message);

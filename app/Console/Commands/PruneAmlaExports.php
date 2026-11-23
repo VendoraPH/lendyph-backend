@@ -8,7 +8,7 @@ use Illuminate\Console\Attributes\Signature;
 use Illuminate\Console\Command;
 
 #[Signature('amla:prune-exports')]
-#[Description('Delete AMLA export files whose download link has expired; each export\'s record and checksum stay')]
+#[Description('Delete AMLA export files whose download link has expired and that are not swept yet; each export\'s record and checksum stay')]
 class PruneAmlaExports extends Command
 {
     public function handle(ReportExports $exports): int
