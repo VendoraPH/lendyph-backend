@@ -142,6 +142,12 @@ jobs:
           extensions: pdo_mysql, gd, mbstring, bcmath, intl, zip
           coverage: none
 
+      - name: Install qpdf (the loan origination PDF tests run the real qpdf)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qpdf
+          qpdf --version
+
       - name: Cache vendor
         uses: actions/cache@v6
         with:

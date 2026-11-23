@@ -469,54 +469,28 @@ it('answers 409 when the assessment was run again while the hand-off was under w
         ->and($application->fresh()->status)->toBe('under_assessment');
 });
 
-describe('linking a member', function () {
-    it('links a visible member before the hand-off, needing borrowers:view, and the assessment must then run again', function () {
+describe('linking a member (LO-B3\'s route)', function () {
+    it('needs the assessment to run again before the hand-off once a member is linked', function () {
         $member = Borrower::factory()->create(['status' => 'active', 'branch_id' => Branch::query()->value('id')]);
         $application = lo4Ready($this);
         $staff = $this->originationStaff('loan_origination:view', 'loan_origination:update', 'borrowers:view', 'loan_origination:convert', 'loans:create');
 
         $this->actingAs($staff)->postJson("/api/loan-origination/applications/{$application->id}/link-member", ['borrower_id' => $member->id, 'version' => $application->version])
-            ->assertOk()->assertJsonPath('data.borrower_id', $member->id);
+            ->assertOk()->assertJsonPath('data.linked_borrower_id', $member->id);
 
         $this->actingAs($staff)->postJson(lo4HandOffUrl($application->id), ['version' => $application->fresh()->version])
             ->assertUnprocessable()
             ->assertJsonPath('errors.assessment.0', 'The application changed after it was assessed. Run the assessment again.');
     });
 
-    it('refuses without borrowers:view, another branch\'s member, and a former or rejected member', function () {
+    it('refuses a rejected registration', function () {
         $application = lo4Ready($this);
-        $url = "/api/loan-origination/applications/{$application->id}/link-member";
-        $staff = $this->originationStaff('loan_origination:view', 'loan_origination:update', 'borrowers:view');
-
-        $this->actingAs($this->originationStaff('loan_origination:view', 'loan_origination:update'))
-            ->postJson($url, ['borrower_id' => Borrower::factory()->create()->id, 'version' => $application->version])
-            ->assertForbidden()->assertJsonPath('message', 'Linking a member needs the permission to update online applications and the permission to view members.');
-
-        $elsewhere = Borrower::factory()->create(['status' => 'active', 'branch_id' => Branch::factory()->create()->id]);
-        $this->actingAs($staff)->postJson($url, ['borrower_id' => $elsewhere->id, 'version' => $application->version])
-            ->assertUnprocessable()->assertJsonPath('errors.borrower_id.0', 'Choose a member in one of your branches.');
-
-        $withdrawn = Borrower::factory()->create(['status' => 'withdrawn', 'branch_id' => Branch::query()->value('id')]);
-        $this->actingAs($staff)->postJson($url, ['borrower_id' => $withdrawn->id, 'version' => $application->version])
-            ->assertUnprocessable()->assertJsonValidationErrors(['borrower_id']);
-
         $rejected = Borrower::factory()->create(['status' => 'rejected', 'branch_id' => Branch::query()->value('id')]);
-        $this->actingAs($staff)->postJson($url, ['borrower_id' => $rejected->id, 'version' => $application->version])
-            ->assertUnprocessable()->assertJsonPath('errors.borrower_id.0', 'This member\'s registration was rejected, so they can\'t be linked.');
+
+        $this->actingAs($this->originationStaff('loan_origination:view', 'loan_origination:update', 'borrowers:view'))
+            ->postJson("/api/loan-origination/applications/{$application->id}/link-member", ['borrower_id' => $rejected->id, 'version' => $application->version])
+            ->assertUnprocessable()->assertJsonPath('errors.borrower_id.0', 'That member can\'t be linked to this application.');
 
         expect($application->fresh()->borrower_id)->toBeNull();
-    });
-
-    it('unlinks with null, and refuses once handed off', function () {
-        $member = Borrower::factory()->create(['status' => 'active', 'branch_id' => Branch::query()->value('id')]);
-        $application = lo4Ready($this, [], '40000', ['borrower_id' => $member->id]);
-        $staff = $this->originationStaff('loan_origination:view', 'loan_origination:update', 'borrowers:view');
-        $url = "/api/loan-origination/applications/{$application->id}/link-member";
-
-        $this->actingAs($staff)->postJson($url, ['borrower_id' => null, 'version' => $application->version])->assertOk()->assertJsonPath('data.borrower_id', null);
-
-        DB::table('origination_applications')->where('id', $application->id)->update(['status' => 'pending_approval']);
-        $this->actingAs($staff)->postJson($url, ['borrower_id' => $member->id, 'version' => $application->fresh()->version])
-            ->assertUnprocessable()->assertJsonPath('errors.status.0', 'A member can be linked only before the application is submitted for approval.');
     });
 });

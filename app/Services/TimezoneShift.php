@@ -333,6 +333,9 @@ class TimezoneShift
         'origination_rule_revisions' => ['created_at'],
         'origination_settings' => ['created_at', 'updated_at'],
         'origination_status_history' => ['created_at'],
+        // Added 2026-11-19 with loan origination staff processing (LO-B3), for
+        // the same reason.
+        'origination_applicant_messages' => ['created_at'],
         // Added 2026-11-19 with the AMLA foundation (Phase 6), well after the
         // cutover, for the same reason. `amla_calendar_entries.date` is a DATE.
         'amla_calendar_entries' => ['created_at', 'removed_at'],

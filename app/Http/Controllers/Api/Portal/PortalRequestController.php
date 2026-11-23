@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api\Portal;
 use App\Http\Controllers\Controller;
 use App\Models\PortalRequest;
 use App\Models\SavingsAccount;
+use App\Services\Branches\MemberLock;
 use App\Services\GeneratedNumberWrite;
 use App\Services\Portal\MemberScope;
 use App\Services\Portal\PortalSettings;
@@ -189,11 +190,15 @@ class PortalRequestController extends Controller
 
         $validated = $this->desk->validate($portalUser, $request->all());
 
-        return $idempotent->run($request, function () use ($portalUser, $validated): JsonResponse {
+        // A request copies the member's branch, so it's written holding the
+        // member's branch lock, with the member read afresh under it: a
+        // transfer can't move the member around it (Phase 6 MB-BE4).
+        return MemberLock::whileHeld($portalUser->borrower_id, fn (): JsonResponse => $idempotent->run($request, function () use ($portalUser, $validated): JsonResponse {
+            $portalUser->load('borrower');
             $created = $this->desk->submit($portalUser, $validated);
 
             return response()->json(['success' => true, 'data' => $this->presenter->member($created->refresh())], 201);
-        }, GeneratedNumberWrite::PORTAL_REQUEST_CONFLICT, IdempotentWrite::STORE_PORTAL);
+        }, GeneratedNumberWrite::PORTAL_REQUEST_CONFLICT, IdempotentWrite::STORE_PORTAL));
     }
 
     #[OA\Post(
