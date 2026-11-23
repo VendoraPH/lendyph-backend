@@ -9,9 +9,11 @@ use App\Models\AmlaReport;
 use App\Models\SavingsAccount;
 use App\Models\SavingsTransaction;
 use App\Models\User;
+use Illuminate\Contracts\Filesystem\Filesystem;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
+use Mockery;
 use Tests\TestCase;
 use Tests\Traits\SetupLendyPH;
 
@@ -115,6 +117,21 @@ class AmlaB8FollowUpsTest extends TestCase
         Storage::disk('private')->put($first->file_path, 'restored by hand');
         $this->artisan('amla:prune-exports')->assertSuccessful()->expectsOutput('0 expired AMLA export file(s) deleted.');
         Storage::disk('private')->assertExists($first->file_path);
+    }
+
+    public function test_an_export_whose_file_fails_to_delete_stays_unmarked_for_the_next_run(): void
+    {
+        Storage::fake('private');
+        $this->actingAs($this->amlaUser(['amla:alerts', 'amla:export']))->postJson('/api/amla/compliance-reports/transaction_monitoring/exports', ['format' => 'csv'])->assertCreated();
+        $export = AmlaExport::query()->sole();
+        $disk = Mockery::mock(Filesystem::class);
+        $disk->shouldReceive('exists')->with($export->file_path)->andReturnTrue();
+        $disk->shouldReceive('delete')->with($export->file_path)->andReturnFalse();
+        Storage::set('private', $disk);
+
+        $this->travel(36)->minutes();
+        $this->artisan('amla:prune-exports')->assertSuccessful()->expectsOutput('0 expired AMLA export file(s) deleted.');
+        $this->assertNull($export->fresh()->file_deleted_at);
     }
 
     public function test_the_sixth_export_in_a_minute_answers_429_in_words(): void

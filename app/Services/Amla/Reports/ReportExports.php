@@ -64,7 +64,8 @@ final class ReportExports
      * lives SignedFileLink::TTL_MINUTES and nothing makes a new one), so a
      * report's decrypted contents never sit on disk for good. Each export is
      * marked `file_deleted_at` once its file is gone (deleted now, or already
-     * missing), and a run reads only expired exports not yet marked, on the
+     * missing); a delete that fails leaves it unmarked for the next run. A
+     * run reads only expired exports not yet marked, on the
      * (`file_deleted_at`, `created_at`) index, up to PRUNE_BATCH of them. So
      * no run re-checks old exports, and a scheduler stopped for days still
      * has its files swept when it starts again. The record and checksum stay.
@@ -81,7 +82,10 @@ final class ReportExports
 
         foreach ($exports as $export) {
             if ($disk->exists($export->file_path)) {
-                $disk->delete($export->file_path);
+                if (! $disk->delete($export->file_path)) {
+                    continue;
+                }
+
                 $deleted++;
             }
 
