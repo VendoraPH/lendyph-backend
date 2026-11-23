@@ -39,7 +39,7 @@ class UpdateUserRequest extends FormRequest
      *
      * @var list<string>
      */
-    private const NON_COLUMN_RULES = ['role', 'branch_ids', 'branch_ids.*'];
+    private const NON_COLUMN_RULES = ['role', 'branch_ids', 'branch_ids.*', 'primary_branch_id'];
 
     /**
      * `users:view` as well as `users:update`, and the second one is not
@@ -89,6 +89,10 @@ class UpdateUserRequest extends FormRequest
              */
             'branch_ids' => ['sometimes', 'array', 'min:1'],
             'branch_ids.*' => ['bail', 'integer', $this->assignableBranchRule(), BranchTakesNew::openOnly($this->user())],
+            // The chosen primary branch (Phase 6 MB-BE6): one of the user's
+            // branches after this save, or null for Organisation-wide, which
+            // needs a user who sees all branches (validatePrimaryBranch()).
+            'primary_branch_id' => ['sometimes', 'nullable', 'integer'],
             'role' => ['sometimes', 'string', 'exists:roles,name', new AssignableRole($this->user())],
         ];
     }
@@ -131,6 +135,7 @@ class UpdateUserRequest extends FormRequest
                 }
 
                 $this->guardBranchChange($validator, $actor, $target);
+                $this->validatePrimaryBranch($validator, $target);
 
                 // Compares against the FIRST role only, which is exact for every
                 // user this application can produce — `store` assigns one and
@@ -156,7 +161,7 @@ class UpdateUserRequest extends FormRequest
                     return;
                 }
 
-                if (! $this->changesAnyColumn($target) && ! $this->changesBranchAssignment($target)) {
+                if (! $this->changesAnyColumn($target) && ! $this->changesBranchAssignment($target) && ! $this->changesPrimaryBranch($target)) {
                     $validator->errors()->add(
                         'changes',
                         'Nothing to update. Change at least one field before saving.',
@@ -254,14 +259,22 @@ class UpdateUserRequest extends FormRequest
     {
         $callerBranches = app(BranchAccess::class)->for($actor);
 
-        if ($callerBranches === null || ! $this->changesBranchAssignment($target)) {
+        if ($callerBranches === null || (int) $target->id !== (int) $actor->id) {
             return;
         }
 
-        if ((int) $target->id === (int) $actor->id) {
+        if ($this->changesBranchAssignment($target)) {
             $validator->errors()->add(
                 'branch_ids',
                 'You cannot change your own branches. Another administrator has to do it for you.',
+            );
+        }
+
+        // Their primary branch too (Phase 6 MB-BE6, permission review).
+        if ($this->changesPrimaryBranch($target)) {
+            $validator->errors()->add(
+                'primary_branch_id',
+                'You cannot change your own primary branch. Another administrator has to do it for you.',
             );
         }
     }

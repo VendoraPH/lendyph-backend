@@ -6,6 +6,7 @@ use App\Http\Requests\Concerns\ResolvesBranchAssignment;
 use App\Rules\AssignableRole;
 use App\Rules\BranchTakesNew;
 use Illuminate\Foundation\Http\FormRequest;
+use Illuminate\Validation\Validator;
 
 class StoreUserRequest extends FormRequest
 {
@@ -48,7 +49,21 @@ class StoreUserRequest extends FormRequest
             'branch_id' => ['bail', 'required_without:branch_ids', 'nullable', $this->assignableBranchRule(), BranchTakesNew::openOnly($this->user())],
             'branch_ids' => ['required_without:branch_id', 'array', 'min:1'],
             'branch_ids.*' => ['bail', 'integer', $this->assignableBranchRule(), BranchTakesNew::openOnly($this->user())],
+            /**
+             * The chosen primary branch (Phase 6 MB-BE6): one of `branch_ids`,
+             * or null for Organisation-wide, which needs a role that sees all
+             * branches. Absent, the first assigned branch, as before. See the
+             * trait and validatePrimaryBranch().
+             */
+            'primary_branch_id' => ['sometimes', 'nullable', 'integer'],
             'role' => ['required', 'string', 'exists:roles,name', new AssignableRole($this->user())],
+        ];
+    }
+
+    public function after(): array
+    {
+        return [
+            fn (Validator $validator) => $this->validatePrimaryBranch($validator),
         ];
     }
 }

@@ -270,6 +270,7 @@ class Loan extends Model
             'scb_amount' => 'decimal:2',
             'penalty_rate' => 'decimal:4',
             'penalty_brackets' => 'array',
+            'approval_chain' => 'array',
             'policy_exception' => 'boolean',
             'start_date' => 'date',
             'maturity_date' => 'date',

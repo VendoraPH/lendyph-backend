@@ -136,6 +136,43 @@ class User extends Authenticatable
     }
 
     /**
+     * The description on this user's automatic audit rows when their primary
+     * branch is set or changes (Phase 6 MB-BE6, multi-branch D9), in words:
+     * `User jdoe created with primary branch Main Branch.` and `Primary branch
+     * for jdoe changed from Main Branch to Organisation-wide.` Other changes
+     * keep no description, as before. The branch history reads these rows.
+     */
+    public function describeAuditEvent(string $action): ?string
+    {
+        if ($action === 'created') {
+            return sprintf('User %s created with primary branch %s.', $this->username, self::primaryBranchWords($this->branch_id));
+        }
+
+        if ($action !== 'updated' || ! array_key_exists('branch_id', $this->getChanges())) {
+            return null;
+        }
+
+        return sprintf(
+            'Primary branch for %s changed from %s to %s.',
+            $this->username,
+            self::primaryBranchWords($this->getOriginal('branch_id')),
+            self::primaryBranchWords($this->branch_id),
+        );
+    }
+
+    /**
+     * A primary branch in words: its name, or "Organisation-wide" for none.
+     */
+    public static function primaryBranchWords(mixed $branchId): string
+    {
+        if ($branchId === null || $branchId === '') {
+            return 'Organisation-wide';
+        }
+
+        return Branch::query()->whereKey((int) $branchId)->value('name') ?? 'Branch #'.(int) $branchId;
+    }
+
+    /**
      * Every branch this user is assigned to. The source of truth.
      *
      * Always a superset of `branch()` — `users.branch_id` is maintained as one

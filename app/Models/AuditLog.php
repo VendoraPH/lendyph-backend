@@ -33,6 +33,7 @@ class AuditLog extends Model
         'action',
         'auditable_type',
         'auditable_id',
+        'branch_id',
         'old_values',
         'new_values',
         'ip_address',
@@ -45,6 +46,7 @@ class AuditLog extends Model
         return [
             'old_values' => 'array',
             'new_values' => 'array',
+            'branch_id' => 'integer',
             'created_at' => 'datetime',
         ];
     }
@@ -125,6 +127,12 @@ class AuditLog extends Model
     public function portalUser(): BelongsTo
     {
         return $this->belongsTo(PortalUser::class);
+    }
+
+    /** The audited record's branch when the row was written (AuditBranch). */
+    public function branch(): BelongsTo
+    {
+        return $this->belongsTo(Branch::class);
     }
 
     public function auditable(): MorphTo

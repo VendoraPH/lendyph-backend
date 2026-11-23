@@ -25,9 +25,11 @@ use Symfony\Component\HttpFoundation\StreamedResponse;
  * user_id only, so those old login rows stay outside a user's filtered view;
  * rows written since carry the user_id and are counted normally.
  *
- * The audit trail is a head-office control and records no branch, so every
- * endpoint here also requires `branches:view_all` (decision B2): a branch
- * user holding `audit_logs:view` or `audit_logs:export` gets 403.
+ * The audit trail is a head-office control, so every endpoint here also
+ * requires `branches:view_all` (decision B2): a branch user holding
+ * `audit_logs:view` or `audit_logs:export` gets 403. Rows written since Phase
+ * 6 MB-BE6 record the audited record's branch (AuditBranch), which the list
+ * and the CSV filter on; that filter needs `branches:view_all` with them.
  *
  * A caller without `borrowers:view` reads member, co-maker, contact
  * preference and credit rows without their personal fields (credit rows also
@@ -47,6 +49,7 @@ class AuditLogController extends Controller
         parameters: [
             new OA\Parameter(name: 'search', in: 'query', required: false, schema: new OA\Schema(type: 'string'), description: 'Matches action, auditable_type, description, or user name'),
             new OA\Parameter(name: 'user_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')),
+            new OA\Parameter(name: 'branch_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer'), description: 'The audited record\'s branch, recorded on rows written since Phase 6 (older rows have none)'),
             new OA\Parameter(name: 'action', in: 'query', required: false, schema: new OA\Schema(type: 'string')),
             new OA\Parameter(name: 'auditable_type', in: 'query', required: false, schema: new OA\Schema(type: 'string')),
             new OA\Parameter(name: 'module', in: 'query', required: false, schema: new OA\Schema(type: 'string', enum: ['auth', 'borrowers', 'loans', 'payments', 'collections', 'users', 'roles', 'accounting', 'gcash', 'system']), description: 'The `module` each row carries (auth = sign-in and self-service events; system = rows of no other module); an unknown value is a 422'),
@@ -114,6 +117,7 @@ class AuditLogController extends Controller
         parameters: [
             new OA\Parameter(name: 'search', in: 'query', required: false, schema: new OA\Schema(type: 'string')),
             new OA\Parameter(name: 'user_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')),
+            new OA\Parameter(name: 'branch_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer'), description: 'The audited record\'s branch, recorded on rows written since Phase 6 (older rows have none)'),
             new OA\Parameter(name: 'action', in: 'query', required: false, schema: new OA\Schema(type: 'string')),
             new OA\Parameter(name: 'auditable_type', in: 'query', required: false, schema: new OA\Schema(type: 'string')),
             new OA\Parameter(name: 'module', in: 'query', required: false, schema: new OA\Schema(type: 'string', enum: ['auth', 'borrowers', 'loans', 'payments', 'collections', 'users', 'roles', 'accounting', 'gcash', 'system']), description: 'The `module` each row carries (auth = sign-in and self-service events; system = rows of no other module); an unknown value is a 422'),
@@ -217,7 +221,7 @@ class AuditLogController extends Controller
         $this->authorize('audit_logs:view');
         $this->authorize(BranchAccess::VIEW_ALL);
 
-        $auditLog->load('user', 'auditable', 'portalUser.borrower');
+        $auditLog->load('user', 'auditable', 'portalUser.borrower', 'branch:id,name');
         AuditLogResource::loadChangeNames([$auditLog]);
 
         return new AuditLogResource($auditLog);
@@ -236,6 +240,9 @@ class AuditLogController extends Controller
         return request()->validate([
             'search' => ['nullable', 'string'],
             'user_id' => ['nullable', 'integer', 'min:1'],
+            // The audited record's branch (Phase 6 MB-BE6). The trail itself
+            // already needs branches:view_all, so the filter does too.
+            'branch_id' => ['nullable', 'integer', 'min:1'],
             'action' => ['nullable', 'string'],
             'auditable_type' => ['nullable', 'string'],
             'module' => ['nullable', 'string', Rule::in(AuditLogModules::all())],
@@ -262,13 +269,14 @@ class AuditLogController extends Controller
     {
         $search = $filters['search'] ?? null;
         $userId = $filters['user_id'] ?? null;
+        $branchId = $filters['branch_id'] ?? null;
         $action = $filters['action'] ?? null;
         $auditableType = $filters['auditable_type'] ?? null;
         $module = $filters['module'] ?? null;
         $dateFrom = $filters['date_from'] ?? null;
         $dateTo = $filters['date_to'] ?? null;
 
-        return AuditLog::with('user', 'auditable', 'portalUser.borrower')
+        return AuditLog::with('user', 'auditable', 'portalUser.borrower', 'branch:id,name')
             ->when(filled($search), function ($q) use ($search) {
                 $like = LikePattern::contains($search);
 
@@ -284,6 +292,7 @@ class AuditLogController extends Controller
                 });
             })
             ->when(filled($userId), fn ($q) => $q->where('user_id', $userId))
+            ->when(filled($branchId), fn ($q) => $q->where('branch_id', $branchId))
             ->when(filled($action), fn ($q) => $q->where('action', $action))
             ->when(filled($auditableType), fn ($q) => $q->where('auditable_type', 'like', LikePattern::contains($auditableType)))
             ->when(filled($module), fn ($q) => AuditLogModules::constrain($q, $module))

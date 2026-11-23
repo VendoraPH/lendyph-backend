@@ -4,6 +4,7 @@ namespace App\Services\Dashboard;
 
 use App\Models\Loan;
 use Carbon\CarbonInterface;
+use Closure;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Carbon;
 
@@ -24,6 +25,8 @@ use Illuminate\Support\Carbon;
  *   the two middle loans when the count is even) are rounded half up to one
  *   decimal; with no loan measured both read null.
  * - Branch, product and officer narrow the loans; the collector does not.
+ * - `$narrow` narrows the loans further for a caller of its own: loan
+ *   origination passes the loans its online applications became (LO-B3).
  *
  * Reads only.
  */
@@ -40,9 +43,10 @@ final class ApplicationTurnaround
 
     /**
      * @param  list<int>|null  $branchIds  null for every branch
+     * @param  (Closure(Builder<Loan>): mixed)|null  $narrow  an extra loan filter
      * @return array{submitted_to_approved: array{loans: int, average_days: float|null, median_days: float|null, not_measured: int}, approved_to_released: array{loans: int, average_days: float|null, median_days: float|null, not_measured: int}, submitted_to_released: array{loans: int, average_days: float|null, median_days: float|null, not_measured: int}}
      */
-    public function build(string $from, string $to, ?array $branchIds, LoanScope $scope): array
+    public function build(string $from, string $to, ?array $branchIds, LoanScope $scope, ?Closure $narrow = null): array
     {
         $start = Carbon::parse($from)->startOfDay();
         $end = Carbon::parse($to)->addDay()->startOfDay();
@@ -51,6 +55,7 @@ final class ApplicationTurnaround
             ->with('approvalSteps')
             ->when($branchIds !== null, fn (Builder $q) => $q->whereIn('loans.branch_id', $branchIds))
             ->tap($scope->loans())
+            ->when($narrow !== null, fn (Builder $q) => $q->tap($narrow))
             ->where(fn (Builder $q) => $q
                 ->where(fn (Builder $approved) => $approved->where('approved_at', '>=', $start)->where('approved_at', '<', $end))
                 ->orWhere(fn (Builder $released) => $released->where('released_at', '>=', $start)->where('released_at', '<', $end)))
