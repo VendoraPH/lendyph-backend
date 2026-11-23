@@ -832,7 +832,7 @@ class CsvImportProcessor
             );
         }
 
-        $borrower = Borrower::query()->where('external_account_no', $accountNo)->first();
+        $borrower = Borrower::query()->where('external_account_no', $accountNo)->sharedLock()->first();
 
         if ($borrower === null) {
             return RowOutcome::failed(

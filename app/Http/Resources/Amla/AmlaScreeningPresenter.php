@@ -4,6 +4,7 @@ namespace App\Http\Resources\Amla;
 
 use App\Models\AmlaOrder;
 use App\Models\AmlaOrderHold;
+use App\Models\AmlaOrderReleaseRequest;
 use App\Models\AmlaScreeningMatch;
 use App\Models\AmlaWatchlistEntry;
 use App\Models\AmlaWatchlistVersion;
@@ -118,7 +119,13 @@ final class AmlaScreeningPresenter
         return $data;
     }
 
-    /** @return array<string, mixed> */
+    /**
+     * An order; `$full` (the order's own page and its actions, which need
+     * `amla:sanctions` with head-office access) adds its details and every
+     * release request with the approver's `decision_note`.
+     *
+     * @return array<string, mixed>
+     */
     public static function order(AmlaOrder $order, bool $full): array
     {
         $member = $order->borrower;
@@ -161,6 +168,19 @@ final class AmlaScreeningPresenter
             $data['released_at'] = $order->released_at;
             $data['release_reason'] = $order->release_reason;
             $data['release_reference'] = $order->release_reference;
+            $data['release_requests'] = $order->releaseRequests()->with('requester', 'decider')->orderBy('id')->get()
+                ->map(fn (AmlaOrderReleaseRequest $request) => [
+                    'id' => (int) $request->id,
+                    'status' => $request->status,
+                    'status_words' => AmlaOrderReleaseRequest::STATUS_WORDS[$request->status] ?? $request->status,
+                    'reason' => $request->reason,
+                    'release_reference' => $request->release_reference,
+                    'requested_by' => AmlaPresenter::user($request->requester),
+                    'requested_at' => $request->created_at,
+                    'decided_by' => AmlaPresenter::user($request->decider),
+                    'decided_at' => $request->decided_at,
+                    'decision_note' => $request->decision_note,
+                ])->values()->all();
         }
 
         return $data;

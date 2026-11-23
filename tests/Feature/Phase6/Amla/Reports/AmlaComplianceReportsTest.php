@@ -100,7 +100,7 @@ class AmlaComplianceReportsTest extends TestCase
 
     public function test_the_confidential_reports_equal_their_sources_and_never_show_a_narrative(): void
     {
-        $officer = $this->headOffice(['amla:cases', 'amla:str', 'amla:approve', 'amla:screening', 'amla:audit', 'amla:view', 'amla:ctr', 'amla:cdd']);
+        $officer = $this->headOffice(['amla:cases', 'amla:str', 'amla:approve', 'amla:screening', 'amla:audit', 'amla:view', 'amla:ctr', 'amla:cdd', 'amla:alerts']);
         $reviewer = $this->headOffice(['amla:cases', 'amla:approve']);
         $strCase = $this->openCase($officer);
         $this->actingAs($reviewer)->postJson("/api/amla/cases/{$strCase->id}/decision", ['decision' => 'str', 'reason' => 'No business reason.', 'determination_date' => '2026-11-20'])->assertOk();

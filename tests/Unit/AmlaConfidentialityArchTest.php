@@ -218,6 +218,7 @@ const AMLA_TABLE_MIGRATIONS = [
     'database/migrations/2026_11_21_100000_create_amla_detection_tables.php',
     'database/migrations/2026_11_22_100000_create_amla_case_tables.php',
     'database/migrations/2026_11_23_100000_create_amla_report_tables.php',
+    'database/migrations/2026_11_24_100000_amla_b8_follow_ups.php',
 ];
 
 it('keeps AMLA out of the main audit trail, outbound channels, notices, logs and the environment', function () use ($amlaFiles, $codeOf, $relative, $channelOffences) {

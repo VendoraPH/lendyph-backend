@@ -45,17 +45,12 @@ class AmlaFilingController extends Controller
 {
     private const READ = [AmlaAccess::CTR, AmlaAccess::STR, AmlaAccess::APPROVE, AmlaAccess::SUBMIT, AmlaAccess::EXPORT];
 
-    private const STR_READ = Filings::STR_READ;
-
-    private const CTR_READ = Filings::CTR_READ;
-
     public function __construct(
         private readonly AmlaAccess $access,
         private readonly Filings $filings,
         private readonly FilingDeadlines $deadlines,
         private readonly AmlaLog $log,
         private readonly DetectionScope $scope,
-        private readonly BranchAccess $branches,
     ) {}
 
     #[OA\Post(path: '/api/amla/ctr-candidates/{id}/report', summary: 'Prepare a CTR', description: 'Needs `amla:ctr`. From a detected candidate in the caller\'s scope: a snapshot of its fields ("Data not available" where Lendy holds none), due the settings\' working days after the transaction ("to verify"). Waits for approval by someone else. 409 once prepared or set aside.', tags: ['AMLA'], security: [['sanctum' => []]], responses: [new OA\Response(response: 201, description: 'The report')])]
@@ -208,24 +203,14 @@ class AmlaFilingController extends Controller
         ])->values()->all()]);
     }
 
-    #[OA\Get(path: '/api/amla/filing-deadlines', summary: 'AMLA filings still to make, with their deadlines', description: 'Needs a reporting key. Unfiled reports, detected CTR candidates with no CTR yet, and (head office) cases whose STR isn\'t prepared; each with its due date on the working-day calendar, whether it is provisional, and whether it is upcoming, due today or overdue. Logged.', tags: ['AMLA'], security: [['sanctum' => []]], responses: [new OA\Response(response: 200, description: 'The filings')])]
+    #[OA\Get(path: '/api/amla/filing-deadlines', summary: 'AMLA filings still to make, with their deadlines', description: 'Needs a reporting key. Unfiled reports, detected CTR candidates with no CTR yet, and (head office) cases whose STR isn\'t prepared; each with its report type (`type`: ctr or str, and `type_words`), its due date on the working-day calendar, whether it is provisional, and whether it is upcoming, due today or overdue. Logged.', tags: ['AMLA'], security: [['sanctum' => []]], responses: [new OA\Response(response: 200, description: 'The filings')])]
     public function deadlines(Request $request): JsonResponse
     {
         $user = $request->user();
         $this->access->authorize($user, self::READ);
         $this->log->record('filing_deadlines_viewed', $user);
         $today = CarbonImmutable::now(WorkingDayCalendar::TIMEZONE)->toDateString();
-        $headOffice = $user->can(BranchAccess::VIEW_ALL);
-        $rows = [];
-
-        foreach ($this->deadlines->filings() as $filing) {
-            $keys = $filing['type'] === AmlaReport::STR ? self::STR_READ : self::CTR_READ;
-            $visible = $user->canAny($keys) && ($filing['head_office'] ? $headOffice : $this->branches->canSee($user, $filing['branch_id']));
-
-            if ($visible) {
-                $rows[] = AmlaCasePresenter::deadline($filing['subject_type'], $filing['id'], $filing['reference'], $filing['status_words'], $filing['due'], $today, $this->deadlines);
-            }
-        }
+        $rows = array_map(fn (array $filing) => AmlaCasePresenter::deadline($filing, $today, $this->deadlines), $this->deadlines->visibleTo($user));
 
         usort($rows, fn (array $a, array $b) => [$a['due_on'], $a['reference']] <=> [$b['due_on'], $b['reference']]);
 

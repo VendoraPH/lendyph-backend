@@ -63,6 +63,7 @@ final class MissingIdentity extends DetectionRule
                 self::indicator('ID on file', null),
                 self::indicator('Review amount', self::peso($review)),
             ],
+            countedTransactions: $events->count(),
         );
     }
 

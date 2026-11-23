@@ -2,8 +2,15 @@
 
 namespace App\Services\Amla\Foundation;
 
+use App\Models\AmlaAlert;
+use App\Models\AmlaCase;
+use App\Models\AmlaCtrCandidate;
 use App\Models\AmlaLogEntry;
+use App\Models\AmlaOrder;
+use App\Models\AmlaReport;
+use App\Models\Borrower;
 use App\Models\User;
+use Illuminate\Support\Collection;
 use InvalidArgumentException;
 
 /**
@@ -88,7 +95,22 @@ final class AmlaLog
         'risk_downgrades_viewed' => 'High-risk downgrades viewed',
     ];
 
-    /** @var array<string, string> each subject type in words, read as "<words> #<id>" */
+    /**
+     * Subjects named by their reference, as the main audit trail names
+     * records (a member by member code): the model and its reference column.
+     *
+     * @var array<string, array{0: class-string, 1: string}>
+     */
+    private const REFERENCED = [
+        'alert' => [AmlaAlert::class, 'reference'],
+        'ctr_candidate' => [AmlaCtrCandidate::class, 'reference'],
+        'case' => [AmlaCase::class, 'reference'],
+        'report' => [AmlaReport::class, 'reference'],
+        'order' => [AmlaOrder::class, 'reference'],
+        'member' => [Borrower::class, 'borrower_code'],
+    ];
+
+    /** @var array<string, string> each subject type in words, read as "<words> <reference>", or "<words> #<id>" when it has none */
     public const SUBJECTS = [
         'change_request' => 'Change request',
         'settings_version' => 'Settings version',
@@ -145,7 +167,7 @@ final class AmlaLog
         return self::ACTIONS[$action] ?? ucfirst(str_replace('_', ' ', $action));
     }
 
-    public static function subjectWords(?string $type, ?int $id): ?string
+    public static function subjectWords(?string $type, ?int $id, ?string $reference = null): ?string
     {
         if ($type === null) {
             return null;
@@ -153,7 +175,49 @@ final class AmlaLog
 
         $words = self::SUBJECTS[$type] ?? ucfirst(str_replace('_', ' ', $type));
 
-        return $id === null ? $words : "{$words} #{$id}";
+        return match (true) {
+            $id === null => $words,
+            filled($reference) => "{$words} {$reference}",
+            default => "{$words} #{$id}",
+        };
+    }
+
+    /**
+     * The references of the entries' subjects, one query per subject type,
+     * keyed "<type>:<id>". Records without a reference are left out and read
+     * "#<id>". An order's reference is the authority's own number, which can
+     * name its subject, so it is resolved only for `amla:sanctions` holders
+     * (who may open orders); everyone else reads "Order #<id>".
+     *
+     * @param  iterable<AmlaLogEntry>  $entries
+     * @return array<string, string>
+     */
+    public static function references(iterable $entries, User $viewer): array
+    {
+        $references = [];
+        $types = array_keys(self::REFERENCED);
+
+        if (! $viewer->can(AmlaAccess::SANCTIONS)) {
+            $types = array_values(array_diff($types, ['order']));
+        }
+
+        foreach (Collection::make($entries)->filter(fn (AmlaLogEntry $entry) => in_array($entry->subject_type, $types, true) && $entry->subject_id !== null)
+            ->groupBy('subject_type') as $type => $group) {
+            [$model, $column] = self::REFERENCED[$type];
+            $query = $model::query();
+
+            if (method_exists($model, 'bootSoftDeletes')) {
+                $query->withTrashed();
+            }
+
+            foreach ($query->whereIn('id', $group->pluck('subject_id')->unique()->values())->pluck($column, 'id') as $id => $reference) {
+                if (filled($reference)) {
+                    $references["{$type}:{$id}"] = (string) $reference;
+                }
+            }
+        }
+
+        return $references;
     }
 
     private static function clean(?string $value): ?string
