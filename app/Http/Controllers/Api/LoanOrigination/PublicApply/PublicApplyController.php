@@ -193,9 +193,10 @@ class PublicApplyController extends Controller
             ...$input,
         ], $request);
 
-        // The draft is the office's now: this session ends, so it can't read
-        // the draft back. Tracking takes a new code and the reference.
-        $this->sessions->end(self::session($request));
+        // The draft is the office's now: this session can't read it back or
+        // change it, but a retried submit still answers the same reference
+        // (decision 3). Tracking takes a new code and the reference.
+        $this->sessions->markSubmitted(self::session($request));
 
         return response()->json(['data' => $result]);
     }

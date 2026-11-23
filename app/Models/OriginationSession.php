@@ -19,7 +19,7 @@ class OriginationSession extends Model
     public const INTAKE_PURPOSES = ['apply', 'resume'];
 
     protected $fillable = [
-        'application_id', 'link_id', 'purpose', 'token_hash', 'ip_address', 'user_agent', 'last_used_at', 'expires_at', 'ended_at',
+        'application_id', 'link_id', 'purpose', 'token_hash', 'ip_address', 'user_agent', 'last_used_at', 'expires_at', 'ended_at', 'submitted_at',
     ];
 
     protected $hidden = ['token_hash'];
@@ -32,12 +32,18 @@ class OriginationSession extends Model
             'last_used_at' => 'datetime',
             'expires_at' => 'datetime',
             'ended_at' => 'datetime',
+            'submitted_at' => 'datetime',
         ];
     }
 
     public function isTracking(): bool
     {
         return $this->purpose === 'track';
+    }
+
+    public function hasSubmitted(): bool
+    {
+        return $this->submitted_at !== null;
     }
 
     public function application(): BelongsTo

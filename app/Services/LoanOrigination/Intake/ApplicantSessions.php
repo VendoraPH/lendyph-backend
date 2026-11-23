@@ -12,8 +12,9 @@ use Illuminate\Support\Str;
  * Applicant sessions (origination decision 8): a random 64-character token,
  * kept only as its SHA-256, tied to one link and one application. A session
  * ends 30 minutes after its last use or 4 hours after it began; a newer code
- * verified for the same application ends the earlier ones, and so do submit
- * and sign-out.
+ * verified for the same application ends the earlier ones, and so does
+ * sign-out. A session that submitted is marked so: it can only repeat the
+ * submit (which answers the same reference) or sign out.
  */
 final class ApplicantSessions
 {
@@ -22,6 +23,8 @@ final class ApplicantSessions
     public const REQUIRED = 'Ask for a code to continue your application.';
 
     public const EXPIRED = 'Your session has ended. Ask for a new code to continue.';
+
+    public const SUBMITTED = 'This application has been submitted. Ask for a code with your reference number to follow it.';
 
     public const WRONG_PURPOSE = 'This session can\'t do that. Ask for a new code to continue.';
 
@@ -43,6 +46,12 @@ final class ApplicantSessions
         ]);
 
         return ['token' => $token, 'session' => $session];
+    }
+
+    /** The session submitted its application: from now on it only repeats the submit or signs out. */
+    public function markSubmitted(OriginationSession $session): void
+    {
+        OriginationSession::query()->whereKey($session->id)->whereNull('submitted_at')->update(['submitted_at' => now()]);
     }
 
     public function end(OriginationSession $session): void

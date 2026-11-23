@@ -15,6 +15,8 @@ use Illuminate\Support\Facades\Schema;
  * - A session is a random token kept only as its SHA-256, tied to one link
  *   and one application. It ends 30 minutes after its last use, 4 hours
  *   after it began, or when a newer code is verified for the application.
+ *   `submitted_at` marks the session that submitted: it can only repeat the
+ *   submit (for the same reference) or sign out.
  *
  * New tables only; no existing row changes. Each create is skipped when its
  * table exists, so running it again changes nothing.
@@ -57,6 +59,7 @@ return new class extends Migration
                 $table->timestamp('last_used_at');
                 $table->timestamp('expires_at');
                 $table->timestamp('ended_at')->nullable();
+                $table->timestamp('submitted_at')->nullable();
                 $table->timestamp('created_at')->nullable();
                 $table->index(['application_id', 'ended_at']);
             });

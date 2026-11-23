@@ -73,8 +73,9 @@ final class ApplicantOtp
         $minutes = (int) config('loan_origination_intake.otp.minutes', 5);
         $code = str_pad((string) random_int(0, 999999), 6, '0', STR_PAD_LEFT);
         $shown = $this->testCodes->serves($link, $normalised);
+        $willSend = ! $shown && $this->sms->reachesSomeone() && $this->sms->permits($normalised);
 
-        $challenge = DB::transaction(function () use ($link, $purpose, $hash, $reference, $code, $shown, $minutes, $ip): OriginationOtpChallenge {
+        $challenge = DB::transaction(function () use ($link, $purpose, $hash, $reference, $code, $shown, $willSend, $minutes, $ip): OriginationOtpChallenge {
             // Read under a lock on the day's rows, so two requests at a cap
             // can't both pass. The deployment's cap counts only codes that
             // reached someone (sent, or shown in test mode), so requests for
@@ -109,15 +110,18 @@ final class ApplicantOtp
                 'reference_number' => $reference,
                 'code_hash' => Hash::make($code),
                 'test_mode' => $shown,
+                // Counted at once under the cap's lock, so codes asked for at
+                // the same moment can't pass it; set back if the send fails.
+                'delivered' => $willSend,
                 'expires_at' => now()->addMinutes($minutes),
                 'ip_address' => $ip,
             ]);
         });
 
-        $delivered = ! $shown && $this->send($challenge, $normalised, $code, $minutes);
+        $delivered = $willSend && $this->send($challenge, $normalised, $code, $minutes);
 
-        if ($delivered) {
-            $challenge->forceFill(['delivered' => true])->save();
+        if ($willSend && ! $delivered) {
+            $challenge->forceFill(['delivered' => false])->save();
         }
 
         return [
@@ -175,10 +179,6 @@ final class ApplicantOtp
 
     private function send(OriginationOtpChallenge $challenge, string $mobile, string $code, int $minutes): bool
     {
-        if (! $this->sms->reachesSomeone() || ! $this->sms->permits($mobile)) {
-            return false;
-        }
-
         $result = $this->sms->driver()->send(new OutgoingReminder(
             messageId: (int) $challenge->getKey(),
             queueItemId: 0,

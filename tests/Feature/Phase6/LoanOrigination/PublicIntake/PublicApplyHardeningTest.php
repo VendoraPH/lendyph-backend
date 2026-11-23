@@ -160,12 +160,13 @@ it('closes every link while the server can\'t tell visitors apart, and logs it o
     config(['trustedproxy.proxy_secret' => '']);
     Log::spy();
 
-    $this->getJson("/api/public-apply/{$link->token}")->assertJsonPath('data.accepting', false)
-        ->assertJsonPath('data.closed_reason', PublicPortal::NO_VISITOR_ADDRESS);
+    $page = $this->getJson("/api/public-apply/{$link->token}")->assertJsonPath('data.accepting', false)
+        ->assertJsonPath('data.closed_reason', PublicPortal::NOT_READY);
     $this->getJson("/api/public-apply/{$link->token}")->assertJsonPath('data.accepting', false);
-    $this->requestCode($link)->assertStatus(409)->assertJsonPath('message', PublicPortal::NO_VISITOR_ADDRESS);
+    $this->requestCode($link)->assertStatus(409)->assertJsonPath('message', PublicPortal::NOT_READY);
 
-    Log::shouldHaveReceived('warning')->once();
+    expect($page->getContent())->not->toContain('limit')->not->toContain('tell visitors');
+    Log::shouldHaveReceived('warning')->once()->withArgs(fn (string $message) => str_contains($message, 'LENDYPH_PROXY_SECRET'));
     expect(OriginationApplication::query()->count())->toBe(0);
 });
 

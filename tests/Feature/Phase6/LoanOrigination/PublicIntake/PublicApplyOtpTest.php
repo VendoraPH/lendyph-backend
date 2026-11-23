@@ -171,6 +171,45 @@ it('sends through a provider only to an allow-listed number, never shows the cod
         ->and($driver->sent[0]->recipient)->toBe('639171234567');
 });
 
+it('records that a code will be sent when its row is written, so the daily cap counts it at once', function () {
+    $link = $this->enableIntake();
+    config(['loan_origination_intake.otp.test_codes' => false]);
+    $driver = new class implements ReminderDriver
+    {
+        /** @var list<mixed> */
+        public array $seen = [];
+
+        public function name(): string
+        {
+            return 'provider';
+        }
+
+        public function reachesNobody(): bool
+        {
+            return false;
+        }
+
+        public function send(OutgoingReminder $reminder): DriverResult
+        {
+            $this->seen[] = DB::table('origination_otp_challenges')->where('id', $reminder->messageId)->value('delivered');
+
+            return count($this->seen) === 1 ? DriverResult::sent('p-1') : DriverResult::permanentFailure('bad', 'Refused');
+        }
+
+        public function creditsRemaining(): ?int
+        {
+            return null;
+        }
+    };
+    loPubUseDriver($driver);
+
+    $this->requestCode($link)->assertOk()->assertJsonPath('data.delivered', true);
+    $this->requestCode($link, $this->secondStaffMobile)->assertOk()->assertJsonPath('data.delivered', false);
+
+    expect($driver->seen)->toBe([1, 1])
+        ->and(DB::table('origination_otp_challenges')->orderBy('id')->pluck('delivered')->all())->toBe([1, 0]);
+});
+
 it('takes Philippine mobile numbers only, by SMS only', function (array $input, string $field) {
     $link = $this->enableIntake();
 

@@ -194,7 +194,7 @@ it('submits once: checks the draft, documents and notices, records the consents 
         ->assertUnprocessable()->assertJsonValidationErrors('terms_version');
 
     $first = $this->postJson($url, $this->consents(['marketing_opt_in' => true]), $this->applicantSession($this->token))->assertOk()->json('data');
-    $again = app(ApplicantIntake::class)->submit(OriginationApplication::query()->sole(), $this->link, $this->consents(), request());
+    $again = $this->postJson($url, $this->consents(), $this->applicantSession($this->token))->assertOk()->json('data');
 
     expect($first['reference_number'])->toMatch('/^OA-\d{4}-000001$/')
         ->and($again['reference_number'])->toBe($first['reference_number']);
@@ -222,22 +222,31 @@ it('lists what blocks a submit in words', function () {
         ->assertUnprocessable()->assertJsonPath('errors', ['draft.personal.gender' => ['Choose your gender.']]);
 });
 
-it('ends the intake session at submit and freezes the draft', function () {
+it('marks the session submitted: a repeat submit answers the reference, every other intake route refuses', function () {
     loPubSave($this, $this->link, $this->token, $this->completeDraft($this->product->id))->assertOk();
     loPubUploadRequired($this, $this->link, $this->token);
-    $this->postJson("/api/public-apply/{$this->link->token}/submit", $this->consents(), $this->applicantSession($this->token))->assertOk();
+    $url = "/api/public-apply/{$this->link->token}/submit";
+    $reference = $this->postJson($url, $this->consents(), $this->applicantSession($this->token))->assertOk()->json('data.reference_number');
 
-    $this->getJson("/api/public-apply/{$this->link->token}/draft", $this->applicantSession($this->token))->assertUnauthorized()
-        ->assertJsonPath('code', 'session_expired');
-    loPubSave($this, $this->link, $this->token, $this->completeDraft($this->product->id))->assertUnauthorized();
-    $this->post("/api/public-apply/{$this->link->token}/documents", ['type' => 'proof_of_address', 'file' => $this->png()], [...$this->applicantSession($this->token), 'Accept' => 'application/json'])->assertUnauthorized();
+    $this->getJson("/api/public-apply/{$this->link->token}/draft", $this->applicantSession($this->token))->assertStatus(409)
+        ->assertJsonPath('code', 'session_submitted');
+    loPubSave($this, $this->link, $this->token, $this->completeDraft($this->product->id))->assertStatus(409);
+    $this->postJson("/api/public-apply/{$this->link->token}/estimate", [], $this->applicantSession($this->token))->assertStatus(409);
+    $this->post("/api/public-apply/{$this->link->token}/documents", ['type' => 'proof_of_address', 'file' => $this->png()], [...$this->applicantSession($this->token), 'Accept' => 'application/json'])->assertStatus(409);
+    $this->deleteJson("/api/public-apply/{$this->link->token}/documents/x", [], $this->applicantSession($this->token))->assertStatus(409);
+
+    $this->link->forceFill(['active' => false])->save();
+    $this->postJson($url, $this->consents(), $this->applicantSession($this->token))->assertOk()->assertJsonPath('data.reference_number', $reference);
+    $this->postJson("/api/public-apply/{$this->link->token}/logout", [], $this->applicantSession($this->token))->assertNoContent();
+    $this->postJson($url, $this->consents(), $this->applicantSession($this->token))->assertUnauthorized();
 
     expect(fn () => app(ApplicantIntake::class)->saveDraft(OriginationApplication::query()->sole(), $this->link, $this->completeDraft($this->product->id)))
         ->toThrow(HttpResponseException::class);
     expect(OriginationApplication::query()->sole()->status)->toBe('submitted');
 });
 
-it('signs the applicant out, ending the session', function () {
+it('signs the applicant out even while the link is closed', function () {
+    $this->link->forceFill(['active' => false])->save();
     $this->postJson("/api/public-apply/{$this->link->token}/logout", [], $this->applicantSession($this->token))->assertNoContent();
 
     $this->getJson("/api/public-apply/{$this->link->token}/draft", $this->applicantSession($this->token))->assertUnauthorized();

@@ -13,7 +13,7 @@ final class PublicApplyStack
 {
     /**
      * @param  string  $limiter  a `public-apply-*` limiter (LoanOriginationServiceProvider)
-     * @param  ?string  $session  `intake`, `track` or `any`; null for the routes before the code step
+     * @param  ?string  $session  `intake`, `track`, `any`, `submit` or `logout` (RequireApplicationSession); null before the code step
      * @return list<string>
      */
     public static function for(string $limiter, ?string $session = null): array

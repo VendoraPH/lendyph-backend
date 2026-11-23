@@ -43,8 +43,6 @@ final class PublicPortal
 
     public const CLOSED = 'This link isn\'t taking applications right now. Please contact the office.';
 
-    public const NO_VISITOR_ADDRESS = 'Online applications can\'t open yet: the server can\'t tell visitors apart, so it can\'t limit misuse. Please contact the office.';
-
     private const PROXY_WARNING_KEY = 'loan-origination:proxy-secret-warning';
 
     public function __construct(
@@ -59,7 +57,8 @@ final class PublicPortal
             ! OriginationSetting::current()->online_applications_enabled => self::SETTINGS_OFF,
             $link->status() === OriginationLink::STATUS_DISABLED => self::LINK_OFF,
             $link->status() === OriginationLink::STATUS_EXPIRED => self::LINK_EXPIRED,
-            ! $this->knowsVisitorAddresses() => self::NO_VISITOR_ADDRESS,
+            // The public reads only "not ready"; the reason is logged.
+            ! $this->knowsVisitorAddresses() => self::NOT_READY,
             $this->notices->missingRequired() !== [] => self::NOT_READY,
             $this->products($link)->isEmpty() => self::NO_PRODUCTS,
             $this->otp->channels($link) === [] => ApplicantOtp::NO_CHANNEL,
