@@ -153,3 +153,42 @@ it('ignores the current borrower when updating (no self-duplicate)', function ()
         'birthdate' => '1990-01-15',
     ])->assertSuccessful();
 });
+
+/*
+ * The duplicate check compares text. A name or birthdate sent as a list is
+ * left to that field's own rules, which answer 422; reading it as text answered
+ * 500 (security review, 2026-11-24).
+ */
+it('answers 422, never 500, when a public registration sends a name or the birthdate as a list', function (string $field) {
+    $this->app['auth']->forgetGuards();
+
+    $this->postJson('/api/borrowers', registerPayload(['status' => 'pending', $field => ['x']]))
+        ->assertUnprocessable()
+        ->assertJsonValidationErrors($field);
+})->with(['first_name', 'middle_name', 'last_name', 'birthdate']);
+
+it('answers 422, never 500, when a member edit sends a name or the birthdate as a list', function (string $field) {
+    $borrower = createBorrower();
+
+    $this->putJson("/api/borrowers/{$borrower->id}", [
+        'first_name' => 'Juan',
+        'middle_name' => 'Santos',
+        'last_name' => 'Dela Cruz',
+        'birthdate' => '1990-01-15',
+        $field => ['x'],
+    ])->assertUnprocessable()->assertJsonValidationErrors($field);
+})->with(['first_name', 'middle_name', 'last_name', 'birthdate']);
+
+it('refuses a public registration whose birthdate is sent as a number, so a number cannot slip a duplicate past the check', function (int|float|string $birthdate) {
+    createBorrower();
+    $this->app['auth']->forgetGuards();
+    $before = Borrower::count();
+
+    // The duplicate check steps aside for a number; the birthdate's own rule
+    // (written year-month-day) refuses it.
+    $this->postJson('/api/borrowers', registerPayload(['status' => 'pending', 'birthdate' => $birthdate]))
+        ->assertUnprocessable()
+        ->assertJsonValidationErrors('birthdate');
+
+    expect(Borrower::count())->toBe($before);
+})->with([19900115, 19900115.0, '19900115']);

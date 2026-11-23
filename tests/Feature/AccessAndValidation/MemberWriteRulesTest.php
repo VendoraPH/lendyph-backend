@@ -11,9 +11,9 @@ use Tests\TestCase;
 use Tests\Traits\SetupLendyPH;
 
 /**
- * Three write rules on members and their documents: valid IDs have their own
- * upload, a street address reaches `address`, and a status change goes through
- * its own route.
+ * Four write rules on members and their documents: valid IDs have their own
+ * upload, a street address reaches `address`, a status change goes through
+ * its own route, and member dates are written year-month-day.
  */
 class MemberWriteRulesTest extends TestCase
 {
@@ -164,5 +164,117 @@ class MemberWriteRulesTest extends TestCase
 
         $this->patchJson("/api/borrowers/{$this->member->id}/reactivate")->assertOk();
         $this->assertSame('active', $this->member->fresh()->status);
+    }
+
+    // ── Member dates are written year-month-day ──
+
+    private const DATE_REFUSALS = [
+        'birthdate' => 'The birthdate must be a date written as year-month-day, such as 1990-01-15.',
+        'date_hired' => 'The date hired must be a date written as year-month-day, such as 2020-06-01.',
+        'membership_date' => 'The membership date must be a date written as year-month-day, such as 2026-01-15.',
+    ];
+
+    /**
+     * A number passes the `date` rule (19900115 reads as 1990-01-15) but the
+     * model's date cast stores it as a Unix timestamp (1970-08-19).
+     *
+     * @return array<string, array{string, int|float|string}>
+     */
+    public static function numericMemberDates(): array
+    {
+        return [
+            'birthdate as a whole number' => ['birthdate', 19900115],
+            'birthdate as a decimal' => ['birthdate', 19900115.0],
+            'birthdate as digits' => ['birthdate', '19900115'],
+            'date hired as a whole number' => ['date_hired', 20150601],
+            'date hired as digits' => ['date_hired', '20150601'],
+        ];
+    }
+
+    /**
+     * @return array<string, array{string, int|float|string}>
+     */
+    public static function numericMemberDatesOnAnEdit(): array
+    {
+        return [
+            ...self::numericMemberDates(),
+            'membership date as a whole number' => ['membership_date', 20250101],
+        ];
+    }
+
+    #[DataProvider('numericMemberDates')]
+    public function test_the_public_form_refuses_a_member_date_sent_as_a_number(string $field, int|float|string $value): void
+    {
+        $this->app['auth']->forgetGuards();
+        $before = Borrower::count();
+
+        $this->postJson('/api/borrowers', $this->registration([$field => $value]))
+            ->assertUnprocessable()
+            ->assertJsonPath("errors.{$field}", [self::DATE_REFUSALS[$field]]);
+
+        $this->assertSame($before, Borrower::count());
+    }
+
+    #[DataProvider('numericMemberDatesOnAnEdit')]
+    public function test_a_member_edit_refuses_a_member_date_sent_as_a_number(string $field, int|float|string $value): void
+    {
+        $stored = $this->member->{$field}?->toDateString();
+
+        $this->putJson("/api/borrowers/{$this->member->id}", [$field => $value])
+            ->assertUnprocessable()
+            ->assertJsonPath("errors.{$field}", [self::DATE_REFUSALS[$field]]);
+
+        $this->assertSame($stored, $this->member->fresh()->{$field}?->toDateString());
+    }
+
+    public function test_the_public_form_saves_year_month_day_dates_as_sent(): void
+    {
+        $this->app['auth']->forgetGuards();
+
+        $id = $this->postJson('/api/borrowers', $this->registration(['birthdate' => '1988-02-29', 'date_hired' => '2015-06-01']))
+            ->assertCreated()
+            ->json('data.id');
+
+        $member = Borrower::findOrFail($id);
+        $this->assertSame('1988-02-29', $member->birthdate->toDateString());
+        $this->assertSame('2015-06-01', $member->date_hired->toDateString());
+    }
+
+    public function test_a_member_edit_saves_year_month_day_dates_as_sent(): void
+    {
+        $this->putJson("/api/borrowers/{$this->member->id}", [
+            'birthdate' => '1979-12-31',
+            'date_hired' => '2016-07-04',
+            'membership_date' => '2025-01-01',
+        ])->assertOk();
+
+        $member = $this->member->fresh();
+        $this->assertSame('1979-12-31', $member->birthdate->toDateString());
+        $this->assertSame('2016-07-04', $member->date_hired->toDateString());
+        $this->assertSame('2025-01-01', $member->membership_date->toDateString());
+    }
+
+    /**
+     * A complete public registration, as the form sends it.
+     *
+     * @param  array<string, mixed>  $overrides
+     * @return array<string, mixed>
+     */
+    private function registration(array $overrides = []): array
+    {
+        return [
+            'status' => 'pending',
+            'branch_id' => $this->branch->id,
+            'first_name' => 'Rosalinda',
+            'last_name' => 'Macaraeg',
+            'birthdate' => '1985-06-15',
+            'gender' => 'female',
+            'civil_status' => 'single',
+            'contact_number' => '09171234567',
+            'address' => '9 Rizal Ave',
+            'city' => 'Butuan',
+            'province' => 'Agusan del Norte',
+            ...$overrides,
+        ];
     }
 }
