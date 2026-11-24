@@ -8,6 +8,7 @@ use App\Http\Requests\Accounting\PreviewJournalRequest;
 use App\Http\Requests\Accounting\ReverseJournalRequest;
 use App\Http\Requests\Accounting\StoreJournalRequest;
 use App\Http\Requests\Accounting\UpdateJournalRequest;
+use App\Http\Requests\Concerns\DateInputMessages;
 use App\Http\Resources\JournalEntryResource;
 use App\Models\AccountingJournal;
 use App\Services\Accounting\JournalPoster;
@@ -96,8 +97,8 @@ class AccountingJournalController extends Controller
         $this->authorize('journals:view');
 
         $filters = request()->validate([
-            'from' => ['nullable', 'date'],
-            'to' => ['nullable', 'date'],
+            'from' => ['nullable', 'date', 'date_format:Y-m-d'],
+            'to' => ['nullable', 'date', 'date_format:Y-m-d'],
             'status' => ['nullable', Rule::in(AccountingJournal::STATUSES)],
             /*
              * Every enum value, INCLUDING the eight nothing writes.
@@ -128,7 +129,7 @@ class AccountingJournalController extends Controller
             // `$perPage ?: $model->getPerPage()` and silently becomes 15, while
             // a negative value reaches the database as a negative LIMIT.
             'per_page' => ['nullable', 'integer', 'min:1'],
-        ]);
+        ], DateInputMessages::calendar(['from' => 'start date', 'to' => 'end date']));
 
         $perPage = min((int) ($filters['per_page'] ?? 15), 100);
 

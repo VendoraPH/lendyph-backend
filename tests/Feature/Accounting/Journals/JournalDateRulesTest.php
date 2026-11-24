@@ -132,10 +132,10 @@ class JournalDateRulesTest extends TestCase
             ->assertStatus(422)
             ->assertJsonPath('errors.date.0', self::REVERSAL_REFUSAL);
 
-        // Its Manila day is what counts: 23:00 on Nov 11 at UTC-1 is Nov 12 in Manila.
+        // A day is written year-month-day: a time with an offset is refused, never read as another day.
         $this->postJson("/api/accounting/journals/{$original->id}/reverse", ['date' => '2026-11-11T23:00:00-01:00'])
             ->assertStatus(422)
-            ->assertJsonPath('errors.date.0', self::REVERSAL_REFUSAL);
+            ->assertJsonPath('errors.date.0', 'The reversal date must be a date written as year-month-day, such as 2026-11-24.');
 
         $this->assertSame(0, AccountingJournal::query()->where('source', 'reversal')->count());
         $this->assertSame('posted', $original->fresh()->status);

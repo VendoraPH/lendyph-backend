@@ -74,17 +74,24 @@ class MembershipFieldsTest extends TestCase
         $this->assertNull($pending->fresh()->membership_number);
     }
 
-    public function test_the_member_type_and_membership_date_can_be_edited(): void
+    public function test_the_member_type_and_membership_date_are_edited_on_their_own_route_never_through_the_member_update(): void
     {
-        $member = Borrower::factory()->create(['branch_id' => $this->branch->id]);
+        $member = Borrower::factory()->create(['branch_id' => $this->branch->id, 'membership_date' => '2020-01-01']);
 
-        $this->putJson("/api/borrowers/{$member->id}", ['member_type' => 'associate', 'membership_date' => '2019-03-01'])
+        // The member update ignores them, as it ignores `status` (finish run round 2).
+        $this->putJson("/api/borrowers/{$member->id}", ['member_type' => 'associate', 'membership_date' => '2019-03-01', 'membership_number' => 'MEM-1'])
+            ->assertOk()
+            ->assertJsonPath('data.member_type', 'regular')
+            ->assertJsonPath('data.membership_date', '2020-01-01')
+            ->assertJsonPath('data.membership_number', $member->borrower_code);
+
+        $this->patchJson("/api/borrowers/{$member->id}/membership", ['member_type' => 'associate', 'membership_date' => '2019-03-01'])
             ->assertOk()
             ->assertJsonPath('data.member_type', 'associate')
             ->assertJsonPath('data.membership_date', '2019-03-01');
 
-        $this->putJson("/api/borrowers/{$member->id}", ['member_type' => 'honorary'])->assertUnprocessable()->assertJsonValidationErrors('member_type');
-        $this->putJson("/api/borrowers/{$member->id}", ['membership_date' => '2026-12-01'])->assertUnprocessable()->assertJsonValidationErrors('membership_date');
+        $this->patchJson("/api/borrowers/{$member->id}/membership", ['member_type' => 'honorary'])->assertUnprocessable()->assertJsonValidationErrors('member_type');
+        $this->patchJson("/api/borrowers/{$member->id}/membership", ['membership_date' => '2026-12-01'])->assertUnprocessable()->assertJsonValidationErrors('membership_date');
     }
 
     public function test_withdrawing_is_refused_in_words_while_a_loan_savings_or_share_capital_is_open(): void

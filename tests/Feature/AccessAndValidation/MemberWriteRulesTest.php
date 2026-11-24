@@ -171,7 +171,6 @@ class MemberWriteRulesTest extends TestCase
     private const DATE_REFUSALS = [
         'birthdate' => 'The birthdate must be a date written as year-month-day, such as 1990-01-15.',
         'date_hired' => 'The date hired must be a date written as year-month-day, such as 2020-06-01.',
-        'membership_date' => 'The membership date must be a date written as year-month-day, such as 2026-01-15.',
     ];
 
     /**
@@ -191,17 +190,6 @@ class MemberWriteRulesTest extends TestCase
         ];
     }
 
-    /**
-     * @return array<string, array{string, int|float|string}>
-     */
-    public static function numericMemberDatesOnAnEdit(): array
-    {
-        return [
-            ...self::numericMemberDates(),
-            'membership date as a whole number' => ['membership_date', 20250101],
-        ];
-    }
-
     #[DataProvider('numericMemberDates')]
     public function test_the_public_form_refuses_a_member_date_sent_as_a_number(string $field, int|float|string $value): void
     {
@@ -215,7 +203,11 @@ class MemberWriteRulesTest extends TestCase
         $this->assertSame($before, Borrower::count());
     }
 
-    #[DataProvider('numericMemberDatesOnAnEdit')]
+    /**
+     * The membership date has its own route since finish run round 2
+     * (MembershipDetailsTest refuses one sent as a number there).
+     */
+    #[DataProvider('numericMemberDates')]
     public function test_a_member_edit_refuses_a_member_date_sent_as_a_number(string $field, int|float|string $value): void
     {
         $stored = $this->member->{$field}?->toDateString();
@@ -245,13 +237,11 @@ class MemberWriteRulesTest extends TestCase
         $this->putJson("/api/borrowers/{$this->member->id}", [
             'birthdate' => '1979-12-31',
             'date_hired' => '2016-07-04',
-            'membership_date' => '2025-01-01',
         ])->assertOk();
 
         $member = $this->member->fresh();
         $this->assertSame('1979-12-31', $member->birthdate->toDateString());
         $this->assertSame('2016-07-04', $member->date_hired->toDateString());
-        $this->assertSame('2025-01-01', $member->membership_date->toDateString());
     }
 
     /**

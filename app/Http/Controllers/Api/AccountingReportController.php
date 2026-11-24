@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Api\Traits\ScopesBranchFilter;
 use App\Http\Controllers\Controller;
+use App\Http\Requests\Concerns\DateInputMessages;
 use App\Http\Resources\LedgerEntryResource;
 use App\Models\AccountingAccount;
 use App\Models\AccountingJournal;
@@ -79,13 +80,13 @@ class AccountingReportController extends Controller
 
         $filters = request()->validate([
             'account_id' => ['required', 'integer', 'exists:accounting_accounts,id'],
-            'from' => ['nullable', 'date'],
-            'to' => ['nullable', 'date', Rule::when(filled(request()->input('from')), ['after_or_equal:from'])],
+            'from' => ['nullable', 'date', 'date_format:Y-m-d'],
+            'to' => ['nullable', 'date', 'date_format:Y-m-d', Rule::when(filled(request()->input('from')), ['after_or_equal:from'])],
             'source' => ['nullable', 'string', Rule::in(AccountingJournal::SOURCES)],
             'branch_id' => ['nullable', 'integer'],
             'page' => ['nullable', 'integer', 'min:1'],
             'per_page' => ['nullable', 'integer', 'min:1'],
-        ]);
+        ], DateInputMessages::calendar(['from' => 'start date', 'to' => 'end date']));
 
         $account = AccountingAccount::query()->findOrFail($filters['account_id']);
 
@@ -139,9 +140,9 @@ class AccountingReportController extends Controller
         $this->authorize('accounting:view');
 
         $filters = request()->validate([
-            'as_of' => ['nullable', 'date'],
+            'as_of' => ['nullable', 'date', 'date_format:Y-m-d'],
             'branch_id' => ['nullable', 'integer'],
-        ]);
+        ], DateInputMessages::calendar(['as_of' => 'report date']));
 
         return response()->json([
             'data' => $this->trialBalance->build(
@@ -173,10 +174,10 @@ class AccountingReportController extends Controller
         $this->authorize('accounting:view');
 
         $filters = request()->validate([
-            'as_of' => ['nullable', 'date'],
+            'as_of' => ['nullable', 'date', 'date_format:Y-m-d'],
             'from' => ['nullable', 'date_format:Y-m-d'],
             'branch_id' => ['nullable', 'integer'],
-        ]);
+        ], DateInputMessages::calendar(['as_of' => 'report date', 'from' => 'start date']));
 
         $asOf = $this->asOf($filters);
         $from = $filters['from'] ?? null;
@@ -217,9 +218,9 @@ class AccountingReportController extends Controller
         $this->authorize('accounting:view');
 
         $filters = request()->validate([
-            'as_of' => ['nullable', 'date'],
+            'as_of' => ['nullable', 'date', 'date_format:Y-m-d'],
             'branch_id' => ['nullable', 'integer'],
-        ]);
+        ], DateInputMessages::calendar(['as_of' => 'report date']));
 
         return response()->json([
             'data' => $this->receivableAging->build(

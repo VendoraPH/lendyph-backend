@@ -76,6 +76,13 @@ jobs:
         # Staging only: AMLA monitoring (Phase 6 plan §8, Arvin 2026-11-19 "Yes GO!"): events, detection
         # and screening collect from now, into AMLA tables only. No outbound channels; screens stay behind their flag.
         export AMLA_MONITORING_ENABLED=true
+        # Staging only: loan origination (Arvin, 2026-11-24, finish run round 2, decision 10). qpdf
+        # is on the box (installed 2026-11-24) and PDFs are checked with it. Test codes reach only
+        # the reminders allow-list's staff numbers, on Test links; production refuses to boot with them.
+        export LOAN_ORIGINATION_ENABLED=true
+        export LOAN_ORIGINATION_OTP_TEST_CODES=true
+        export LOAN_ORIGINATION_PUBLIC_URL=https://staging-app.lendyph.com
+        export LOAN_ORIGINATION_QPDF_BINARY=/usr/bin/qpdf
         # Linda's AI key, delivered by the step above (staging only). Exported so
         # config:cache bakes it in; never echoed, never on a command line. Without it
         # Linda answers with its matcher only (LINDA_DRIVER stays none).

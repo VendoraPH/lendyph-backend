@@ -2,6 +2,7 @@
 
 namespace App\Http\Requests\ShareCapital;
 
+use App\Http\Requests\Concerns\DateInputMessages;
 use App\Http\Requests\Concerns\ReferenceNumberMessages;
 use App\Services\ShareCapitalService;
 use Illuminate\Foundation\Http\FormRequest;
@@ -32,7 +33,7 @@ class ShareCapitalManualEntryRequest extends FormRequest
         return [
             'amount' => ['required', 'numeric', 'min:0.01', 'decimal:0,2'],
             'type' => ['required', 'in:credit,debit'],
-            'date' => ['required', 'date', 'before_or_equal:today'],
+            'date' => ['required', 'date', 'date_format:Y-m-d', 'before_or_equal:today'],
             'description' => ['nullable', 'string', 'max:255'],
             'method' => ['sometimes', Rule::in(ShareCapitalService::ENTRY_METHODS)],
             'reference_number' => ['nullable', 'string', 'max:100', 'required_unless:method,cash'],
@@ -44,7 +45,7 @@ class ShareCapitalManualEntryRequest extends FormRequest
      */
     public function messages(): array
     {
-        return $this->referenceNumberMessages();
+        return [...$this->referenceNumberMessages(), ...DateInputMessages::calendar(['date' => 'entry date'])];
     }
 
     /**

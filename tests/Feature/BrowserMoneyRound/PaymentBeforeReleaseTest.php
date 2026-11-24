@@ -104,20 +104,20 @@ class PaymentBeforeReleaseTest extends TestCase
     }
 
     /**
-     * The repayment is stored with the input's own calendar date, offset
-     * included, so that is the date the rule compares. 16:30 UTC on the 28th
-     * is already the 1st in Manila, but it would be stored as the 28th, before
-     * the release on the 1st.
+     * A payment date is a calendar day written year-month-day (Finish run
+     * round 2, decision 1). A time or an offset is refused in words, never read
+     * as some other day: 16:30 UTC on the 28th is the 1st in Manila but would
+     * have been stored as the 28th, before the release on the 1st.
      */
-    public function test_an_offset_timestamp_that_would_be_stored_before_release_is_refused(): void
+    public function test_a_payment_date_with_a_time_or_offset_is_refused_in_words(): void
     {
         $this->travelTo(Carbon::parse('2026-03-01 09:00'));
         $loan = $this->releasedLoanFor(startDate: '2026-02-20');
         $this->travelTo(Carbon::parse('2026-03-10 09:00'));
 
-        $message = "The payment date can't be before the loan's release date (2026-03-01).";
+        $message = 'The payment date must be a date written as year-month-day, such as 2026-11-24.';
 
-        foreach (['2026-02-28T16:30:00Z', '2026-02-28T20:00:00-05:00'] as $paymentDate) {
+        foreach (['2026-02-28T16:30:00Z', '2026-02-28T20:00:00-05:00', '2026-03-01T01:00:00+08:00'] as $paymentDate) {
             $this->postJson("/api/loans/{$loan->id}/repayments", ['amount_paid' => 1000, 'payment_date' => $paymentDate])
                 ->assertStatus(422)
                 ->assertJsonValidationErrors(['payment_date' => $message]);
@@ -128,9 +128,8 @@ class PaymentBeforeReleaseTest extends TestCase
 
         $this->assertSame(0, Repayment::where('loan_id', $loan->id)->count());
 
-        // An offset timestamp whose own date is the release day is accepted
-        // and stored with that date.
-        $this->postJson("/api/loans/{$loan->id}/repayments", ['amount_paid' => 1000, 'payment_date' => '2026-03-01T01:00:00+08:00'])
+        // The release day, written as a day, is accepted and stored as that day.
+        $this->postJson("/api/loans/{$loan->id}/repayments", ['amount_paid' => 1000, 'payment_date' => '2026-03-01'])
             ->assertCreated()
             ->assertJsonPath('data.payment_date', '2026-03-01');
     }

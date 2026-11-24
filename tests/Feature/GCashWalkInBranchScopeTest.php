@@ -42,11 +42,11 @@ class GCashWalkInBranchScopeTest extends TestCase
         $base = ['transactor_user_id' => $this->admin->id, 'transaction_date' => now()];
 
         $this->rows = [
-            'member_here' => GCashTransaction::factory()->create([...$base, 'borrower_id' => $here->id, 'type' => 'cash_in', 'status' => 'paid', 'charge_amount' => 10]),
-            'member_there' => GCashTransaction::factory()->create([...$base, 'borrower_id' => $there->id, 'type' => 'cash_in', 'status' => 'paid', 'charge_amount' => 20]),
+            'member_here' => GCashTransaction::factory()->create([...$base, 'borrower_id' => $here->id, 'type' => 'cash_in', 'status' => 'paid', 'paid_at' => now(), 'charge_amount' => 10]),
+            'member_there' => GCashTransaction::factory()->create([...$base, 'borrower_id' => $there->id, 'type' => 'cash_in', 'status' => 'paid', 'paid_at' => now(), 'charge_amount' => 20]),
             'walk_in_here' => GCashTransaction::factory()->forNonMember($this->walkInPerson)->create([...$base, 'branch_id' => $this->branch->id, 'type' => 'cash_out', 'status' => 'completed', 'charge_amount' => 15.5]),
             'walk_in_there' => GCashTransaction::factory()->forNonMember($this->walkInPerson)->create([...$base, 'branch_id' => $this->far->id, 'type' => 'cash_out', 'status' => 'completed', 'charge_amount' => 40]),
-            'walk_in_head_office' => GCashTransaction::factory()->forNonMember($this->walkInPerson)->create([...$base, 'branch_id' => null, 'type' => 'cash_in', 'status' => 'paid', 'charge_amount' => 80]),
+            'walk_in_head_office' => GCashTransaction::factory()->forNonMember($this->walkInPerson)->create([...$base, 'branch_id' => null, 'type' => 'cash_in', 'status' => 'paid', 'paid_at' => now(), 'charge_amount' => 80]),
             'pending_walk_in_here' => GCashTransaction::factory()->forNonMember($this->walkInPerson)->create([...$base, 'branch_id' => $this->branch->id, 'type' => 'cash_in', 'status' => 'pending']),
             'pending_walk_in_there' => GCashTransaction::factory()->forNonMember($this->walkInPerson)->create([...$base, 'branch_id' => $this->far->id, 'type' => 'cash_in', 'status' => 'pending']),
             'pending_walk_in_head_office' => GCashTransaction::factory()->forNonMember($this->walkInPerson)->create([...$base, 'branch_id' => null, 'type' => 'cash_in', 'status' => 'pending']),

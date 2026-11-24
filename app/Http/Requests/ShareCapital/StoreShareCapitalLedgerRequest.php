@@ -2,6 +2,7 @@
 
 namespace App\Http\Requests\ShareCapital;
 
+use App\Http\Requests\Concerns\DateInputMessages;
 use App\Http\Requests\Concerns\ReferenceNumberMessages;
 use App\Models\Borrower;
 use App\Services\BranchAccess;
@@ -30,7 +31,7 @@ class StoreShareCapitalLedgerRequest extends FormRequest
                     $fail('This member withdrew from the cooperative, so no share capital is recorded for them. Reactivate the membership first, with a reason.');
                 }
             }],
-            'date' => ['required', 'date', 'before_or_equal:today'],
+            'date' => ['required', 'date', 'date_format:Y-m-d', 'before_or_equal:today'],
             'description' => ['required', 'string', 'max:255'],
             'type' => ['required', 'in:credit,debit'],
             'amount' => ['required', 'numeric', 'min:0.01', 'decimal:0,2'],
@@ -44,7 +45,7 @@ class StoreShareCapitalLedgerRequest extends FormRequest
      */
     public function messages(): array
     {
-        return $this->referenceNumberMessages();
+        return [...$this->referenceNumberMessages(), ...DateInputMessages::calendar(['date' => 'entry date'])];
     }
 
     /**

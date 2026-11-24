@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Http\Requests\Concerns\DateInputMessages;
 use App\Http\Requests\Repayment\StoreRepaymentRequest;
 use App\Http\Requests\Repayment\VoidRepaymentRequest;
 use App\Http\Resources\RepaymentResource;
@@ -88,10 +89,10 @@ class RepaymentController extends Controller
             // carry, and it used to reach a `when()` that treats it as absent.
             'loan_id' => ['nullable', 'integer', 'min:1'],
             'borrower_id' => ['nullable', 'integer', 'min:1'],
-            'date_from' => ['nullable', 'date'],
-            'date_to' => ['nullable', 'date'],
+            'date_from' => ['nullable', 'date', 'date_format:Y-m-d'],
+            'date_to' => ['nullable', 'date', 'date_format:Y-m-d'],
             'per_page' => ['nullable', 'integer', 'min:1'],
-        ]);
+        ], DateInputMessages::calendar(['date_from' => 'start date', 'date_to' => 'end date']));
 
         /**
          * Pulled out as locals so every filter below can be gated on filled() —
@@ -465,8 +466,8 @@ class RepaymentController extends Controller
 
         $validated = request()->validate([
             'amount_paid' => ['required', 'numeric', 'decimal:0,2', 'min:0.01'],
-            'payment_date' => ['required', 'date', StoreRepaymentRequest::notBeforeRelease($loan)],
-        ]);
+            'payment_date' => ['required', 'date', 'date_format:Y-m-d', StoreRepaymentRequest::notBeforeRelease($loan)],
+        ], DateInputMessages::calendar(['payment_date' => 'payment date']));
 
         $preview = $this->repaymentService->previewAllocation(
             $loan,

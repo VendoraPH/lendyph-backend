@@ -2,11 +2,16 @@
 
 namespace App\Services;
 
+use App\Models\Borrower;
+use App\Models\Branch;
+use App\Models\BranchClosure;
 use App\Models\GCashTier;
 use App\Models\GCashTransaction;
 use App\Models\User;
+use App\Rules\BranchTakesNew;
 use App\Services\Accounting\AutomaticPoster;
 use App\Services\Accounting\Money;
+use App\Services\Branches\BranchWriteGuard;
 use Brick\Math\BigDecimal;
 use Brick\Math\RoundingMode;
 use Carbon\Carbon;
@@ -41,11 +46,16 @@ class GCashService
      * charge, dated `transaction_date`. A pending Cash In posts nothing until
      * markPaid().
      *
-     * The reference lock (generateReferenceNo()) is the transaction's first
-     * statement, and the duplicate check runs under it as a locking read
-     * (Lead's call 5). So an identical create can't commit between the check
-     * and this insert, and the check reads what any create before it
-     * committed: two identical creates are never both saved.
+     * A transaction that posts in a branch (a walk-in's recorded branch, a
+     * member's branch) first locks that branch's row and re-checks it
+     * (lockBranchTakingGCash(), Finish run round 2, decision 4), the row a
+     * closure request and its approval lock first, so the two never
+     * interleave. Then the reference lock (generateReferenceNo())
+     * is the first statement on gcash_transactions, and the duplicate check
+     * runs under it as a locking read (Lead's call 5). So an identical create
+     * can't commit between the check and this insert, and the check reads what
+     * any create before it committed: two identical creates are never both
+     * saved.
      *
      * A deadlock, a lock wait timeout or a collision on the reference number
      * answers 409 with nothing saved, never 500, and is not tried again: the
@@ -57,6 +67,14 @@ class GCashService
         $isPending = (bool) ($payload['is_pending'] ?? false);
 
         return LoanWriteTransaction::run(function () use ($payload, $actor, $isPending) {
+            if (isset($payload['gcash_non_member_id'])) {
+                $this->lockPostingBranch(isset($payload['branch_id']) ? (int) $payload['branch_id'] : null, null, 'branch_id');
+            } elseif (isset($payload['borrower_id'])) {
+                // MemberLock keeps the member in this branch until the
+                // transaction ends.
+                $this->lockPostingBranch(null, (int) $payload['borrower_id'], 'borrower_id');
+            }
+
             $now = now();
             $referenceNo = $this->generateReferenceNo($now);
 
@@ -157,15 +175,30 @@ class GCashService
     /**
      * Settles a pending Cash In and posts its journal, dated `paid_at`.
      *
-     * The row is locked and re-read first, so of two mark-paid requests only
-     * the first finds it pending: the second answers the same 422 as a Cash In
-     * that was already paid, and nothing posts twice. A deadlock or lock wait
-     * timeout answers 409 with nothing saved, never 500.
+     * The branch it posts in is locked and re-checked first, as a create
+     * takes it (lockBranchTakingGCash(), Finish run round 2, decision 4): a
+     * closed branch or one waiting to close is refused (422 on `branch`). Then
+     * the row is locked and re-read, so of two mark-paid requests only the
+     * first finds it pending: the second answers the same 422 as a Cash In
+     * that was already paid, and nothing posts twice. If the row's posting
+     * branch is no longer the one locked (its member moved in between), it
+     * answers 409. A deadlock or lock wait timeout answers 409 with nothing
+     * saved, never 500.
      */
     public function markPaid(GCashTransaction $tx, User $actor): GCashTransaction
     {
         return LoanWriteTransaction::run(function () use ($tx, $actor): GCashTransaction {
+            $branchId = $this->lockPostingBranch(
+                $tx->branch_id === null ? null : (int) $tx->branch_id,
+                $tx->branch_id === null && $tx->borrower_id !== null ? (int) $tx->borrower_id : null,
+                'branch',
+            );
+
             $locked = GCashTransaction::query()->whereKey($tx->getKey())->lockForUpdate()->firstOrFail();
+
+            if (BranchAttribution::gcashPostingBranch($locked) !== $branchId) {
+                throw new HttpResponseException(response()->json(['message' => self::MARK_PAID_CONFLICT], 409));
+            }
 
             if ($locked->type !== 'cash_in' || $locked->status !== 'pending') {
                 throw ValidationException::withMessages([
@@ -254,24 +287,49 @@ class GCashService
     }
 
     /**
-     * Charge income for non-pending rows dated in the range, plus how many of
-     * them were Cash In and Cash Out. With a $viewer, every figure covers only
-     * the rows they may see (GCashTransaction::scopeVisibleTo), so the list,
-     * the total and the counts always agree.
+     * Charge income earned in the range, plus how many of those transactions
+     * were Cash In and Cash Out (Finish run round 2, decision 2), on the date
+     * AutomaticPoster::gcashTransaction() books its 4090 credit:
+     *
+     * - a Cash In on the Manila day it was paid (`paid_at`), whenever it was
+     *   recorded: one recorded on the 30th and paid on the 2nd counts on the
+     *   2nd;
+     * - a Cash Out, completed when recorded, on its `transaction_date`.
+     *
+     * A pending Cash In's charge is income in no period until it is paid. So
+     * is a paid Cash In with no `paid_at` (one the paid_at backfill had to
+     * skip), which the books never posted either. The rows come in that
+     * income date's order.
+     *
+     * With a $viewer, every figure covers only the rows they may see
+     * (GCashTransaction::scopeVisibleTo), so the list, the total and the
+     * counts always agree.
      *
      * @return array{total_income: float, cash_in_count: int, cash_out_count: int, start_date: string, end_date: string, transactions: Collection<int, GCashTransaction>}
      */
     public function incomeReport(string $startDate, string $endDate, ?User $viewer = null): array
     {
+        $bounds = [
+            Carbon::parse($startDate, config('app.timezone'))->startOfDay(),
+            Carbon::parse($endDate, config('app.timezone'))->endOfDay(),
+        ];
+
         $query = GCashTransaction::query()
-            ->where('status', '!=', 'pending')
-            ->whereBetween('transaction_date', [
-                Carbon::parse($startDate)->startOfDay(),
-                Carbon::parse($endDate)->endOfDay(),
-            ])
+            ->where(fn (Builder $earned) => $earned
+                ->where(fn (Builder $cashIn) => $cashIn
+                    ->where('type', 'cash_in')
+                    ->where('status', 'paid')
+                    ->whereBetween('paid_at', $bounds))
+                ->orWhere(fn (Builder $cashOut) => $cashOut
+                    ->where('type', 'cash_out')
+                    ->where('status', 'completed')
+                    ->whereBetween('transaction_date', $bounds)))
             ->when($viewer !== null, fn ($q) => $q->visibleTo($viewer));
 
-        $transactions = (clone $query)->orderBy('transaction_date')->orderBy('id')->get();
+        $transactions = (clone $query)
+            ->orderByRaw("CASE WHEN type = 'cash_in' THEN paid_at ELSE transaction_date END")
+            ->orderBy('id')
+            ->get();
         $totals = (clone $query)
             ->selectRaw('COALESCE(SUM(charge_amount), 0) AS total_income')
             ->selectRaw("COALESCE(SUM(type = 'cash_in'), 0) AS cash_in_count")
@@ -380,6 +438,55 @@ class GCashService
         }
 
         return $tier;
+    }
+
+    /**
+     * Lock and re-check the branch a GCash transaction posts in: `$branchId`
+     * when it carries one (a walk-in's recorded branch, a stamped member row),
+     * else `$memberId`'s branch, read with a lock on the member's row first,
+     * the order MemberTransfer takes (the member, then a branch), so no plain
+     * read fixes the snapshot before the locks. Returns the branch locked, or
+     * null when there is none (head office, a member with no branch).
+     *
+     * @param  string  $field  the field a refusal is reported on
+     *
+     * @throws ValidationException 422 in words
+     */
+    private function lockPostingBranch(?int $branchId, ?int $memberId, string $field): ?int
+    {
+        if ($branchId === null && $memberId !== null) {
+            $memberBranch = Borrower::query()->whereKey($memberId)->sharedLock()->value('branch_id');
+            $branchId = $memberBranch === null ? null : (int) $memberBranch;
+        }
+
+        if ($branchId !== null) {
+            $this->lockBranchTakingGCash($branchId, $field);
+        }
+
+        return $branchId;
+    }
+
+    private function lockBranchTakingGCash(int $branchId, string $field): void
+    {
+        $branch = Branch::query()->whereKey($branchId)->sharedLock()->firstOrFail(['id', 'name', 'code', 'status']);
+
+        if ($branch->status === Branch::STATUS_CLOSED) {
+            throw ValidationException::withMessages([
+                $field => [BranchWriteGuard::refusal($branch, BranchTakesNew::NOTHING_NEW)],
+            ]);
+        }
+
+        $closing = BranchClosure::query()
+            ->where('branch_id', $branch->id)
+            ->where('status', BranchClosure::STATUS_PENDING)
+            ->sharedLock()
+            ->exists();
+
+        if ($closing) {
+            throw ValidationException::withMessages([
+                $field => [sprintf('Branch %s is waiting to close, so %s.', $branch->auditName(), BranchTakesNew::NOTHING_NEW)],
+            ]);
+        }
     }
 
     private function generateReferenceNo(Carbon $date): string
