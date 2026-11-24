@@ -12,6 +12,7 @@ use App\Services\Linda\Answers\BranchPerformanceAnswer;
 use App\Services\Linda\Answers\CdaSummaryAnswer;
 use App\Services\Linda\Answers\CollectionEfficiencyAnswer;
 use App\Services\Linda\Answers\CollectionSummaryAnswer;
+use App\Services\Linda\Answers\CreditScoringSummaryAnswer;
 use App\Services\Linda\Answers\DisbursementSummaryAnswer;
 use App\Services\Linda\Answers\ExpenseSummaryAnswer;
 use App\Services\Linda\Answers\GeneralLendingSummaryAnswer;
@@ -71,6 +72,7 @@ final class LindaAnswerer
         'share_capital_summary' => ShareCapitalSummaryAnswer::class,
         'cda_summary' => CdaSummaryAnswer::class,
         'reminder_summary' => ReminderSummaryAnswer::class,
+        'credit_scoring_summary' => CreditScoringSummaryAnswer::class,
     ];
 
     /** The record numbers a lookup reads: receipts, loans (LN-, LA-) and members. */

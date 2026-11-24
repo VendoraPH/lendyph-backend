@@ -48,6 +48,8 @@ final class LindaLinks
         'cda_sworn_statement' => ['label' => 'Open Sworn Statement', 'url' => '/cda/sworn-statement', 'needs' => ['cda:view', 'branches:view_all']],
         'cda_tax_reports' => ['label' => 'Open ATIR & ABR', 'url' => '/cda/tax-reports', 'needs' => ['cda:view', 'branches:view_all', 'cda:view_tax']],
         'cda_documents' => ['label' => 'Open Compliance Documents', 'url' => '/cda/documents', 'needs' => ['cda:view', 'branches:view_all']],
+        // Finish run round 2: the Credit Scoring dashboard.
+        'credit_scoring' => ['label' => 'Open Credit Scoring Dashboard', 'url' => '/credit-scoring', 'needs' => ['credit_scoring:view']],
     ];
 
     /**
