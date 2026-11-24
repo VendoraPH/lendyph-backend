@@ -45,6 +45,8 @@ use App\Http\Controllers\Api\LoanPrintLogController;
 use App\Http\Controllers\Api\LoanProductController;
 use App\Http\Controllers\Api\NotificationController;
 use App\Http\Controllers\Api\PromissoryNoteController;
+use App\Http\Controllers\Api\PublicReceiptController;
+use App\Http\Controllers\Api\ReceiptShareLinkController;
 use App\Http\Controllers\Api\RepaymentController;
 use App\Http\Controllers\Api\ReportController;
 use App\Http\Controllers\Api\RoleController;
@@ -56,6 +58,8 @@ use App\Http\Middleware\AllowAuthOrSubmissionToken;
 use App\Http\Middleware\CheckTokenExpiry;
 use App\Http\Middleware\EnsureUserIsActive;
 use App\Http\Middleware\OptionalSanctumAuth;
+use App\Http\Middleware\ReceiptShare\EnsureReceiptShareLinksEnabled;
+use App\Http\Middleware\ReceiptShare\PublicReceiptHeaders;
 use App\Http\Middleware\RequirePasswordChange;
 use Illuminate\Support\Facades\Route;
 
@@ -149,6 +153,18 @@ Route::prefix('public-apply')->name('public-apply.')->group(function (): void {
         require $publicApplyPartial;
     }
 });
+
+/*
+ * A shared receipt (finish run round 2, decision 6), OUTSIDE the staff group:
+ * no sign-in, and a staff or member token sent along is ignored. Named
+ * `public-receipts.*` so the shared `api` limiter exempts it for its own
+ * `receipt-share-view` limiter (ReceiptShareServiceProvider). The headers and
+ * the switch run ahead of the limiter (bootstrap/app.php), so while
+ * RECEIPT_SHARE_LINKS_ENABLED is off it answers 404, never 429.
+ */
+Route::get('/public/receipts/{token}', PublicReceiptController::class)
+    ->middleware([PublicReceiptHeaders::class, EnsureReceiptShareLinksEnabled::class, 'throttle:receipt-share-view'])
+    ->name('public-receipts.show');
 
 // Protected routes
 //
@@ -327,6 +343,13 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
     Route::get('/loans/{loan}/summary', [RepaymentController::class, 'summary']);
     Route::get('/repayments/{repayment}', [RepaymentController::class, 'show']);
     Route::patch('/repayments/{repayment}/void', [RepaymentController::class, 'void']);
+    // Receipt share links (finish run round 2, decision 6): payments:view and
+    // the payment's branch; 404 on all three while the server switch is off.
+    Route::middleware(EnsureReceiptShareLinksEnabled::class)->whereNumber('repayment')->group(function (): void {
+        Route::get('/repayments/{repayment}/share-link', [ReceiptShareLinkController::class, 'show']);
+        Route::post('/repayments/{repayment}/share-link', [ReceiptShareLinkController::class, 'store']);
+        Route::patch('/repayments/{repayment}/share-link/revoke', [ReceiptShareLinkController::class, 'revoke']);
+    });
 
     // Loan Documents
     Route::get('/loans/{loan}/disclosure', [DisclosureController::class, 'show']);

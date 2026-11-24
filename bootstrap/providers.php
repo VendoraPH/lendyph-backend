@@ -4,6 +4,7 @@ use App\Providers\AmlaServiceProvider;
 use App\Providers\AppServiceProvider;
 use App\Providers\LoanOriginationServiceProvider;
 use App\Providers\PortalServiceProvider;
+use App\Providers\ReceiptShareServiceProvider;
 use App\Providers\SavingsNoticesServiceProvider;
 
 return [
@@ -12,4 +13,5 @@ return [
     SavingsNoticesServiceProvider::class,
     AmlaServiceProvider::class,
     LoanOriginationServiceProvider::class,
+    ReceiptShareServiceProvider::class,
 ];
