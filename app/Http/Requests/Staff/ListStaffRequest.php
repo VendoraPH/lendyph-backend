@@ -4,6 +4,7 @@ namespace App\Http\Requests\Staff;
 
 use App\Services\Amla\Foundation\AmlaAccess;
 use App\Services\BranchAccess;
+use App\Services\LoanApprovalEditService;
 use Illuminate\Foundation\Http\FormRequest;
 
 /**
@@ -14,13 +15,15 @@ use Illuminate\Foundation\Http\FormRequest;
  * whoever can create, edit or restructure a loan can choose its account
  * officer without being able to read the users list. That is why it:
  *
- *  - gates on `loans:create`, `loans:update` OR `loans:restructure` rather
- *    than a `users:*` permission — one per form with an officer picker: the
- *    new-loan form needs `loans:create`, `AssignAccountOfficerRequest` needs
- *    `loans:update` and `RestructureLoanRequest` needs `loans:restructure`,
- *    and a role may hold any one of them alone (the seeded `loan_processor`
- *    holds only `loans:update`, and the roles screen can build one holding
- *    only `loans:restructure`);
+ *  - gates on `loans:create`, `loans:update`, `loans:restructure` OR
+ *    `loans:edit_in_approval` rather than a `users:*` permission — one per
+ *    form with an officer picker: the new-loan form needs `loans:create`,
+ *    `AssignAccountOfficerRequest` needs `loans:update`,
+ *    `RestructureLoanRequest` needs `loans:restructure`, and the
+ *    Chairman/Chairwoman's edit at their approval step
+ *    (`ApprovalEditLoanRequest`) needs `loans:edit_in_approval`; a role may
+ *    hold any one of them alone (the seeded `loan_processor` holds only
+ *    `loans:update`, the Chair's `bod1` only `loans:edit_in_approval`);
  *  - answers a refusal with an ordinary 403. Existence masking belongs to the
  *    `users.*` routes, whose `{user}` binding is an oracle; a list that binds
  *    nothing has nothing to conceal.
@@ -69,7 +72,7 @@ class ListStaffRequest extends FormRequest
             return $user->can('loan_origination:update');
         }
 
-        return $user->canAny(['loans:create', 'loans:update', 'loans:restructure'])
+        return $user->canAny(['loans:create', 'loans:update', 'loans:restructure', LoanApprovalEditService::PERMISSION])
             || ($this->query('for') === self::FOR_SAVINGS && $user->can('savings:create'));
     }
 

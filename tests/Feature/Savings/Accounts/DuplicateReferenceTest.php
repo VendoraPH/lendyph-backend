@@ -4,6 +4,7 @@ namespace Tests\Feature\Savings\Accounts;
 
 use App\Models\Borrower;
 use App\Models\SavingsAccount;
+use App\Models\SavingsApproval;
 use App\Models\SavingsAutoCreditInstruction;
 use App\Models\SavingsProduct;
 use App\Models\SavingsTransaction;
@@ -30,6 +31,8 @@ class DuplicateReferenceTest extends TestCase
     private const TAKEN = 'Reference "GC-778899" is already on record for another GCash transaction. Check the reference and enter the right one.';
 
     private const BDO_9 = 'Reference "BDO-9" is already on record for another bank transfer. Check the reference and enter the right one.';
+
+    private const BDO_9_HELD = 'Reference "BDO-9" is held by a bank transfer withdrawal waiting for approval. Check the reference, or decide that withdrawal first.';
 
     private SavingsAccount $mine;
 
@@ -98,14 +101,35 @@ class DuplicateReferenceTest extends TestCase
         $this->actingAs($this->teller());
         $approval = $this->withdrawal($this->mine, 'bank_transfer', 'BDO-9', '10000.01')->assertStatus(202)->json('data.approval');
 
-        $this->deposit($this->theirs, 'bank_transfer', 'BDO-9')->assertUnprocessable()->assertJsonPath('errors.reference.0', self::BDO_9);
+        $this->deposit($this->theirs, 'bank_transfer', 'BDO-9')->assertUnprocessable()->assertJsonPath('errors.reference.0', self::BDO_9_HELD);
         $this->withdrawal($this->mine, 'bank_transfer', 'bdo-9')->assertUnprocessable()
-            ->assertJsonPath('errors.reference.0', 'Reference "bdo-9" is already on record for another bank transfer. Check the reference and enter the right one.');
+            ->assertJsonPath('errors.reference.0', 'Reference "bdo-9" is held by a bank transfer withdrawal waiting for approval. Check the reference, or decide that withdrawal first.');
         $this->deposit($this->theirs, 'gcash', 'BDO-9')->assertCreated();
 
         $this->actingAs($this->checker());
         $this->postJson("/api/savings/approvals/{$approval['id']}/approve")->assertOk()->assertJsonPath('data.status', 'approved');
         $this->assertSame('BDO-9', SavingsTransaction::query()->where('type', 'withdrawal')->sole()->external_reference);
+    }
+
+    /**
+     * Two waiting withdrawals can already share a reference (from before this
+     * check, or two requests at the same instant). The older one posts; the
+     * newer one is refused, whichever the checker approves first.
+     */
+    public function test_of_two_waiting_withdrawals_sharing_a_reference_the_older_posts_and_the_newer_is_refused(): void
+    {
+        $this->actingAs($this->teller());
+        $older = $this->withdrawal($this->mine, 'bank_transfer', 'BDO-9', '10000.01')->assertStatus(202)->json('data.approval.id');
+        $newer = $this->withdrawal($this->mine, 'bank_transfer', 'BDO-TEMP', '10000.02')->assertStatus(202)->json('data.approval.id');
+        $approval = SavingsApproval::query()->findOrFail($newer);
+        $approval->forceFill(['payload' => ['reference' => 'BDO-9'] + $approval->payload])->save();
+
+        $this->actingAs($this->checker());
+        $this->postJson("/api/savings/approvals/{$newer}/approve")->assertUnprocessable()->assertJsonPath('errors.reference.0', self::BDO_9_HELD);
+        $this->postJson("/api/savings/approvals/{$older}/approve")->assertOk()->assertJsonPath('data.status', 'approved');
+        $this->postJson("/api/savings/approvals/{$newer}/approve")->assertUnprocessable()->assertJsonPath('errors.reference.0', self::BDO_9);
+
+        $this->assertSame(['10000.01'], SavingsTransaction::query()->where('type', 'withdrawal')->pluck('debit')->all());
     }
 
     public function test_a_rejected_withdrawal_frees_its_reference(): void

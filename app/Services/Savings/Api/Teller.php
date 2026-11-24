@@ -42,8 +42,9 @@ use Illuminate\Validation\ValidationException;
  * - A deposit or withdrawal paid by any method but cash is refused when its
  *   reference is already on record for that method (DuplicateReference,
  *   finish run round 2, decision 11), under the account lock. A withdrawal
- *   waiting for its checker holds its reference, and is checked again, apart
- *   from itself, when it posts.
+ *   waiting for its checker holds its reference, and is checked again when
+ *   it posts, against what is on record and the withdrawals waiting since
+ *   before it.
  */
 class Teller
 {
@@ -161,7 +162,7 @@ class Teller
     {
         // An approved request was checked when it was made, and held its
         // reference while it waited; a writer that never checks (auto-credit)
-        // may still have taken it. Its own approval doesn't count.
+        // may still have taken it, or an older request may share it.
         if ($approvalId !== null) {
             $this->duplicates->assertUnused($data['payment_method'] ?? null, $data['reference'] ?? null, 'reference', $approvalId);
         }
