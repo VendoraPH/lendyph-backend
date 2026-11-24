@@ -2,6 +2,7 @@
 
 namespace App\Http\Requests\ShareCapital;
 
+use App\Http\Requests\Concerns\DateInputMessages;
 use App\Http\Requests\Concerns\ReferenceNumberMessages;
 use App\Models\Borrower;
 use App\Services\BranchAccess;
@@ -37,7 +38,7 @@ class ShareCapitalBulkEntryRequest extends FormRequest
             'entries.*.pledge_id' => ['required', 'integer', $this->visiblePledgeRule()],
             'entries.*.amount' => ['required', 'numeric', 'min:0.01', 'decimal:0,2'],
             'entries.*.type' => ['required', 'in:credit,debit'],
-            'entries.*.date' => ['required', 'date', 'before_or_equal:today'],
+            'entries.*.date' => ['required', 'date', 'date_format:Y-m-d', 'before_or_equal:today'],
             'entries.*.description' => ['nullable', 'string', 'max:255'],
             'method' => ['sometimes', Rule::in(ShareCapitalService::ENTRY_METHODS)],
             'reference_number' => ['nullable', 'string', 'max:100', 'required_unless:method,cash'],
@@ -49,7 +50,7 @@ class ShareCapitalBulkEntryRequest extends FormRequest
      */
     public function messages(): array
     {
-        return $this->referenceNumberMessages();
+        return [...$this->referenceNumberMessages(), ...DateInputMessages::calendar(['entries.*.date' => 'entry date'])];
     }
 
     /**

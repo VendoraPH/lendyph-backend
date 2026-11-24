@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Http\Requests\Concerns\DateInputMessages;
 use App\Http\Resources\GCashTransactionResource;
 use App\Services\GCashService;
 use Illuminate\Http\JsonResponse;
@@ -35,9 +36,9 @@ class GCashReportController extends Controller
         $this->authorize('gcash:view');
 
         $validated = $request->validate([
-            'start_date' => ['required', 'date'],
-            'end_date' => ['required', 'date', 'after_or_equal:start_date'],
-        ]);
+            'start_date' => ['required', 'date', 'date_format:Y-m-d'],
+            'end_date' => ['required', 'date', 'date_format:Y-m-d', 'after_or_equal:start_date'],
+        ], DateInputMessages::calendar(['start_date' => 'start date', 'end_date' => 'end date']));
 
         $report = $this->gcash->incomeReport($validated['start_date'], $validated['end_date'], $request->user());
 

@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Http\Requests\Concerns\DateInputMessages;
 use App\Http\Requests\ShareCapital\StoreShareCapitalLedgerRequest;
 use App\Http\Resources\ShareCapitalLedgerResource;
 use App\Models\Borrower;
@@ -44,11 +45,11 @@ class ShareCapitalLedgerController extends Controller
             // `min:1` is not cosmetic: 0 is a valid integer that no row can
             // carry, and it used to reach a `when()` that treats it as absent.
             'borrower_id' => ['nullable', 'integer', 'min:1'],
-            'date_from' => ['nullable', 'date'],
-            'date_to' => ['nullable', 'date'],
+            'date_from' => ['nullable', 'date', 'date_format:Y-m-d'],
+            'date_to' => ['nullable', 'date', 'date_format:Y-m-d'],
             'search' => ['nullable', 'string'],
             'per_page' => ['nullable', 'integer', 'min:1'],
-        ]);
+        ], DateInputMessages::calendar(['date_from' => 'start date', 'date_to' => 'end date']));
 
         /**
          * Pulled out as locals so every filter below can be gated on filled() —

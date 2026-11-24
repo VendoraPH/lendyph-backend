@@ -3,6 +3,7 @@
 namespace App\Http\Requests\Loan;
 
 use App\Enums\LoanFrequency;
+use App\Http\Requests\Concerns\DateInputMessages;
 use App\Http\Requests\Concerns\ExcludesRejectedBorrowers;
 use App\Http\Requests\Concerns\RequiresActiveAccountOfficer;
 use App\Http\Requests\Concerns\ValidatesDeductionAmounts;
@@ -41,7 +42,7 @@ class StoreLoanRequest extends FormRequest
             'interest_rate' => ['nullable', 'numeric', 'min:0', 'max:100', 'decimal:0,4'],
             'term' => ['nullable', 'integer', 'min:1'],
             'frequency' => ['nullable', LoanFrequency::rule()],
-            'start_date' => ['required', 'date'],
+            'start_date' => ['required', 'date', 'date_format:Y-m-d'],
             'account_officer_id' => ['nullable', 'integer', $this->activeAccountOfficerRule()],
             'scb_amount' => ['nullable', 'numeric', 'min:0'],
             'policy_exception' => ['nullable', 'boolean'],
@@ -59,6 +60,7 @@ class StoreLoanRequest extends FormRequest
     public function messages(): array
     {
         return [
+            ...DateInputMessages::calendar(['start_date' => 'start date']),
             'co_maker_ids.*.exists' => 'Each co-maker must be an existing member who was not rejected.',
             'account_officer_id.exists' => $this->activeAccountOfficerMessage(),
         ];

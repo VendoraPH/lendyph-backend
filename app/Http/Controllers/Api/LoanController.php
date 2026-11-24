@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Http\Requests\AutoPay\ToggleAutoPayRequest;
+use App\Http\Requests\Concerns\DateInputMessages;
 use App\Http\Requests\Loan\AddLoanCoMakerRequest;
 use App\Http\Requests\Loan\ApproveLoanRequest;
 use App\Http\Requests\Loan\AssignAccountOfficerRequest;
@@ -287,14 +288,14 @@ DESC,
             'branch_id' => ['nullable', 'integer', 'min:1'],
             'borrower_id' => ['nullable', 'integer', 'min:1'],
             'loan_product_id' => ['nullable', 'integer', 'min:1'],
-            'date_from' => ['nullable', 'date'],
-            'date_to' => ['nullable', 'date'],
+            'date_from' => ['nullable', 'date', 'date_format:Y-m-d'],
+            'date_to' => ['nullable', 'date', 'date_format:Y-m-d'],
             'sort' => ['nullable', Rule::in(self::SORT_KEYS)],
             'dir' => ['nullable', Rule::in(['asc', 'desc'])],
             'per_page' => ['nullable', 'integer', 'min:1'],
             'awaiting_me' => ['nullable', 'boolean'],
             'view' => ['nullable', Rule::in(['summary'])],
-        ]);
+        ], DateInputMessages::calendar(['date_from' => 'start date', 'date_to' => 'end date']));
 
         /**
          * Pulled out as locals so every filter below can be gated on
