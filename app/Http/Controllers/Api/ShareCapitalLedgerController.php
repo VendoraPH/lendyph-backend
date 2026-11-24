@@ -193,18 +193,24 @@ class ShareCapitalLedgerController extends Controller
     #[OA\Get(
         path: '/api/share-capital/cash-reference/next',
         summary: 'The next cash entry\'s CSH number',
-        description: 'The reference number the next cash share capital entry would get today: CSH-[super admin id]-[year]-[0001]. A preview only: it reserves nothing, and the entry gets its number when it saves. `reference_number` is null while no super admin is active.',
+        description: 'The reference number the next cash share capital entry dated `date` (today when left out) would get: CSH-[super admin id]-[year]-[0001], in that date\'s year. A preview only: it reserves nothing, and the entry gets its number when it saves. `reference_number` is null while no super admin is active.',
         tags: ['Share Capital'],
         security: [['sanctum' => []]],
+        parameters: [new OA\Parameter(name: 'date', in: 'query', required: false, description: 'The entry date, year-month-day', schema: new OA\Schema(type: 'string', format: 'date'))],
         responses: [
             new OA\Response(response: 200, description: '{success, data: {reference_number}}'),
             new OA\Response(response: 403, description: 'Missing share_capital:create'),
+            new OA\Response(response: 422, description: 'A `date` not written year-month-day'),
         ],
     )]
     public function nextCashReference(CashReferences $references): JsonResponse
     {
         $this->authorize('share_capital:create');
 
-        return response()->json(['success' => true, 'data' => ['reference_number' => $references->next(CashReferences::SHARE_CAPITAL)]]);
+        $filters = request()->validate([
+            'date' => ['nullable', 'date', 'date_format:Y-m-d'],
+        ], DateInputMessages::calendar(['date' => 'entry date']));
+
+        return response()->json(['success' => true, 'data' => ['reference_number' => $references->next(CashReferences::SHARE_CAPITAL, $filters['date'] ?? null)]]);
     }
 }

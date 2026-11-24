@@ -29,6 +29,15 @@ class ShareCapitalService
      */
     public const AUTO_CREDIT_BRANCH_CONSEQUENCE = "auto-credit can't credit its members' share capital. Switch their auto-credit off, or transfer them, first";
 
+    /** The 409 when the member moved branch while their entry was being saved. */
+    public const MEMBER_MOVED = 'This member was moved to another branch while the entry was being saved. Nothing was saved; reload and try again.';
+
+    /** The 409 when a batch's member moved branch while it was being saved. */
+    public const BATCH_MEMBER_MOVED = 'A member in this batch was moved to another branch while it was being saved. Nothing was posted; reload and try again.';
+
+    /** The 409 when a member moved branch while the run was being saved. */
+    public const AUTO_CREDIT_MEMBER_MOVED = 'A member was moved to another branch while auto-credit was running. Nothing was posted; run it again.';
+
     public function __construct(private AutomaticPoster $poster, private CashReferences $cashReferences) {}
 
     /**
@@ -48,8 +57,9 @@ class ShareCapitalService
      *
      * Its first statement locks the branches of the members it credits
      * (BranchRowLock): a member's branch that is closed or waiting to close
-     * stops the whole run, in words, with nothing posted. Each row posts in
-     * the branch that was locked for it. The rows stay unnumbered: a run's
+     * stops the whole run, in words, with nothing posted. The members' branches
+     * are then read again under their rows' shared locks, and a member moved
+     * since answers 409. Each row posts in the branch that was locked for it. The rows stay unnumbered: a run's
      * credits get no CSH reference (finish run round 2, decision 5).
      */
     public function processAutoCredit(
@@ -72,6 +82,10 @@ class ShareCapitalService
         // The loser of a collision answers 409 and posts nothing.
         return LoanWriteTransaction::run(function () use ($eligiblePledges, $branchIds, $user, $method, $referenceNumber) {
             BranchRowLock::lock(['branch' => $branchIds], ['branch' => self::AUTO_CREDIT_BRANCH_CONSEQUENCE]);
+            $this->assertMembersStayed(
+                $eligiblePledges->mapWithKeys(fn (ShareCapitalPledge $pledge): array => [$pledge->borrower_id => $pledge->borrower?->branch_id])->all(),
+                self::AUTO_CREDIT_MEMBER_MOVED,
+            );
 
             $today = now()->toDateString();
             $totalAmount = 0.0;
@@ -203,7 +217,9 @@ class ShareCapitalService
      * In order (finish run round 2):
      * 1. the member's branch row (BranchRowLock), the write's first statement:
      *    a branch that is closed or waiting to close takes nothing, in words,
-     *    on `borrower_id`. The row posts in that branch.
+     *    on `borrower_id`. The row posts in that branch. Then the member's row
+     *    FOR SHARE: a member moved to another branch since it was read answers
+     *    409, with nothing saved.
      * 2. Cash: the CSH series row, for the entry's `CSH-[id]-[year]-[0001]`
      *    (CashReferences, decision 5). A typed reference is ignored for cash;
      *    any other method keeps the one it was given.
@@ -227,6 +243,7 @@ class ShareCapitalService
 
         return GeneratedNumberWrite::run(function () use ($borrowerId, $branchId, $owner, $amount, $type, $date, $user, $description, $method, $referenceNumber): ShareCapitalLedger {
             BranchRowLock::lock(['borrower_id' => $branchId]);
+            $this->assertMembersStayed([$borrowerId => $branchId], self::MEMBER_MOVED);
 
             $reference = $method === 'cash'
                 ? $this->cashReferences->assign(CashReferences::SHARE_CAPITAL, $owner, [$date], 'reference_number')[0]
@@ -277,9 +294,10 @@ class ShareCapitalService
      *
      * The first statement locks every row's member branch in one statement
      * (BranchRowLock): one closed or closing branch refuses the whole batch,
-     * in words, on that row's `entries.N.pledge_id`. The pledges, their
-     * members' branches and the series' owner are read before the
-     * transaction.
+     * in words, on that row's `entries.N.pledge_id`. The members' branches
+     * are then read again under their rows' shared locks: a member moved since
+     * answers 409 with nothing posted. The pledges, their members' branches
+     * and the series' owner are read before the transaction.
      *
      * @param  list<array{pledge_id: int, amount: float|int|string, type: string, date: string, description?: string|null}>  $entries
      */
@@ -288,9 +306,15 @@ class ShareCapitalService
         $entries = array_values($entries);
         $pledges = ShareCapitalPledge::query()->with('borrower:id,branch_id')->findMany(array_column($entries, 'pledge_id'))->keyBy('id');
         $branches = [];
+        $members = [];
 
         foreach ($entries as $i => $entry) {
-            $branches["entries.{$i}.pledge_id"] = $pledges->get($entry['pledge_id'])?->borrower?->branch_id;
+            $pledge = $pledges->get($entry['pledge_id']);
+            $branches["entries.{$i}.pledge_id"] = $pledge?->borrower?->branch_id;
+
+            if ($pledge !== null) {
+                $members[$pledge->borrower_id] = $pledge->borrower?->branch_id;
+            }
         }
 
         $owner = $method === 'cash' ? $this->cashReferences->owner() : null;
@@ -299,8 +323,9 @@ class ShareCapitalService
         // whole batch a second time when the same batch was submitted twice. The
         // loser of a collision answers 409 and posts nothing: no row and no
         // journal, since both are written in this one transaction.
-        return LoanWriteTransaction::run(function () use ($entries, $pledges, $branches, $owner, $user, $method, $referenceNumber) {
+        return LoanWriteTransaction::run(function () use ($entries, $pledges, $branches, $members, $owner, $user, $method, $referenceNumber) {
             BranchRowLock::lock($branches);
+            $this->assertMembersStayed($members, self::BATCH_MEMBER_MOVED);
 
             $references = $method === 'cash'
                 ? $this->cashReferences->assign(CashReferences::SHARE_CAPITAL, $owner, array_column($entries, 'date'), 'reference_number')
@@ -332,6 +357,33 @@ class ShareCapitalService
 
             return $results;
         }, GeneratedNumberWrite::SHARE_CAPITAL_REFERENCE_INDEX, GeneratedNumberWrite::SHARE_CAPITAL_CONFLICT);
+    }
+
+    /**
+     * Read the members' branches again, under their rows' shared locks, right
+     * after their branch rows were locked. A member moved to another branch
+     * since the read before the transaction (a member transfer at the same
+     * moment) answers 409 in words, so nothing posts in a branch that wasn't
+     * locked and checked. The member rows stay locked until the write
+     * commits, so a transfer that starts now waits for it.
+     *
+     * @param  array<int, int|null>  $expected  member id => the branch read before the transaction
+     */
+    private function assertMembersStayed(array $expected, string $conflict): void
+    {
+        if ($expected === []) {
+            return;
+        }
+
+        $now = Borrower::query()->whereIn('id', array_keys($expected))->orderBy('id')->sharedLock()->pluck('branch_id', 'id');
+
+        foreach ($expected as $memberId => $branchId) {
+            $current = $now->get($memberId);
+
+            if (($current === null ? null : (int) $current) !== $branchId) {
+                throw LoanWriteTransaction::conflict($conflict);
+            }
+        }
     }
 
     /** The member's branch, where a standalone entry for them posts. */

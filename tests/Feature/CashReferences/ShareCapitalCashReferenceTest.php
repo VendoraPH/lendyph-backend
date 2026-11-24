@@ -26,7 +26,8 @@ use Tests\Traits\SetupLendyPH;
  *   at 0001.
  * - A typed reference is ignored for cash; other methods keep theirs and take
  *   no number. Auto-credit stays unnumbered.
- * - The preview answers the next number and reserves nothing.
+ * - The preview answers the next number for a date (today by default) and
+ *   reserves nothing.
  */
 class ShareCapitalCashReferenceTest extends TestCase
 {
@@ -187,6 +188,23 @@ class ShareCapitalCashReferenceTest extends TestCase
 
         $this->ledgerEntry()->assertJsonPath('data.reference_number', "CSH-{$owner}-2026-0001");
         $this->getJson('/api/share-capital/cash-reference/next')->assertJsonPath('data.reference_number', "CSH-{$owner}-2026-0002");
+    }
+
+    public function test_the_preview_takes_the_date_the_entry_will_carry(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2027-01-01 08:00:00', 'Asia/Manila'));
+        $owner = $this->owner();
+        $this->ledgerEntry(['date' => '2026-12-31'])->assertCreated()->assertJsonPath('data.reference_number', "CSH-{$owner}-2026-0001");
+
+        $this->getJson('/api/share-capital/cash-reference/next?date=2026-12-31')->assertOk()->assertJsonPath('data.reference_number', "CSH-{$owner}-2026-0002");
+        $this->getJson('/api/share-capital/cash-reference/next?date=2027-01-01')->assertOk()->assertJsonPath('data.reference_number', "CSH-{$owner}-2027-0001");
+        $this->getJson('/api/share-capital/cash-reference/next')->assertOk()->assertJsonPath('data.reference_number', "CSH-{$owner}-2027-0001");
+
+        foreach (['20261231', '2026-12-32', '12/31/2026'] as $written) {
+            $this->getJson('/api/share-capital/cash-reference/next?date='.urlencode($written))
+                ->assertUnprocessable()
+                ->assertJsonPath('errors.date.0', 'The entry date must be a date written as year-month-day, such as 2026-11-24.');
+        }
     }
 
     public function test_the_preview_needs_the_permission_to_record_an_entry(): void

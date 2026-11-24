@@ -23,7 +23,8 @@ use Tests\Traits\SetupLendyPH;
  * decision 5): no two saves ever take the same number.
  *
  * - Each share capital write takes the branch row lock first, then the
- *   closure rows, then (for cash) its series row FOR UPDATE.
+ *   closure rows, then its members' rows FOR SHARE (their branch read again),
+ *   then (for cash) its series row FOR UPDATE.
  * - A save waits for another one holding its series, and one that waits too
  *   long answers 409 with nothing saved and no number used.
  * - A save that another one beats to the series reads the number that one
@@ -63,7 +64,7 @@ class CashReferenceRaceTest extends TestCase
         parent::tearDown();
     }
 
-    public function test_each_write_takes_the_branch_row_lock_first_then_the_closure_rows_then_its_series(): void
+    public function test_each_write_takes_the_branch_row_lock_first_then_the_closure_rows_its_members_and_its_series(): void
     {
         $this->member->shareCapitalPledge->update(['auto_credit' => true, 'amount' => 500]);
 
@@ -80,9 +81,10 @@ class CashReferenceRaceTest extends TestCase
 
             $this->assertMatchesRegularExpression('/^select .* from `branches` where `id` in \(.*\) order by `id` asc lock in share mode$/', $statements[0], "{$name}: the branch rows are its first statement");
             $this->assertMatchesRegularExpression('/^select .* from `branch_closures` .* lock in share mode$/', $statements[1], "{$name}: then the closure rows");
+            $this->assertMatchesRegularExpression('/^select .* from `borrowers` .* lock in share mode$/', $statements[2], "{$name}: then its members' branches again");
 
             if ($numbered) {
-                $this->assertMatchesRegularExpression('/^select .* from `cash_reference_sequences` .* for update$/', $statements[2], "{$name}: then its series row");
+                $this->assertMatchesRegularExpression('/^select .* from `cash_reference_sequences` .* for update$/', $statements[3], "{$name}: then its series row");
             } else {
                 $this->assertSame([], array_values(array_filter($statements, fn (string $sql): bool => str_contains($sql, 'cash_reference_sequences'))), "{$name}: takes no number");
             }
