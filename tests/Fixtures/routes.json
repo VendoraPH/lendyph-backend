@@ -2881,7 +2881,7 @@
         ],
         "wheres": {
             "run": "[0-9]+",
-            "kind": "customers|loans",
+            "kind": "customers|loans|share_capital",
             "index": "[0-9]+"
         }
     },

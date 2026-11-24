@@ -38,6 +38,10 @@ use LogicException;
  *
  * next() is the screens' preview: the number the next save would get, read
  * plainly, reserving nothing.
+ *
+ * advance() moves a series past a number the app didn't give: an entry the
+ * share capital import brought over whose reference is already in this
+ * deployment's own format (finish run round 2, decision 13).
  */
 final class CashReferences
 {
@@ -50,6 +54,13 @@ final class CashReferences
     public const SERIES_INDEX = GeneratedNumberWrite::CASH_REFERENCE_SERIES_INDEX;
 
     public const PAD_LENGTH = 4;
+
+    /**
+     * The highest number a series is moved to (advance()). Nine digits, far
+     * past any real year of cash entries and well inside the counter's
+     * column, so the series can always give the next one.
+     */
+    public const MAX_SEQUENCE = 999_999_999;
 
     public const NO_OWNER = 'Cash entries take their reference number from the primary super admin\'s user ID, and no super admin account is active. Reactivate one before recording cash.';
 
@@ -149,6 +160,66 @@ final class CashReferences
         }
 
         return $numbers;
+    }
+
+    /**
+     * Moves a series on so its next number is above `$sequence`: its last
+     * number becomes at least `$sequence`, and a series with no row yet
+     * starts there. Never moves one back. Inside the caller's transaction,
+     * under the series row's lock, as assign() takes it, so a save waiting on
+     * the lock reads the moved number.
+     */
+    public function advance(string $prefix, int $owner, int $year, int $sequence): void
+    {
+        if (DB::transactionLevel() === 0) {
+            throw new LogicException('A series is moved on inside its save\'s transaction, so a rollback takes it back.');
+        }
+
+        if ($sequence < 1 || $sequence > self::MAX_SEQUENCE) {
+            throw new LogicException("A series can't be moved to {$sequence}.");
+        }
+
+        $row = DB::table(self::TABLE)
+            ->where('prefix', $prefix)
+            ->where('owner_id', $owner)
+            ->where('year', $year)
+            ->lockForUpdate()
+            ->first(['id', 'last_number']);
+
+        if ($row === null) {
+            DB::table(self::TABLE)->insert(['prefix' => $prefix, 'owner_id' => $owner, 'year' => $year, 'last_number' => $sequence]);
+
+            return;
+        }
+
+        if ((int) $row->last_number < $sequence) {
+            DB::table(self::TABLE)->where('id', $row->id)->update(['last_number' => $sequence]);
+        }
+    }
+
+    /**
+     * A reference read as one of these numbers: `CSH-0012-2026-0007` is
+     * prefix CSH, owner 12, year 2026 and number 7. In any case, and with or
+     * without the padding, since the same number written another way is
+     * still the same number to anyone reading the ledger. Null when the
+     * reference isn't one.
+     *
+     * @return array{prefix: string, owner: int, year: int, sequence: int}|null
+     */
+    public static function parse(string $reference): ?array
+    {
+        $prefixes = implode('|', [self::SHARE_CAPITAL, self::TIME_DEPOSIT]);
+
+        if (preg_match('/^('.$prefixes.')-(\d{1,9})-(\d{4})-(\d{1,18})$/i', trim($reference), $parts) !== 1) {
+            return null;
+        }
+
+        return [
+            'prefix' => strtoupper($parts[1]),
+            'owner' => (int) $parts[2],
+            'year' => (int) $parts[3],
+            'sequence' => (int) $parts[4],
+        ];
     }
 
     /** `CSH-0012-2026-0001`: the id and the sequence padded to at least four digits. */

@@ -23,6 +23,8 @@ class ShareCapitalLedgerResource extends JsonResource
             // they were recorded, and on build-up and release rows.
             'method' => $this->method,
             'reference_number' => $this->reference_number,
+            // Brought over by Data Import from the cooperative's earlier books.
+            'is_imported' => (bool) $this->is_imported,
             // Only where the query selected it (ShareCapitalMemberService::withRunningBalance()).
             'running_balance' => $this->when(
                 array_key_exists('running_balance', $this->resource->getAttributes()),

@@ -52,8 +52,8 @@ class CsvImportUploadService
      */
     public const DISK = 'private';
 
-    /** The two files a run carries, in the order the importer must consume them. */
-    public const KINDS = ['customers', 'loans'];
+    /** The files a run can carry, in the order the importer must consume them. */
+    public const KINDS = ['customers', 'loans', 'share_capital'];
 
     /**
      * Phases where a run still owns the importer's attention.
@@ -70,6 +70,7 @@ class CsvImportUploadService
         'awaiting_mapping',
         'importing_customers',
         'importing_loans',
+        'importing_share_capital',
     ];
 
     /**
@@ -353,8 +354,9 @@ class CsvImportUploadService
                 'initiated_ip' => $actorIp,
             ]);
 
-            // The files the client declared: the members file always, the loans
-            // file when there is one (StoreCsvImportRunRequest).
+            // The files the client declared: the members file, the share capital
+            // file, or both, and the loans file only beside the members file
+            // (StoreCsvImportRunRequest).
             foreach (self::KINDS as $kind) {
                 $declared = $data['files'][$kind] ?? null;
 
@@ -1257,12 +1259,17 @@ class CsvImportUploadService
 
         $files = $run->files()->orderBy('kind')->get();
 
-        // A run carries its members file, and a loans file only beside it: a
-        // loan row finds its member through the members file of the same
-        // import, so a run with loans alone never gets as far as importing.
-        if (! $files->contains(fn (CsvImportFile $file): bool => $file->kind === 'customers')) {
+        // A run carries its members file, its share capital file, or both, and
+        // a loans file only beside the members file: a loan row finds its
+        // member through the members file of the same import, so a run with
+        // loans and no members never gets as far as importing.
+        $kinds = $files->pluck('kind')->all();
+
+        if (! in_array('customers', $kinds, true) && (in_array('loans', $kinds, true) || ! in_array('share_capital', $kinds, true))) {
             throw new HttpResponseException(response()->json([
-                'message' => "Import run #{$run->id} has no members file. A loans file needs its members file in the same import.",
+                'message' => in_array('loans', $kinds, true)
+                    ? "Import run #{$run->id} has no members file. A loans file needs its members file in the same import."
+                    : "Import run #{$run->id} has no members file or share capital file to import.",
             ], 422));
         }
 

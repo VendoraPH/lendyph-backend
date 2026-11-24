@@ -515,7 +515,7 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
         // that cannot rely on that. See CsvImportController::resolveChunkBytes().
         Route::match(['put', 'post'], '/{run}/files/{kind}/chunks/{index}', [CsvImportController::class, 'uploadChunk'])
             ->whereNumber('run')
-            ->whereIn('kind', ['customers', 'loans'])
+            ->whereIn('kind', ['customers', 'loans', 'share_capital'])
             ->whereNumber('index')
             ->name('chunk');
 

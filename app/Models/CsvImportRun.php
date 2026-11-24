@@ -12,7 +12,7 @@ use Illuminate\Database\Eloquent\Relations\HasOne;
 /**
  * One attempt at migrating a coop's legacy records in from CSV.
  *
- * A run owns its two uploaded files and, through `phase` and `cursor_row_id`,
+ * A run owns its uploaded files and, through `phase` and `cursor_row_id`,
  * enough state to resume a half-finished import instead of restarting it and
  * writing everything a second time.
  *
@@ -81,6 +81,12 @@ class CsvImportRun extends Model
     public function loansFile(): HasOne
     {
         return $this->hasOne(CsvImportFile::class)->where('kind', 'loans');
+    }
+
+    /** The share capital file (finish run round 2, decision 13), when there is one. */
+    public function shareCapitalFile(): HasOne
+    {
+        return $this->hasOne(CsvImportFile::class)->where('kind', 'share_capital');
     }
 
     /**

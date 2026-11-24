@@ -6,6 +6,7 @@ use App\Rules\BranchTakesNew;
 use App\Services\BranchAccess;
 use App\Services\Branches\BranchWriteGuard;
 use App\Services\CsvImport\CsvImportUploadService;
+use Closure;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Rule;
 
@@ -16,6 +17,10 @@ use Illuminate\Validation\Rule;
  */
 class StoreCsvImportRunRequest extends FormRequest
 {
+    public const CHOOSE_A_FILE = 'Choose the members file or the share capital file to import.';
+
+    public const SHARE_CAPITAL_NEEDS_PERMISSION = 'Importing share capital needs permission to record share capital entries, and your account doesn\'t have it. Leave the share capital file out, or have someone who can record share capital start the import.';
+
     /**
      * Checked here as well as in the controller, and both are deliberate.
      *
@@ -91,17 +96,36 @@ class StoreCsvImportRunRequest extends FormRequest
              */
             'as_of_date' => ['nullable', 'date_format:Y-m-d', 'after:1999-12-31', 'before_or_equal:today'],
 
-            // `array:customers,loans` rejects unknown keys outright rather than
-            // ignoring them, so a client that sends `members` learns it named
-            // the file wrong here instead of at assemble time.
+            // `array:customers,loans,share_capital` rejects unknown keys
+            // outright rather than ignoring them, so a client that sends
+            // `members` learns it named the file wrong here instead of at
+            // assemble time.
             //
-            // The members file is required and the loans file is optional: a
-            // cooperative may have no loans to carry over, or be adding a batch
-            // of new members. A loans file on its own is refused, since its rows
-            // find their members through the members file of the same import.
-            'files' => ['required', 'array:customers,loans'],
-            'files.customers' => ['required', 'array:filename,size_bytes,sha256'],
+            // A run carries the members file, the share capital file, or both
+            // (finish run round 2, decision 13): a cooperative may have no loans
+            // to carry over, be adding a batch of new members, or bring only
+            // share capital for members it already has. A loans file needs the
+            // members file, since its rows find their members through the
+            // members file of the same import.
+            'files' => ['required', 'array:customers,loans,share_capital'],
+            'files.customers' => [
+                Rule::requiredIf(fn (): bool => $this->has('files.loans') || ! $this->has('files.share_capital')),
+                'array:filename,size_bytes,sha256',
+            ],
             'files.loans' => ['sometimes', 'array:filename,size_bytes,sha256'],
+            // Writing share capital entries is `share_capital:create`'s, on top
+            // of the `imports:process` every import needs. Asked again when the
+            // rows are written (ShareCapitalRowImporter), since a run can wait
+            // days and its starter can lose the access meanwhile.
+            'files.share_capital' => [
+                'sometimes',
+                'array:filename,size_bytes,sha256',
+                function (string $attribute, mixed $value, Closure $fail): void {
+                    if (! ($this->user()?->can('share_capital:create') ?? false)) {
+                        $fail(self::SHARE_CAPITAL_NEEDS_PERMISSION);
+                    }
+                },
+            ],
 
             'files.*.filename' => ['required', 'string', 'max:255'],
             'files.*.size_bytes' => ['required', 'integer', 'min:1', 'max:'.$maxBytes],
@@ -114,10 +138,10 @@ class StoreCsvImportRunRequest extends FormRequest
         $maxMb = (int) round(app(CsvImportUploadService::class)->maxFileBytes() / 1048576);
 
         return [
-            'files.required' => 'Choose the members file to import.',
+            'files.required' => self::CHOOSE_A_FILE,
             'files.customers.required' => $this->has('files.loans')
                 ? 'A loans file needs its members file in the same import.'
-                : 'Choose the members file to import.',
+                : self::CHOOSE_A_FILE,
             'branch_id.required' => 'Choose the branch these members and loans belong to. Every imported loan needs one, and the file cannot supply it.',
             'branch_id.exists' => 'Choose one of your own branches for this import.',
             'files.*.size_bytes.max' => "That file is larger than the {$maxMb} MB import limit.",

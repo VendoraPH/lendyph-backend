@@ -12,6 +12,7 @@ use App\Services\AuditLogService;
 use App\Services\LoanTermSchedule;
 use App\Services\Penalties\PenaltyTerms;
 use Carbon\Carbon;
+use Closure;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use LogicException;
@@ -21,8 +22,9 @@ use Throwable;
  * Drives one CSV import run forward by one unit of work at a time.
  *
  * The run is a state machine — staging, then an optional wait for a human to
- * confirm the product mapping, then customers, then loans — and this class owns
- * every transition. The command above it owns only the clock.
+ * confirm the product mapping, then customers, then loans, then share capital
+ * — and this class owns every transition. The command above it owns only the
+ * clock.
  *
  * ## The unit of work is a CHUNK, not a row
  *
@@ -155,13 +157,14 @@ class CsvImportProcessor
      *
      * @var list<string>
      */
-    public const WORKABLE_PHASES = ['assembled', 'staging', 'awaiting_mapping', 'importing_customers', 'importing_loans'];
+    public const WORKABLE_PHASES = ['assembled', 'staging', 'awaiting_mapping', 'importing_customers', 'importing_loans', 'importing_share_capital'];
 
     public function __construct(
         private readonly CsvImportStager $stager = new CsvImportStager,
         private readonly BorrowerMatcher $matcher = new BorrowerMatcher,
         private readonly SequenceAllocator $sequences = new SequenceAllocator,
         private readonly LoanScheduleReconstructor $schedules = new LoanScheduleReconstructor,
+        private readonly ShareCapitalRowImporter $shareCapital = new ShareCapitalRowImporter,
     ) {}
 
     /**
@@ -174,6 +177,7 @@ class CsvImportProcessor
             'awaiting_mapping' => $this->mappingGate($run),
             'importing_customers' => $this->importCustomers($run),
             'importing_loans' => $this->importLoans($run),
+            'importing_share_capital' => $this->importShareCapital($run),
             default => new ImportTick($run->phase, 0, idle: true, note: "Phase [{$run->phase}] is not workable."),
         };
     }
@@ -366,7 +370,7 @@ class CsvImportProcessor
         $loansFile = $run->loansFile;
 
         if ($loansFile === null) {
-            return $this->completeRun($run);
+            return $this->beginShareCapital($run);
         }
 
         if (! $this->stager->isStaged($loansFile)) {
@@ -394,7 +398,7 @@ class CsvImportProcessor
         $file = $run->loansFile;
 
         if ($file === null) {
-            return $this->completeRun($run);
+            return $this->beginShareCapital($run);
         }
 
         $this->markInvalidRowsSkipped($file);
@@ -402,7 +406,7 @@ class CsvImportProcessor
         $rows = $this->nextWindow($file, self::LOANS_CHUNK_SIZE);
 
         if ($rows === []) {
-            return $this->completeRun($run);
+            return $this->beginShareCapital($run);
         }
 
         $processed = $this->processWindow($run, $rows, CsvImportSchema::LOANS);
@@ -418,6 +422,83 @@ class CsvImportProcessor
         ]);
 
         return new ImportTick('importing_loans', $processed);
+    }
+
+    /**
+     * The share capital file's turn, after the members and the loans: its rows
+     * find their members among those already in Lendyph and those this run's
+     * members file just wrote (finish run round 2, decision 13). A run with
+     * no share capital file is complete.
+     */
+    private function beginShareCapital(CsvImportRun $run): ImportTick
+    {
+        $file = $run->shareCapitalFile;
+
+        if ($file === null) {
+            return $this->completeRun($run);
+        }
+
+        if (! $this->stager->isStaged($file)) {
+            // Defensive, as for the loans file: never import from rows that
+            // do not exist yet.
+            $this->setPhase($run, 'staging');
+
+            return new ImportTick('staging', 0, note: 'The share capital file still needs staging.');
+        }
+
+        $this->setPhase($run, 'importing_share_capital', ['cursor_row_id' => null]);
+
+        Log::info('csv-import: importing share capital', [
+            'csv_import_run_id' => $run->id,
+            'csv_import_file_id' => $file->id,
+        ]);
+
+        return new ImportTick('importing_share_capital', 0, note: 'Share capital import started.');
+    }
+
+    /**
+     * One window of the share capital file: every contribution first, then
+     * the withdrawals, whatever order the file lists them in. A withdrawal is
+     * refused when it would take the member's balance below ₱0.00
+     * (ShareCapitalRowImporter), so the file's own contributions are all on
+     * the ledger before any withdrawal is weighed against it.
+     */
+    private function importShareCapital(CsvImportRun $run): ImportTick
+    {
+        $this->assertCustomersComplete($run);
+
+        $file = $run->shareCapitalFile;
+
+        if ($file === null) {
+            return $this->completeRun($run);
+        }
+
+        $this->markInvalidRowsSkipped($file);
+
+        $type = 'normalized->values['.CsvImportSchema::indexOf(CsvImportSchema::SHARE_CAPITAL, 'transaction_type').']';
+        $rows = $this->nextWindow($file, self::CHUNK_SIZE, static fn ($rows) => $rows->where($type, ShareCapitalRowNormalizer::CREDIT));
+
+        if ($rows === []) {
+            $rows = $this->nextWindow($file, self::CHUNK_SIZE);
+        }
+
+        if ($rows === []) {
+            return $this->completeRun($run);
+        }
+
+        $processed = $this->processWindow($run, $rows, CsvImportSchema::SHARE_CAPITAL);
+        $this->rememberCursor($run, $rows);
+
+        Log::info('csv-import: share capital chunk done', [
+            'csv_import_run_id' => $run->id,
+            'csv_import_file_id' => $file->id,
+            'rows' => $processed,
+            'from_row_id' => $rows[0]->id,
+            'to_row_id' => $rows[array_key_last($rows)]->id,
+            'remaining' => $this->pendingCount($file),
+        ]);
+
+        return new ImportTick('importing_share_capital', $processed);
     }
 
     /**
@@ -497,14 +578,20 @@ class CsvImportProcessor
     /**
      * The next chunk, re-derived from the data rather than from the cursor.
      *
+     * `$narrow`, when given, keeps only some of the rows still to do (the
+     * share capital file's contributions), for both the resume point and the
+     * window.
+     *
+     * @param  Closure|null  $narrow  takes the rows query and narrows it
      * @return list<CsvImportRow>
      */
-    private function nextWindow(CsvImportFile $file, int $size): array
+    private function nextWindow(CsvImportFile $file, int $size, ?Closure $narrow = null): array
     {
         $min = DB::table('csv_import_rows')
             ->where('csv_import_file_id', $file->id)
             ->where('status', 'valid')
             ->whereNull('result')
+            ->when($narrow !== null, $narrow)
             ->min('id');
 
         if ($min === null) {
@@ -517,6 +604,7 @@ class CsvImportProcessor
             ->where('csv_import_file_id', $file->id)
             ->where('status', 'valid')
             ->whereNull('result')
+            ->when($narrow !== null, $narrow)
             ->where('id', '>', $cursor)
             ->where('id', '<=', $cursor + $size)
             ->orderBy('id')
@@ -674,9 +762,12 @@ class CsvImportProcessor
         // and holds it for the whole chunk because the caller's transaction is
         // still open. The codes it returns are a prediction, not an assignment
         // — the hooks issue the real ones and arrive at the same values.
-        $shape === CsvImportSchema::CUSTOMERS
-            ? $this->sequences->allocateBorrowerCodes(count($rows))
-            : $this->sequences->allocateApplicationNumbers(count($rows));
+        match ($shape) {
+            CsvImportSchema::CUSTOMERS => $this->sequences->allocateBorrowerCodes(count($rows)),
+            CsvImportSchema::LOANS => $this->sequences->allocateApplicationNumbers(count($rows)),
+            // A share capital entry takes no member code or application number.
+            default => null,
+        };
 
         // Drops the Auditable trait's per-model row WITHOUT dropping the model
         // event, so Borrower::booted()'s `created` hook still creates the
@@ -701,12 +792,16 @@ class CsvImportProcessor
         // Asked again here, not only at staging: a run can wait days on its
         // product mapping, and its starter can lose the access meanwhile.
         $membershipAllowed = $shape === CsvImportSchema::CUSTOMERS && $run->starterMayEditMembers();
+        // The same for share capital: the starter's access, read once a chunk.
+        $shareCapital = $shape === CsvImportSchema::SHARE_CAPITAL ? $this->shareCapital->writerFor($run) : null;
 
-        AuditLogService::withoutModelAuditing(function () use ($run, $rows, $shape, $membershipAllowed): void {
+        AuditLogService::withoutModelAuditing(function () use ($run, $rows, $shape, $membershipAllowed, $shareCapital): void {
             foreach ($rows as $row) {
-                $outcome = $shape === CsvImportSchema::CUSTOMERS
-                    ? $this->importCustomerRow($run, $row, $membershipAllowed)
-                    : $this->importLoanRow($run, $row);
+                $outcome = match (true) {
+                    $shareCapital !== null => $shareCapital($row),
+                    $shape === CsvImportSchema::CUSTOMERS => $this->importCustomerRow($run, $row, $membershipAllowed),
+                    default => $this->importLoanRow($run, $row),
+                };
 
                 $this->stamp($row, $outcome);
             }
@@ -1211,6 +1306,7 @@ class CsvImportProcessor
             'result_message' => $outcome->message === null ? null : mb_substr($outcome->message, 0, 2000),
             'borrower_id' => $outcome->borrowerId,
             'loan_id' => $outcome->loanId,
+            'share_capital_ledger_id' => $outcome->shareCapitalLedgerId,
             'updated_at' => now(),
         ]);
     }
@@ -1361,6 +1457,11 @@ class CsvImportProcessor
     {
         $written = "{$summary['borrowers_imported']} member(s) and {$summary['loans_imported']} loan(s)";
 
+        if (array_key_exists('share_capital', $summary['by_file'])) {
+            $entries = $summary['share_capital_imported'];
+            $written = "{$summary['borrowers_imported']} member(s), {$summary['loans_imported']} loan(s) and {$entries} share capital ".($entries === 1 ? 'entry' : 'entries');
+        }
+
         return match ($phase) {
             'completed' => "CSV migration run #{$run->id} completed: {$written} imported.",
             'failed' => "CSV migration run #{$run->id} failed: {$written} had already been imported when it stopped.",
@@ -1395,6 +1496,7 @@ class CsvImportProcessor
             'borrowers_matched' => (int) ($counts['customers']['matched_existing'] ?? 0)
                 + (int) ($counts['customers']['already_imported'] ?? 0),
             'loans_imported' => (int) ($counts['loans']['imported'] ?? 0),
+            'share_capital_imported' => (int) ($counts['share_capital']['imported'] ?? 0),
             'by_file' => $counts,
         ];
     }

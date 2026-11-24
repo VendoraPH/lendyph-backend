@@ -39,7 +39,7 @@ class CsvImportErrorReportController extends Controller
         parameters: [
             new OA\Parameter(name: 'run', in: 'path', required: true, schema: new OA\Schema(type: 'integer')),
             new OA\Parameter(name: 'severity', in: 'query', required: false, schema: new OA\Schema(type: 'string', enum: ['error', 'warning'])),
-            new OA\Parameter(name: 'kind', in: 'query', required: false, schema: new OA\Schema(type: 'string', enum: ['customers', 'loans'])),
+            new OA\Parameter(name: 'kind', in: 'query', required: false, schema: new OA\Schema(type: 'string', enum: ['customers', 'loans', 'share_capital'])),
             new OA\Parameter(name: 'per_page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', default: 25, maximum: 100)),
         ],
         responses: [
@@ -104,7 +104,7 @@ class CsvImportErrorReportController extends Controller
         parameters: [
             new OA\Parameter(name: 'run', in: 'path', required: true, schema: new OA\Schema(type: 'integer')),
             new OA\Parameter(name: 'severity', in: 'query', required: false, schema: new OA\Schema(type: 'string', enum: ['error', 'warning'])),
-            new OA\Parameter(name: 'kind', in: 'query', required: false, schema: new OA\Schema(type: 'string', enum: ['customers', 'loans'])),
+            new OA\Parameter(name: 'kind', in: 'query', required: false, schema: new OA\Schema(type: 'string', enum: ['customers', 'loans', 'share_capital'])),
         ],
         responses: [
             new OA\Response(response: 200, description: 'CSV file stream', content: new OA\MediaType(mediaType: 'text/csv')),
@@ -164,7 +164,7 @@ class CsvImportErrorReportController extends Controller
     {
         $validated = $request->validate([
             'severity' => ['nullable', 'string', 'in:error,warning'],
-            'kind' => ['nullable', 'string', 'in:customers,loans'],
+            'kind' => ['nullable', 'string', 'in:customers,loans,share_capital'],
             'per_page' => ['nullable', 'integer', 'min:1'],
         ]);
 

@@ -80,7 +80,7 @@ class MembersOnlyImportTest extends TestCase
 
         $this->postJson('/api/imports', $this->openRunPayload([]))
             ->assertStatus(422)
-            ->assertJsonPath('errors.files', ['Choose the members file to import.']);
+            ->assertJsonPath('errors.files', ['Choose the members file or the share capital file to import.']);
 
         $this->assertSame(0, CsvImportRun::count());
     }
