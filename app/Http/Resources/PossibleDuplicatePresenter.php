@@ -74,6 +74,20 @@ final class PossibleDuplicatePresenter
         );
     }
 
+    /**
+     * Why a registration waits while its email is on another member, in words
+     * for $viewer: the member by code and name when they may see them, else
+     * "another member".
+     */
+    public static function emailOnFileRefusal(Borrower $holder, ?User $viewer): string
+    {
+        $who = self::mayName($holder, $viewer)
+            ? sprintf('%s (%s)', $holder->borrower_code, $holder->full_name)
+            : 'another member';
+
+        return "This email is already on file for {$who}. Change or clear it in Edit Details before approving.";
+    }
+
     private static function mayName(Borrower $match, ?User $viewer): bool
     {
         return app(ContactVisibility::class)->allows($viewer, $match->branch_id === null ? null : (int) $match->branch_id);

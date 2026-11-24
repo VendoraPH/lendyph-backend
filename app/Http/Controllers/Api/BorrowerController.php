@@ -12,6 +12,7 @@ use App\Http\Requests\Document\UploadFileTypes;
 use App\Http\Resources\BorrowerResource;
 use App\Http\Resources\PossibleDuplicatePresenter;
 use App\Models\Borrower;
+use App\Services\BorrowerDuplicateDetector;
 use App\Services\BorrowerLoanSummaryService;
 use App\Services\BorrowerPurgeService;
 use App\Services\BorrowerRegistration;
@@ -215,7 +216,7 @@ Create a new borrower profile.
 
 **Validation rules (enforced):**
 - `contact_number` must match `^(\+?\d{7,15}|0\d{9,10})$`
-- `email` must be unique across all borrowers
+- `email` must be unique across all borrowers on a staff create (a public registration's email is never refused; see below)
 - `pledge_amount` max `9,999,999.99`
 - `birthdate` must be after 1900-01-01 and before today
 
@@ -226,7 +227,7 @@ Create a new borrower profile.
 A signed-in (staff) create that matches is rejected with 422. A signed-in user holding `borrowers:create` may pass `force=true` in the body to bypass the duplicate check (frontend "Create Anyway" flow).
 On a duplicate rejection, the error message in `errors.first_name[0]` contains the matched borrower's code and DOB when the caller can see that borrower's branch, and a generic message otherwise.
 
-An anonymous (public) registration is **never** rejected as a duplicate, and its `force` is ignored: it is always checked, and a match is saved pending with a server-set link to the matched record (`possible_duplicate` on GET /borrowers/{id}, shown only to a reviewer who can see that record). The answer is the same 201 whether or not it matched.
+An anonymous (public) registration is **never** rejected as a duplicate or for a taken email, and its `force` is ignored: it is always checked, and a match (by name as above, or else by the same email, case and spaces ignored) is saved pending with a server-set link to the matched record (`possible_duplicate` on GET /borrowers/{id}, shown only to a reviewer who can see that record). The answer is the same 201 whether or not it matched.
 
 **Idempotency (public registration):** an anonymous caller may send a client-generated `registration_uuid`
 (UUID **v4**, e.g. the browser's `crypto.randomUUID()`). A retry is honoured — same 201 shape, same borrower
@@ -555,6 +556,7 @@ Approve a borrower whose status is `pending` (public-registration review).
 - Requires at least one valid ID (`type=valid_id` document) on file — returns 422 otherwise.
 - Returns 422 if the borrower is not currently `pending`. Use `/reactivate` to re-activate a previously-active member — keeping the two distinct preserves the audit distinction between "approved an application" and "reactivated a member".
 - `branch_id` (optional): the member's branch, one of the caller's (any branch with `branches:view_all`). Required (422) when the registration has no branch; when it already has one, it may only repeat it (422 otherwise), so approval never moves a member.
+- Returns 422 on `email` while the registration's email (case and spaces ignored) is on another member, whatever is acknowledged: change or clear it with PUT /borrowers/{id} first. It names that member only to a caller who can see them.
 - `acknowledge_possible_duplicate` (boolean): required as `true` when the registration was saved as a possible duplicate of a record on file (its `possible_duplicate`); otherwise 422 on `possible_duplicate`, in words, once every other check passes. It names the record only to a caller who can see it.
 DESC,
         tags: ['Borrowers'],
@@ -576,7 +578,7 @@ DESC,
             new OA\Response(response: 401, description: 'Unauthenticated'),
             new OA\Response(response: 403, description: 'Forbidden'),
             new OA\Response(response: 404, description: 'Not found, or in a branch the caller can\'t see'),
-            new OA\Response(response: 422, description: 'Borrower is not in pending status, has no valid ID on file, has no branch and none was chosen, the chosen branch isn\'t the caller\'s or differs from the registration\'s, or it may be a duplicate and `acknowledge_possible_duplicate` wasn\'t true'),
+            new OA\Response(response: 422, description: 'Borrower is not in pending status, has no valid ID on file, has no branch and none was chosen, the chosen branch isn\'t the caller\'s or differs from the registration\'s, its email is on another member, or it may be a duplicate and `acknowledge_possible_duplicate` wasn\'t true'),
         ],
     )]
     public function approveRegistration(ApproveRegistrationRequest $request, Borrower $borrower): BorrowerResource
@@ -613,9 +615,21 @@ DESC,
             ]);
         }
 
-        // A public registration saved as a possible duplicate (finish run round
-        // 2, decision 3) is approved only once the reviewer confirms they
-        // checked it. Asked last, so it never hides a check that would fail.
+        // A member's email is theirs alone, as a staff create refuses a taken
+        // one, and the public form no longer refuses it (finish run round 2,
+        // decision 3): a registration whose email is on another member waits
+        // until it's changed or cleared, whatever the reviewer confirms.
+        $emailHolder = app(BorrowerDuplicateDetector::class)->memberWithEmail($borrower->email, $borrower->id);
+
+        if ($emailHolder !== null) {
+            throw ValidationException::withMessages([
+                'email' => PossibleDuplicatePresenter::emailOnFileRefusal($emailHolder, $request->user()),
+            ]);
+        }
+
+        // A public registration saved as a possible duplicate is approved only
+        // once the reviewer confirms they checked it. Asked last, so it never
+        // hides a check that would fail.
         if ($borrower->possible_duplicate_of_id !== null && ! $request->boolean('acknowledge_possible_duplicate')) {
             throw ValidationException::withMessages([
                 'possible_duplicate' => PossibleDuplicatePresenter::approvalRefusal($borrower, $request->user()),

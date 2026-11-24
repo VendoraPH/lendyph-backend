@@ -130,10 +130,11 @@ final class BorrowerRegistration
      *
      * A staff create is refused, as at validation. A public registration is
      * never refused (finish run round 2, decision 3): refusing it let anyone
-     * confirm that a person is on file and probe their birthdate. It is saved
-     * with the record it may duplicate instead, which this returns. It is the
-     * only duplicate check a public registration gets, and it runs every tier
-     * whether or not one matches, so the answer is the same either way.
+     * confirm that a person, or an email, is on file and probe their
+     * birthdate. It is saved with the record it may duplicate instead (by
+     * name, or else by email), which this returns. It is the only duplicate
+     * check a public registration gets, and it runs every tier whether or not
+     * one matches, so the answer is the same either way.
      *
      * Not for staff's "Create Anyway" (StoreBorrowerRequest::forced(); an
      * anonymous `force` is ignored). That is settled before the lock is taken,
@@ -168,6 +169,7 @@ final class BorrowerRegistration
                 middleName: $identity['middle_name'] ?? null,
                 lastName: (string) $identity['last_name'],
                 birthdate: $identity['birthdate'] ?? null,
+                email: $request->validated('email'),
             );
         }
 

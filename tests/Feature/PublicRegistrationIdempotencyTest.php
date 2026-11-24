@@ -152,17 +152,11 @@ it('ignores a key whose submission has aged out of the window', function () {
 
     BorrowerSubmissionToken::query()->delete();
 
-    // Normal validation applies again. The stale row's email is taken, so the
-    // same payload is refused on it; its name is never refused as a duplicate
-    // (finish run round 2, decision 3).
-    $this->postJson('/api/borrowers', $payload)
-        ->assertUnprocessable()
-        ->assertJsonValidationErrors(['email'])
-        ->assertJsonMissingValidationErrors(['first_name']);
-
-    // Without the taken email it is a new registration, and the applicant's
-    // own stale row is now just its possible duplicate.
-    $retry = $this->postJson('/api/borrowers', [...$payload, 'email' => null])->assertCreated();
+    // The key is dropped and the submission is a new registration. Neither the
+    // name nor the email is refused on the public form (finish run round 2,
+    // decision 3), so the applicant's own stale row is now just its possible
+    // duplicate.
+    $retry = $this->postJson('/api/borrowers', $payload)->assertCreated();
 
     expect($retry->json('data.id'))->not->toBe($borrowerId);
     expect(Borrower::find($retry->json('data.id'))->possible_duplicate_of_id)->toBe($borrowerId);

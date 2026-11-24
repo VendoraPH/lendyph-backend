@@ -7,6 +7,7 @@ use App\Models\Borrower;
 use App\Models\Branch;
 use App\Models\Role;
 use App\Models\User;
+use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
@@ -67,6 +68,72 @@ class PublicRegistrationPossibleDuplicateTest extends TestCase
         $this->assertSame($noneQueries, $similarQueries);
     }
 
+    /**
+     * A taken email isn't refused either: refusing it told a stranger the
+     * email is on file. Every registration here sends an email, so each
+     * runs the same checks.
+     */
+    public function test_the_public_answer_is_the_same_with_or_without_a_taken_email(): void
+    {
+        $this->member(['email' => 'juan.cruz@example.com']);
+        $this->register(['first_name' => 'Warm', 'last_name' => 'Up', 'email' => 'warm.up@example.com'])->assertCreated();
+
+        [$none, $noneQueries] = $this->registerCountingQueries(['first_name' => 'Pedro', 'last_name' => 'Penduko', 'email' => 'pedro@example.com']);
+        [$taken, $takenQueries] = $this->registerCountingQueries(['first_name' => 'Maria', 'last_name' => 'Santos', 'email' => 'Juan.Cruz@Example.com']);
+        [$same, $sameQueries] = $this->registerCountingQueries(['email' => 'another.juan@example.com']);
+
+        $this->assertSame(201, $none->status());
+
+        foreach ([$taken, $same] as $matched) {
+            $this->assertSame($none->status(), $matched->status());
+            $this->assertSame($this->shape($none), $this->shape($matched));
+        }
+
+        $this->assertSame($noneQueries, $takenQueries);
+        $this->assertSame($noneQueries, $sameQueries);
+    }
+
+    /**
+     * Each public check reads all its rows, matched or not: one that stopped
+     * at its first match would answer sooner when a person or an email is on
+     * file (security review of #372).
+     */
+    public function test_the_public_name_and_email_checks_read_every_row_whether_or_not_one_matches(): void
+    {
+        $this->member(['email' => 'juan.cruz@example.com']);
+
+        DB::flushQueryLog();
+        DB::enableQueryLog();
+        $this->register(['email' => 'juan.cruz@example.com'])->assertCreated();
+        $checks = collect(DB::getQueryLog())
+            ->pluck('query')
+            ->filter(fn (string $sql): bool => str_contains($sql, 'LOWER(TRIM(first_name))') || str_contains($sql, 'REPLACE(email'));
+        DB::disableQueryLog();
+
+        $this->assertCount(2, $checks);
+
+        foreach ($checks as $sql) {
+            $this->assertStringNotContainsStringIgnoringCase('limit', $sql);
+        }
+    }
+
+    /**
+     * The applicant's own photo upload (signed out, with the submission token)
+     * costs the same whether or not the registration was linked: nothing on
+     * that path reads the link (security review of #372).
+     */
+    public function test_a_signed_out_photo_upload_costs_the_same_with_or_without_a_match(): void
+    {
+        $this->member();
+        $this->uploadPhotoCountingQueries($this->register(['first_name' => 'Warm', 'last_name' => 'Up'])->assertCreated());
+
+        $plain = $this->register(['first_name' => 'Pedro', 'last_name' => 'Penduko'])->assertCreated();
+        $linked = $this->register()->assertCreated();
+        $this->assertNotNull(Borrower::findOrFail($linked->json('data.id'))->possible_duplicate_of_id);
+
+        $this->assertSame($this->uploadPhotoCountingQueries($plain), $this->uploadPhotoCountingQueries($linked));
+    }
+
     public function test_the_public_answer_never_names_the_match(): void
     {
         $member = $this->member(['first_name' => 'Juana']);
@@ -99,6 +166,29 @@ class PublicRegistrationPossibleDuplicateTest extends TestCase
 
         $this->assertSame($member->id, $saved->possible_duplicate_of_id);
         $this->assertSame('similar_name_same_birthdate', $saved->possible_duplicate_reason);
+    }
+
+    public function test_a_taken_email_is_linked_with_its_own_reason_case_and_spaces_ignored(): void
+    {
+        $member = $this->member(['email' => 'Juan @Example.com']);
+
+        $saved = $this->savedFrom($this->register(['first_name' => 'Maria', 'last_name' => 'Santos', 'email' => 'juan@example.COM']));
+
+        $this->assertSame('pending', $saved->status);
+        $this->assertSame($member->id, $saved->possible_duplicate_of_id);
+        $this->assertSame('same_email', $saved->possible_duplicate_reason);
+        $this->assertSame('juan@example.COM', $saved->email);
+    }
+
+    public function test_a_name_match_comes_before_an_email_match(): void
+    {
+        $byName = $this->member();
+        $this->member(['first_name' => 'Maria', 'last_name' => 'Santos', 'middle_name' => null, 'email' => 'maria@example.com']);
+
+        $saved = $this->savedFrom($this->register(['email' => 'maria@example.com']));
+
+        $this->assertSame($byName->id, $saved->possible_duplicate_of_id);
+        $this->assertSame('same_name', $saved->possible_duplicate_reason);
     }
 
     public function test_a_registration_that_matches_no_one_has_no_link(): void
@@ -146,6 +236,21 @@ class PublicRegistrationPossibleDuplicateTest extends TestCase
             ->assertCreated();
 
         $this->assertNull(Borrower::findOrFail($created->json('data.id'))->possible_duplicate_of_id);
+    }
+
+    public function test_staff_creates_and_edits_still_refuse_a_taken_email(): void
+    {
+        $this->member(['email' => 'juan.cruz@example.com']);
+        $other = $this->member(['first_name' => 'Pedro', 'middle_name' => null, 'last_name' => 'Penduko', 'birthdate' => '1985-01-01']);
+        $this->actingAs($this->admin);
+
+        $this->postJson('/api/borrowers', $this->applicant(['status' => 'active', 'first_name' => 'Maria', 'last_name' => 'Santos', 'email' => 'juan.cruz@example.com']))
+            ->assertUnprocessable()
+            ->assertJsonPath('errors.email', ['A member with this email already exists.']);
+
+        $this->putJson("/api/borrowers/{$other->id}", ['email' => 'juan.cruz@example.com'])
+            ->assertUnprocessable()
+            ->assertJsonPath('errors.email', ['A member with this email already exists.']);
     }
 
     public function test_a_staff_edit_into_a_duplicate_is_still_refused(): void
@@ -201,6 +306,22 @@ class PublicRegistrationPossibleDuplicateTest extends TestCase
 
         $this->assertSame(['visible' => false, 'message' => self::HIDDEN_NOTICE], $response->json('data.possible_duplicate'));
         $this->assertStringNotContainsString($member->borrower_code, $response->getContent());
+    }
+
+    public function test_an_email_link_reads_its_reason_in_words(): void
+    {
+        $member = $this->member(['first_name' => 'Maria', 'middle_name' => null, 'last_name' => 'Santos', 'email' => 'maria@example.com']);
+        $registration = $this->savedFrom($this->register(['email' => 'maria@example.com']));
+
+        $link = $this->actingAs($this->admin)->getJson("/api/borrowers/{$registration->id}")->assertOk()->json('data.possible_duplicate');
+
+        $this->assertSame($member->id, $link['id']);
+        $this->assertSame('Same email', $link['reason']);
+        $this->assertSame("Possible duplicate of {$member->borrower_code} (Maria Santos): same email.", $link['message']);
+        $this->assertSame(
+            "Public registration saved as a possible duplicate of {$member->borrower_code} (same email).",
+            $this->auditRow($registration, 'created')->description,
+        );
     }
 
     public function test_a_registration_with_no_link_reads_null_and_the_list_carries_no_link(): void
@@ -261,6 +382,76 @@ class PublicRegistrationPossibleDuplicateTest extends TestCase
 
         $this->actingAs($this->reviewer($this->branch))
             ->patchJson($url, ['acknowledge_possible_duplicate' => true])
+            ->assertOk()
+            ->assertJsonPath('data.status', 'active');
+    }
+
+    /**
+     * Staff can't create two members with one email, so the acknowledgement
+     * alone doesn't approve a registration whose email is on another member:
+     * the reviewer changes or clears it first ("Save & Approve").
+     */
+    public function test_approval_waits_while_the_email_is_on_another_member(): void
+    {
+        $member = $this->member(['first_name' => 'Maria', 'middle_name' => null, 'last_name' => 'Santos', 'email' => 'Maria@Example.com']);
+        $registration = $this->flaggedWithValidId(['email' => 'maria@example.com']);
+        $this->actingAs($this->admin);
+        $url = "/api/borrowers/{$registration->id}/approve-registration";
+
+        foreach ([[], ['acknowledge_possible_duplicate' => true]] as $body) {
+            $this->patchJson($url, $body)
+                ->assertUnprocessable()
+                ->assertJsonPath('errors.email', [
+                    "This email is already on file for {$member->borrower_code} (Maria Santos). Change or clear it in Edit Details before approving.",
+                ])
+                ->assertJsonMissingValidationErrors('possible_duplicate');
+        }
+
+        $this->assertSame('pending', $registration->fresh()->status);
+
+        $this->putJson("/api/borrowers/{$registration->id}", ['email' => 'juan.own@example.com'])->assertOk();
+        $this->patchJson($url, ['acknowledge_possible_duplicate' => true])
+            ->assertOk()
+            ->assertJsonPath('data.status', 'active');
+    }
+
+    public function test_a_cleared_email_lets_the_approval_through(): void
+    {
+        $this->member(['email' => 'shared@example.com']);
+        $registration = $this->flaggedWithValidId(['email' => 'shared@example.com']);
+        $this->actingAs($this->admin);
+
+        $this->putJson("/api/borrowers/{$registration->id}", ['email' => ''])->assertOk();
+
+        $this->assertNull($registration->fresh()->email);
+        $this->patchJson("/api/borrowers/{$registration->id}/approve-registration", ['acknowledge_possible_duplicate' => true])
+            ->assertOk()
+            ->assertJsonPath('data.status', 'active');
+    }
+
+    public function test_the_email_refusal_names_the_member_only_to_a_reviewer_who_may_see_them(): void
+    {
+        $member = $this->member(['branch_id' => $this->far->id, 'email' => 'far@example.com']);
+        $registration = $this->flaggedWithValidId(['email' => 'far@example.com']);
+
+        $response = $this->actingAs($this->reviewer($this->branch))
+            ->patchJson("/api/borrowers/{$registration->id}/approve-registration", ['acknowledge_possible_duplicate' => true])
+            ->assertUnprocessable();
+
+        $this->assertSame(
+            ['This email is already on file for another member. Change or clear it in Edit Details before approving.'],
+            $response->json('errors.email'),
+        );
+        $this->assertStringNotContainsString($member->borrower_code, $response->getContent());
+    }
+
+    public function test_an_email_on_another_registration_does_not_hold_the_approval(): void
+    {
+        $this->register(['first_name' => 'Maria', 'last_name' => 'Santos', 'email' => 'twice@example.com'])->assertCreated();
+        $registration = $this->flaggedWithValidId(['email' => 'twice@example.com']);
+
+        $this->actingAs($this->admin)
+            ->patchJson("/api/borrowers/{$registration->id}/approve-registration", ['acknowledge_possible_duplicate' => true])
             ->assertOk()
             ->assertJsonPath('data.status', 'active');
     }
@@ -397,6 +588,28 @@ class PublicRegistrationPossibleDuplicateTest extends TestCase
         DB::disableQueryLog();
 
         return [$response, $queries];
+    }
+
+    /**
+     * The queries the applicant's own photo upload ran, signed out with the
+     * registration's submission token.
+     */
+    private function uploadPhotoCountingQueries(TestResponse $registration): int
+    {
+        $this->app['auth']->forgetGuards();
+        DB::flushQueryLog();
+        DB::enableQueryLog();
+
+        $this->postJson(
+            "/api/borrowers/{$registration->json('data.id')}/photo",
+            ['photo' => UploadedFile::fake()->image('me.jpg')],
+            ['X-Submission-Token' => $registration->json('data.submission_token')],
+        )->assertOk();
+        $queries = count(DB::getQueryLog());
+
+        DB::disableQueryLog();
+
+        return $queries;
     }
 
     /**

@@ -237,6 +237,12 @@ class Borrower extends Model
      * registration saved as a possible duplicate: its creation and its approval
      * name that record by member code only (`$auditRedacted` keeps the link's
      * id out). Other rows keep no description, as before.
+     *
+     * The linked record is read only for those two rows. Any other write, such
+     * as the applicant's own photo upload, reads nothing more for a linked
+     * registration than for any other, so it can't tell them apart (security
+     * review of #372). On creation the link is already loaded
+     * (BorrowerRegistration).
      */
     public function describeAuditEvent(string $action): ?string
     {
@@ -244,12 +250,10 @@ class Borrower extends Model
             return null;
         }
 
-        $code = $this->possibleDuplicateOf?->borrower_code;
-
         if ($action === 'created') {
             return sprintf(
                 'Public registration saved as a possible duplicate of %s (%s).',
-                $code,
+                $this->possibleDuplicateOf?->borrower_code,
                 lcfirst(BorrowerDuplicateDetector::reasonInWords($this->possible_duplicate_reason)),
             );
         }
@@ -258,9 +262,14 @@ class Borrower extends Model
             && ($this->getChanges()['status'] ?? null) === 'active'
             && $this->getOriginal('status') === 'pending';
 
-        return $approved
-            ? sprintf('Registration approved after the reviewer checked the possible duplicate of %s.', $code)
-            : null;
+        if (! $approved) {
+            return null;
+        }
+
+        return sprintf(
+            'Registration approved after the reviewer checked the possible duplicate of %s.',
+            $this->possibleDuplicateOf?->borrower_code,
+        );
     }
 
     public function coMakers(): HasMany

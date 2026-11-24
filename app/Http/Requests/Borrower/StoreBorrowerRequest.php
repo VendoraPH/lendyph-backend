@@ -20,8 +20,8 @@ class StoreBorrowerRequest extends FormRequest
     /**
      * Memoised result of existingRegistration().
      *
-     * rules() needs it to relax the uniqueness checks and the controller needs
-     * it to decide whether to insert at all; the lookup runs once per request.
+     * The controller needs it to decide whether to insert at all; the lookup
+     * runs once per request.
      */
     private ?Borrower $existingRegistration = null;
 
@@ -92,12 +92,6 @@ class StoreBorrowerRequest extends FormRequest
 
     public function rules(): array
     {
-        // A retry whose first response was lost collides with the row that very
-        // first attempt wrote. Feeding its id to the rules that already accept
-        // one is what lets the retry validate instead of being rejected as its
-        // own duplicate.
-        $ignoreId = $this->existingRegistration()?->id;
-
         $firstNameRules = ['required', 'string', 'max:255'];
 
         // Staff may skip the duplicate check with "Create Anyway" (forced()).
@@ -119,8 +113,11 @@ class StoreBorrowerRequest extends FormRequest
             ? ['bail', 'required', app(BranchAccess::class)->constrainBranchExists(Rule::exists('branches', 'id'), $this->user()), BranchTakesNew::activeOnly(BranchWriteGuard::MEMBERS, $this->user())]
             : ['bail', 'nullable', 'exists:branches,id', BranchTakesNew::forPublicRegistration()];
 
+        // A staff create refuses a taken email. A public registration's isn't
+        // (finish run round 2, decision 3), so a retry whose first response was
+        // lost is never refused on the email its first attempt saved either.
         $rules = array_merge(
-            $this->requireMemberFields($this->sharedBorrowerRules($ignoreId), creating: true),
+            $this->requireMemberFields($this->sharedBorrowerRules(uniqueEmail: $this->user() !== null), creating: true),
             [
                 'first_name' => $firstNameRules,
                 'last_name' => ['required', 'string', 'max:255'],
@@ -171,9 +168,9 @@ class StoreBorrowerRequest extends FormRequest
     {
         $uuid = $this->input('registration_uuid');
 
-        // is_string() before the query: `registration_uuid` is raw input here
-        // (rules() runs before validation), so an array or an int would
-        // otherwise reach the query builder.
+        // is_string() before the query: `registration_uuid` is read as raw
+        // input here, so an array or an int would otherwise reach the query
+        // builder.
         if ($this->user() || ! is_string($uuid) || $uuid === '') {
             return null;
         }
@@ -233,10 +230,10 @@ class StoreBorrowerRequest extends FormRequest
     /**
      * The submitted birthdate as `Y-m-d`, or null when absent or unparseable.
      *
-     * This runs from rules(), before the `date` rule has had a chance to reject
-     * anything, so it has to survive arbitrary input. Anything it cannot read
-     * becomes null, which matches only a borrower whose birthdate is also null
-     * — and that request then fails the `date` rule on its own merits anyway.
+     * It reads raw input, not the validated data, so it has to survive
+     * arbitrary input. Anything it cannot read becomes null, which matches only
+     * a borrower whose birthdate is also null — and that request fails the
+     * `date` rule on its own merits anyway.
      */
     private function normalizedDate(mixed $value): ?string
     {
