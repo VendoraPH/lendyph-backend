@@ -33,7 +33,7 @@ class ReceiptShareLinkStaffTest extends TestCase
     {
         parent::setUp();
         $this->seedAndLogin();
-        config(['receipt_share_links.enabled' => true]);
+        config(['receipt_share_links.enabled' => true, 'trustedproxy.proxy_secret' => str_repeat('s', 40)]);
 
         $this->loan = $this->createReleasedLoan();
         $this->repayment = Repayment::factory()->create([

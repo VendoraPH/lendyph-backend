@@ -2,6 +2,7 @@
 
 namespace App\Services\ReceiptShareLinks;
 
+use App\Http\Middleware\TrustFrontendProxy;
 use App\Models\ReceiptShareLink;
 use App\Models\Repayment;
 use App\Models\User;
@@ -9,7 +10,9 @@ use App\Services\AuditLogService;
 use Illuminate\Http\Exceptions\HttpResponseException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 
 /**
  * Receipt share links (finish run round 2, decision 6): a staff member with
@@ -26,6 +29,11 @@ use Illuminate\Support\Facades\DB;
  *   instead of the address.
  * - An unknown, expired or revoked token, a malformed one, and every route
  *   while the switch is off, answer the same 404 (self::notFound()).
+ * - Links are off while the frontend proxy's secret is unset: the limits then
+ *   can't tell visitors apart (self::knowsVisitorAddresses()).
+ * - Views are limited per address (ReceiptShareServiceProvider) and per link
+ *   (self::VIEWS_PER_LINK_PER_HOUR), so rotating addresses can't flood the
+ *   audit trail, which is kept forever.
  */
 final class ReceiptShareLinks
 {
@@ -41,9 +49,50 @@ final class ReceiptShareLinks
     /** The one answer to every refused public view, and to every route while the switch is off. */
     public const NOT_FOUND = 'Not found.';
 
+    /** The one answer to every view over a limit, per address or per link. */
+    public const TOO_MANY_VIEWS = 'Too many tries. Please wait a minute and try again.';
+
+    /** Views one link answers in an hour, from all addresses together. */
+    public const VIEWS_PER_LINK_PER_HOUR = 60;
+
+    private const PROXY_WARNING_KEY = 'receipt-share-links:proxy-secret-warning';
+
+    /** The server switch, and the frontend proxy's secret it relies on. */
     public function enabled(): bool
     {
-        return config('receipt_share_links.enabled') === true;
+        return config('receipt_share_links.enabled') === true && $this->knowsVisitorAddresses();
+    }
+
+    /**
+     * Whether the frontend proxy's secret is set (TrustFrontendProxy), so the
+     * per-address limit sees each visitor's own address. Without it every
+     * visitor shares the frontend's, and 30 junk requests a minute would block
+     * every shared receipt, so links stay off; the first refusal logs a warning
+     * once (as LoanOrigination's PublicPortal does).
+     */
+    private function knowsVisitorAddresses(): bool
+    {
+        if (strlen((string) config('trustedproxy.proxy_secret', '')) >= TrustFrontendProxy::MIN_SECRET_LENGTH) {
+            return true;
+        }
+
+        if (Cache::add(self::PROXY_WARNING_KEY, true)) {
+            Log::warning('Receipt share links are off: LENDYPH_PROXY_SECRET is not set, so every visitor would share one address for the rate limits.');
+        }
+
+        return false;
+    }
+
+    /** The per-link view counter's key. */
+    public static function linkViewsKey(ReceiptShareLink $link): string
+    {
+        return 'receipt-share:link:'.$link->getKey();
+    }
+
+    /** The same 429 for a view over either limit. */
+    public static function tooManyViews(array $headers = []): JsonResponse
+    {
+        return response()->json(['message' => self::TOO_MANY_VIEWS], 429, $headers);
     }
 
     /**

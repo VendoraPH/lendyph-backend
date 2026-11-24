@@ -8,6 +8,7 @@ use App\Services\ReceiptShareLinks\PublicReceipt;
 use App\Services\ReceiptShareLinks\ReceiptShareLinks;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\RateLimiter;
 use OpenApi\Attributes as OA;
 
 /**
@@ -27,7 +28,7 @@ class PublicReceiptController extends Controller
         responses: [
             new OA\Response(response: 200, description: '{data: {cooperative, receipt_number, payment_date, member_name, method, reference_last4, amount_paid, principal_applied, interest_applied, penalty_applied, insurance_applied, overpayment, build_up_credited, overpayment_kept, status, voided_on}}'),
             new OA\Response(response: 404, description: 'Not found'),
-            new OA\Response(response: 429, description: 'Too many views from one address'),
+            new OA\Response(response: 429, description: 'Too many views from one address, or of one link (60 an hour)'),
         ],
     )]
     public function __invoke(Request $request, string $token, ReceiptShareLinks $links, PublicReceipt $receipt): JsonResponse
@@ -38,6 +39,14 @@ class PublicReceiptController extends Controller
         if ($link === null || $repayment === null) {
             return ReceiptShareLinks::notFound();
         }
+
+        // Each link answers at most 60 views an hour, whatever the addresses,
+        // so rotating addresses can't flood the audit trail with view rows.
+        $views = ReceiptShareLinks::linkViewsKey($link);
+        if (RateLimiter::tooManyAttempts($views, ReceiptShareLinks::VIEWS_PER_LINK_PER_HOUR)) {
+            return ReceiptShareLinks::tooManyViews(['Retry-After' => RateLimiter::availableIn($views)]);
+        }
+        RateLimiter::hit($views, 3600);
 
         $shown = $receipt->present($repayment, $request);
         $links->recordView($link, $repayment, $request);

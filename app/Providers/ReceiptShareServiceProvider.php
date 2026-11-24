@@ -2,8 +2,8 @@
 
 namespace App\Providers;
 
+use App\Services\ReceiptShareLinks\ReceiptShareLinks;
 use Illuminate\Cache\RateLimiting\Limit;
-use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\RateLimiter;
 use Illuminate\Support\ServiceProvider;
@@ -17,7 +17,9 @@ use Illuminate\Support\ServiceProvider;
  * one meters it alone: a flood of views can't spend the bucket that the sign-in
  * page's branding and public registration share, and the reverse. Keyed on the
  * caller's address, which is each viewer's own once the frontend proves it is
- * the proxy (LENDYPH_PROXY_SECRET); without that every view shares the proxy's.
+ * the proxy (LENDYPH_PROXY_SECRET); links stay off without it
+ * (ReceiptShareLinks::enabled()). Each link is also limited on its own, in
+ * PublicReceiptController.
  */
 class ReceiptShareServiceProvider extends ServiceProvider
 {
@@ -27,8 +29,6 @@ class ReceiptShareServiceProvider extends ServiceProvider
     {
         RateLimiter::for('receipt-share-view', fn (Request $request) => Limit::perMinute(self::VIEWS_PER_MINUTE)
             ->by('receipt-share:view:'.$request->ip())
-            ->response(fn (Request $request, array $headers): JsonResponse => response()->json([
-                'message' => 'Too many tries. Please wait a minute and try again.',
-            ], 429, $headers)));
+            ->response(fn (Request $request, array $headers) => ReceiptShareLinks::tooManyViews($headers)));
     }
 }

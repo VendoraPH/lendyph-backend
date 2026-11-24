@@ -4,6 +4,7 @@ namespace Tests\Feature\ReceiptShareLinks;
 
 use App\Http\Middleware\ReceiptShare\EnsureReceiptShareLinksEnabled;
 use App\Http\Middleware\ReceiptShare\PublicReceiptHeaders;
+use App\Http\Middleware\TrustFrontendProxy;
 use App\Models\AuditLog;
 use App\Models\BrandingSetting;
 use App\Models\Loan;
@@ -15,6 +16,7 @@ use Illuminate\Cache\RateLimiting\Unlimited;
 use Illuminate\Http\Request;
 use Illuminate\Routing\Middleware\ThrottleRequests;
 use Illuminate\Routing\Route as RoutingRoute;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\RateLimiter;
 use Illuminate\Support\Facades\Route;
 use Illuminate\Support\Facades\Storage;
@@ -45,7 +47,7 @@ class PublicReceiptTest extends TestCase
     {
         parent::setUp();
         $this->seedAndLogin();
-        config(['receipt_share_links.enabled' => true]);
+        config(['receipt_share_links.enabled' => true, 'trustedproxy.proxy_secret' => str_repeat('s', 40)]);
         BrandingSetting::current()->update(['organization_name' => 'Binhs Multi-Purpose Cooperative']);
 
         $this->loan = $this->createReleasedLoan();
@@ -253,6 +255,51 @@ class PublicReceiptTest extends TestCase
         $this->assertNotNull($limited->headers->get('Retry-After'));
 
         $this->openShared(address: '198.51.100.23')->assertOk();
+    }
+
+    public function test_one_link_opens_at_most_60_times_an_hour_however_many_addresses_ask(): void
+    {
+        // Rotating IPv6 addresses each stay far under the per-address limit.
+        for ($i = 1; $i <= 60; $i++) {
+            $this->openShared(address: '2001:db8::'.dechex($i))->assertOk();
+        }
+
+        $capped = $this->openShared(address: '2001:db8::ffff')->assertStatus(429);
+        $this->assertSame('{"message":"Too many tries. Please wait a minute and try again."}', $capped->getContent());
+        $this->assertStringContainsString('no-store', (string) $capped->headers->get('Cache-Control'));
+        $this->assertGreaterThan(0, (int) $capped->headers->get('Retry-After'));
+
+        // Every allowed view is audited; the refused one isn't.
+        $this->assertSame(60, AuditLog::query()->where('action', 'receipt_share_link_opened')->count());
+
+        // The cap is the link's own: another receipt's link still opens.
+        [, $other] = $this->freshLinkFor(Repayment::factory()->create(['loan_id' => $this->loan->id, 'received_by' => $this->admin->id]));
+        $this->openShared($other, address: '2001:db8::ffff')->assertOk();
+
+        $this->travel(61)->minutes();
+        $this->openShared(address: '2001:db8::ffff')->assertOk();
+    }
+
+    public function test_links_stay_off_while_the_proxy_secret_is_unset_and_it_is_logged_once(): void
+    {
+        Log::spy();
+        $staffStatus = "/api/repayments/{$this->repayment->id}/share-link";
+
+        foreach (['', str_repeat('s', TrustFrontendProxy::MIN_SECRET_LENGTH - 1)] as $secret) {
+            config(['trustedproxy.proxy_secret' => $secret]);
+
+            $this->openShared()->assertNotFound()->assertExactJson(['message' => 'Not found.']);
+            $this->actingAs($this->admin)->getJson($staffStatus)->assertNotFound();
+            $this->actingAs($this->admin)->postJson($staffStatus)->assertNotFound();
+            $this->app['auth']->forgetGuards();
+        }
+
+        Log::shouldHaveReceived('warning')->once()->withArgs(fn (string $message) => str_contains($message, 'LENDYPH_PROXY_SECRET'));
+        $this->assertSame(0, AuditLog::query()->where('action', 'receipt_share_link_opened')->count());
+        $this->assertSame(1, ReceiptShareLink::query()->count());
+
+        config(['trustedproxy.proxy_secret' => str_repeat('s', TrustFrontendProxy::MIN_SECRET_LENGTH)]);
+        $this->openShared()->assertOk();
     }
 
     public function test_while_the_switch_is_off_it_answers_404_and_never_429(): void
