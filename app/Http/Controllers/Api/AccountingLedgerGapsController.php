@@ -26,7 +26,7 @@ class AccountingLedgerGapsController extends Controller
     #[OA\Get(
         path: '/api/accounting/ledger-gaps',
         summary: 'Past events that posted nothing, or posted differently from today\'s rules',
-        description: 'The paginator envelope ({data, links, meta}), 25 rows a page. Each row: `kind`, `kind_label`, `record_id`, `reference`, `date`, `branch` ({id, name} or null), `member` ({name, code} or null for a walk-in), `amount` (pesos, two decimals, as a string), `posted` (`none` or `differently`), `reason` and `imported` (the loan came in by CSV). `meta.totals` holds the overall `count` and, for every kind, its `count` and `amount` over every page the filters match. `meta.books_kept` is false, with `meta.notice`, when the organisation has no chart of accounts; the list is then empty. Nothing is written.',
+        description: 'The paginator envelope ({data, links, meta}), 25 rows a page. Each row: `kind`, `kind_label`, `record_id`, `reference`, `date`, `branch` ({id, name} or null), `member` ({name, code} or null for a walk-in), `amount` (pesos, two decimals, as a string), `posted` (`none` or `differently`), `reason` and `imported` (the loan, or the share capital entry, came in by CSV). `meta.totals` holds the overall `count` and, for every kind, its `count` and `amount` over every page the filters match. `meta.books_kept` is false, with `meta.notice`, when the organisation has no chart of accounts; the list is then empty. Nothing is written.',
         tags: ['Accounting'],
         security: [['sanctum' => []]],
         parameters: [
@@ -34,7 +34,7 @@ class AccountingLedgerGapsController extends Controller
             new OA\Parameter(name: 'from', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')),
             new OA\Parameter(name: 'to', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')),
             new OA\Parameter(name: 'branch_id', in: 'query', required: false, description: 'One of the caller\'s branches (another answers 403). Without it, every branch the caller holds; rows with no branch (walk-ins) only for branches:view_all.', schema: new OA\Schema(type: 'integer')),
-            new OA\Parameter(name: 'imported', in: 'query', required: false, description: 'Events of loans imported by CSV: `include` (default), `exclude`, or `only`.', schema: new OA\Schema(type: 'string', enum: LedgerGapsReport::IMPORTED_FILTERS, default: 'include')),
+            new OA\Parameter(name: 'imported', in: 'query', required: false, description: 'Events of loans and share capital entries imported by CSV: `include` (default), `exclude`, or `only`.', schema: new OA\Schema(type: 'string', enum: LedgerGapsReport::IMPORTED_FILTERS, default: 'include')),
             new OA\Parameter(name: 'page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', default: 1)),
         ],
         responses: [

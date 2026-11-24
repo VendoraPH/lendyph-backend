@@ -9,12 +9,16 @@ use App\Services\Savings\SavingsMath;
 /**
  * Tells the member when share capital is credited to them (portal design
  * §7). Registered by convention (PortalServiceProvider).
+ *
+ * Not for an entry Data Import's share capital file brought over
+ * (`is_imported`): that is the cooperative's earlier books, history rather
+ * than a new credit (finish run round 2, decision 13).
  */
 class ShareCapitalLedgerObserver
 {
     public function created(ShareCapitalLedger $row): void
     {
-        if (SavingsMath::centavos((string) ($row->credit ?? '0')) <= 0) {
+        if ($row->is_imported || SavingsMath::centavos((string) ($row->credit ?? '0')) <= 0) {
             return;
         }
 
