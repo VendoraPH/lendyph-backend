@@ -84,7 +84,7 @@ class RoleActivationGuardsTest extends TestCase
         $this->actingAs($actor)
             ->patchJson("/api/roles/{$role->id}/reactivate")
             ->assertStatus(422)
-            ->assertJsonValidationErrors(['role' => 'You can\'t grant permissions you do not hold yourself (loans:view).']);
+            ->assertJsonValidationErrors(['role' => 'You can\'t grant permissions you do not hold yourself: Loans: View.']);
 
         $this->assertFalse(Role::findOrFail($role->id)->is_active);
     }
