@@ -31,6 +31,7 @@ use Illuminate\Support\Carbon;
  * @property string $withholding_tax_rate
  * @property int $term_days
  * @property string $funding_method
+ * @property string|null $reference the payment reference: a cash placement's TD number (CashReferences), else the one it was given
  * @property string $status
  * @property Carbon|null $settled_on
  * @property string|null $settled_interest
@@ -67,6 +68,7 @@ class TimeDeposit extends Model
         'maturity_amount',
         'maturity_instruction',
         'funding_method',
+        'reference',
         'funding_transaction_id',
         'payout_account_id',
         'status',

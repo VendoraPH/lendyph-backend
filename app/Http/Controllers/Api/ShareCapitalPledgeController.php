@@ -214,9 +214,9 @@ DESC,
         ],
         requestBody: new OA\RequestBody(required: true, content: new OA\JsonContent),
         responses: [
-            new OA\Response(response: 201, description: 'Entry created'),
+            new OA\Response(response: 201, description: 'Entry created. A cash entry carries its CSH number in `reference_number` (CSH-[super admin id]-[year]-[0001]); a typed one is ignored for cash.'),
             new OA\Response(response: 409, description: 'Kept colliding with other saves taking the next reference. Nothing was saved; submit again.'),
-            new OA\Response(response: 422, description: 'The pledge belongs to a borrower whose registration is still `pending` or was `rejected`'),
+            new OA\Response(response: 422, description: 'The pledge belongs to a borrower whose registration is still `pending` or was `rejected`, or the member\'s branch is closed or waiting to close (on `borrower_id`)'),
         ],
     )]
     public function manualEntry(ShareCapitalManualEntryRequest $request, ShareCapitalPledge $pledge): JsonResponse
@@ -248,9 +248,9 @@ DESC,
         security: [['sanctum' => []]],
         requestBody: new OA\RequestBody(required: true, content: new OA\JsonContent),
         responses: [
-            new OA\Response(response: 201, description: 'Bulk entries created'),
+            new OA\Response(response: 201, description: 'Bulk entries created. `data.reference_numbers` lists each row\'s reference in the batch\'s order: a cash batch gives each row its own CSH number (CSH-[super admin id]-[year]-[0001]); any other method stores the batch\'s one reference on every row.'),
             new OA\Response(response: 409, description: 'Collided with another save taking the next reference. Not tried again, so a batch sent twice cannot post twice. Nothing was posted; check the ledger before submitting again.'),
-            new OA\Response(response: 422, description: 'One of the pledges belongs to a borrower whose registration is still `pending` or was `rejected`'),
+            new OA\Response(response: 422, description: 'One of the pledges belongs to a borrower whose registration is still `pending` or was `rejected`, or a row\'s member is in a branch that is closed or waiting to close (on `entries.N.pledge_id`)'),
         ],
     )]
     public function bulkEntry(ShareCapitalBulkEntryRequest $request): JsonResponse
@@ -277,6 +277,10 @@ DESC,
         return response()->json([
             'message' => "Created {$entries->count()} ledger entries.",
             'count' => $entries->count(),
+            'data' => [
+                'processed_count' => $entries->count(),
+                'reference_numbers' => $entries->pluck('reference_number')->all(),
+            ],
         ], 201);
     }
 }

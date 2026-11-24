@@ -73,6 +73,12 @@ final class GeneratedNumberWrite
     /** Online loan applications, `OA-YYYY-NNNNNN` (LoanOrigination\ApplicationReference). */
     public const ORIGINATION_REFERENCE_INDEX = 'origination_applications_reference_number_unique';
 
+    /**
+     * A cash reference series' row (CashReferences): two first saves of a
+     * series (`CSH-` or `TD-`, one id, one year) can both insert it.
+     */
+    public const CASH_REFERENCE_SERIES_INDEX = 'cash_reference_sequences_series_unique';
+
     public const MEMBER_CONFLICT = 'Another member was created at the same moment. Submit again.';
 
     public const CO_MAKER_CONFLICT = 'Another co-maker was created at the same moment. Submit again.';
@@ -99,6 +105,7 @@ final class GeneratedNumberWrite
         self::MEMBERSHIP_NUMBER_INDEX,
         self::PORTAL_REQUEST_REFERENCE_INDEX,
         self::ORIGINATION_REFERENCE_INDEX,
+        self::CASH_REFERENCE_SERIES_INDEX,
     ];
 
     private const BACKOFF_MILLISECONDS = 20;

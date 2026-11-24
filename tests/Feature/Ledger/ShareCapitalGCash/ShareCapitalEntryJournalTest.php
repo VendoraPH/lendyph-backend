@@ -79,12 +79,13 @@ class ShareCapitalEntryJournalTest extends TestCase
         $this->assertSame(['1020 Cr 40050', '3060 Dr 40050'], $this->linesOf($this->journalOn($row, 'share_capital')));
     }
 
-    public function test_cash_is_the_default_and_needs_no_reference(): void
+    public function test_cash_is_the_default_needs_no_reference_and_gets_its_csh_number(): void
     {
         $row = $this->entryOnPledge(['amount' => 250, 'type' => 'credit']);
 
         $this->assertSame('cash', $row->method);
-        $this->assertNull($row->reference_number);
+        // Finish run round 2, decision 5: the server numbers a cash entry.
+        $this->assertMatchesRegularExpression('/^CSH-\d{4,}-\d{4}-0001$/', $row->reference_number);
         $this->assertSame(['1010 Dr 25000', '3060 Cr 25000'], $this->linesOf($this->journalOn($row, 'share_capital')));
     }
 

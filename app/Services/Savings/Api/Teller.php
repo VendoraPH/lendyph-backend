@@ -10,6 +10,7 @@ use App\Services\Accounting\AutomaticPoster;
 use App\Services\Accounting\PeriodGuard;
 use App\Services\Savings\ApprovalGate;
 use App\Services\Savings\AvailableBalance;
+use App\Services\Savings\DuplicateReference;
 use App\Services\Savings\ProductRules;
 use App\Services\Savings\SavingsLedger;
 use App\Services\Savings\SavingsLocks;
@@ -38,6 +39,10 @@ use Illuminate\Validation\ValidationException;
  * - A transfer goes between the same member's accounts in the same branch,
  *   to an active or dormant account (which it reactivates), with no journal
  *   (both legs sit on savings deposits) and no tier.
+ * - A deposit or withdrawal paid by any method but cash is refused when its
+ *   reference is already on record for that method (DuplicateReference,
+ *   finish run round 2, decision 11), under the account lock; an approved
+ *   withdrawal is checked again when it posts.
  */
 class Teller
 {
@@ -50,6 +55,7 @@ class Teller
         private readonly PeriodGuard $periods,
         private readonly LargeTransactionAlert $alert,
         private readonly ProductRules $rules,
+        private readonly DuplicateReference $duplicates,
     ) {}
 
     /**
@@ -71,6 +77,7 @@ class Teller
 
         $centavos = SavingsMath::centavos($data['amount']);
         $this->rules->assertCanDeposit($account, $centavos);
+        $this->duplicates->assertUnused($data['payment_method'], $data['reference'] ?? null);
 
         $row = $this->ledger->credit($account, 'deposit', $centavos, $this->attributes($data, $user->id));
         $this->poster->savingsTransaction($row, $user->id);
@@ -98,6 +105,7 @@ class Teller
         $centavos = SavingsMath::centavos($data['amount']);
 
         $this->assertCanPayOut($account);
+        $this->duplicates->assertUnused($data['payment_method'], $data['reference'] ?? null);
 
         if ($decided === null) {
             $decided = $this->rules->decideWithdrawal($account, $centavos, $data['date']);
@@ -150,6 +158,12 @@ class Teller
      */
     public function postWithdrawal(SavingsAccount $account, int $centavos, array $data, WithdrawalFee $fee, int $makerId, ?int $approvalId, int $posterId, array $otherDeciders = []): SavingsTransaction
     {
+        // An approved request was checked when it was made; another entry may
+        // have taken its reference while it waited for its checker.
+        if ($approvalId !== null) {
+            $this->duplicates->assertUnused($data['payment_method'] ?? null, $data['reference'] ?? null);
+        }
+
         $row = $this->ledger->debit($account, 'withdrawal', $centavos, [
             ...$this->attributes($data, $makerId),
             'approval_id' => $approvalId,

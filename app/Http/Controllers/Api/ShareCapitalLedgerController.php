@@ -9,6 +9,7 @@ use App\Http\Resources\ShareCapitalLedgerResource;
 use App\Models\Borrower;
 use App\Models\ShareCapitalLedger;
 use App\Services\BranchAccess;
+use App\Services\CashReferences;
 use App\Services\LikePattern;
 use App\Services\ShareCapitalMemberService;
 use App\Services\ShareCapitalService;
@@ -159,14 +160,14 @@ class ShareCapitalLedgerController extends Controller
                     new OA\Property(property: 'type', type: 'string', enum: ['credit', 'debit']),
                     new OA\Property(property: 'amount', type: 'number'),
                     new OA\Property(property: 'method', type: 'string', enum: ['cash', 'gcash', 'maya', 'bank_transfer', 'online'], default: 'cash'),
-                    new OA\Property(property: 'reference_number', type: 'string', maxLength: 100, nullable: true, description: 'Required unless the method is cash.'),
+                    new OA\Property(property: 'reference_number', type: 'string', maxLength: 100, nullable: true, description: 'Required unless the method is cash. Ignored for cash: a cash entry gets its CSH number when it saves.'),
                 ],
             ),
         ),
         responses: [
-            new OA\Response(response: 201, description: 'Ledger entry created, and posted Dr the method\'s account / Cr 3060 Share Capital for a credit, the reverse for a debit, when the organisation keeps books'),
+            new OA\Response(response: 201, description: 'Ledger entry created, and posted Dr the method\'s account / Cr 3060 Share Capital for a credit, the reverse for a debit, when the organisation keeps books. A cash entry carries its `reference_number` CSH-[super admin id]-[year]-[0001]: the primary super admin\'s user id (the lowest-id active super_admin) padded to 4 digits, the entry date\'s year in Manila, and the next number of that series from 0001.'),
             new OA\Response(response: 409, description: 'Kept colliding with other saves taking the next reference. Nothing was saved; submit again.'),
-            new OA\Response(response: 422, description: 'Validation error. `borrower_id` must belong to a member — a borrower whose registration is still `pending` or was `rejected` is refused here, exactly as on `/pledges/{pledge}/entries`.'),
+            new OA\Response(response: 422, description: 'Validation error. `borrower_id` must belong to a member — a borrower whose registration is still `pending` or was `rejected` is refused here, exactly as on `/pledges/{pledge}/entries`. Also on `borrower_id`: the member\'s branch is closed or waiting to close. On `reference_number`: a cash entry while no super admin is active.'),
         ],
     )]
     public function store(StoreShareCapitalLedgerRequest $request, ShareCapitalService $shareCapital): JsonResponse
@@ -187,5 +188,23 @@ class ShareCapitalLedgerController extends Controller
         return (new ShareCapitalLedgerResource($entry))
             ->response()
             ->setStatusCode(201);
+    }
+
+    #[OA\Get(
+        path: '/api/share-capital/cash-reference/next',
+        summary: 'The next cash entry\'s CSH number',
+        description: 'The reference number the next cash share capital entry would get today: CSH-[super admin id]-[year]-[0001]. A preview only: it reserves nothing, and the entry gets its number when it saves. `reference_number` is null while no super admin is active.',
+        tags: ['Share Capital'],
+        security: [['sanctum' => []]],
+        responses: [
+            new OA\Response(response: 200, description: '{success, data: {reference_number}}'),
+            new OA\Response(response: 403, description: 'Missing share_capital:create'),
+        ],
+    )]
+    public function nextCashReference(CashReferences $references): JsonResponse
+    {
+        $this->authorize('share_capital:create');
+
+        return response()->json(['success' => true, 'data' => ['reference_number' => $references->next(CashReferences::SHARE_CAPITAL)]]);
     }
 }

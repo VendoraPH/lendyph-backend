@@ -421,6 +421,7 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
     Route::get('/share-capital/ledger', [ShareCapitalLedgerController::class, 'index']);
     Route::post('/share-capital/ledger', [ShareCapitalLedgerController::class, 'store']);
     Route::get('/share-capital/members', [ShareCapitalLedgerController::class, 'members']);
+    Route::get('/share-capital/cash-reference/next', [ShareCapitalLedgerController::class, 'nextCashReference']);
 
     // Share Capital Pledges
     Route::get('/pledges', [ShareCapitalPledgeController::class, 'index']);

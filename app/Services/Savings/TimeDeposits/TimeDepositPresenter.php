@@ -20,7 +20,8 @@ use Throwable;
  *
  * A rollover's own placement is funded by the one it came from
  * (`rolled_over_from_id`), so its `funding_method` reads null: no money
- * method paid for it.
+ * method paid for it, and it has no `reference`. A cash placement's
+ * `reference` is its TD number; any other method's is the one it was given.
  *
  * `post_maturity_days` and `post_maturity_interest` (gross, before tax): on
  * a placement settled at maturity, what its settlement paid for the days
@@ -90,6 +91,7 @@ class TimeDepositPresenter
             'maturity_amount' => $deposit->maturity_amount,
             'maturity_instruction' => $deposit->maturity_instruction,
             'funding_method' => $deposit->funding_method === Placement::ROLLOVER_FUNDING ? null : $deposit->funding_method,
+            'reference' => $deposit->reference,
             'payout_account_id' => $deposit->payout_account_id,
             'payout_account_number' => $deposit->payoutAccount?->account_number,
             'status' => $deposit->status,

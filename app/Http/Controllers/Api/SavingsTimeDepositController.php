@@ -14,6 +14,7 @@ use App\Models\SavingsProduct;
 use App\Models\TimeDeposit;
 use App\Services\BranchAccess;
 use App\Services\Branches\MemberLock;
+use App\Services\CashReferences;
 use App\Services\Savings\IdempotentWrite;
 use App\Services\Savings\SavingsMath;
 use App\Services\Savings\TimeDeposits\Placement;
@@ -159,10 +160,28 @@ class SavingsTimeDepositController extends Controller
         return response()->json(['success' => true, 'data' => $this->quote->present($figures)]);
     }
 
+    #[OA\Get(
+        path: '/api/savings/time-deposits/cash-reference/next',
+        summary: 'The next cash placement\'s TD number',
+        description: 'The reference number the next cash placement would get today: TD-[super admin id]-[year]-[0001]. A preview only: it reserves nothing, and the placement gets its number when it saves. `reference_number` is null while no super admin is active.',
+        tags: ['Savings'],
+        security: [['sanctum' => []]],
+        responses: [
+            new OA\Response(response: 200, description: '{success, data: {reference_number}}'),
+            new OA\Response(response: 403, description: 'Missing savings:create'),
+        ],
+    )]
+    public function nextCashReference(CashReferences $references): JsonResponse
+    {
+        $this->authorize('savings:create');
+
+        return response()->json(['success' => true, 'data' => ['reference_number' => $references->next(CashReferences::TIME_DEPOSIT)]]);
+    }
+
     #[OA\Post(
         path: '/api/savings/time-deposits',
         summary: 'Place a time deposit',
-        description: 'Needs an Idempotency-Key. The figures are the quote\'s, snapshotted on the placement. Dated today or yesterday. Paid in cash, by bank transfer, GCash or Maya, or from the member\'s own active savings account in the same branch (`payment_method` savings with `funding_account_id`), never above its available balance. Posts Dr the money account or savings deposits / Cr time deposits.',
+        description: 'Needs an Idempotency-Key. The figures are the quote\'s, snapshotted on the placement. Dated today or yesterday. Paid in cash, by bank transfer, GCash or Maya, or from the member\'s own active savings account in the same branch (`payment_method` savings with `funding_account_id`), never above its available balance. Posts Dr the money account or savings deposits / Cr time deposits. The placement keeps its payment `reference`: a cash placement gets TD-[super admin id]-[year]-[0001] (any typed one is ignored); any other method keeps the one given, refused (422 on `reference`) when that method already has it on record in the cooperative.',
         tags: ['Savings'],
         security: [['sanctum' => []]],
         parameters: [new OA\Parameter(name: 'Idempotency-Key', in: 'header', required: true, schema: new OA\Schema(type: 'string', format: 'uuid'))],
@@ -174,7 +193,7 @@ class SavingsTimeDepositController extends Controller
             new OA\Property(property: 'placement_date', type: 'string', format: 'date'),
             new OA\Property(property: 'maturity_instruction', type: 'string', enum: TimeDeposit::MATURITY_INSTRUCTIONS),
             new OA\Property(property: 'payment_method', type: 'string', enum: ['cash', 'bank_transfer', 'gcash', 'maya', 'savings']),
-            new OA\Property(property: 'reference', type: 'string', nullable: true),
+            new OA\Property(property: 'reference', type: 'string', nullable: true, description: 'The payment reference. Ignored for cash, which gets its TD number.'),
             new OA\Property(property: 'funding_account_id', type: 'integer', nullable: true),
             new OA\Property(property: 'payout_account_id', type: 'integer', nullable: true),
         ])),
