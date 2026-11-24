@@ -34,9 +34,15 @@ trait HasBorrowerRules
      * request can apply its own `required` vs `sometimes` modifier.
      *
      * @param  int|null  $ignoreId  Current borrower id when updating (for unique rules).
+     * @param  bool  $uniqueEmail  Whether a taken email is refused. Not on a public
+     *                             registration (finish run round 2, decision 3):
+     *                             refusing it told a stranger the email is on file,
+     *                             so BorrowerRegistration links the registration to
+     *                             the record holding it, and approval waits until
+     *                             the email is changed or cleared.
      * @return array<string, array<int, mixed>>
      */
-    protected function sharedBorrowerRules(?int $ignoreId = null): array
+    protected function sharedBorrowerRules(?int $ignoreId = null, bool $uniqueEmail = true): array
     {
         return [
             'middle_name' => ['nullable', 'string', 'max:255'],
@@ -69,7 +75,7 @@ trait HasBorrowerRules
                 'nullable',
                 'email',
                 'max:255',
-                Rule::unique('borrowers', 'email')->ignore($ignoreId),
+                ...($uniqueEmail ? [Rule::unique('borrowers', 'email')->ignore($ignoreId)] : []),
             ],
             'employer_or_business' => ['nullable', 'string', 'max:255'],
             'date_hired' => ['nullable', 'date', 'date_format:Y-m-d', 'after:1900-01-01', 'before_or_equal:today', $this->dateHiredNotBeforeBirthdate()],
@@ -137,13 +143,9 @@ trait HasBorrowerRules
             'address.required_without' => 'The street address is required.',
             'street_address.required_without' => 'The street address is required.',
             'contact_number.regex' => 'The contact number must be a valid phone format (e.g., 09171234567 or +639171234567).',
-            // Same reasoning as NoDuplicateBorrower: public registration is
-            // anonymous, so confirming that an address is already on file lets
-            // anyone enumerate who borrows here. Operators still get the direct
-            // message, since they need it to resolve the collision.
-            'email.unique' => $this->user()
-                ? 'A member with this email already exists.'
-                : 'This email cannot be used. Please contact your branch to continue.',
+            // Staff only: a public registration's email is never refused as
+            // taken (sharedBorrowerRules()).
+            'email.unique' => 'A member with this email already exists.',
             'pledge_amount.max' => 'The pledge amount may not exceed 9,999,999.99.',
             'birthdate.date_format' => 'The birthdate must be a date written as year-month-day, such as 1990-01-15.',
             'birthdate.after' => 'The birthdate must be after January 1, 1900.',

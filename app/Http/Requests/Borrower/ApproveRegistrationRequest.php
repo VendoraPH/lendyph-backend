@@ -41,6 +41,10 @@ class ApproveRegistrationRequest extends FormRequest
                 app(BranchAccess::class)->constrainBranchExists(Rule::exists('branches', 'id'), $this->user()),
                 BranchTakesNew::activeOnly(BranchWriteGuard::MEMBERS, $this->user()),
             ],
+            // The reviewer checked the record a public registration may
+            // duplicate (finish run round 2, decision 3). Needed as true only
+            // when the registration has one; the controller asks for it last.
+            'acknowledge_possible_duplicate' => ['sometimes', 'boolean'],
         ];
     }
 
@@ -74,6 +78,7 @@ class ApproveRegistrationRequest extends FormRequest
         return [
             'branch_id.exists' => 'Choose one of your own branches for this member.',
             'branch_id.integer' => 'Choose one of your own branches for this member.',
+            'acknowledge_possible_duplicate.boolean' => 'Say yes or no to whether you checked the possible duplicate.',
         ];
     }
 }
