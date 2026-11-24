@@ -36,6 +36,7 @@ final class FakeModel implements LindaModel, LindaWriter
         ['unsupported_question', ['ignore', 'you are now', 'pretend', 'system prompt', 'instructions', 'weather', 'joke', 'poem', 'delete', 'send', 'kalimti']],
         ['how_to', ['how do i', 'how can i', 'how to', 'where is', 'where are', 'where can i', 'paano', 'unsaon', 'saan', 'asa makita']],
         ['reminder_summary', ['reminder', 'reminders', 'paalala', 'pahinumdom', 'sms']],
+        ['credit_scoring_summary', ['credit score', 'credit scores', 'credit scoring', 'credit risk', 'risk level', 'risk levels', 'high risk', 'low risk', 'score bands', 'score band', 'due for review', 'taas og risk', 'mataas ang risk']],
         ['collection_efficiency', ['efficiency', 'collection rate', 'porsyento', 'porsiyento', 'percent', 'percentage']],
         ['income_summary', ['income', 'interest earned', 'earn', 'earned', 'revenue', 'kita', 'kinita', 'ganansya', 'kinitaan']],
         ['expense_summary', ['expense', 'expenses', 'gastos', 'gasto', 'gigasto', 'gastu']],
