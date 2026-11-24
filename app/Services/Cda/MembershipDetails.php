@@ -3,10 +3,13 @@
 namespace App\Services\Cda;
 
 use App\Models\Borrower;
+use App\Models\PortalCode;
+use App\Models\PortalUser;
 use App\Models\User;
 use App\Services\AuditLogService;
 use App\Services\GeneratedNumberWrite;
 use App\Services\Portal\Auth\MemberNumber;
+use App\Services\Portal\PortalAccess;
 use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
@@ -30,8 +33,14 @@ use Illuminate\Validation\ValidationException;
  * membership date still brings the member code as the number when there is
  * none (Borrower::booted()).
  *
+ * A new sign-in number (MemberNumber::of) closes the member's open portal
+ * activation or reset code in the same transaction: its slip shows the old
+ * number, which may later go to another member. Staff issue a new one. The
+ * member's portal sessions carry on.
+ *
  * One audit row on the member holds the old and new values of exactly the
- * fields that changed. A save that changes nothing writes nothing.
+ * fields that changed, and says when an open portal code was closed. A save
+ * that changes nothing writes nothing.
  */
 final class MembershipDetails
 {
@@ -46,6 +55,8 @@ final class MembershipDetails
         'member_type' => 'member type',
         'membership_number' => 'membership number',
     ];
+
+    public function __construct(private readonly PortalAccess $portal) {}
 
     /** A number another member already holds, naming the number only. */
     public static function numberTaken(string $number): string
@@ -79,7 +90,9 @@ final class MembershipDetails
                 $before[$field] = $locked->getRawOriginal($field);
             }
 
+            $signInBefore = MemberNumber::of($locked);
             $this->write($locked, $changes);
+            $codeClosed = MemberNumber::of($locked) !== $signInBefore && $this->closeOpenPortalCode($locked);
 
             // What the save changed, the member code the first membership date
             // brings with it included.
@@ -95,7 +108,8 @@ final class MembershipDetails
                 $locked,
                 array_intersect_key($before, $new),
                 $new,
-                'Membership details changed: '.self::listInWords(array_map(fn (string $field): string => self::WORDS[$field], $changed)).'.',
+                'Membership details changed: '.self::listInWords(array_map(fn (string $field): string => self::WORDS[$field], $changed))
+                    .($codeClosed ? '; open portal codes closed' : '').'.',
             );
 
             return $locked;
@@ -173,6 +187,32 @@ final class MembershipDetails
 
             throw $e;
         }
+    }
+
+    /**
+     * Close the member's open portal code, if they have a portal account and
+     * one is open. The account is locked after the member, the order CodeDesk
+     * issues codes in, so a code issued at the same moment waits and shows the
+     * new number. Sessions are left alone.
+     */
+    private function closeOpenPortalCode(Borrower $member): bool
+    {
+        $portalUser = PortalUser::query()->where('borrower_id', $member->getKey())->lockForUpdate()->first();
+
+        if ($portalUser === null) {
+            return false;
+        }
+
+        $open = PortalCode::query()
+            ->where('portal_user_id', $portalUser->getKey())
+            ->where('status', PortalCode::STATUS_OPEN)
+            ->exists();
+
+        if ($open) {
+            $this->portal->closeOpenCodes($portalUser);
+        }
+
+        return $open;
     }
 
     /** @param  list<string>  $items */

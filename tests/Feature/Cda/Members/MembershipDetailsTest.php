@@ -5,13 +5,17 @@ namespace Tests\Feature\Cda\Members;
 use App\Models\AuditLog;
 use App\Models\Borrower;
 use App\Models\Branch;
+use App\Models\PortalCode;
+use App\Models\PortalUser;
 use App\Models\User;
 use App\Services\AuditLogService;
 use App\Services\Cda\MembershipDetails;
 use Illuminate\Database\Eloquent\ModelNotFoundException;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\Hash;
 use Illuminate\Validation\ValidationException;
 use PHPUnit\Framework\Attributes\DataProvider;
+use Tests\Feature\Portal\PortalTestHelpers;
 use Tests\TestCase;
 use Tests\Traits\SetupLendyPH;
 
@@ -22,11 +26,12 @@ use Tests\Traits\SetupLendyPH;
  * The number follows the members import's rules; a number another member holds
  * is refused in words naming the number only. Only a member has these details,
  * a former member's can be corrected but never dated after the membership
- * ended, and one audit row holds the old and new values.
+ * ended, and one audit row holds the old and new values. A new sign-in number
+ * closes the member's open portal code; their sessions carry on.
  */
 class MembershipDetailsTest extends TestCase
 {
-    use SetupLendyPH;
+    use PortalTestHelpers, SetupLendyPH;
 
     private const FORMAT = 'The membership date must be a date written as year-month-day, such as 2026-01-15.';
 
@@ -343,6 +348,61 @@ class MembershipDetailsTest extends TestCase
             ->assertJsonPath('data.membership_number', $member->borrower_code);
     }
 
+    // The portal sign-in --------------------------------------------------------
+
+    public function test_a_new_number_closes_the_open_portal_code_and_the_members_session_carries_on(): void
+    {
+        $this->enablePortal();
+        $portalUser = $this->portalMember(['branch_id' => $this->branch->id]);
+        $member = $portalUser->borrower;
+        $token = $this->portalToken($portalUser);
+        $code = $this->openCode($portalUser);
+
+        // A change that keeps the sign-in number leaves the code open.
+        $this->patchJson($this->url($member), ['member_type' => 'associate'])->assertOk();
+        $this->assertSame(PortalCode::STATUS_OPEN, $code->fresh()->status);
+
+        $before = (int) AuditLog::query()->max('id');
+
+        $this->patchJson($this->url($member), ['membership_number' => 'MEM-0042'])->assertOk();
+
+        // Its slip showed the old number, which may later go to another member.
+        $closed = $code->fresh();
+        $this->assertSame(PortalCode::STATUS_SUPERSEDED, $closed->status);
+        $this->assertNull($closed->live_key);
+
+        $row = AuditLog::query()->where('id', '>', $before)->sole();
+        $this->assertSame('Membership details changed: membership number; open portal codes closed.', $row->description);
+
+        // The member's session carries on, under the new number.
+        $this->portalJson('GET', '/api/portal/membership', [], $token)
+            ->assertOk()
+            ->assertJsonPath('data.member_number', 'MEM-0042');
+        $this->assertSame(PortalUser::STATUS_ACTIVE, $portalUser->fresh()->status);
+    }
+
+    public function test_a_new_number_with_no_open_portal_code_says_nothing_of_codes(): void
+    {
+        // No portal account.
+        $member = $this->member();
+        $before = (int) AuditLog::query()->max('id');
+
+        $this->patchJson($this->url($member), ['membership_number' => 'MEM-7'])->assertOk();
+
+        $this->assertSame('Membership details changed: membership number.', AuditLog::query()->where('id', '>', $before)->sole()->description);
+
+        // A portal account whose code was already used.
+        $this->enablePortal();
+        $portalUser = $this->portalMember(['branch_id' => $this->branch->id]);
+        $used = $this->openCode($portalUser, ['status' => PortalCode::STATUS_USED, 'live_key' => null, 'used_at' => now()]);
+        $before = (int) AuditLog::query()->max('id');
+
+        $this->patchJson($this->url($portalUser->borrower), ['membership_number' => 'MEM-8'])->assertOk();
+
+        $this->assertSame('Membership details changed: membership number.', AuditLog::query()->where('id', '>', $before)->sole()->description);
+        $this->assertSame(PortalCode::STATUS_USED, $used->fresh()->status);
+    }
+
     // Who has membership details ---------------------------------------------
 
     public function test_a_registration_not_yet_a_member_has_no_membership_details(): void
@@ -404,6 +464,26 @@ class MembershipDetailsTest extends TestCase
         ksort($actual);
 
         $this->assertSame($expected, $actual);
+    }
+
+    /**
+     * An activation or reset code as CodeDesk issues one (open unless stated).
+     *
+     * @param  array<string, mixed>  $attributes
+     */
+    private function openCode(PortalUser $portalUser, array $attributes = []): PortalCode
+    {
+        return PortalCode::query()->create([
+            'portal_user_id' => $portalUser->getKey(),
+            'kind' => PortalCode::KIND_RESET,
+            'code_hash' => Hash::make('ABCD2345EFGH'),
+            'expires_at' => now()->addDay(),
+            'status' => PortalCode::STATUS_OPEN,
+            'live_key' => $portalUser->getKey(),
+            'identity_checked_as' => 'umid',
+            'issued_by' => $this->admin->getKey(),
+            ...$attributes,
+        ]);
     }
 
     private function url(Borrower $member): string
