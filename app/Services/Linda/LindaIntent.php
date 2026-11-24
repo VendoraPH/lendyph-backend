@@ -6,9 +6,10 @@ namespace App\Services\Linda;
  * What a Linda question is about.
  *
  * The names of the frontend's `LindaIntent` union (lendyph-frontend
- * src/types/linda.ts), plus round 3's and round 4's own (reminders), which
- * the union accepts as plain strings and the panel treats alike. The
- * deterministic matcher answers five of them; the model may choose any.
+ * src/types/linda.ts), plus round 3's, round 4's (reminders) and the finish
+ * run's (credit scoring) own, which the union accepts as plain strings and
+ * the panel treats alike. The deterministic matcher answers five of them; the
+ * model may choose any.
  */
 enum LindaIntent: string
 {
@@ -32,6 +33,7 @@ enum LindaIntent: string
     case ShareCapitalSummary = 'share_capital_summary';
     case CdaSummary = 'cda_summary';
     case ReminderSummary = 'reminder_summary';
+    case CreditScoringSummary = 'credit_scoring_summary';
     case HowTo = 'how_to';
     case OpenQuestion = 'open_question';
     case UnsupportedQuestion = 'unsupported_question';
@@ -44,13 +46,13 @@ enum LindaIntent: string
      * lookup (a member, a loan or a receipt), which is about one record.
      * Savings take one since round 4 (deposits and withdrawals over it, and the
      * balances at its end); with none, they are as of today. Reminders count a
-     * day or a period, today with none.
+     * day or a period, today with none. Credit scoring is as of today.
      */
     public function takesPeriod(): bool
     {
         return match ($this) {
             self::OverdueAccounts, self::LoanSummary, self::PortfolioSummary, self::ShareCapitalSummary,
-            self::CdaSummary, self::HowTo, self::UnsupportedQuestion,
+            self::CdaSummary, self::CreditScoringSummary, self::HowTo, self::UnsupportedQuestion,
             self::BorrowerLookup, self::LoanDetails, self::TransactionLookup => false,
             default => true,
         };
