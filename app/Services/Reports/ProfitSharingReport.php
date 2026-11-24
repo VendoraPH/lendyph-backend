@@ -3,6 +3,7 @@
 namespace App\Services\Reports;
 
 use App\Models\AccountingJournal;
+use App\Models\Borrower;
 use App\Models\Loan;
 use App\Models\ShareCapitalLedger;
 use App\Services\ReportService;
@@ -19,10 +20,16 @@ use Illuminate\Support\Facades\DB;
  * members by their share capital on a cutoff date. A report only: nothing is
  * credited to a member or posted to the books.
  *
+ * It is a whole-cooperative report (money review, 2026-11-24): every
+ * branch's income, expenses and losses, head office's included, shared among
+ * every member by all members' share capital, the approved rule. Who may read
+ * it is ProfitSharingReportRequest's (every branch and each figure's source).
+ *
  * - **Share capital** is each member's share capital ledger balance on the
  *   cutoff date, by the ledger's own rule (ShareCapitalLedger::balancesQuery(),
  *   credits less debits, to the cutoff date). Members holding none, or less
- *   than none, are left out; those holding less are counted.
+ *   than none, are left out; those holding less are counted. Pending and
+ *   rejected registrations hold no membership and are left out too.
  * - **Distributable profit** runs from 1 January of the cutoff date's year to
  *   the cutoff date, on the cash basis:
  *   - plus the lending income received: interest, penalty and the processing,
@@ -38,33 +45,28 @@ use Illuminate\Support\Facades\DB;
  *     covered was counted when the allowance was provided, and the part
  *     unearned interest covered was never income. A restructure with no write-
  *     off journal (no books when it was released) loses all of it.
- *   A journal reversed on or before the cutoff date counts as never posted, so
- *   its expense, allowance posting or write-off is left out; one reversed later
- *   still stood on the cutoff date.
+ *   An expense or allowance posting whose journal was reversed on or before the
+ *   cutoff date is left out. A write-off whose journal was reversed by then
+ *   counts all of its principal as lost, the safe side, as a write-off with no
+ *   journal does. A journal reversed after the cutoff date still stood on it.
  * - **Earnings** are (share capital ÷ all members' share capital) × the
  *   profit, in exact maths, half up to the centavo
  *   (ProfitSharingDistribution); what the rounding leaves over is reported.
  *   Nothing is shared from a profit at or below ₱0.00.
- *
- * Branches follow the reports' rule. In one branch, or a branch user's own
- * branches, the figures are those branches' own: income on their loans, their
- * expenses, allowance postings and write-offs, shared among the members now in
- * them, each with their whole share capital (the share capital member list's
- * rule). Head office's expenses with no branch count only for the whole
- * cooperative.
  *
  * Money is worked out in integer centavos and sent in pesos.
  */
 final class ProfitSharingReport
 {
     /** Read with every figure: the definition is the owner's to confirm. */
-    public const BASIS_NOTE = 'To confirm with the owner: distributable profit is the lending income received from 1 January to the '
-        .'cutoff date (interest, penalty, and processing, service and other loan fees, as the Income report counts them), less the '
-        .'expenses recorded in Expenses, less credit losses: the allowance for credit losses provided less released, and principal '
-        .'written off by restructures beyond what the allowance or interest never received already covered. Principal repayments '
-        .'are never income, and savings interest, GCash income and journal entries made by hand are not counted. Each member\'s '
-        .'share capital is their balance on the cutoff date. This report only calculates: nothing is credited to members or '
-        .'posted to the books.';
+    public const BASIS_NOTE = 'To confirm with the owner: the whole cooperative\'s distributable profit is the lending income received '
+        .'from 1 January to the cutoff date (interest, penalty, and processing, service and other loan fees, as the Income report '
+        .'counts them), less the expenses recorded in Expenses, less credit losses: the allowance for credit losses provided less '
+        .'released, and principal written off by restructures beyond what the allowance or interest never received already '
+        .'covered. Expenses whose entry was reversed by the cutoff date are left out, unlike the Expenses screen\'s totals. '
+        .'Principal repayments are never income, and savings interest, GCash income and journal entries made by hand are not '
+        .'counted. Each member\'s share capital is their balance on the cutoff date. This report only calculates: nothing is '
+        .'credited to members or posted to the books.';
 
     public const ROWS_WITHHELD = 'Each member\'s share capital and earnings are limited to roles that can export reports. '
         .'The profit and the totals are complete.';
@@ -73,24 +75,21 @@ final class ProfitSharingReport
 
     /**
      * @param  string  $cutoff  `Y-m-d`, no later than today
-     * @param  int|null  $branchId  the one branch asked for, already allowed for the caller
-     * @param  list<int>|null  $callerBranches  the caller's branches (BranchAccess::for()); null for every branch
      * @param  bool  $withRows  whether the caller sees each member's row (`reports:export`)
      * @return array<string, mixed>
      */
-    public function build(string $cutoff, ?int $branchId, ?array $callerBranches, bool $withRows): array
+    public function build(string $cutoff, bool $withRows): array
     {
         $from = CarbonImmutable::parse($cutoff)->startOfYear()->toDateString();
-        $scope = $branchId !== null ? [$branchId] : $callerBranches;
 
-        $income = $this->lendingIncome($from, $cutoff, $branchId, $callerBranches);
-        $expenses = $this->expenses($from, $cutoff, $scope);
-        $allowance = $this->allowancePostings($from, $cutoff, $scope);
-        $writeOffs = $this->writeOffs($from, $cutoff, $scope);
+        $income = $this->lendingIncome($from, $cutoff);
+        $expenses = $this->expenses($from, $cutoff);
+        $allowance = $this->allowancePostings($from, $cutoff);
+        $writeOffs = $this->writeOffs($from, $cutoff);
         $losses = $allowance + $writeOffs['written_off'] - $writeOffs['covered'];
         $profit = $income['lending_income'] - $expenses - $losses;
 
-        $members = $this->members($cutoff, $scope);
+        $members = $this->members($cutoff);
         $holders = array_values(array_filter($members, fn (array $member): bool => $member['centavos'] > 0));
         $shares = ProfitSharingDistribution::of(array_column($holders, 'centavos', 'id'), $profit);
 
@@ -108,7 +107,6 @@ final class ProfitSharingReport
             'cutoff_date' => $cutoff,
             'period_from' => $from,
             'period_to' => $cutoff,
-            'branch_scope' => $scope === null ? 'organisation' : 'branches',
             'profit' => array_map(self::pesos(...), [
                 ...$income,
                 'expenses' => $expenses,
@@ -134,7 +132,9 @@ final class ProfitSharingReport
             'totals' => [
                 'member_count' => count($holders),
                 'share_capital' => self::pesos($shares->totalShareCapital),
-                'share_percent' => $holders === [] ? null : 100.0,
+                // The rows' own shares added up, so the column's total reads
+                // true: three thirds are 99.9999, not 100.
+                'share_percent' => $shares->totalSharePercent === null ? null : (float) $shares->totalSharePercent,
                 'earnings' => self::pesos($shares->totalEarnings),
                 'capital_plus_earnings' => self::pesos($shares->totalShareCapital + $shares->totalEarnings),
                 'rounding_remainder' => self::pesos($shares->remainder),
@@ -146,18 +146,17 @@ final class ProfitSharingReport
     }
 
     /**
-     * The Income report's figures for the period, in centavos, and their sum.
+     * The Income report's figures for the period, for the whole cooperative,
+     * in centavos, and their sum.
      *
-     * @param  list<int>|null  $callerBranches
      * @return array{interest_income: int, penalty_income: int, processing_fees: int, service_fee: int, other_fees: int, lending_fees: int, lending_income: int}
      */
-    private function lendingIncome(string $from, string $to, ?int $branchId, ?array $callerBranches): array
+    private function lendingIncome(string $from, string $to): array
     {
         $report = $this->reports->incomeReport([
             'date_from' => $from,
             'date_to' => $to,
-            'branch_id' => $branchId,
-            'branch_ids' => $callerBranches,
+            'branch_ids' => null,
         ]);
 
         $parts = [];
@@ -177,12 +176,8 @@ final class ProfitSharingReport
         ];
     }
 
-    /**
-     * The expenses recorded in Expenses and dated in the period, in centavos.
-     *
-     * @param  list<int>|null  $scope
-     */
-    private function expenses(string $from, string $to, ?array $scope): int
+    /** The expenses recorded in Expenses and dated in the period, in centavos. */
+    private function expenses(string $from, string $to): int
     {
         return (int) DB::table('accounting_expenses')
             ->join('accounting_journals as recorded', 'recorded.id', '=', 'accounting_expenses.journal_id')
@@ -190,7 +185,6 @@ final class ProfitSharingReport
             ->where('accounting_expenses.date', '>=', $from)
             ->where('accounting_expenses.date', '<=', $to)
             ->tap(self::standingOn($to, 'recorded'))
-            ->when($scope !== null, fn (Builder $query) => $query->whereIn('accounting_expenses.branch_id', $scope))
             ->sum('accounting_expenses.amount');
     }
 
@@ -198,10 +192,8 @@ final class ProfitSharingReport
      * The allowance for credit losses provided less released in the period, in
      * centavos: each allowance posting's `adjustment` (Dr credit loss expense
      * when positive).
-     *
-     * @param  list<int>|null  $scope
      */
-    private function allowancePostings(string $from, string $to, ?array $scope): int
+    private function allowancePostings(string $from, string $to): int
     {
         return (int) DB::table('accounting_allowance_postings')
             ->join('accounting_journals as posted', 'posted.id', '=', 'accounting_allowance_postings.accounting_journal_id')
@@ -209,7 +201,6 @@ final class ProfitSharingReport
             ->where('accounting_allowance_postings.as_of', '>=', $from)
             ->where('accounting_allowance_postings.as_of', '<=', $to)
             ->tap(self::standingOn($to, 'posted'))
-            ->when($scope !== null, fn (Builder $query) => $query->whereIn('accounting_allowance_postings.branch_id', $scope))
             ->sum('accounting_allowance_postings.adjustment');
     }
 
@@ -220,11 +211,11 @@ final class ProfitSharingReport
      * A restructure's write-off journal (J2) is keyed on the loan it
      * restructures, and its lines on expense accounts are what it charged to
      * expense; the rest it took from the allowance and the unearned interest.
+     * With no journal standing on the cutoff date, nothing was covered.
      *
-     * @param  list<int>|null  $scope
      * @return array{written_off: int, covered: int}
      */
-    private function writeOffs(string $from, string $to, ?array $scope): array
+    private function writeOffs(string $from, string $to): array
     {
         $restructures = DB::table('loans')
             ->whereNotNull('loans.source_loan_id')
@@ -232,7 +223,6 @@ final class ProfitSharingReport
             ->where('loans.restructure_written_off_principal', '>', 0)
             ->where('loans.released_at', '>=', $from.' 00:00:00')
             ->where('loans.released_at', '<', CarbonImmutable::parse($to)->addDay()->toDateString().' 00:00:00')
-            ->when($scope !== null, fn (Builder $query) => $query->whereIn('loans.branch_id', $scope))
             ->get(['loans.source_loan_id', 'loans.restructure_written_off_principal']);
 
         if ($restructures->isEmpty()) {
@@ -271,20 +261,19 @@ final class ProfitSharingReport
 
     /**
      * Each member's share capital on the cutoff date, by the ledger's own
-     * balance rule, for the members now in `$scope` (every member when null),
-     * by name.
+     * balance rule, by name. Pending and rejected registrations hold no
+     * membership (Borrower::NON_MEMBER_STATUSES).
      *
-     * @param  list<int>|null  $scope
      * @return list<array{id: int, code: string|null, name: string, centavos: int}>
      */
-    private function members(string $cutoff, ?array $scope): array
+    private function members(string $cutoff): array
     {
         $balances = ShareCapitalLedger::balancesQuery()->where('date', '<=', $cutoff);
 
         return DB::query()
             ->fromSub($balances, 'balances')
             ->join('borrowers', 'borrowers.id', '=', 'balances.borrower_id')
-            ->when($scope !== null, fn (Builder $query) => $query->whereIn('borrowers.branch_id', $scope))
+            ->whereNotIn('borrowers.status', Borrower::NON_MEMBER_STATUSES)
             ->orderBy('borrowers.last_name')
             ->orderBy('borrowers.first_name')
             ->orderBy('borrowers.id')

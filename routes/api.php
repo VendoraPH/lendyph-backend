@@ -366,7 +366,7 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
         Route::get('/share-capital', [ReportController::class, 'shareCapital']);
         Route::get('/performance', [ReportController::class, 'performance']);
         Route::get('/provisioning', [ReportController::class, 'provisioning']);
-        // Finish run round 2, decision 17: reports:view and share_capital:view.
+        // Finish run round 2, decision 17: the whole cooperative (ProfitSharingReportRequest).
         Route::get('/profit-sharing', ProfitSharingReportController::class);
 
         // Feeds the printable Share Capital Certificate — unpaginated, unlike

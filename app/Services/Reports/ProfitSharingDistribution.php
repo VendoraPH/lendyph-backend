@@ -26,11 +26,13 @@ final readonly class ProfitSharingDistribution
     /**
      * @param  array<int, int>  $earnings  centavos, by member, in the order given
      * @param  array<int, string>  $sharePercent  each member's part of the share capital, a percentage rounded half up to four places
+     * @param  string|null  $totalSharePercent  the members' rounded parts added up (99.9999 for three thirds), null with no members
      */
     private function __construct(
         public bool $shared,
         public array $earnings,
         public array $sharePercent,
+        public ?string $totalSharePercent,
         public int $totalShareCapital,
         public int $totalEarnings,
         public int $remainder,
@@ -69,11 +71,15 @@ final readonly class ProfitSharingDistribution
         }
 
         $totalEarnings = array_sum($earnings);
+        $totalSharePercent = $sharePercent === []
+            ? null
+            : (string) array_reduce($sharePercent, fn (BigDecimal $sum, string $part): BigDecimal => $sum->plus($part), BigDecimal::zero());
 
         return new self(
             shared: $shared,
             earnings: $earnings,
             sharePercent: $sharePercent,
+            totalSharePercent: $totalSharePercent,
             totalShareCapital: $total->toInt(),
             totalEarnings: $totalEarnings,
             remainder: $shared ? $profit - $totalEarnings : 0,

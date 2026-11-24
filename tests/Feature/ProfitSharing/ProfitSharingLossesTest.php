@@ -17,8 +17,10 @@ use Tests\Traits\SetupLendyPH;
  * counted when the allowance was provided, and one covered by a restructure's
  * unearned interest was never income, so only what the write-off charged to
  * expense counts, as the books post it (J2). With no books, all of the
- * principal written off counts. A journal reversed on or before the cutoff
- * date counts as not posted, and so does an expense whose journal was.
+ * principal written off counts. An expense or allowance posting whose journal
+ * was reversed on or before the cutoff date is left out; a write-off whose
+ * journal was reversed by then counts all of its principal as lost (the safe
+ * side, money review 2026-11-24).
  */
 class ProfitSharingLossesTest extends TestCase
 {
@@ -54,6 +56,25 @@ class ProfitSharingLossesTest extends TestCase
         // ₱1,500.00: the books' Credit Loss Expense, not ₱2,500.00.
         $this->assertEquals(1500, $profit['losses']);
         $this->assertEquals($profit['lending_income'] - $profit['expenses'] - 1500, $profit['distributable_profit']);
+    }
+
+    public function test_a_write_off_whose_journal_was_reversed_by_the_cutoff_loses_all_its_principal(): void
+    {
+        $source = $this->createReleasedLoan();
+        $new = $this->restructureOf($this->createReleasedLoan(), $source, 6_000_000, 0, 0, 150_000);
+        $this->seedChartOfAccounts();
+        $this->allowancePosting('2026-03-31', 100_000);
+        $writeOff = $this->release($new, $source)['write_off'];
+        $this->reverseJournal($writeOff->id, '2026-11-24');
+
+        $profit = $this->profitSharing('2026-11-24')->assertOk()->json('data.profit');
+
+        // The allowance posting stands; the write-off is taken as never
+        // covered, so all ₱1,500.00 counts: the safe side.
+        $this->assertEquals(1000, $profit['allowance_for_credit_losses']);
+        $this->assertEquals(1500, $profit['principal_written_off']);
+        $this->assertEquals(0, $profit['written_off_covered']);
+        $this->assertEquals(2500, $profit['losses']);
     }
 
     public function test_without_books_all_of_the_principal_written_off_is_lost(): void
@@ -114,15 +135,14 @@ class ProfitSharingLossesTest extends TestCase
         $this->assertEquals(0, $after['expenses']);
     }
 
-    public function test_a_branch_reads_only_its_own_losses(): void
+    public function test_every_branchs_losses_count_whatever_branch_is_sent(): void
     {
         $this->seedChartOfAccounts();
         $north = Branch::factory()->create();
         $this->allowancePosting('2026-03-31', 100_000);
         $this->allowancePosting('2026-03-31', 70_000, $north);
 
-        $this->assertEquals(1000, $this->profitSharing('2026-06-30', $this->branch->id)->assertOk()->json('data.profit.losses'));
-        $this->assertEquals(700, $this->profitSharing('2026-06-30', $north->id)->assertOk()->json('data.profit.losses'));
         $this->assertEquals(1700, $this->profitSharing('2026-06-30')->assertOk()->json('data.profit.losses'));
+        $this->assertEquals(1700, $this->profitSharing('2026-06-30', $north->id)->assertOk()->json('data.profit.losses'));
     }
 }

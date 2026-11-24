@@ -77,7 +77,6 @@ class ProfitSharingReportTest extends TestCase
         $this->assertSame(self::CUTOFF, $data['cutoff_date']);
         $this->assertSame('2026-01-01', $data['period_from']);
         $this->assertSame(self::CUTOFF, $data['period_to']);
-        $this->assertSame('organisation', $data['branch_scope']);
 
         $this->assertEquals([
             'interest_income' => 5000,
@@ -117,6 +116,7 @@ class ProfitSharingReportTest extends TestCase
         ], $data['totals']);
 
         $this->assertStringStartsWith('To confirm with the owner', $data['basis_note']);
+        $this->assertStringContainsString('Expenses whose entry was reversed by the cutoff date are left out, unlike the Expenses screen\'s totals.', $data['basis_note']);
     }
 
     public function test_the_income_is_the_income_reports_own(): void

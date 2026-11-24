@@ -37,6 +37,8 @@ class ProfitSharingOutcomesTest extends TestCase
         $this->assertEquals([33.3333, 33.3333, 33.3333], array_column($data['rows'], 'share_percent'));
         $this->assertEquals(99.99, $data['totals']['earnings']);
         $this->assertEquals(0.01, $data['totals']['rounding_remainder']);
+        // The rows' own shares added up, so the column's total reads true.
+        $this->assertEquals(99.9999, $data['totals']['share_percent']);
         $this->assertEquals(3099.99, $data['totals']['capital_plus_earnings']);
     }
 
@@ -81,6 +83,23 @@ class ProfitSharingOutcomesTest extends TestCase
         $this->assertSame(1, $data['totals']['members_with_negative_balance']);
     }
 
+    public function test_a_pending_or_rejected_registration_holds_no_membership(): void
+    {
+        $this->capital($this->member('Ana', 'Aquino'), '2026-01-05', 3000);
+        foreach (['pending' => 'Bautista', 'rejected' => 'Cruz'] as $status => $last) {
+            $registration = $this->member('Applicant', $last);
+            $registration->forceFill(['status' => $status])->save();
+            $this->capital($registration, '2026-01-05', 2000);
+        }
+        $this->payment($this->releasedLoan('2025-11-03 09:00:00'), '2026-03-01', interest: 300);
+
+        $data = $this->profitSharing('2026-06-30')->assertOk()->json('data');
+
+        $this->assertSame(['Ana Aquino'], array_column($data['rows'], 'member_name'));
+        $this->assertEquals(3000, $data['totals']['share_capital']);
+        $this->assertEquals([300], array_column($data['rows'], 'earnings'));
+    }
+
     public function test_with_no_share_capital_the_profit_stands_and_nobody_shares_it(): void
     {
         $this->payment($this->releasedLoan('2025-11-03 09:00:00'), '2026-03-01', interest: 300);
@@ -116,9 +135,5 @@ class ProfitSharingOutcomesTest extends TestCase
             ->assertJsonPath('errors.cutoff_date.0', 'The cutoff date can\'t be after today.');
 
         $this->profitSharing('2026-11-24')->assertOk();
-
-        $this->getJson('/api/reports/profit-sharing?cutoff_date=2026-06-30&branch_id=0')
-            ->assertUnprocessable()
-            ->assertJsonPath('errors.branch_id.0', 'Pick a branch from the list.');
     }
 }

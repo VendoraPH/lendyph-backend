@@ -24,6 +24,7 @@ class ProfitSharingDistributionTest extends TestCase
         $this->assertTrue($shares->shared);
         $this->assertSame([7 => 83_333, 8 => 166_667, 9 => 250_000], $shares->earnings);
         $this->assertSame([7 => '16.6667', 8 => '33.3333', 9 => '50.0000'], $shares->sharePercent);
+        $this->assertSame('100.0000', $shares->totalSharePercent);
         $this->assertSame(6_000_000, $shares->totalShareCapital);
         $this->assertSame(500_000, $shares->totalEarnings);
         $this->assertSame(0, $shares->remainder);
@@ -36,6 +37,8 @@ class ProfitSharingDistributionTest extends TestCase
         $shares = ProfitSharingDistribution::of([1 => 100_000, 2 => 100_000, 3 => 100_000], 10_000);
 
         $this->assertSame([1 => 3_333, 2 => 3_333, 3 => 3_333], $shares->earnings);
+        // Each third reads 33.3333%; their sum is what the column adds up to.
+        $this->assertSame('99.9999', $shares->totalSharePercent);
         $this->assertSame(9_999, $shares->totalEarnings);
         $this->assertSame(1, $shares->remainder);
     }
@@ -83,6 +86,7 @@ class ProfitSharingDistributionTest extends TestCase
 
         $this->assertFalse($shares->shared);
         $this->assertSame([], $shares->earnings);
+        $this->assertNull($shares->totalSharePercent);
         $this->assertSame(0, $shares->totalShareCapital);
         $this->assertSame(0, $shares->totalEarnings);
         $this->assertSame(0, $shares->remainder);
