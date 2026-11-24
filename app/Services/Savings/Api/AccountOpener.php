@@ -7,6 +7,7 @@ use App\Models\SavingsAccount;
 use App\Models\SavingsProduct;
 use App\Models\User;
 use App\Services\Accounting\AutomaticPoster;
+use App\Services\Savings\DuplicateReference;
 use App\Services\Savings\Notices\OpeningNotices;
 use App\Services\Savings\ProductRules;
 use App\Services\Savings\SavingsLedger;
@@ -28,7 +29,9 @@ use Illuminate\Validation\ValidationException;
  * number is the next one (step 6, retried on a collision); the opening
  * deposit goes through SavingsLedger and its journal is posted last. The
  * member and the branch's savings staff are told once it commits
- * (OpeningNotices).
+ * (OpeningNotices). An opening deposit paid by any method but cash is refused
+ * when its reference is already on record for that method
+ * (DuplicateReference, finish run round 2, decision 11).
  */
 class AccountOpener
 {
@@ -39,6 +42,7 @@ class AccountOpener
         private readonly LargeTransactionAlert $alert,
         private readonly ProductRules $rules,
         private readonly OpeningNotices $notices,
+        private readonly DuplicateReference $duplicates,
     ) {}
 
     /**
@@ -79,6 +83,10 @@ class AccountOpener
 
         if ($deposit > 0 && empty($data['payment_method'])) {
             Refuse::field('payment_method', 'Choose how the opening deposit was paid.');
+        }
+
+        if ($deposit > 0) {
+            $this->duplicates->assertUnused($data['payment_method'], $data['reference'] ?? null);
         }
 
         $openKey = SavingsAccount::openKey($member->id, $product->id);

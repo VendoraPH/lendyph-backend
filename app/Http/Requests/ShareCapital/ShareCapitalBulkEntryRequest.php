@@ -26,8 +26,11 @@ class ShareCapitalBulkEntryRequest extends FormRequest
      * word (₱1,500.555 saved as ₱1,500.56). Exact centavos are accepted; more
      * than two decimals is a 422 on the field, never a silent rounding.
      *
-     * One `method` and `reference_number` for the whole batch, stored on each
-     * row; `reference_number` is required unless cash.
+     * One `method` and `reference_number` for the whole batch. Any method but
+     * cash stores the reference on each row; a cash batch gives each row its
+     * own CSH number and ignores a reference sent with it
+     * (ShareCapitalService::bulkManualEntries()). `reference_number` is
+     * required unless cash.
      *
      * The date can't be after today, as Record Payment's.
      */

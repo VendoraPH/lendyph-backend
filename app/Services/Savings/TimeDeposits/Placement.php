@@ -8,8 +8,10 @@ use App\Models\SavingsProduct;
 use App\Models\TimeDeposit;
 use App\Models\User;
 use App\Services\Accounting\AutomaticPoster;
+use App\Services\CashReferences;
 use App\Services\Savings\ApprovalGate;
 use App\Services\Savings\AvailableBalance;
+use App\Services\Savings\DuplicateReference;
 use App\Services\Savings\Notices\OpeningNotices;
 use App\Services\Savings\ProductRules;
 use App\Services\Savings\SavingsLedger;
@@ -24,8 +26,9 @@ use LogicException;
 /**
  * Placing a time deposit (design §2, §4, §5), inside the caller's
  * transaction (IdempotentWrite's), in the design's lock order: the savings
- * accounts it touches (funding and payout) in one id-ordered statement, then
- * the generated certificate number, then the journal last.
+ * accounts it touches (funding and payout) in one id-ordered statement, then,
+ * for cash, the TD series row (CashReferences), then the generated
+ * certificate number, then the journal last.
  *
  * - Members only, and only an active one, in the caller's branches (the
  *   request's `exists` rule), whom the product is offered to (its eligible
@@ -43,6 +46,11 @@ use LogicException;
  *   because the settlement credits the rolled-over amount to time deposits.
  * - Either way the member and the branch's savings staff are told once it
  *   commits (OpeningNotices).
+ * - Its payment reference is saved on the placement (finish run round 2): a
+ *   cash placement's is its `TD-[id]-[year]-[0001]` number (decision 5),
+ *   any typed one ignored; any other method's is the one it was given,
+ *   refused when that method already has it on record (DuplicateReference,
+ *   decision 11). A rollover has none.
  */
 class Placement
 {
@@ -59,6 +67,8 @@ class Placement
         private readonly ProductRules $rules,
         private readonly ApprovalGate $gate,
         private readonly OpeningNotices $notices,
+        private readonly CashReferences $cashReferences,
+        private readonly DuplicateReference $duplicates,
     ) {}
 
     /**
@@ -103,6 +113,8 @@ class Placement
             $this->assertCanReceive($payout, 'payout_account_id');
         }
 
+        $reference = $this->reference($data, $date);
+
         $deposit = TimeDeposit::query()->create([
             ...$this->contract($figures),
             'certificate_number' => $this->numbers->certificateNumber($date),
@@ -111,6 +123,7 @@ class Placement
             'branch_id' => $member->branch_id,
             'maturity_instruction' => $data['maturity_instruction'],
             'funding_method' => $data['payment_method'],
+            'reference' => $reference,
             'payout_account_id' => $payout?->id,
             'status' => 'active',
             'created_by' => $user->id,
@@ -183,6 +196,32 @@ class Placement
         if (in_array($account->status, [SavingsAccount::STATUS_CLOSED, SavingsAccount::STATUS_FROZEN], true)) {
             $this->refuse($field, "{$account->account_number} is {$account->status}, so it can't receive the payout.");
         }
+    }
+
+    /**
+     * The placement's payment reference. Cash: the next number of the TD
+     * series for the placement date's year, under the series row's lock. The
+     * owner is read here, inside the transaction: the placement's earlier
+     * reads have fixed its snapshot already, and a certificate number that
+     * collides after a wait is retried by IdempotentWrite. Any other method:
+     * the reference given, trimmed, or null.
+     *
+     * @param  array{payment_method: string, reference?: string|null}  $data
+     *
+     * @throws ValidationException
+     */
+    private function reference(array $data, string $date): ?string
+    {
+        $method = (string) $data['payment_method'];
+
+        if ($method === 'cash') {
+            return $this->cashReferences->assign(CashReferences::TIME_DEPOSIT, $this->cashReferences->owner(), [$date], 'reference')[0];
+        }
+
+        $reference = trim((string) ($data['reference'] ?? ''));
+        $this->duplicates->assertUnused($method, $reference);
+
+        return $reference === '' ? null : $reference;
     }
 
     /**
