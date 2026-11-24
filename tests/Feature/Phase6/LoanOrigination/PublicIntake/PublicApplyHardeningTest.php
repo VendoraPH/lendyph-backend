@@ -19,6 +19,14 @@ use Tests\TestCase;
  */
 uses(TestCase::class, PublicApplyHelpers::class);
 
+/*
+ * The daily code caps count from Manila midnight, and some tests travel 61
+ * seconds past the one-a-minute code limit. Each test starts at mid-day
+ * Manila, so a run near midnight can't carry a test into the next day (one
+ * started at 23:59:51 and failed).
+ */
+beforeEach(fn () => $this->travelTo(now('Asia/Manila')->setTime(12, 0)));
+
 afterEach(fn () => Carbon::setTestNow());
 
 it('refuses an estimate with more instalments than the calculator allows, and caps the term', function () {
