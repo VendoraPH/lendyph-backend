@@ -49,8 +49,12 @@ final class ReceiptShareLinks
     /** The one answer to every refused public view, and to every route while the switch is off. */
     public const NOT_FOUND = 'Not found.';
 
-    /** The one answer to every view over a limit, per address or per link. */
-    public const TOO_MANY_VIEWS = 'Too many tries. Please wait a minute and try again.';
+    /**
+     * The one answer to every view over a limit, per address (a minute) or per
+     * link (up to an hour), so it promises no time: `Retry-After` carries each
+     * limit's exact wait.
+     */
+    public const TOO_MANY_VIEWS = 'This receipt was opened too many times. Please try again later.';
 
     /** Views one link answers in an hour, from all addresses together. */
     public const VIEWS_PER_LINK_PER_HOUR = 60;

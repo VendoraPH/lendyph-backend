@@ -245,29 +245,35 @@ class PublicReceiptTest extends TestCase
 
     public function test_views_are_limited_per_address_and_the_limit_answers_in_words(): void
     {
+        $this->freezeSecond();
         for ($i = 0; $i < ReceiptShareServiceProvider::VIEWS_PER_MINUTE; $i++) {
             $this->openShared()->assertOk();
         }
 
-        $limited = $this->openShared()->assertStatus(429)
-            ->assertJsonPath('message', 'Too many tries. Please wait a minute and try again.');
+        $limited = $this->openShared()->assertStatus(429);
+        $this->assertSame('{"message":"This receipt was opened too many times. Please try again later."}', $limited->getContent());
         $this->assertStringContainsString('no-store', (string) $limited->headers->get('Cache-Control'));
-        $this->assertNotNull($limited->headers->get('Retry-After'));
+        // The address's own window: a minute from its first view.
+        $this->assertSame('60', $limited->headers->get('Retry-After'));
 
         $this->openShared(address: '198.51.100.23')->assertOk();
     }
 
     public function test_one_link_opens_at_most_60_times_an_hour_however_many_addresses_ask(): void
     {
+        $this->freezeSecond();
         // Rotating IPv6 addresses each stay far under the per-address limit.
         for ($i = 1; $i <= 60; $i++) {
             $this->openShared(address: '2001:db8::'.dechex($i))->assertOk();
         }
 
+        $this->travel(10)->minutes();
         $capped = $this->openShared(address: '2001:db8::ffff')->assertStatus(429);
-        $this->assertSame('{"message":"Too many tries. Please wait a minute and try again."}', $capped->getContent());
+        // The same words as the address limit, promising no time.
+        $this->assertSame('{"message":"This receipt was opened too many times. Please try again later."}', $capped->getContent());
         $this->assertStringContainsString('no-store', (string) $capped->headers->get('Cache-Control'));
-        $this->assertGreaterThan(0, (int) $capped->headers->get('Retry-After'));
+        // The link's own window: an hour from its first view, 50 minutes left.
+        $this->assertSame('3000', $capped->headers->get('Retry-After'));
 
         // Every allowed view is audited; the refused one isn't.
         $this->assertSame(60, AuditLog::query()->where('action', 'receipt_share_link_opened')->count());
@@ -276,7 +282,7 @@ class PublicReceiptTest extends TestCase
         [, $other] = $this->freshLinkFor(Repayment::factory()->create(['loan_id' => $this->loan->id, 'received_by' => $this->admin->id]));
         $this->openShared($other, address: '2001:db8::ffff')->assertOk();
 
-        $this->travel(61)->minutes();
+        $this->travel(51)->minutes();
         $this->openShared(address: '2001:db8::ffff')->assertOk();
     }
 
