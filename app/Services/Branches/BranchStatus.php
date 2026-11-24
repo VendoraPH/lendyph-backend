@@ -3,8 +3,10 @@
 namespace App\Services\Branches;
 
 use App\Models\AccountingAccount;
+use App\Models\Borrower;
 use App\Models\Branch;
 use App\Models\BranchClosure;
+use App\Models\GCashTransaction;
 use App\Models\InterbranchTransfer;
 use App\Models\Loan;
 use App\Models\LoanAdjustment;
@@ -34,6 +36,12 @@ use Symfony\Component\HttpKernel\Exception\HttpException;
  *   branch's row lock. The requester may cancel; another user may
  *   reject with a note.
  * - Each step writes one audit row on the branch, in words.
+ *
+ * Every closure step takes the branch row FOR UPDATE as its first statement,
+ * the lock the writes in BranchRowLock hold FOR SHARE, so a closure and a
+ * user save, journal, expense, fund transfer or reconciliation action in the
+ * branch never interleave; while a request waits, those writes are refused.
+ * A deadlock or lock wait timeout on a closure step answers 409.
  *
  * A suspended or closed status is enforced on writes by BranchWriteGuard and
  * the BranchTakesNew rules (MB-BE2). A status change and a closure approval
@@ -184,13 +192,14 @@ class BranchStatus
             $item('money_in_accounts', 'Money in its cash and bank accounts', $moneyAccounts, $moneyAccounts === 0 ? null : self::pesos($moneyCentavos)),
             $item('pending_approvals', 'Pending approvals and requests', $pending),
             $item('transfers_in_transit', 'Transfers in transit', $this->transfers($id, InterbranchTransfer::STATUS_IN_TRANSIT)),
+            $item('pending_gcash_cash_ins', 'GCash Cash Ins not yet paid', $this->pendingCashIns($id)),
             $item('assigned_users', 'Assigned users', DB::table('branch_user')->where('branch_id', $id)->count()),
         ];
     }
 
     public function requestClosure(Branch $branch, string $effectiveOn, string $reason, User $by): BranchClosure
     {
-        return DB::transaction(function () use ($branch, $effectiveOn, $reason, $by): BranchClosure {
+        return BranchRowLock::transaction(function () use ($branch, $effectiveOn, $reason, $by): BranchClosure {
             $locked = Branch::query()->whereKey($branch->getKey())->lockForUpdate()->firstOrFail();
 
             $this->assertClosable($locked);
@@ -231,7 +240,7 @@ class BranchStatus
 
     public function approveClosure(Branch $branch, User $by, ?string $note): BranchClosure
     {
-        return $this->guard->exclusively((int) $branch->getKey(), fn (): BranchClosure => DB::transaction(function () use ($branch, $by, $note): BranchClosure {
+        return $this->guard->exclusively((int) $branch->getKey(), fn (): BranchClosure => BranchRowLock::transaction(function () use ($branch, $by, $note): BranchClosure {
             $locked = Branch::query()->whereKey($branch->getKey())->lockForUpdate()->firstOrFail();
             $closure = $this->waiting($locked);
 
@@ -260,7 +269,7 @@ class BranchStatus
 
     public function rejectClosure(Branch $branch, User $by, string $note): BranchClosure
     {
-        return DB::transaction(function () use ($branch, $by, $note): BranchClosure {
+        return BranchRowLock::transaction(function () use ($branch, $by, $note): BranchClosure {
             $locked = Branch::query()->whereKey($branch->getKey())->lockForUpdate()->firstOrFail();
             $closure = $this->waiting($locked);
 
@@ -274,7 +283,7 @@ class BranchStatus
 
     public function cancelClosure(Branch $branch, User $by): BranchClosure
     {
-        return DB::transaction(function () use ($branch, $by): BranchClosure {
+        return BranchRowLock::transaction(function () use ($branch, $by): BranchClosure {
             $locked = Branch::query()->whereKey($branch->getKey())->lockForUpdate()->firstOrFail();
             $closure = $this->waiting($locked);
 
@@ -377,6 +386,7 @@ class BranchStatus
             'money_in_accounts' => self::pesosWords((string) $item['amount']).' in its cash and bank accounts',
             'pending_approvals' => $item['count'] === 1 ? '1 pending approval or request' : "{$item['count']} pending approvals or requests",
             'transfers_in_transit' => self::counted($item['count'], 'transfer').' in transit',
+            'pending_gcash_cash_ins' => self::counted($item['count'], 'GCash Cash In').' not yet paid',
             'assigned_users' => self::counted($item['count'], 'assigned user'),
         }, $open);
 
@@ -401,6 +411,23 @@ class BranchStatus
         $balances = array_filter($this->trialBalance->signedBalances(null, $branchId, $ids), fn (int $centavos): bool => $centavos !== 0);
 
         return [count($balances), array_sum($balances)];
+    }
+
+    /**
+     * GCash Cash Ins not yet paid in the branch: walk-in rows recorded in it
+     * and its members' rows (finish run round 2, review of S2). Marking one
+     * paid posts cash, so a closure waits for them, as a member transfer does
+     * (MemberTransfer).
+     */
+    private function pendingCashIns(int $branchId): int
+    {
+        return GCashTransaction::query()
+            ->where('type', 'cash_in')
+            ->where('status', 'pending')
+            ->where(fn ($q) => $q
+                ->where('branch_id', $branchId)
+                ->orWhereIn('borrower_id', Borrower::query()->select('id')->where('branch_id', $branchId)))
+            ->count();
     }
 
     /** Interbranch transfers in `$status` with the branch as their source or destination. */

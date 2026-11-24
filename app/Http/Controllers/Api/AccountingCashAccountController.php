@@ -5,7 +5,9 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\Accounting\StoreFundTransferRequest;
 use App\Http\Resources\JournalEntryResource;
+use App\Models\AccountingJournal;
 use App\Services\Accounting\FundTransferRecorder;
+use App\Services\Branches\BranchRowLock;
 use Illuminate\Http\JsonResponse;
 use OpenApi\Attributes as OA;
 
@@ -52,7 +54,8 @@ class AccountingCashAccountController extends Controller
     )]
     public function transfer(StoreFundTransferRequest $request): JsonResponse
     {
-        $journal = $this->recorder->record($request->validated(), $request->user()?->id);
+        // A deadlock on the branch lock answers 409 (BranchRowLock).
+        $journal = BranchRowLock::transaction(fn (): AccountingJournal => $this->recorder->record($request->validated(), $request->user()?->id));
 
         // The same relations and the same resource the Journals screen reads,
         // because `accountingService.transfer` is typed to return a

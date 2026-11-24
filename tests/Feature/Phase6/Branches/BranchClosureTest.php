@@ -6,6 +6,7 @@ use App\Models\AuditLog;
 use App\Models\Borrower;
 use App\Models\Branch;
 use App\Models\BranchClosure;
+use App\Models\GCashTransaction;
 use App\Models\Loan;
 use App\Models\LoanAdjustment;
 use App\Models\PortalRequest;
@@ -170,12 +171,52 @@ class BranchClosureTest extends TestCase
             ['key' => 'money_in_accounts', 'label' => 'Money in its cash and bank accounts', 'count' => 1, 'amount' => '1500.00', 'clear' => false],
             ['key' => 'pending_approvals', 'label' => 'Pending approvals and requests', 'count' => 3, 'amount' => null, 'clear' => false],
             ['key' => 'transfers_in_transit', 'label' => 'Transfers in transit', 'count' => 0, 'amount' => null, 'clear' => true],
+            ['key' => 'pending_gcash_cash_ins', 'label' => 'GCash Cash Ins not yet paid', 'count' => 0, 'amount' => null, 'clear' => true],
             ['key' => 'assigned_users', 'label' => 'Assigned users', 'count' => 1, 'amount' => null, 'clear' => false],
         ], $data['checklist']);
 
         $this->postJson("/api/branches/{$this->quiet->id}/closure", ['effective_on' => now()->toDateString(), 'reason' => 'x'])
             ->assertUnprocessable()
             ->assertJsonPath('errors.branch.0', "This branch can't be closed yet: 1 open loan, 1 open savings account, 1 open time deposit, ₱1,500.00 in its cash and bank accounts, 3 pending approvals or requests and 1 assigned user.");
+    }
+
+    /**
+     * A pending Cash In posts cash when it's marked paid, so a closure waits
+     * for the walk-in rows recorded in the branch and its members' rows, as a
+     * member transfer does (finish run round 2, review of S2). Paid rows,
+     * Cash Outs and other branches' rows don't count.
+     */
+    public function test_closing_waits_for_the_branchs_pending_gcash_cash_ins(): void
+    {
+        $member = AuditLogService::withoutModelAuditing(fn () => Borrower::factory()->create(['branch_id' => $this->quiet->id, 'status' => 'active']));
+        $elsewhere = AuditLogService::withoutModelAuditing(fn () => Borrower::factory()->create(['branch_id' => $this->branch->id, 'status' => 'active']));
+        $walkIn = GCashTransaction::factory()->forNonMember()->create(['status' => 'pending', 'branch_id' => $this->quiet->id]);
+        $memberRow = GCashTransaction::factory()->create(['status' => 'pending', 'borrower_id' => $member->id]);
+        GCashTransaction::factory()->create(['status' => 'paid', 'borrower_id' => $member->id]);
+        GCashTransaction::factory()->create(['status' => 'pending', 'type' => 'cash_out', 'borrower_id' => $member->id]);
+        GCashTransaction::factory()->create(['status' => 'pending', 'borrower_id' => $elsewhere->id]);
+        GCashTransaction::factory()->forNonMember()->create(['status' => 'pending', 'branch_id' => $this->branch->id]);
+
+        $item = collect($this->getJson("/api/branches/{$this->quiet->id}/closure")->assertOk()->json('data.checklist'))->firstWhere('key', 'pending_gcash_cash_ins');
+        $this->assertSame(['key' => 'pending_gcash_cash_ins', 'label' => 'GCash Cash Ins not yet paid', 'count' => 2, 'amount' => null, 'clear' => false], $item);
+
+        $this->postJson("/api/branches/{$this->quiet->id}/closure", ['effective_on' => now()->toDateString(), 'reason' => 'Closing'])
+            ->assertUnprocessable()
+            ->assertJsonPath('errors.branch.0', "This branch can't be closed yet: 2 GCash Cash Ins not yet paid.");
+
+        $walkIn->update(['status' => 'paid', 'paid_at' => now()]);
+        $memberRow->update(['status' => 'paid', 'paid_at' => now()]);
+        $this->requestClosure();
+        $late = GCashTransaction::factory()->create(['status' => 'pending', 'borrower_id' => $member->id]);
+
+        $this->actingAs($this->checker);
+        $this->postJson("/api/branches/{$this->quiet->id}/closure/approve")
+            ->assertUnprocessable()
+            ->assertJsonPath('errors.branch.0', "This branch can't be closed yet: 1 GCash Cash In not yet paid.");
+
+        $late->update(['status' => 'paid', 'paid_at' => now()]);
+        $this->postJson("/api/branches/{$this->quiet->id}/closure/approve")->assertOk();
+        $this->assertSame('closed', $this->quiet->fresh()->status);
     }
 
     public function test_a_quiet_branch_has_a_clear_checklist(): void

@@ -5,6 +5,7 @@ namespace App\Services\Branches;
 use App\Models\AccountingAccount;
 use App\Models\AccountingJournal;
 use App\Models\Branch;
+use App\Models\BranchClosure;
 use App\Models\InterbranchTransfer;
 use App\Models\User;
 use App\Services\Accounting\JournalPoster;
@@ -70,6 +71,10 @@ class InterbranchTransfers
     public const SOURCE_CLOSED = 'The source branch is closed, so no money can move out of it.';
 
     public const DESTINATION_CLOSED = 'The destination branch is closed, so no money can move into it.';
+
+    public const SOURCE_CLOSING = 'The source branch is waiting to close, so no money can move out of it.';
+
+    public const DESTINATION_CLOSING = 'The destination branch is waiting to close, so no money can move into it.';
 
     public function __construct(
         private JournalPoster $poster,
@@ -364,6 +369,23 @@ class InterbranchTransfers
         foreach ([[$sourceId, 'source_branch_id', self::SOURCE_CLOSED], [$destinationId, 'destination_branch_id', self::DESTINATION_CLOSED]] as [$id, $field, $message]) {
             if ($branches->get($id)?->status === Branch::STATUS_CLOSED) {
                 throw ValidationException::withMessages([$onCreate ? $field : 'branch' => [$message]]);
+            }
+        }
+
+        if (! $onCreate) {
+            return;
+        }
+
+        // A new transfer is refused by a branch waiting to close too (finish
+        // run round 2, decision 4), read under the branch locks just taken, as
+        // BranchRowLock does. One already made goes on: the closure's
+        // checklist waits for it.
+        $closing = BranchClosure::query()->whereIn('branch_id', [$sourceId, $destinationId])->where('status', BranchClosure::STATUS_PENDING)
+            ->orderBy('branch_id')->sharedLock()->pluck('branch_id')->map(fn (mixed $id): int => (int) $id)->all();
+
+        foreach ([[$sourceId, 'source_branch_id', self::SOURCE_CLOSING], [$destinationId, 'destination_branch_id', self::DESTINATION_CLOSING]] as [$id, $field, $message]) {
+            if (in_array($id, $closing, true)) {
+                throw ValidationException::withMessages([$field => [$message]]);
             }
         }
     }

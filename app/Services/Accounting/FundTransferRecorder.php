@@ -4,6 +4,8 @@ namespace App\Services\Accounting;
 
 use App\Models\AccountingAccount;
 use App\Models\AccountingJournal;
+use App\Services\Branches\BranchRowLock;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
 
 /**
@@ -86,6 +88,22 @@ class FundTransferRecorder
      * }  $data
      */
     public function record(array $data, ?int $userId = null): AccountingJournal
+    {
+        // The branch row first, before the account reads (BranchRowLock's
+        // lock order): a closed or closing branch takes no new transfer.
+        return DB::transaction(function () use ($data, $userId): AccountingJournal {
+            BranchRowLock::lock(['branch_id' => $data['branch_id'] ?? null]);
+
+            return $this->transfer($data, $userId);
+        });
+    }
+
+    /**
+     * The transfer's journal, under the branch lock record() took.
+     *
+     * @param  array<string, mixed>  $data
+     */
+    private function transfer(array $data, ?int $userId): AccountingJournal
     {
         $amount = (int) $data['amount'];
         $charge = (int) ($data['charge'] ?? 0);
