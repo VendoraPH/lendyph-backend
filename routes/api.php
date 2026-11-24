@@ -38,6 +38,7 @@ use App\Http\Controllers\Api\GCashTierController;
 use App\Http\Controllers\Api\GCashTransactionController;
 use App\Http\Controllers\Api\HealthController;
 use App\Http\Controllers\Api\LoanAdjustmentController;
+use App\Http\Controllers\Api\LoanApprovalEditController;
 use App\Http\Controllers\Api\LoanApprovalStepController;
 use App\Http\Controllers\Api\LoanController;
 use App\Http\Controllers\Api\LoanLedgerController;
@@ -318,6 +319,11 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
     Route::patch('/loans/{loan}/approval-steps/{approvalStep}/send-back', [LoanApprovalStepController::class, 'sendBack'])->scopeBindings();
     // Who the next step can be forwarded to (`forward_to_user_id` on submit and approve).
     Route::get('/loans/{loan}/approval/forward-candidates', [LoanApprovalStepController::class, 'forwardCandidates'])->whereNumber('loan');
+    // The Chairman/Chairwoman's edit while the loan waits at their step
+    // (`loans:edit_in_approval`, LoanApprovalEditService).
+    Route::get('/loans/{loan}/approval-edit', [LoanApprovalEditController::class, 'show'])->whereNumber('loan');
+    Route::post('/loans/{loan}/approval-edit/preview', [LoanApprovalEditController::class, 'preview'])->whereNumber('loan');
+    Route::patch('/loans/{loan}/approval-edit', [LoanApprovalEditController::class, 'update'])->whereNumber('loan');
 
     // Repayments
     Route::get('/repayments', [RepaymentController::class, 'listAll']);
