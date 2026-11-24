@@ -237,21 +237,23 @@ class AccountingJournalReversalTest extends TestCase
         $this->postJson("/api/accounting/journals/{$original->id}/reverse", ['date' => '2026-09-15'])->assertCreated();
     }
 
-    public function test_a_reversal_date_with_an_offset_is_read_as_its_day_in_manila(): void
+    /**
+     * A reversal date is a calendar day written year-month-day (Finish run
+     * round 2, decision 1): a time, an offset or bare digits are refused in
+     * words, and nothing is posted.
+     */
+    public function test_a_reversal_date_with_a_time_or_offset_is_refused_in_words(): void
     {
         $original = $this->postSimpleJournal('5030', '1010', 350000, ['date' => '2026-09-15']);
 
-        // 00:30 in Tokyo is still Sep 14 in Manila: before the entry.
-        $this->postJson("/api/accounting/journals/{$original->id}/reverse", ['date' => '2026-09-15T00:30:00+09:00'])
-            ->assertStatus(422)
-            ->assertJsonPath('errors.date.0', 'The reversal can\'t be dated before the entry it reverses (Sep 15, 2026). Choose Sep 15, 2026 or later.');
+        foreach (['2026-09-15T00:30:00+09:00', '2026-09-14T17:00:00-08:00', '20260915', 20260915] as $date) {
+            $this->postJson("/api/accounting/journals/{$original->id}/reverse", ['date' => $date])
+                ->assertStatus(422)
+                ->assertJsonPath('errors.date', ['The reversal date must be a date written as year-month-day, such as 2026-11-24.']);
+        }
 
-        // 17:00 on Sep 14 at UTC-8 is 09:00 on Sep 15 in Manila: the entry's own day.
-        $id = $this->postJson("/api/accounting/journals/{$original->id}/reverse", ['date' => '2026-09-14T17:00:00-08:00'])
-            ->assertCreated()
-            ->json('data.id');
-
-        $this->assertSame('2026-09-15', AccountingJournal::query()->findOrFail($id)->date->toDateString());
+        $this->assertSame(0, AccountingJournal::query()->where('source', 'reversal')->count());
+        $this->assertSame('posted', $original->fresh()->status);
     }
 
     public function test_the_default_date_is_refused_too_when_the_entry_is_dated_after_today(): void

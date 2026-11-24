@@ -2,6 +2,7 @@
 
 namespace App\Http\Requests\Loan;
 
+use App\Http\Requests\Concerns\DateInputMessages;
 use App\Http\Requests\Concerns\ExcludesRejectedBorrowers;
 use App\Http\Requests\Concerns\RequiresActiveAccountOfficer;
 use App\Http\Requests\Concerns\ValidatesDeductionAmounts;
@@ -54,7 +55,7 @@ class UpdateLoanRequest extends FormRequest
             // LoanService maps it onto `restructure_remarks`.
             'remarks' => ['nullable', 'string', 'max:1000'],
             'interest_rate' => ['sometimes', 'numeric', 'min:0', 'max:100', 'decimal:0,4'],
-            'start_date' => ['sometimes', 'date'],
+            'start_date' => ['sometimes', 'date', 'date_format:Y-m-d'],
             'scb_amount' => ['sometimes', 'numeric', 'min:0'],
             'policy_exception' => ['sometimes', 'boolean'],
             'policy_exception_details' => ['nullable', 'string', 'max:2000'],
@@ -98,6 +99,7 @@ class UpdateLoanRequest extends FormRequest
     public function messages(): array
     {
         return [
+            ...DateInputMessages::calendar(['start_date' => 'start date']),
             'co_maker_ids.*.exists' => 'Each co-maker must be an existing member who was not rejected.',
             'account_officer_id.exists' => $this->activeAccountOfficerMessage(),
             'collaterals.*.collateral_id.exists' => $this->notThisLoansBorrowerMessage(),

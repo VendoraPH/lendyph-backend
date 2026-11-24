@@ -2,6 +2,8 @@
 
 namespace App\Http\Requests\Reminders;
 
+use App\Http\Requests\Concerns\DateInputMessages;
+
 /**
  * Pausing reminders for a target (frontend `PauseRequest`): a reason, and an
  * optional end in the future.
@@ -15,7 +17,15 @@ class PauseReminderRequest extends ResumeReminderRequest
     {
         return parent::rules() + [
             'reason' => ['required', 'string', 'max:255'],
-            'until' => ['nullable', 'date', 'after:now'],
+            'until' => ['nullable', 'date', 'date_format:'.DateInputMessages::DATE_TIME_FORMATS, 'after:now'],
         ];
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    public function messages(): array
+    {
+        return [...parent::messages(), ...DateInputMessages::dateTime(['until' => 'resume date'])];
     }
 }

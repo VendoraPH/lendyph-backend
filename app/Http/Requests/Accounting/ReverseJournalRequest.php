@@ -2,6 +2,7 @@
 
 namespace App\Http\Requests\Accounting;
 
+use App\Http\Requests\Concerns\DateInputMessages;
 use App\Models\AccountingJournal;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Support\Carbon;
@@ -28,8 +29,9 @@ use Illuminate\Validation\Validator;
  * such an entry names the one range that satisfies both rules, so the two
  * never contradict each other.
  *
- * Unlike a manual entry's, a reversal date may carry a time or an offset: it
- * is read, checked and stored as its Manila day (see passedValidation()).
+ * A reversal date is a calendar day written year-month-day, like a manual
+ * entry's (Finish run round 2, decision 1): a time, an offset or bare digits
+ * are refused.
  */
 class ReverseJournalRequest extends FormRequest
 {
@@ -47,7 +49,7 @@ class ReverseJournalRequest extends FormRequest
             // original's: reversing a September entry in October belongs in
             // October, or a period that has already been reported on silently
             // changes. Optional, defaulting to today.
-            'date' => ['sometimes', 'nullable', 'date'],
+            'date' => ['sometimes', 'nullable', 'date', 'date_format:Y-m-d'],
             // Folded into the reversal's description, because there is no
             // column for it and it is the most useful half of the record.
             'reason' => ['sometimes', 'nullable', 'string', 'max:300'],
@@ -60,7 +62,7 @@ class ReverseJournalRequest extends FormRequest
     public function messages(): array
     {
         return [
-            'date.date' => 'The reversal date isn\'t a valid date.',
+            ...DateInputMessages::calendar(['date' => 'reversal date']),
             'reason.max' => 'The reason can be at most 300 characters.',
         ];
     }
@@ -69,8 +71,7 @@ class ReverseJournalRequest extends FormRequest
      * Refuses, in words, once the date itself is valid, a reversal dated
      * before the entry it reverses, and one of a no-branch allowance entry
      * dated after today (unless it is the entry's own date). All days are
-     * compared in the app's time zone (Manila), so a date sent with an offset
-     * counts as its Manila day.
+     * Manila days.
      *
      * @return list<callable(Validator): void>
      */
@@ -146,9 +147,7 @@ class ReverseJournalRequest extends FormRequest
     }
 
     /**
-     * The reversal lands on the day it was checked as: a date sent with an
-     * offset is stored as its Manila day, never the day at the sender's
-     * offset.
+     * The reversal lands on the day it was checked as.
      */
     protected function passedValidation(): void
     {
