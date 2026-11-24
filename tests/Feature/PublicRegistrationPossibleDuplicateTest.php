@@ -278,6 +278,7 @@ class PublicRegistrationPossibleDuplicateTest extends TestCase
             'borrower_code' => $member->borrower_code,
             'full_name' => 'Juan Dela Cruz',
             'is_member' => true,
+            'status' => 'active',
             'reason' => 'Same full name',
             'message' => "Possible duplicate of {$member->borrower_code} (Juan Dela Cruz): same full name.",
         ];
@@ -286,7 +287,11 @@ class PublicRegistrationPossibleDuplicateTest extends TestCase
         $this->assertSame($expected, $this->actingAs($this->reviewer($this->branch))->getJson("/api/borrowers/{$registration->id}")->assertOk()->json('data.possible_duplicate'));
     }
 
-    public function test_a_link_to_another_registration_says_it_is_not_a_member(): void
+    /**
+     * A registration the link points at reads by its status, so the review can
+     * name it the way the Registrations list does (PEND-, REJ-).
+     */
+    public function test_a_link_to_another_registration_says_it_is_not_a_member_and_its_status(): void
     {
         $first = $this->savedFrom($this->register());
         $second = $this->savedFrom($this->register());
@@ -295,6 +300,11 @@ class PublicRegistrationPossibleDuplicateTest extends TestCase
 
         $this->assertSame($first->id, $link['id']);
         $this->assertFalse($link['is_member']);
+        $this->assertSame('pending', $link['status']);
+
+        $this->patchJson("/api/borrowers/{$first->id}/reject", ['reason' => 'Applied twice.'])->assertOk();
+
+        $this->assertSame('rejected', $this->getJson("/api/borrowers/{$second->id}")->assertOk()->json('data.possible_duplicate.status'));
     }
 
     public function test_a_reviewer_who_cannot_see_the_member_learns_only_that_one_may_exist(): void
