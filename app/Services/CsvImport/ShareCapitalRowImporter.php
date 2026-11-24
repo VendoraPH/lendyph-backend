@@ -42,7 +42,8 @@ use LogicException;
  *
  * Against the ledger, which by now holds every row this run has written: by
  * reference when the row has one (the ledger's reference number or its own
- * SC- reference, in any case), else by member, date, type and amount. A row
+ * SC- reference, in any case; a CSH number as the app writes it, so
+ * CSH-12-2026-7 is CSH-0012-2026-0007), else by member, date, type and amount. A row
  * whose referenced entry an earlier import wrote with the same figures is
  * `already_imported`; any other duplicate is skipped, naming where the entry
  * it repeats came from.
@@ -82,6 +83,8 @@ final class ShareCapitalRowImporter
      * The writer for one chunk. The starter's access and the cash series'
      * owner are read once here, fresh on every chunk: a run can wait days on
      * its product mapping, and its starter can lose the access meanwhile.
+     * Built before the chunk's transaction opens (CsvImportProcessor), as
+     * CashReferences wants its owner read.
      *
      * @return Closure(CsvImportRow): RowOutcome
      */
@@ -160,7 +163,9 @@ final class ShareCapitalRowImporter
             'date' => (string) $normalized->value('transaction_date'),
             'side' => $this->side($normalized),
             'centavos' => $this->centavos($normalized),
-            'reference' => $normalized->value('reference_number'),
+            // As the normalizer writes it (a CSH number the app's way), for a
+            // row staged before it did.
+            'reference' => ShareCapitalRowNormalizer::reference($normalized->value('reference_number')),
         ];
 
         $duplicate = $this->duplicateOf($entry, $row);
@@ -172,12 +177,13 @@ final class ShareCapitalRowImporter
         if ($entry['side'] === ShareCapitalRowNormalizer::DEBIT) {
             $lowest = $this->lowestBalanceFrom($entry['member'], $entry['date']);
 
+            // In words only: the report is read with imports:process alone, so
+            // it never shows the member's balance.
             if ($entry['centavos'] > $lowest) {
                 return RowOutcome::failed('withdrawal_exceeds_balance', sprintf(
-                    'This withdrawal of %s on %s is more than the member\'s share capital can cover from that date on (%s at the lowest), so it wasn\'t imported. A share capital balance can\'t go below ₱0.00.',
+                    'This withdrawal of %s on %s is more than the member\'s share capital can cover from that date on, so it wasn\'t imported. A share capital balance can\'t go below ₱0.00.',
                     Money::format($entry['centavos']),
                     $entry['date'],
-                    Money::format($lowest),
                 ), $entry['member']);
             }
         }
@@ -186,6 +192,12 @@ final class ShareCapitalRowImporter
 
         if ($series !== null && $series['sequence'] > CashReferences::MAX_SEQUENCE) {
             return RowOutcome::failed('cash_reference_too_large', "Reference {$entry['reference']} is written as one of this app's own cash numbers (CSH), and its number is larger than that numbering goes. Check the reference.", $entry['member']);
+        }
+
+        // The series row before the entry, in the order a cash entry made in
+        // the app takes them (ShareCapitalService::createEntry()).
+        if ($series !== null && $owner !== null) {
+            $this->cashReferences->advance(CashReferences::SHARE_CAPITAL, $owner, $series['year'], $series['sequence']);
         }
 
         $remarks = $normalized->value('remarks');
@@ -204,10 +216,6 @@ final class ShareCapitalRowImporter
             'created_by' => $run->initiated_by,
             'is_imported' => true,
         ]);
-
-        if ($series !== null && $owner !== null) {
-            $this->cashReferences->advance(CashReferences::SHARE_CAPITAL, $owner, $series['year'], $series['sequence']);
-        }
 
         return RowOutcome::imported(
             borrowerId: $entry['member'],

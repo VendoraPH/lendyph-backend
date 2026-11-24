@@ -2,6 +2,7 @@
 
 namespace Tests\Feature\CsvImport;
 
+use App\Models\AccountingOpeningBalance;
 use App\Models\Borrower;
 use App\Models\CsvImportRun;
 use App\Models\PortalUser;
@@ -13,6 +14,7 @@ use Illuminate\Notifications\DatabaseNotification;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Testing\TestResponse;
+use Tests\Feature\Phase6\Amla\Events\AmlaEventTestHelpers;
 use Tests\TestCase;
 use Tests\Traits\PostsJournals;
 use Tests\Traits\SetupLendyPH;
@@ -26,11 +28,16 @@ use Tests\Traits\SetupLendyPH;
  *   sends its "Share capital credited";
  * - on the ledger-gaps report they read as imported, the way an imported
  *   loan's events do: marked, with an "Imported" reason, left out by
- *   `imported=exclude` and alone under `imported=only`.
+ *   `imported=exclude` and alone under `imported=only`;
+ * - no AMLA event, as an imported loan is no release;
+ * - no cash on the Cash Flow: they are listed as non-cash, so the Share
+ *   Capital report's credits and debits still equal the Cash Flow's parts;
+ * - on the share capital control, those dated on or before the finalised
+ *   opening balances count under "No branch", where that balance's books are.
  */
 class ShareCapitalImportSideEffectsTest extends TestCase
 {
-    use PostsJournals, SetupLendyPH;
+    use AmlaEventTestHelpers, PostsJournals, SetupLendyPH;
 
     protected function setUp(): void
     {
@@ -95,6 +102,88 @@ class ShareCapitalImportSideEffectsTest extends TestCase
         $only = $this->gaps(['imported' => 'only'])->assertOk();
         $this->assertEqualsCanonicalizing([$contribution->id, $withdrawal->id], array_keys($this->rows($only)));
         $this->assertSame(['count' => 2, 'amount' => '1200.00'], $only->json('meta.totals.by_kind.share_capital'));
+    }
+
+    public function test_an_imported_entry_is_no_amla_event(): void
+    {
+        $member = Borrower::factory()->create(['branch_id' => $this->branch->id, 'external_account_no' => 'AML-1']);
+        $this->goLive();
+
+        $this->import([
+            ['AML-1', '2024-01-15', 'OR-1', 'Contribution', '1000.00'],
+            ['AML-1', '2024-02-15', 'OR-2', 'Withdrawal', '100.00'],
+        ]);
+        $manual = ShareCapitalLedger::factory()->create(['borrower_id' => $member->id, 'date' => '2026-11-20', 'credit' => 500, 'debit' => 0, 'method' => 'cash']);
+
+        $this->harvestLater();
+
+        foreach (ShareCapitalLedger::query()->where('is_imported', true)->pluck('id') as $imported) {
+            $this->assertSame([], $this->eventsFor('share_capital', (int) $imported), 'recorded before Lendy, so no event');
+        }
+        $this->assertSame('share_capital_contribution', $this->soleEvent('share_capital', $manual->id)->kind);
+    }
+
+    public function test_the_cash_flow_lists_imported_entries_as_non_cash(): void
+    {
+        $member = Borrower::factory()->create(['branch_id' => $this->branch->id, 'external_account_no' => 'CF-1']);
+        $this->import([
+            ['CF-1', '2026-11-02', 'OR-1', 'Contribution', '1000.00'],
+            ['CF-1', '2026-11-03', 'OR-2', 'Withdrawal', '200.00'],
+        ]);
+        $this->postJson('/api/share-capital/ledger', ['borrower_id' => $member->id, 'date' => '2026-11-04', 'description' => 'Contribution', 'type' => 'credit', 'amount' => 300])
+            ->assertCreated();
+
+        $flow = $this->getJson('/api/reports/cash-flow?date_from=2026-11-01&date_to=2026-11-30')->assertOk()->json('data');
+
+        $this->assertEquals(300, $flow['inflows']['share_capital_credit']);
+        $this->assertEquals(0, $flow['outflows']['share_capital_debit']);
+        $this->assertSame(1, $flow['share_capital']['count']);
+        $this->assertEquals(1000, $flow['non_cash']['share_capital_imported_credit']);
+        $this->assertEquals(200, $flow['non_cash']['share_capital_imported_debit']);
+        $this->assertEquals(300, collect($flow['by_branch'])->sum('inflow_share_capital'));
+        $this->assertEquals(0, collect($flow['by_branch'])->sum('outflow_share_capital'));
+
+        // The Share Capital report's credits and debits are still the Cash Flow's parts.
+        $report = $this->getJson('/api/reports/share-capital?date_from=2026-11-01&date_to=2026-11-30')->assertOk()->json('data');
+        $this->assertEquals(1300, $report['credits']);
+        $this->assertEquals(200, $report['debits']);
+        $this->assertEquals($report['credits'], round($flow['share_capital']['credit'] + $flow['share_capital']['build_up_credit'] + $flow['non_cash']['share_capital_at_release'] + $flow['non_cash']['share_capital_from_savings'] + $flow['non_cash']['share_capital_imported_credit'], 2));
+        $this->assertEquals($report['debits'], round($flow['share_capital']['debit'] + $flow['share_capital']['build_up_debit'] + $flow['non_cash']['share_capital_imported_debit'], 2));
+    }
+
+    public function test_the_share_capital_control_counts_imported_history_with_the_opening_balances(): void
+    {
+        $this->seedChartOfAccounts();
+        AccountingOpeningBalance::query()->create(['as_of' => '2026-08-31', 'created_by' => $this->admin->id])
+            ->forceFill(['status' => AccountingOpeningBalance::STATUS_FINALISED, 'finalised_at' => now()])->save();
+        // The opening balances' share capital, on a journal with no branch.
+        $this->postSimpleJournal('1010', '3060', 100000, ['date' => '2026-08-31', 'branch_id' => null, 'source' => 'opening_balance']);
+        Borrower::factory()->create(['branch_id' => $this->branch->id, 'external_account_no' => 'GL-1']);
+
+        $this->import([
+            ['GL-1', '2026-08-31', 'OR-1', 'Contribution', '1000.00'],
+            // After the opening balances: it genuinely has no book side, so it stays in its branch.
+            ['GL-1', '2026-09-15', 'OR-2', 'Contribution', '200.00'],
+        ]);
+
+        $rows = collect($this->getJson('/api/dashboard/executive/share-capital-control?as_of=2026-09-30')->assertOk()->json('data.rows'))->keyBy('branch_name');
+
+        $this->assertSame(['subledger' => 100000, 'books' => 100000, 'difference' => 0, 'is_reconciled' => true], collect($rows['No branch'])->only(['subledger', 'books', 'difference', 'is_reconciled'])->all());
+        $this->assertSame(['subledger' => 20000, 'books' => 0, 'difference' => -20000], collect($rows[$this->branch->name])->only(['subledger', 'books', 'difference'])->all());
+    }
+
+    public function test_without_finalised_opening_balances_imported_entries_stay_in_their_branch(): void
+    {
+        $this->seedChartOfAccounts();
+        Borrower::factory()->create(['branch_id' => $this->branch->id, 'external_account_no' => 'GL-2']);
+
+        $this->import([['GL-2', '2026-08-31', 'OR-1', 'Contribution', '1000.00']]);
+
+        $rows = collect($this->getJson('/api/dashboard/executive/share-capital-control?as_of=2026-09-30')->assertOk()->json('data.rows'))->keyBy('branch_name');
+
+        $this->assertSame(100000, $rows[$this->branch->name]['subledger']);
+        $this->assertSame(0, $rows['No branch']['subledger']);
+        $this->assertNull($rows[$this->branch->name]['books'], 'the books are not ready');
     }
 
     // ------------------------------------------------------------------

@@ -668,6 +668,11 @@ class CsvImportProcessor
             return count($rows);
         }
 
+        // The share capital writer reads who started the run and the cash
+        // series' owner before any chunk transaction opens, as CashReferences
+        // wants its owner read (ShareCapitalRowImporter::writerFor()).
+        $shareCapital = $shape === CsvImportSchema::SHARE_CAPITAL ? $this->shareCapital->writerFor($run) : null;
+
         if ($retrying) {
             // A tick killed mid-window leaves no log line of its own, so this
             // is the first moment anyone can know it happened.
@@ -681,7 +686,7 @@ class CsvImportProcessor
 
         if (! $retrying) {
             try {
-                DB::transaction(fn () => $this->writeChunk($run, $workable, $shape));
+                DB::transaction(fn () => $this->writeChunk($run, $workable, $shape, $shareCapital));
 
                 return count($rows);
             } catch (Throwable $e) {
@@ -708,7 +713,7 @@ class CsvImportProcessor
 
         foreach ($workable as $row) {
             try {
-                DB::transaction(fn () => $this->writeChunk($run, [$row], $shape));
+                DB::transaction(fn () => $this->writeChunk($run, [$row], $shape, $shareCapital));
             } catch (Throwable $e) {
                 $context = ImportErrorDigest::context($e);
 
@@ -753,10 +758,11 @@ class CsvImportProcessor
      * it and prove the rollback took the borrowers AND the stamps with it.
      *
      * @param  list<CsvImportRow>  $rows
+     * @param  (Closure(CsvImportRow): RowOutcome)|null  $shareCapital  the share capital file's writer, built before the transaction (processWindow())
      *
      * @throws LogicException when called outside a transaction
      */
-    public function writeChunk(CsvImportRun $run, array $rows, string $shape): void
+    public function writeChunk(CsvImportRun $run, array $rows, string $shape, ?Closure $shareCapital = null): void
     {
         // Takes the same row lock Borrower::booted() and Loan::booted() take,
         // and holds it for the whole chunk because the caller's transaction is
@@ -792,8 +798,9 @@ class CsvImportProcessor
         // Asked again here, not only at staging: a run can wait days on its
         // product mapping, and its starter can lose the access meanwhile.
         $membershipAllowed = $shape === CsvImportSchema::CUSTOMERS && $run->starterMayEditMembers();
-        // The same for share capital: the starter's access, read once a chunk.
-        $shareCapital = $shape === CsvImportSchema::SHARE_CAPITAL ? $this->shareCapital->writerFor($run) : null;
+        // The same for share capital: the starter's access, read once a chunk
+        // (here only for a caller that didn't build the writer first).
+        $shareCapital ??= $shape === CsvImportSchema::SHARE_CAPITAL ? $this->shareCapital->writerFor($run) : null;
 
         AuditLogService::withoutModelAuditing(function () use ($run, $rows, $shape, $membershipAllowed, $shareCapital): void {
             foreach ($rows as $row) {

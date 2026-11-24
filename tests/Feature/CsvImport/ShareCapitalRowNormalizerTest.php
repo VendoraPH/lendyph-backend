@@ -98,6 +98,17 @@ class ShareCapitalRowNormalizerTest extends TestCase
         $this->assertNull($this->row(['reference_number' => '  '])->value('reference_number'));
     }
 
+    public function test_a_cash_number_is_read_as_the_app_writes_it(): void
+    {
+        $this->assertSame('CSH-0012-2026-0007', $this->row(['reference_number' => 'csh-12-2026-7'])->value('reference_number'));
+        $this->assertSame('TD-0003-2025-0040', $this->row(['reference_number' => 'td-0003-2025-40'])->value('reference_number'));
+        $this->assertSame('OR-12-2026-7', $this->row(['reference_number' => 'OR-12-2026-7'])->value('reference_number'), 'any other reference is kept as typed');
+
+        $file = new ShareCapitalRowNormalizer;
+        $this->assertTrue($this->row(['reference_number' => 'CSH-0012-2026-0007'], $file, line: 2)->isValid());
+        $this->assertRefused($this->row(['reference_number' => 'csh-12-2026-07', 'amount' => '99'], $file, line: 3), 'reference_number', 'duplicate_in_file');
+    }
+
     public function test_long_remarks_are_shortened_with_a_warning(): void
     {
         $row = $this->row(['remarks' => str_repeat('x', 300)]);

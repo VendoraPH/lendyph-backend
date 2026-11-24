@@ -2,6 +2,7 @@
 
 namespace App\Services\CsvImport;
 
+use App\Services\CashReferences;
 use Carbon\Carbon;
 use Throwable;
 
@@ -17,7 +18,10 @@ use Throwable;
  *   1900 on and not after today in Manila. A slash date reads two ways, and a
  *   money entry is never imported on a guess.
  * - Reference Number: optional, at most the 100 characters the ledger keeps,
- *   and never shortened, since it tells one transaction from another.
+ *   and never shortened, since it tells one transaction from another. One of
+ *   the app's own cash numbers written another way (csh-12-2026-7) is kept
+ *   as the app writes it (CSH-0012-2026-0007), so it is matched as the same
+ *   number.
  * - Transaction Type: the ledger's two kinds of entry, in words. Contribution
  *   is a credit and Withdrawal a debit; Credit, Debit, CR and DR read too.
  * - Amount: above ₱0.00, at most two decimals, held as integer centavos.
@@ -97,7 +101,7 @@ final class ShareCapitalRowNormalizer
         $values = [
             'account_no' => $this->identifier($cells['account_no'], $notes),
             'transaction_date' => $this->transactionDate($cells['transaction_date'], $notes),
-            'reference_number' => $this->reference($cells['reference_number'], $notes),
+            'reference_number' => $this->referenceCell($cells['reference_number'], $notes),
             'transaction_type' => $this->transactionType($cells['transaction_type'], $notes),
             'amount' => $this->amount($cells['amount'], $notes),
             'remarks' => $this->values->boundedText($cells['remarks'], 'remarks', self::REMARKS_MAX, $notes),
@@ -199,7 +203,7 @@ final class ShareCapitalRowNormalizer
         return $date !== null && $date->format('Y-m-d') === $value;
     }
 
-    private function reference(?string $raw, RowNoteBag $notes): ?string
+    private function referenceCell(?string $raw, RowNoteBag $notes): ?string
     {
         $value = $this->values->text($raw);
 
@@ -209,7 +213,21 @@ final class ShareCapitalRowNormalizer
             return null;
         }
 
-        return $value;
+        return self::reference($value);
+    }
+
+    /**
+     * A reference as it is kept and compared: one of the app's own cash
+     * numbers (CashReferences::parse()) as the app writes it, any other as
+     * typed.
+     */
+    public static function reference(?string $value): ?string
+    {
+        $number = $value === null ? null : CashReferences::parse($value);
+
+        return $number === null
+            ? $value
+            : CashReferences::format($number['prefix'], $number['owner'], $number['year'], $number['sequence']);
     }
 
     private function transactionType(?string $raw, RowNoteBag $notes): ?string

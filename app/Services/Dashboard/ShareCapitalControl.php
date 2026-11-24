@@ -5,8 +5,10 @@ namespace App\Services\Dashboard;
 use App\Models\AccountingAccount;
 use App\Models\AccountingAccountMapping;
 use App\Models\AccountingJournal;
+use App\Models\AccountingOpeningBalance;
 use App\Services\Accounting\BooksState;
 use App\Services\Accounting\Money;
+use App\Services\Accounting\OpeningBalancePoster;
 use App\Services\BranchAttribution;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
@@ -33,6 +35,14 @@ use RuntimeException;
  * Every branch in scope has a row (₱0.00 when idle). With every branch in
  * scope (`branches:view_all`), a last "No branch" row holds journals with no
  * branch (opening balances) and subledger rows whose member has no branch.
+ *
+ * A subledger row the share capital import brought over (`is_imported`) and
+ * dated on or before the finalised opening balances' date counts under "No
+ * branch" too: its book side is in those opening balances, which carry no
+ * branch (finish run round 2, decision 13; lead's standard pick). One dated
+ * after them, or while none are finalised, stays in its branch: it genuinely
+ * has no book side.
+ *
  * Integer centavos.
  * Reads only.
  */
@@ -117,19 +127,41 @@ final class ShareCapitalControl
     private function subledger(string $asOf, ?array $branchIds): array
     {
         $branch = BranchAttribution::shareCapitalBranchSql('share_capital_ledger', 'borrowers');
+        $opening = $this->openingBalancesDate();
+        $bindings = [];
 
+        if ($opening !== null) {
+            $branch = "CASE WHEN share_capital_ledger.is_imported = 1 AND share_capital_ledger.date <= ? THEN NULL ELSE {$branch} END";
+            $bindings = [$opening];
+        }
+
+        // Grouped by its alias: MySQL takes a bound date in the select list and
+        // the same one in GROUP BY for two different expressions.
         return DB::table('share_capital_ledger')
             ->leftJoin('borrowers', 'borrowers.id', '=', 'share_capital_ledger.borrower_id')
             ->tap(BranchAttribution::shareCapitalInBranches($branchIds))
             ->where('share_capital_ledger.date', '<=', $asOf)
-            ->groupByRaw($branch)
-            ->selectRaw("{$branch} as branch_id")
+            ->selectRaw("{$branch} as counted_branch_id", $bindings)
             ->selectRaw('COALESCE(SUM(share_capital_ledger.credit), 0) as credit, COALESCE(SUM(share_capital_ledger.debit), 0) as debit')
+            ->groupBy('counted_branch_id')
             ->get()
             ->mapWithKeys(fn (object $row): array => [
-                ($row->branch_id === null ? '' : (int) $row->branch_id) => self::centavos($row->credit) - self::centavos($row->debit),
+                ($row->counted_branch_id === null ? '' : (int) $row->counted_branch_id) => self::centavos($row->credit) - self::centavos($row->debit),
             ])
             ->all();
+    }
+
+    /**
+     * The date the finalised opening balances are as of: the finalised entry's,
+     * else its posted journal's (BooksState reads the books ready on either).
+     * Null while none are finalised.
+     */
+    private function openingBalancesDate(): ?string
+    {
+        $date = DB::table('accounting_opening_balances')->where('status', AccountingOpeningBalance::STATUS_FINALISED)->orderBy('id')->value('as_of')
+            ?? DB::table('accounting_journals')->where('source', OpeningBalancePoster::SOURCE)->where('status', 'posted')->orderBy('id')->value('date');
+
+        return $date === null ? null : substr((string) $date, 0, 10);
     }
 
     /**

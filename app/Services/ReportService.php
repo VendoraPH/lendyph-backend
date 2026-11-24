@@ -2439,16 +2439,20 @@ class ReportService
         // apart and kept out of every cash figure; only the rows with neither
         // are share capital paid in or out on its own. A row with a
         // `savings_transaction_id` moved from the member's savings (gap round
-        // S3): no cash moved, so it is summed apart too.
+        // S3): no cash moved, so it is summed apart too. So is a row the share
+        // capital import brought over (`is_imported`): its money moved before
+        // Lendy, under the old books (finish run round 2, decision 13).
         $share = DB::table('share_capital_ledger')
             ->tap(BranchAttribution::shareCapitalInBranches($branchIds))
             ->whereBetween('date', [$fromDate, $toDate])
             ->selectRaw('
-                COALESCE(SUM(CASE WHEN loan_id IS NULL AND repayment_id IS NULL AND savings_transaction_id IS NULL THEN 1 ELSE 0 END), 0) as entry_count,
-                COALESCE(SUM(CASE WHEN loan_id IS NULL AND repayment_id IS NULL AND savings_transaction_id IS NULL THEN credit ELSE 0 END), 0) as credit,
-                COALESCE(SUM(CASE WHEN loan_id IS NULL AND repayment_id IS NULL AND savings_transaction_id IS NULL THEN debit ELSE 0 END), 0) as debit,
+                COALESCE(SUM(CASE WHEN loan_id IS NULL AND repayment_id IS NULL AND savings_transaction_id IS NULL AND is_imported = 0 THEN 1 ELSE 0 END), 0) as entry_count,
+                COALESCE(SUM(CASE WHEN loan_id IS NULL AND repayment_id IS NULL AND savings_transaction_id IS NULL AND is_imported = 0 THEN credit ELSE 0 END), 0) as credit,
+                COALESCE(SUM(CASE WHEN loan_id IS NULL AND repayment_id IS NULL AND savings_transaction_id IS NULL AND is_imported = 0 THEN debit ELSE 0 END), 0) as debit,
                 COALESCE(SUM(CASE WHEN loan_id IS NOT NULL THEN credit - debit ELSE 0 END), 0) as at_release,
                 COALESCE(SUM(CASE WHEN savings_transaction_id IS NOT NULL THEN credit - debit ELSE 0 END), 0) as from_savings,
+                COALESCE(SUM(CASE WHEN is_imported = 1 THEN credit ELSE 0 END), 0) as imported_credit,
+                COALESCE(SUM(CASE WHEN is_imported = 1 THEN debit ELSE 0 END), 0) as imported_debit,
                 COALESCE(SUM(CASE WHEN loan_id IS NULL AND repayment_id IS NOT NULL THEN credit ELSE 0 END), 0) as build_up_credit,
                 COALESCE(SUM(CASE WHEN loan_id IS NULL AND repayment_id IS NOT NULL THEN debit ELSE 0 END), 0) as build_up_debit
             ')
@@ -2470,6 +2474,8 @@ class ReportService
         $shareDebit = round((float) ($share->debit ?? 0), 2);
         $shareAtRelease = round((float) ($share->at_release ?? 0), 2);
         $shareFromSavings = round((float) ($share->from_savings ?? 0), 2);
+        $shareImportedCredit = round((float) ($share->imported_credit ?? 0), 2);
+        $shareImportedDebit = round((float) ($share->imported_debit ?? 0), 2);
         $buildUpCredit = round((float) ($share->build_up_credit ?? 0), 2);
         $buildUpDebit = round((float) ($share->build_up_debit ?? 0), 2);
         $netProceedsOut = round((float) ($release->net_proceeds ?? 0), 2);
@@ -2515,7 +2521,11 @@ class ReportService
                 // Moved from the members' savings to their share capital: one
                 // liability to equity, never cash in.
                 'share_capital_from_savings' => $shareFromSavings,
-                'note' => 'Deductions are withheld at release and never leave the till; principal_released = net_proceeds + total_deductions. share_capital_at_release is the share capital withheld from loans at release and credited to the members\' share capital: it is in their Share Capital balance but was never received as cash, so it is excluded from inflows and from share_capital. share_capital_from_savings is share capital moved from the members\' savings accounts: no cash moved, so it is excluded the same way.',
+                // Brought over from the cooperative's earlier books by the
+                // share capital import: the money moved before Lendy.
+                'share_capital_imported_credit' => $shareImportedCredit,
+                'share_capital_imported_debit' => $shareImportedDebit,
+                'note' => 'Deductions are withheld at release and never leave the till; principal_released = net_proceeds + total_deductions. share_capital_at_release is the share capital withheld from loans at release and credited to the members\' share capital: it is in their Share Capital balance but was never received as cash, so it is excluded from inflows and from share_capital. share_capital_from_savings is share capital moved from the members\' savings accounts: no cash moved, so it is excluded the same way. share_capital_imported_credit and share_capital_imported_debit are the share capital entries brought over from the cooperative\'s earlier books by Data Import: their money moved before Lendy, so they are excluded the same way.',
             ],
             // Same scope vocabulary as the Share Capital report. `credit`,
             // `debit`, `net_movement` and `count` are share capital paid in and
@@ -2538,7 +2548,7 @@ class ReportService
                     ? 'branch_id is honoured through the branch each share capital entry posted in; an entry recorded before entries carried a branch, and not yet attributed, counts in the member\'s branch. This matches the Share Capital report.'
                     : 'No branch filter applied, so these figures are organisation-wide.')
                     .' In by_branch, share capital paid in and out on its own is in the row of the branch each entry posted in (inflow_share_capital, outflow_share_capital, inside inflow_total and outflow_total), so the rows add up to the statement totals; an entry with no branch whose member has none is in an Unassigned row.'
-                    .' credit and debit are share capital paid in and out on its own. build_up_from_payments is the share capital build-up credited from loan payments, net of void reversals: that cash is already in inflows.repayments (as overpayment), so it is in no total here. Share capital withheld at release is under non_cash.share_capital_at_release. The Share Capital report\'s credits for the same period and branch = credit + build_up_credit + non_cash.share_capital_at_release + non_cash.share_capital_from_savings; its debits = debit + build_up_debit.',
+                    .' credit and debit are share capital paid in and out on its own. build_up_from_payments is the share capital build-up credited from loan payments, net of void reversals: that cash is already in inflows.repayments (as overpayment), so it is in no total here. Share capital withheld at release is under non_cash.share_capital_at_release. The Share Capital report\'s credits for the same period and branch = credit + build_up_credit + non_cash.share_capital_at_release + non_cash.share_capital_from_savings + non_cash.share_capital_imported_credit; its debits = debit + build_up_debit + non_cash.share_capital_imported_debit.',
             ],
             'by_branch' => $byBranch,
             // The rows' loan cash plus the share capital paid in and out on
@@ -2615,13 +2625,14 @@ class ReportService
             ->keyBy(fn ($row) => (int) $row->branch_id);
 
         // The same rows as cashFlow()'s share capital credit and debit,
-        // grouped by the branch each posted in.
+        // grouped by the branch each posted in: imported rows are no cash.
         $postedBranch = BranchAttribution::shareCapitalBranchSql();
         $share = DB::table('share_capital_ledger')
             ->leftJoin('borrowers', 'borrowers.id', '=', 'share_capital_ledger.borrower_id')
             ->whereNull('share_capital_ledger.loan_id')
             ->whereNull('share_capital_ledger.repayment_id')
             ->whereNull('share_capital_ledger.savings_transaction_id')
+            ->where('share_capital_ledger.is_imported', false)
             ->tap(BranchAttribution::shareCapitalInBranches($branchIds))
             ->whereBetween('share_capital_ledger.date', [$fromDate, $toDate])
             ->groupByRaw($postedBranch)

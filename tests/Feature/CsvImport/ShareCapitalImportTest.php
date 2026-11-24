@@ -256,7 +256,8 @@ class ShareCapitalImportTest extends TestCase
 
         $this->assertOutcome($run, 2, 'imported', null);
         $this->assertOutcome($run, 3, 'imported', null);
-        $this->assertOutcome($run, 4, 'failed', 'withdrawal_exceeds_balance', 'This withdrawal of ₱300.01 on 2024-03-01 is more than the member\'s share capital can cover from that date on (₱300.00 at the lowest), so it wasn\'t imported. A share capital balance can\'t go below ₱0.00.');
+        // The member's balance isn't in the report: it needs only imports:process.
+        $this->assertOutcome($run, 4, 'failed', 'withdrawal_exceeds_balance', 'This withdrawal of ₱300.01 on 2024-03-01 is more than the member\'s share capital can cover from that date on, so it wasn\'t imported. A share capital balance can\'t go below ₱0.00.');
         $this->assertOutcome($run, 5, 'imported', null);
         $this->assertOutcome($run, 6, 'failed', 'withdrawal_exceeds_balance');
 
@@ -326,6 +327,30 @@ class ShareCapitalImportTest extends TestCase
         // 0002 was given already: refused as a duplicate, and the series is unmoved.
         $this->assertOutcome($run, 2, 'skipped', 'duplicate_reference');
         $this->getJson('/api/share-capital/cash-reference/next')->assertJsonPath('data.reference_number', "CSH-{$owner}-2026-0004");
+    }
+
+    public function test_a_cash_number_written_another_way_is_kept_and_matched_as_the_app_writes_it(): void
+    {
+        $member = Borrower::factory()->create(['branch_id' => $this->branch->id, 'external_account_no' => 'CSW-1']);
+        $owner = $this->owner();
+        $unpadded = (int) $owner;
+
+        $first = $this->import(['share_capital' => $this->shareCapitalCsv([
+            ['account_no' => 'CSW-1', 'reference_number' => "csh-{$unpadded}-2026-7", 'amount' => '100'],
+            ['account_no' => 'CSW-1', 'reference_number' => "CSH-{$owner}-2026-0007", 'amount' => '200'],
+        ])]);
+
+        $this->assertOutcome($first, 2, 'imported', null);
+        $this->assertOutcome($first, 3, 'skipped', 'invalid_row', null);
+        $this->assertSame(["CSH-{$owner}-2026-0007"], ShareCapitalLedger::query()->where('borrower_id', $member->id)->pluck('reference_number')->all());
+
+        $second = $this->import(['share_capital' => $this->shareCapitalCsv([
+            ['account_no' => 'CSW-1', 'reference_number' => "CSH-{$unpadded}-2026-07", 'amount' => '300'],
+        ])]);
+
+        $this->assertOutcome($second, 2, 'skipped', 'duplicate_reference');
+        $this->assertSame(1, ShareCapitalLedger::query()->where('borrower_id', $member->id)->count());
+        $this->getJson('/api/share-capital/cash-reference/next')->assertJsonPath('data.reference_number', "CSH-{$owner}-2026-0008");
     }
 
     public function test_opening_a_run_says_what_it_may_carry(): void
