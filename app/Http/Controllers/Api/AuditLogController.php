@@ -4,11 +4,13 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Api\Traits\CsvExportTrait;
 use App\Http\Controllers\Controller;
+use App\Http\Requests\Concerns\DateInputMessages;
 use App\Http\Resources\AuditLogResource;
 use App\Models\AuditLog;
 use App\Services\AuditLogModules;
 use App\Services\BranchAccess;
 use App\Services\LikePattern;
+use Carbon\CarbonImmutable;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
 use Illuminate\Validation\Rule;
@@ -246,10 +248,10 @@ class AuditLogController extends Controller
             'action' => ['nullable', 'string'],
             'auditable_type' => ['nullable', 'string'],
             'module' => ['nullable', 'string', Rule::in(AuditLogModules::all())],
-            'date_from' => ['nullable', 'date'],
-            'date_to' => ['nullable', 'date'],
+            'date_from' => ['nullable', 'date', 'date_format:Y-m-d'],
+            'date_to' => ['nullable', 'date', 'date_format:Y-m-d'],
             'per_page' => ['nullable', 'integer', 'min:1'],
-        ]);
+        ], DateInputMessages::calendar(['date_from' => 'start date', 'date_to' => 'end date']));
     }
 
     /**
@@ -296,7 +298,20 @@ class AuditLogController extends Controller
             ->when(filled($action), fn ($q) => $q->where('action', $action))
             ->when(filled($auditableType), fn ($q) => $q->where('auditable_type', 'like', LikePattern::contains($auditableType)))
             ->when(filled($module), fn ($q) => AuditLogModules::constrain($q, $module))
-            ->when(filled($dateFrom), fn ($q) => $q->where('created_at', '>=', $dateFrom))
-            ->when(filled($dateTo), fn ($q) => $q->where('created_at', '<=', "{$dateTo} 23:59:59"));
+            ->when(filled($dateFrom), fn ($q) => $q->where('created_at', '>=', self::manilaDayStart($dateFrom)))
+            ->when(filled($dateTo), fn ($q) => $q->where('created_at', '<', self::manilaDayStart($dateTo)->addDay()));
+    }
+
+    /**
+     * The first instant of a calendar day in the app timezone (Asia/Manila).
+     *
+     * `created_at` holds the Manila wall clock (AuditLog stamps it from PHP's
+     * clock), and a Carbon binding is written as its own wall clock, so the
+     * filter covers exactly the Manila days picked: from the start day's
+     * 00:00:00 up to, but not including, the day after the end day.
+     */
+    private static function manilaDayStart(string $date): CarbonImmutable
+    {
+        return CarbonImmutable::createFromFormat('!Y-m-d', $date, config('app.timezone'));
     }
 }

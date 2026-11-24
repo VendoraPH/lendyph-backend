@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Api\Traits\ScopesBranchFilter;
 use App\Http\Controllers\Controller;
+use App\Http\Requests\Concerns\DateInputMessages;
 use App\Services\Accounting\BookBuilder;
 use App\Services\Accounting\ColumnBookBuilder;
 use Carbon\CarbonImmutable;
@@ -233,10 +234,10 @@ class AccountingBookController extends Controller
     private function period(): array
     {
         $filters = request()->validate([
-            'from' => ['required', 'date'],
-            'to' => ['required', 'date'],
+            'from' => ['required', 'date', 'date_format:Y-m-d'],
+            'to' => ['required', 'date', 'date_format:Y-m-d'],
             'branch_id' => ['nullable', 'integer'],
-        ]);
+        ], DateInputMessages::calendar(['from' => 'start date', 'to' => 'end date']));
 
         $from = CarbonImmutable::parse($filters['from'])->startOfDay();
         $to = CarbonImmutable::parse($filters['to'])->startOfDay();

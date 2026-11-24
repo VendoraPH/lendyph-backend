@@ -4,6 +4,7 @@ namespace App\Services\Accounting;
 
 use App\Models\AccountingExpense;
 use App\Models\AccountingExpensePayment;
+use App\Services\Branches\BranchRowLock;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
 
@@ -81,6 +82,10 @@ class ExpenseRecorder
         $amount = (int) $data['amount'];
 
         return DB::transaction(function () use ($data, $paymentAccountId, $amount, $userId): AccountingExpense {
+            // The branch row first (BranchRowLock's lock order): a closed or
+            // closing branch takes no new expense.
+            BranchRowLock::lock(['branch_id' => $data['branch_id'] ?? null]);
+
             // Resolved BEFORE anything is written. Inside a transaction the
             // rollback would undo the row anyway; doing it in this order means
             // the failure is about the mapping rather than about a half-built
@@ -161,6 +166,11 @@ class ExpenseRecorder
         $amount = (int) $data['amount'];
 
         return DB::transaction(function () use ($expense, $data, $amount, $userId): AccountingExpense {
+            // The branch row before the expense row (BranchRowLock's lock
+            // order): a closed or closing branch's payable isn't paid. An
+            // expense's branch never changes.
+            BranchRowLock::lock(['branch' => $expense->branch_id]);
+
             $locked = AccountingExpense::query()
                 ->whereKey($expense->id)
                 ->lockForUpdate()

@@ -609,13 +609,18 @@ class BranchScopedReportsTest extends TestCase
     }
 
     /**
+     * A factory row; a paid Cash In (the factory's default) was paid when recorded.
+     *
      * @param  array<string, mixed>  $attributes
      */
     private function gcash(array $attributes): GCashTransaction
     {
+        $paidCashIn = ($attributes['type'] ?? 'cash_in') === 'cash_in' && ($attributes['status'] ?? 'paid') === 'paid';
+
         return GCashTransaction::factory()->create(array_merge([
             'transactor_user_id' => $this->admin->id,
             'transaction_date' => now(),
+            'paid_at' => $paidCashIn ? now() : null,
         ], $attributes));
     }
 

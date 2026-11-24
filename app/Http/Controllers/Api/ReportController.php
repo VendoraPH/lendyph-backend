@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Api\Traits\CsvExportTrait;
 use App\Http\Controllers\Controller;
+use App\Http\Requests\Concerns\DateInputMessages;
 use App\Http\Resources\BorrowerReleasedResource;
 use App\Http\Resources\IncomeByLoanResource;
 use App\Http\Resources\LoanResource;
@@ -69,12 +70,13 @@ class ReportController extends Controller
     private function reportFilters(array $extra = []): array
     {
         $filters = request()->validate(array_merge([
-            'date' => ['nullable', 'date'],
-            'as_of_date' => ['nullable', 'date'],
-            'date_from' => ['nullable', 'date'],
+            'date' => ['nullable', 'date', 'date_format:Y-m-d'],
+            'as_of_date' => ['nullable', 'date', 'date_format:Y-m-d'],
+            'date_from' => ['nullable', 'date', 'date_format:Y-m-d'],
             'date_to' => array_values(array_filter([
                 'nullable',
                 'date',
+                'date_format:Y-m-d',
                 // Only a cross-field rule when there is a field to compare to.
                 request()->filled('date_from') ? 'after_or_equal:date_from' : null,
             ])),
@@ -98,7 +100,7 @@ class ReportController extends Controller
             'officer_id' => ['nullable', 'integer', 'min:1'],
             'collector_id' => ['nullable', 'integer', 'min:1'],
             'per_page' => ['nullable', 'integer', 'min:1', 'max:1000'],
-        ], $extra));
+        ], $extra), DateInputMessages::calendar(['date' => 'day', 'as_of_date' => 'report date', 'date_from' => 'start date', 'date_to' => 'end date']));
 
         $this->assertSpanWithinCap($filters);
 

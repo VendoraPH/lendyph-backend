@@ -9,6 +9,7 @@ use App\Models\AccountingJournalLine;
 use App\Models\AccountingReconciliation;
 use App\Models\AccountingReconciliationLine;
 use App\Services\AuditLogService;
+use App\Services\Branches\BranchRowLock;
 use App\Services\GeneratedNumberWrite;
 use App\Services\LoanWriteTransaction;
 use Closure;
@@ -229,6 +230,10 @@ class ReconciliationActions
      *
      * `$create` writes the record and returns [record id, journal id].
      *
+     * The reconciliation's branch row comes first, FOR SHARE (BranchRowLock),
+     * so a closure can't land between the request's check and the entry; the
+     * expense or transfer recorder takes it again, already held.
+     *
      * `$accountIds` are money-account rows locked, in id order and in one
      * read, after the statement line and BEFORE the duplicate check. Every
      * action passes the reconciled account, and a transfer its counter
@@ -264,6 +269,10 @@ class ReconciliationActions
     ): array {
         try {
             return DB::transaction(function () use ($reconciliation, $lineId, $userId, $type, $recordAnyway, $create, $accountIds): array {
+                // The branch row first (BranchRowLock's lock order): a closed
+                // or closing branch takes no new entry.
+                BranchRowLock::lock(['branch' => $reconciliation->branch_id]);
+
                 $line = AccountingReconciliationLine::query()
                     ->whereKey($lineId)
                     ->lockForUpdate()

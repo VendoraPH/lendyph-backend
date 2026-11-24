@@ -5,6 +5,7 @@ namespace App\Http\Requests\Loan;
 use App\Enums\InterestRateFrequency;
 use App\Enums\LoanFrequency;
 use App\Enums\TermUnit;
+use App\Http\Requests\Concerns\DateInputMessages;
 use App\Services\AmortizationCalculatorService;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Validator;
@@ -36,7 +37,7 @@ class AmortizationCalculatorRequest extends FormRequest
             'term' => ['required', 'integer', 'min:1', $this->input('term_unit') === TermUnit::Days->value ? 'max:10950' : 'max:360'],
             'term_unit' => ['required', TermUnit::rule()],
             'frequency' => ['required', LoanFrequency::rule()],
-            'start_date' => ['required', 'date'],
+            'start_date' => ['required', 'date', 'date_format:Y-m-d'],
             // At most what the loans.scb_amount column (decimal 12,2) can hold.
             'scb_amount' => ['nullable', 'numeric', 'min:0', 'max:9999999999.99', 'decimal:0,2'],
             'compare' => ['nullable', 'boolean'],
@@ -73,5 +74,13 @@ class AmortizationCalculatorRequest extends FormRequest
                 }
             },
         ];
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    public function messages(): array
+    {
+        return DateInputMessages::calendar(['start_date' => 'start date']);
     }
 }

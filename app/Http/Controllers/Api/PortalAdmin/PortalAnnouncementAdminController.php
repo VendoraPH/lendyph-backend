@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api\PortalAdmin;
 
 use App\Http\Controllers\Controller;
+use App\Http\Requests\Concerns\DateInputMessages;
 use App\Models\Borrower;
 use App\Models\PortalAnnouncement;
 use App\Services\BranchAccess;
@@ -160,8 +161,8 @@ class PortalAnnouncementAdminController extends Controller
             'branch_ids.*' => ['integer', 'distinct', $this->branches->constrainBranchExists(Rule::exists('branches', 'id'), $request->user())],
             'member_types' => ['exclude_unless:audience,'.PortalAnnouncement::AUDIENCE_MEMBER_TYPE, 'required', 'array', 'min:1'],
             'member_types.*' => ['string', 'distinct', Rule::in(Borrower::MEMBER_TYPES)],
-            'publish_at' => ['nullable', 'date'],
-            'expires_at' => ['nullable', 'date', $request->filled('publish_at') ? 'after:publish_at' : 'after:now'],
+            'publish_at' => ['nullable', 'date', 'date_format:'.DateInputMessages::DATE_TIME_FORMATS],
+            'expires_at' => ['nullable', 'date', 'date_format:'.DateInputMessages::DATE_TIME_FORMATS, $request->filled('publish_at') ? 'after:publish_at' : 'after:now'],
             'pinned' => ['sometimes', 'boolean'],
         ];
     }
@@ -170,6 +171,7 @@ class PortalAnnouncementAdminController extends Controller
     private function messages(): array
     {
         return [
+            ...DateInputMessages::dateTime(['publish_at' => 'start date', 'expires_at' => 'end date']),
             'title.required' => 'Give the announcement a title.',
             'title.max' => 'The title can be at most 150 characters.',
             'body.required' => 'Write the announcement.',
