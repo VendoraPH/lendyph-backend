@@ -31,14 +31,14 @@ class GCashReportTest extends TestCase
             'reference_no' => 'GC-001',
             'transaction_date' => now(),
             'type' => 'cash_in', 'amount' => 1000, 'charge_amount' => 20, 'total_amount' => 1020,
-            'status' => 'paid',
+            'status' => 'paid', 'paid_at' => now(),
             'borrower_id' => $this->borrower->id, 'transactor_user_id' => $this->admin->id,
         ]);
         GCashTransaction::factory()->create([
             'reference_no' => 'GC-002',
             'transaction_date' => now(),
             'type' => 'cash_in', 'amount' => 1000, 'charge_amount' => 20, 'total_amount' => 1020,
-            'status' => 'paid',
+            'status' => 'paid', 'paid_at' => now(),
             'borrower_id' => $this->borrower->id, 'transactor_user_id' => $this->admin->id,
         ]);
         GCashTransaction::factory()->create([
@@ -84,7 +84,7 @@ class GCashReportTest extends TestCase
             'reference_no' => 'GC-P02',
             'transaction_date' => now(),
             'type' => 'cash_in', 'amount' => 1000, 'charge_amount' => 20, 'total_amount' => 1020,
-            'status' => 'paid',
+            'status' => 'paid', 'paid_at' => now(),
             'borrower_id' => $this->borrower->id, 'transactor_user_id' => $this->admin->id,
         ]);
 

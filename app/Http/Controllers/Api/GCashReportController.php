@@ -17,7 +17,7 @@ class GCashReportController extends Controller
     #[OA\Get(
         path: '/api/gcash/reports/income',
         summary: 'Sum of GCash charge income in a date range',
-        description: 'Sums charge_amount across non-pending transactions whose transaction_date falls within [start_date, end_date], and counts them by type (cash_in_count, cash_out_count). Pending Cash Ins are deferred income and excluded. A caller without branches:view_all sees only their branches\' member transactions and the walk-in transactions recorded in their branches (a walk-in with no branch needs branches:view_all); the list, total and counts cover those rows.',
+        description: 'Sums charge_amount over the charges earned within [start_date, end_date] (Manila days), on the date the books post 4090: a Cash In on the day it was paid (paid_at), a Cash Out on its transaction_date. Counts them by type (cash_in_count, cash_out_count). A pending Cash In is income in no period until it is paid. A caller without branches:view_all sees only their branches\' member transactions and the walk-in transactions recorded in their branches (a walk-in with no branch needs branches:view_all); the list, total and counts cover those rows.',
         tags: ['GCash'],
         security: [['sanctum' => []]],
         parameters: [
