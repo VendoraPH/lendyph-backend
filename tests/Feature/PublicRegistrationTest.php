@@ -438,39 +438,26 @@ class PublicRegistrationTest extends TestCase
 
     /**
      * Public registration is anonymous and the exact-match tier needs only
-     * first+middle+last name, so naming the match would let anyone confirm that a
-     * given person borrows here and read back their date of birth and borrower
-     * code. Probing leaves no trace either, since the row is only written when
-     * validation passes.
+     * first+middle+last name, so even refusing the match would let anyone
+     * confirm that a given person is on file and probe their birthdate (#356
+     * security review). The applicant gets the ordinary answer instead, and the
+     * match is kept for the reviewer (finish run round 2, decision 3;
+     * PublicRegistrationPossibleDuplicateTest).
      */
     public function test_anonymous_duplicate_does_not_disclose_the_matching_borrower(): void
     {
-        $existing = Borrower::factory()->create([
-            'branch_id' => $this->branch->id,
-            'first_name' => 'Juan',
-            'middle_name' => 'Dela',
-            'last_name' => 'Cruz',
-            'birthdate' => '1990-05-12',
-        ]);
+        $existing = $this->juanDelaCruz();
 
-        $response = $this->postJson('/api/borrowers', [
-            'status' => 'pending',
-            'branch_id' => $this->branch->id,
-            'first_name' => 'Juan',
-            'middle_name' => 'Dela',
-            'last_name' => 'Cruz',
-            'contact_number' => '09171234567',
-            'address' => '123 Mango St',
-        ]);
+        $response = $this->postJson('/api/borrowers', $this->applicant(['status' => 'pending']))
+            ->assertCreated()
+            ->assertJsonStructure(['success', 'data' => ['id', 'submission_token', 'expires_at']]);
 
-        $response->assertStatus(422);
+        $body = $response->getContent();
 
-        $message = implode(' ', $response->json('errors.first_name') ?? []);
-
-        $this->assertStringNotContainsString('1990-05-12', $message);
-        $this->assertStringNotContainsString($existing->borrower_code, $message);
-        $this->assertStringNotContainsString('Juan', $message);
-        $this->assertStringContainsString('contact your branch', $message);
+        $this->assertStringNotContainsString('1990-05-12', $body);
+        $this->assertStringNotContainsString($existing->borrower_code, $body);
+        $this->assertStringNotContainsString('Juan', $body);
+        $this->assertNotSame($existing->id, $response->json('data.id'));
     }
 
     public function test_authenticated_duplicate_still_names_the_match_for_operators(): void
@@ -504,23 +491,26 @@ class PublicRegistrationTest extends TestCase
     /**
      * "Create Anyway" (`force`) is a staff decision, made after seeing the
      * match (re-scan, 2026-11-24): an anonymous caller's `force` is ignored,
-     * so the public form is always checked and a duplicate applicant gets the
-     * generic refusal, with nothing written.
+     * so the public form is always checked. A duplicate applicant is saved
+     * pending with its possible duplicate linked for the reviewer (finish run
+     * round 2, decision 3), and gets the same answer as anyone else.
      */
     public function test_an_anonymous_force_is_ignored_so_the_duplicate_check_still_applies(): void
     {
         $existing = $this->juanDelaCruz();
-        $before = Borrower::count();
 
-        $response = $this->postJson('/api/borrowers', $this->applicant(['status' => 'pending', 'force' => true]))->assertStatus(422);
-
-        $this->assertSame(['A similar member already exists. Please contact your branch to continue.'], $response->json('errors.first_name'));
-        $this->assertStringNotContainsString($existing->borrower_code, $response->getContent());
-        $this->assertSame($before, Borrower::count(), 'No second record.');
-
-        $this->postJson('/api/borrowers', $this->applicant(['status' => 'pending', 'force' => true, 'first_name' => 'Pedro', 'last_name' => 'Penduko']))
+        $response = $this->postJson('/api/borrowers', $this->applicant(['status' => 'pending', 'force' => true]))
             ->assertCreated()
             ->assertJsonStructure(['data' => ['id', 'submission_token', 'expires_at']]);
+
+        $this->assertStringNotContainsString($existing->borrower_code, $response->getContent());
+        $this->assertSame($existing->id, Borrower::findOrFail($response->json('data.id'))->possible_duplicate_of_id);
+
+        $unmatched = $this->postJson('/api/borrowers', $this->applicant(['status' => 'pending', 'force' => true, 'first_name' => 'Pedro', 'last_name' => 'Penduko']))
+            ->assertCreated()
+            ->assertJsonStructure(['data' => ['id', 'submission_token', 'expires_at']]);
+
+        $this->assertNull(Borrower::findOrFail($unmatched->json('data.id'))->possible_duplicate_of_id);
     }
 
     public function test_staff_holding_borrowers_create_may_still_create_anyway_and_no_one_else(): void
