@@ -18,8 +18,8 @@ use Tests\Traits\SetupLendyPH;
  * The branch row lock on two real connections (finish run round 2, decision
  * 4): a closure and a write in the same branch never interleave.
  *
- * - A closure request that commits after the write's FormRequest passed is
- *   still seen: the write re-reads the branch under its lock and refuses.
+ * - A closure that commits after the write's FormRequest passed is still
+ *   seen: the write re-reads the branch under its lock and refuses.
  * - While a write holds the branch, a closure step can't lock it.
  * - While a closure step holds the branch, a write waits; one that waits too
  *   long answers 409 with nothing saved.
@@ -55,31 +55,40 @@ class BranchWriteLockRaceTest extends TestCase
         parent::tearDown();
     }
 
-    public function test_a_closure_requested_after_the_check_is_seen_under_the_lock(): void
+    /**
+     * The branch closes on the other connection right after the FormRequest's
+     * BranchTakesNew read (a suspended branch, so it passed) and before the
+     * write's transaction: the write reads the branch again under its lock
+     * and refuses. Before the lock it saved the expense into a closed branch.
+     */
+    public function test_a_branch_closed_after_the_requests_check_is_seen_under_the_lock(): void
     {
-        $requested = false;
+        $closed = false;
 
-        DB::listen(function (QueryExecuted $query) use (&$requested): void {
-            // The FormRequest's plain read of the branch (BranchTakesNew),
-            // outside the write's transaction: it has just passed.
-            if ($requested || $query->connectionName === self::OTHER_CONNECTION || DB::transactionLevel() > 0
-                || ! str_contains($query->sql, 'from `branches`') || str_contains($query->sql, 'lock in share mode')) {
+        DB::listen(function (QueryExecuted $query) use (&$closed): void {
+            if ($closed || $query->connectionName === self::OTHER_CONNECTION || DB::transactionLevel() > 0
+                || $query->sql !== 'select `id`, `name`, `code`, `status` from `branches` where `branches`.`id` = ? limit 1'
+                || (int) ($query->bindings[0] ?? 0) !== $this->far->id) {
                 return;
             }
 
-            $requested = true;
+            $closed = true;
             $other = DB::connection(self::OTHER_CONNECTION);
-            $other->transaction(fn () => $other->table('branch_closures')->insert([
-                'branch_id' => $this->far->id, 'status' => BranchClosure::STATUS_PENDING, 'effective_on' => now()->toDateString(),
-                'reason' => 'Merged into Main', 'requested_by' => $this->admin->id, 'created_at' => now(), 'updated_at' => now(),
-            ]));
+            $other->transaction(function () use ($other): void {
+                $other->table('branch_closures')->insert([
+                    'branch_id' => $this->far->id, 'status' => BranchClosure::STATUS_APPROVED, 'effective_on' => now()->toDateString(),
+                    'reason' => 'Merged into Main', 'requested_by' => $this->admin->id, 'decided_by' => $this->admin->id,
+                    'decided_at' => now(), 'created_at' => now(), 'updated_at' => now(),
+                ]);
+                $other->table('branches')->where('id', $this->far->id)->update(['status' => Branch::STATUS_CLOSED, 'closed_on' => now()->toDateString()]);
+            });
         });
 
         $this->postJson('/api/accounting/expenses', $this->expense())
             ->assertUnprocessable()
-            ->assertJsonPath('errors.branch_id.0', 'Branch "Far Branch" (FAR) is waiting to close, so nothing new can be added there.');
+            ->assertJsonPath('errors.branch_id.0', 'Branch "Far Branch" (FAR) is closed, so nothing new can be added there.');
 
-        $this->assertTrue($requested, 'the closure was requested between the check and the write');
+        $this->assertTrue($closed, "the branch closed right after BranchTakesNew's read");
         $this->assertSame(0, AccountingExpense::query()->where('branch_id', $this->far->id)->count());
     }
 

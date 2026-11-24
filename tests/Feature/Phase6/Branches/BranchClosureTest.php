@@ -2,6 +2,7 @@
 
 namespace Tests\Feature\Phase6\Branches;
 
+use App\Models\AccountingExpense;
 use App\Models\AuditLog;
 use App\Models\Borrower;
 use App\Models\Branch;
@@ -172,6 +173,7 @@ class BranchClosureTest extends TestCase
             ['key' => 'pending_approvals', 'label' => 'Pending approvals and requests', 'count' => 3, 'amount' => null, 'clear' => false],
             ['key' => 'transfers_in_transit', 'label' => 'Transfers in transit', 'count' => 0, 'amount' => null, 'clear' => true],
             ['key' => 'pending_gcash_cash_ins', 'label' => 'GCash Cash Ins not yet paid', 'count' => 0, 'amount' => null, 'clear' => true],
+            ['key' => 'unpaid_payables', 'label' => 'Unpaid payables', 'count' => 0, 'amount' => null, 'clear' => true],
             ['key' => 'assigned_users', 'label' => 'Assigned users', 'count' => 1, 'amount' => null, 'clear' => false],
         ], $data['checklist']);
 
@@ -217,6 +219,31 @@ class BranchClosureTest extends TestCase
         $late->update(['status' => 'paid', 'paid_at' => now()]);
         $this->postJson("/api/branches/{$this->quiet->id}/closure/approve")->assertOk();
         $this->assertSame('closed', $this->quiet->fresh()->status);
+    }
+
+    /**
+     * An expense recorded as owed is paid into its own branch, which a closed
+     * branch refuses, so a closure waits for the branch's unpaid and partly
+     * paid payables (finish run round 2, review of #369).
+     */
+    public function test_closing_waits_for_the_branchs_unpaid_payables(): void
+    {
+        $this->seedChartOfAccounts();
+        $unpaid = AccountingExpense::factory()->create(['branch_id' => $this->quiet->id]);
+        $partly = AccountingExpense::factory()->create(['branch_id' => $this->quiet->id, 'amount_paid' => 500, 'settlement_status' => 'partially_paid']);
+        AccountingExpense::factory()->create(['branch_id' => $this->quiet->id, 'amount_paid' => 1500050, 'settlement_status' => 'paid']);
+        AccountingExpense::factory()->create(['branch_id' => $this->branch->id]);
+
+        $item = collect($this->getJson("/api/branches/{$this->quiet->id}/closure")->assertOk()->json('data.checklist'))->firstWhere('key', 'unpaid_payables');
+        $this->assertSame(['key' => 'unpaid_payables', 'label' => 'Unpaid payables', 'count' => 2, 'amount' => null, 'clear' => false], $item);
+
+        $this->postJson("/api/branches/{$this->quiet->id}/closure", ['effective_on' => now()->toDateString(), 'reason' => 'Closing'])
+            ->assertUnprocessable()
+            ->assertJsonPath('errors.branch.0', "This branch can't be closed yet: 2 unpaid payables.");
+
+        $unpaid->forceFill(['amount_paid' => 1500050, 'settlement_status' => 'paid'])->save();
+        $partly->forceFill(['amount_paid' => 1500050, 'settlement_status' => 'paid'])->save();
+        $this->requestClosure();
     }
 
     public function test_a_quiet_branch_has_a_clear_checklist(): void

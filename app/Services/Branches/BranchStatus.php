@@ -3,6 +3,7 @@
 namespace App\Services\Branches;
 
 use App\Models\AccountingAccount;
+use App\Models\AccountingExpense;
 use App\Models\Borrower;
 use App\Models\Branch;
 use App\Models\BranchClosure;
@@ -41,7 +42,8 @@ use Symfony\Component\HttpKernel\Exception\HttpException;
  * the lock the writes in BranchRowLock hold FOR SHARE, so a closure and a
  * user save, journal, expense, fund transfer or reconciliation action in the
  * branch never interleave; while a request waits, those writes are refused.
- * A deadlock or lock wait timeout on a closure step answers 409.
+ * A deadlock or lock wait timeout on a closure step, a status change or a
+ * main-office move answers 409 with nothing saved.
  *
  * A suspended or closed status is enforced on writes by BranchWriteGuard and
  * the BranchTakesNew rules (MB-BE2). A status change and a closure approval
@@ -70,7 +72,7 @@ class BranchStatus
      */
     public function change(Branch $branch, string $to, string $reason): Branch
     {
-        return $this->guard->exclusively((int) $branch->getKey(), fn (): Branch => DB::transaction(function () use ($branch, $to, $reason): Branch {
+        return $this->guard->exclusively((int) $branch->getKey(), fn (): Branch => BranchRowLock::transaction(function () use ($branch, $to, $reason): Branch {
             $locked = Branch::query()->whereKey($branch->getKey())->lockForUpdate()->firstOrFail();
 
             $this->assertCanMove($locked, $to);
@@ -121,7 +123,7 @@ class BranchStatus
      */
     public function makeMainOffice(Branch $branch, string $reason): Branch
     {
-        return DB::transaction(function () use ($branch, $reason): Branch {
+        return BranchRowLock::transaction(function () use ($branch, $reason): Branch {
             $current = Branch::query()->where('is_main_office', true)->lockForUpdate()->get();
             $locked = Branch::query()->whereKey($branch->getKey())->lockForUpdate()->firstOrFail();
 
@@ -193,6 +195,7 @@ class BranchStatus
             $item('pending_approvals', 'Pending approvals and requests', $pending),
             $item('transfers_in_transit', 'Transfers in transit', $this->transfers($id, InterbranchTransfer::STATUS_IN_TRANSIT)),
             $item('pending_gcash_cash_ins', 'GCash Cash Ins not yet paid', $this->pendingCashIns($id)),
+            $item('unpaid_payables', 'Unpaid payables', $this->unpaidPayables($id)),
             $item('assigned_users', 'Assigned users', DB::table('branch_user')->where('branch_id', $id)->count()),
         ];
     }
@@ -387,6 +390,7 @@ class BranchStatus
             'pending_approvals' => $item['count'] === 1 ? '1 pending approval or request' : "{$item['count']} pending approvals or requests",
             'transfers_in_transit' => self::counted($item['count'], 'transfer').' in transit',
             'pending_gcash_cash_ins' => self::counted($item['count'], 'GCash Cash In').' not yet paid',
+            'unpaid_payables' => self::counted($item['count'], 'unpaid payable'),
             'assigned_users' => self::counted($item['count'], 'assigned user'),
         }, $open);
 
@@ -428,6 +432,16 @@ class BranchStatus
                 ->where('branch_id', $branchId)
                 ->orWhereIn('borrower_id', Borrower::query()->select('id')->where('branch_id', $branchId)))
             ->count();
+    }
+
+    /**
+     * Expenses recorded in the branch as owed and not yet settled in full.
+     * Paying one posts into the branch, which a closed branch refuses, so a
+     * closure waits for them (finish run round 2, review of #369).
+     */
+    private function unpaidPayables(int $branchId): int
+    {
+        return AccountingExpense::query()->where('branch_id', $branchId)->where('settlement_status', '!=', 'paid')->count();
     }
 
     /** Interbranch transfers in `$status` with the branch as their source or destination. */

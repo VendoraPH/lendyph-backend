@@ -91,7 +91,8 @@ class InterbranchTransfers
         $this->requireMoneyAccount((int) $data['from_account_id'], 'from_account_id');
         $this->requireMoneyAccount((int) $data['to_account_id'], 'to_account_id');
 
-        $transfer = DB::transaction(function () use ($data, $maker): InterbranchTransfer {
+        // A lock wait behind a closure step, or a deadlock, answers 409.
+        $transfer = BranchRowLock::transaction(function () use ($data, $maker): InterbranchTransfer {
             $this->lockBranches((int) $data['source_branch_id'], (int) $data['destination_branch_id'], onCreate: true);
 
             $transfer = new InterbranchTransfer([...$data, 'created_by' => $maker->id]);

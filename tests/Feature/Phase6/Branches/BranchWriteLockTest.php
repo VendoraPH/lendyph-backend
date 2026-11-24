@@ -103,6 +103,52 @@ class BranchWriteLockTest extends TestCase
         $this->assertSame('posted', $posted->refresh()->status);
     }
 
+    /**
+     * A closed branch: posting a draft and reversing a posted entry aren't
+     * refused by their requests, only by the lock's re-check.
+     */
+    public function test_a_closed_branchs_draft_is_not_posted_and_its_entries_are_not_reversed(): void
+    {
+        $draft = $this->draftJournal($this->lines(), ['branch_id' => $this->far->id]);
+        $posted = $this->postJournal($this->lines(), ['branch_id' => $this->far->id]);
+        DB::table('branches')->where('id', $this->far->id)->update(['status' => Branch::STATUS_CLOSED]);
+        $closed = 'Branch "Far Branch" (FAR) is closed, so nothing new can be added there.';
+
+        $this->postJson("/api/accounting/journals/{$draft->id}/post")
+            ->assertUnprocessable()->assertJsonPath('errors.branch.0', $closed);
+        $this->assertSame('draft', $draft->refresh()->status);
+
+        $this->postJson("/api/accounting/journals/{$posted->id}/reverse")
+            ->assertUnprocessable()->assertJsonPath('errors.branch.0', $closed);
+        $this->assertSame('posted', $posted->refresh()->status);
+    }
+
+    /**
+     * A draft moved to another branch after the request loaded it, before the
+     * lock, answers 409: the branch that was checked isn't the one it would
+     * post into.
+     */
+    public function test_a_draft_moved_to_another_branch_while_posting_answers_409(): void
+    {
+        $draft = $this->draftJournal($this->lines(), ['branch_id' => $this->branch->id]);
+        $moved = false;
+
+        DB::listen(function (QueryExecuted $query) use (&$moved, $draft): void {
+            if ($moved || ! str_contains($query->sql, 'from `branches`') || ! str_contains($query->sql, 'lock in share mode')) {
+                return;
+            }
+
+            $moved = true;
+            DB::table('accounting_journals')->where('id', $draft->id)->update(['branch_id' => $this->far->id]);
+        });
+
+        $this->postJson("/api/accounting/journals/{$draft->id}/post")
+            ->assertStatus(409)->assertExactJson(['message' => 'This entry changed while it was being saved. Reload it and try again.']);
+
+        $this->assertTrue($moved);
+        $this->assertSame('draft', $draft->refresh()->status);
+    }
+
     public function test_a_closing_branch_takes_no_reconciliation_action(): void
     {
         $reconciliation = AccountingReconciliation::create([
@@ -136,6 +182,23 @@ class BranchWriteLockTest extends TestCase
         $this->putJson("/api/users/{$user->id}", ['branch_ids' => [$this->branch->id, $this->far->id]])
             ->assertUnprocessable()->assertJsonPath('errors.branch_ids.0', self::CLOSING);
         $this->assertSame([$this->branch->id], $user->branches()->pluck('branches.id')->map(fn ($id): int => (int) $id)->all());
+    }
+
+    /**
+     * A user already assigned to the branch (assigned before the closure was
+     * asked for) can't be given it as their primary branch while it waits to
+     * close.
+     */
+    public function test_a_closing_branch_is_not_made_a_users_primary_branch(): void
+    {
+        $user = User::factory()->inBranches($this->branch, $this->far)->create(['branch_id' => $this->branch->id]);
+        $user->assignRole('cashier');
+        $this->closing();
+
+        $this->putJson("/api/users/{$user->id}", ['primary_branch_id' => $this->far->id])
+            ->assertUnprocessable()
+            ->assertJsonPath('errors.primary_branch_id.0', 'Branch "Far Branch" (FAR) is waiting to close, so it can\'t be anyone\'s primary branch.');
+        $this->assertSame($this->branch->id, (int) $user->refresh()->branch_id);
     }
 
     public function test_an_interbranch_transfer_is_not_requested_into_or_out_of_a_closing_branch(): void
@@ -238,6 +301,32 @@ class BranchWriteLockTest extends TestCase
         $this->postJson("/api/branches/{$this->far->id}/closure", ['effective_on' => now()->toDateString(), 'reason' => 'Merged into Main'])
             ->assertStatus(409)->assertExactJson(['message' => BranchRowLock::CONFLICT]);
         $this->assertSame(0, BranchClosure::query()->where('branch_id', $this->far->id)->count());
+    }
+
+    public function test_a_deadlock_on_an_interbranch_transfer_create_answers_409(): void
+    {
+        $this->deadlockOnce('lock in share mode', '`branches`');
+
+        $this->postJson('/api/interbranch-transfers', [
+            'source_branch_id' => $this->branch->id, 'destination_branch_id' => $this->far->id,
+            'from_account_id' => $this->account('1010'), 'to_account_id' => $this->account('1040'),
+            'amount' => 120_000, 'purpose' => 'Cash for Monday releases',
+        ])->assertStatus(409)->assertExactJson(['message' => BranchRowLock::CONFLICT]);
+        $this->assertSame(0, DB::table('interbranch_transfers')->count());
+    }
+
+    public function test_a_deadlock_on_a_status_change_or_a_main_office_move_answers_409(): void
+    {
+        $this->deadlockOnce('for update', '`branches`');
+        $this->patchJson("/api/branches/{$this->far->id}/status", ['status' => Branch::STATUS_ACTIVE, 'reason' => 'Reopened'])
+            ->assertStatus(409)->assertExactJson(['message' => BranchRowLock::CONFLICT]);
+        $this->assertSame(Branch::STATUS_SUSPENDED, $this->far->refresh()->status);
+
+        $this->far->forceFill(['status' => Branch::STATUS_ACTIVE])->save();
+        $this->deadlockOnce('for update', '`branches`');
+        $this->putJson("/api/branches/{$this->far->id}/main-office", ['reason' => 'Head office moved'])
+            ->assertStatus(409)->assertExactJson(['message' => BranchRowLock::CONFLICT]);
+        $this->assertFalse((bool) $this->far->refresh()->is_main_office);
     }
 
     // Helpers -------------------------------------------------------------
