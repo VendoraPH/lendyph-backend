@@ -27,7 +27,7 @@ use Illuminate\Console\Command;
     {--from= : Only events on or after this date (Y-m-d)}
     {--to= : Only events on or before this date (Y-m-d)}
     {--kind= : Only one kind: release, collection, build_up, restructure, adjustment, share_capital, cash_in or cash_out}
-    {--imported=include : Events of loans imported by CSV: include, exclude or only}')]
+    {--imported=include : Events of loans and share capital entries imported by CSV: include, exclude or only}')]
 #[Description('List past events that posted nothing to the books, or posted differently from today\'s rules. Read only')]
 class ReportLedgerGaps extends Command
 {

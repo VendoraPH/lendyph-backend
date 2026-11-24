@@ -17,7 +17,8 @@ use stdClass;
  * contribution and a debit as a withdrawal, by the row's `method`, dated
  * `date`, recorded at `created_at`, in the branch BranchAttribution gives it.
  * A row linked to a payment, a release or a savings row already sits inside
- * that event.
+ * that event. A row the share capital import brought over (`is_imported`) was
+ * recorded before Lendy and is no event, as an imported loan is no release.
  */
 final class ShareCapital extends EventSource
 {
@@ -53,6 +54,7 @@ final class ShareCapital extends EventSource
             ->whereNull('share_capital_ledger.repayment_id')
             ->whereNull('share_capital_ledger.loan_id')
             ->whereNull('share_capital_ledger.savings_transaction_id')
+            ->where('share_capital_ledger.is_imported', false)
             ->select([
                 'share_capital_ledger.id', 'share_capital_ledger.created_at as recorded', 'share_capital_ledger.borrower_id',
                 'share_capital_ledger.date', 'share_capital_ledger.reference', 'share_capital_ledger.debit', 'share_capital_ledger.credit',

@@ -40,9 +40,10 @@ use Illuminate\Support\LazyCollection;
  *   neither the carried principal nor the capitalised line, so it posted as
  *   an ordinary release;
  * - `adjustment`: an applied balance adjustment with no `adjustment` journal;
- * - `share_capital`: a share capital entry of its own (manual, bulk or
- *   auto-credit; not a payment's build-up, not a release's withholding) with
- *   no `share_capital` journal;
+ * - `share_capital`: a share capital entry of its own (manual, bulk,
+ *   auto-credit or imported; not a payment's build-up, not a release's
+ *   withholding) with no `share_capital` journal. An imported one reads as
+ *   imported, as an imported loan's events do;
  * - `cash_in` / `cash_out`: a paid Cash In or a completed Cash Out with no
  *   journal of that source.
  *
@@ -90,10 +91,17 @@ final class LedgerGapsReport
     /** Whether a part's loan came in through the CSV importer (Loan::isImported()). */
     private const IMPORTED_LOAN = '(l.external_loan_no IS NOT NULL OR l.imported_arrears_baseline IS NOT NULL)';
 
+    /**
+     * Whether a share capital entry came in through the CSV importer's share
+     * capital file (`is_imported`), which posts no journal, as an imported
+     * loan doesn't (finish run round 2, decision 13).
+     */
+    private const IMPORTED_SHARE_CAPITAL = '(s.is_imported = 1)';
+
     /** The day a paid Cash In posts on. */
     private const CASH_IN_DATE = 'COALESCE(g.paid_at, g.transaction_date)';
 
-    /** Whether imported (CSV) loans' events are listed: all events, none of them, or only them. */
+    /** Whether imported (CSV) loans' events and share capital entries are listed: all events, none of them, or only them. */
     public const IMPORTED_FILTERS = ['include', 'exclude', 'only'];
 
     /**
@@ -226,7 +234,7 @@ final class LedgerGapsReport
                 'build_up' => [$this->selectBuildUp(), ['r.payment_date', false], 'l.branch_id', self::IMPORTED_LOAN],
                 'restructure' => [$this->selectRestructure(), ['l.released_at', true], 'l.branch_id', self::IMPORTED_LOAN],
                 'adjustment' => [$this->selectAdjustment(), ['a.applied_at', true], 'l.branch_id', self::IMPORTED_LOAN],
-                'share_capital' => [$this->selectShareCapital(), ['s.date', false], DB::raw(self::shareCapitalBranch()), null],
+                'share_capital' => [$this->selectShareCapital(), ['s.date', false], DB::raw(self::shareCapitalBranch()), self::IMPORTED_SHARE_CAPITAL],
                 'cash_in' => [$this->selectGCash('cash_in', 'paid', self::CASH_IN_DATE), [self::CASH_IN_DATE, true], DB::raw(self::gcashBranch()), null],
                 'cash_out' => [$this->selectGCash('cash_out', 'completed', 'g.transaction_date'), ['g.transaction_date', true], DB::raw(self::gcashBranch()), null],
             };
@@ -241,7 +249,8 @@ final class LedgerGapsReport
     /**
      * One part's filters on its own columns. A timestamp is bounded by its
      * day, `[from 00:00, to + 1 day 00:00)`, rather than wrapped in DATE(),
-     * so its index still serves. A part with no loan is never imported.
+     * so its index still serves. A part with no import marker (a GCash
+     * transaction) is never imported.
      *
      * @param  array{from?: string|null, to?: string|null, imported?: string|null}  $filters
      * @param  int|list<int>|null  $branches
@@ -420,7 +429,8 @@ final class LedgerGapsReport
             ->selectRaw('s.date AS event_date, '.self::shareCapitalBranch().' AS branch_id, s.borrower_id')
             ->selectRaw('CAST(ROUND((COALESCE(s.credit, 0) + COALESCE(s.debit, 0)) * 100) AS SIGNED) AS amount')
             ->selectRaw("'none' AS posted")
-            ->selectRaw("CASE WHEN COALESCE(s.debit, 0) > 0 THEN 'withdrawal' WHEN s.description = ? THEN 'auto_credit' ELSE 'contribution' END AS detail", [self::AUTO_CREDIT_DESCRIPTION]);
+            ->selectRaw("CASE WHEN s.is_imported = 1 AND COALESCE(s.debit, 0) > 0 THEN 'imported_withdrawal' WHEN s.is_imported = 1 THEN 'imported_contribution'
+                WHEN COALESCE(s.debit, 0) > 0 THEN 'withdrawal' WHEN s.description = ? THEN 'auto_credit' ELSE 'contribution' END AS detail", [self::AUTO_CREDIT_DESCRIPTION]);
     }
 
     private function selectGCash(string $type, string $status, string $dateColumn): Builder
@@ -508,6 +518,8 @@ final class LedgerGapsReport
                 default => 'Applied balance adjustment with no adjustment journal.',
             },
             'share_capital' => match ($detail) {
+                'imported_contribution' => 'Imported share capital contribution, from the old books: no journal.',
+                'imported_withdrawal' => 'Imported share capital withdrawal, from the old books: no journal.',
                 'withdrawal' => 'Share capital withdrawal with no journal.',
                 'auto_credit' => 'Auto-credit contribution with no journal.',
                 default => 'Share capital contribution with no journal.',

@@ -20,11 +20,13 @@ final class RowOutcome
         public readonly ?string $message = null,
         public readonly ?int $borrowerId = null,
         public readonly ?int $loanId = null,
+        /** The share capital entry the row wrote, or the one it was already. */
+        public readonly ?int $shareCapitalLedgerId = null,
     ) {}
 
-    public static function imported(?int $borrowerId = null, ?int $loanId = null, ?string $category = null, ?string $message = null): self
+    public static function imported(?int $borrowerId = null, ?int $loanId = null, ?string $category = null, ?string $message = null, ?int $shareCapitalLedgerId = null): self
     {
-        return new self('imported', $category, $message, $borrowerId, $loanId);
+        return new self('imported', $category, $message, $borrowerId, $loanId, $shareCapitalLedgerId);
     }
 
     public static function matchedExisting(?int $borrowerId, string $message, ?int $loanId = null): self
@@ -32,9 +34,9 @@ final class RowOutcome
         return new self('matched_existing', 'matched_existing', $message, $borrowerId, $loanId);
     }
 
-    public static function alreadyImported(?int $borrowerId, string $message, ?int $loanId = null): self
+    public static function alreadyImported(?int $borrowerId, string $message, ?int $loanId = null, ?int $shareCapitalLedgerId = null): self
     {
-        return new self('already_imported', 'already_imported', $message, $borrowerId, $loanId);
+        return new self('already_imported', 'already_imported', $message, $borrowerId, $loanId, $shareCapitalLedgerId);
     }
 
     public static function skipped(string $category, string $message, ?int $borrowerId = null): self

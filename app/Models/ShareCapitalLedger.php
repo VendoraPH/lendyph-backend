@@ -31,6 +31,9 @@ class ShareCapitalLedger extends Model
         'method',
         'reference_number',
         'created_by',
+        // Brought over from the cooperative's earlier books by Data Import's
+        // share capital file (ShareCapitalRowImporter): posts no journal.
+        'is_imported',
     ];
 
     protected function casts(): array
@@ -40,6 +43,7 @@ class ShareCapitalLedger extends Model
             'branch_id' => 'integer',
             'debit' => 'decimal:2',
             'credit' => 'decimal:2',
+            'is_imported' => 'boolean',
         ];
     }
 

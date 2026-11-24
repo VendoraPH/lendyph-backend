@@ -5,7 +5,7 @@ namespace App\Services\CsvImport;
 use InvalidArgumentException;
 
 /**
- * The single declaration of what the two migration CSVs look like.
+ * The single declaration of what the three migration CSVs look like.
  *
  * Labels below are VERBATIM from the client's workbook (sharedStrings.xml),
  * parenthetical qualifiers and all. Do not tidy them:
@@ -37,6 +37,12 @@ final class CsvImportSchema
     public const CUSTOMERS = 'customers';
 
     public const LOANS = 'loans';
+
+    /**
+     * The share capital file (finish run round 2, decision 13). Each shape is
+     * named as its file's kind is (`csv_import_files.kind`).
+     */
+    public const SHARE_CAPITAL = 'share_capital';
 
     /**
      * Per-column value types, which drive normalisation AND the staged-payload
@@ -125,6 +131,28 @@ final class CsvImportSchema
     ];
 
     /**
+     * The 6 Share Capital columns, in file order: who, when, which reference,
+     * which way, how much, and the entry's description. Its own template, not
+     * the client's workbook, so the labels are the app's words.
+     *
+     * The first column matches a member by their account number (the members
+     * file's Account No., `borrowers.external_account_no`) or their member ID
+     * (`borrowers.borrower_code`). Its key is `account_no`, like the other two
+     * files', because the stager files every staged row under that value for
+     * erasure (CsvImportStager::externalAccountNo()).
+     *
+     * @var list<array{key: string, label: string, type: string, aliases: list<string>}>
+     */
+    private const SHARE_CAPITAL_COLUMNS = [
+        ['key' => 'account_no', 'label' => 'Account No. or Member ID', 'type' => self::TYPE_TEXT, 'aliases' => ['account no', 'account number', 'account', 'acct no', 'member id', 'member no', 'member number', 'member code', 'member account', 'member account no']],
+        ['key' => 'transaction_date', 'label' => 'Transaction Date', 'type' => self::TYPE_DATE, 'aliases' => ['date', 'trans date', 'txn date', 'entry date', 'posting date', 'date of transaction']],
+        ['key' => 'reference_number', 'label' => 'Reference Number', 'type' => self::TYPE_TEXT, 'aliases' => ['reference', 'reference no', 'ref', 'ref no', 'ref number', 'or no', 'or number', 'receipt no', 'receipt number']],
+        ['key' => 'transaction_type', 'label' => 'Transaction Type', 'type' => self::TYPE_ENUM, 'aliases' => ['type', 'trans type', 'txn type', 'entry type', 'type of transaction']],
+        ['key' => 'amount', 'label' => 'Amount', 'type' => self::TYPE_MONEY, 'aliases' => ['amt', 'transaction amount']],
+        ['key' => 'remarks', 'label' => 'Remarks', 'type' => self::TYPE_TEXT, 'aliases' => ['remark', 'description', 'particulars', 'notes', 'memo']],
+    ];
+
+    /**
      * Columns appended to a shape after its first layout, by the key of the
      * first one appended.
      *
@@ -144,7 +172,16 @@ final class CsvImportSchema
      */
     public static function shapes(): array
     {
-        return [self::CUSTOMERS, self::LOANS];
+        return [self::CUSTOMERS, self::LOANS, self::SHARE_CAPITAL];
+    }
+
+    /**
+     * The shape a file of this kind is read as: its own, since a kind is its
+     * shape's name, or the members file's for a kind this schema doesn't know.
+     */
+    public static function shapeOf(?string $kind): string
+    {
+        return in_array($kind, self::shapes(), true) ? (string) $kind : self::CUSTOMERS;
     }
 
     /**
@@ -187,6 +224,7 @@ final class CsvImportSchema
         return match ($shape) {
             self::CUSTOMERS => self::CUSTOMER_COLUMNS,
             self::LOANS => self::LOAN_COLUMNS,
+            self::SHARE_CAPITAL => self::SHARE_CAPITAL_COLUMNS,
             default => throw new InvalidArgumentException("Unknown CSV shape [{$shape}]."),
         };
     }

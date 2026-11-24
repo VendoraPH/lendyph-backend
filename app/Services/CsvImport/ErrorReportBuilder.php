@@ -448,7 +448,7 @@ class ErrorReportBuilder
      */
     public function issuesFor(CsvImportRow $row, ?CsvImportFile $file, ?string $severity = null): array
     {
-        $shape = $file?->kind === CsvImportSchema::LOANS ? CsvImportSchema::LOANS : CsvImportSchema::CUSTOMERS;
+        $shape = CsvImportSchema::shapeOf($file?->kind);
         $normalized = is_array($row->normalized) ? $row->normalized : [];
         $raw = is_array($row->raw) ? $row->raw : [];
 

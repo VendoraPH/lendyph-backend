@@ -111,6 +111,8 @@ class CsvImportStager
 
         $result = $this->reader->readFromDisk(CsvImportReader::PII_DISK, $file->assembled_path, $shape);
         $mayImportMembership = $shape === CsvImportSchema::CUSTOMERS && ($file->run?->starterMayEditMembers() ?? false);
+        // A fresh one per file: it remembers the file's own earlier rows.
+        $shareCapital = new ShareCapitalRowNormalizer;
 
         $batch = [];
         $staged = 0;
@@ -121,9 +123,11 @@ class CsvImportStager
         $now = now();
 
         foreach ($result->rows() as $row) {
-            $normalized = $shape === CsvImportSchema::LOANS
-                ? $this->loans->normalize($row)
-                : $this->customers->normalize($row, $mayImportMembership);
+            $normalized = match ($shape) {
+                CsvImportSchema::LOANS => $this->loans->normalize($row),
+                CsvImportSchema::SHARE_CAPITAL => $shareCapital->normalize($row),
+                default => $this->customers->normalize($row, $mayImportMembership),
+            };
 
             if ($shape === CsvImportSchema::LOANS) {
                 $this->collectLoanProduct($normalized, $products, $productsTruncated);
@@ -284,8 +288,8 @@ class CsvImportStager
         }
 
         /*
-         * The schema's own index, never a literal 0. `account_no` leads both
-         * shapes today; deriving it is what keeps that from becoming a fact
+         * The schema's own index, never a literal 0. `account_no` leads every
+         * shape today; deriving it is what keeps that from becoming a fact
          * this method silently depends on.
          */
         $cell = $cells[CsvImportSchema::indexOf($normalized->shape, 'account_no')] ?? null;
@@ -305,7 +309,7 @@ class CsvImportStager
 
     private function shapeFor(CsvImportFile $file): string
     {
-        return $file->kind === 'loans' ? CsvImportSchema::LOANS : CsvImportSchema::CUSTOMERS;
+        return CsvImportSchema::shapeOf($file->kind);
     }
 
     /**
