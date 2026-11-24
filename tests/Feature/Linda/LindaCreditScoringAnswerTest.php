@@ -19,6 +19,7 @@ use App\Services\Linda\Model\FakeModel;
 use App\Services\Linda\Model\LindaModelRequest;
 use App\Services\Linda\Model\LindaPrompt;
 use Illuminate\Routing\Middleware\ThrottleRequests;
+use Illuminate\Support\Arr;
 use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\Feature\CreditScoring\Api\CreditApiFixtures;
 use Tests\TestCase;
@@ -196,6 +197,34 @@ class LindaCreditScoringAnswerTest extends TestCase
         );
     }
 
+    public function test_the_score_bands_need_the_scorecard_permission_too(): void
+    {
+        // The scorecard API needs credit_scoring:settings; a view-only user gets the counts only.
+        $viewOnly = $this->caller(['credit_scoring:view', 'borrowers:view']);
+        $reply = $this->ask($viewOnly, 'What are the score bands?');
+
+        $this->assertSame('answered', $reply->outcome);
+        $this->assertArrayNotHasKey('Score bands', $this->lists($reply));
+        $this->assertStringNotContainsString('score bands', $reply->answer);
+        $this->assertStringNotContainsString(' to 100', json_encode($reply->toArray(), JSON_UNESCAPED_UNICODE));
+        $this->assertStringStartsWith('As of today, '.LindaWording::today().', 4 members have a credit score for '.$this->mainBranch()->name, $reply->answer);
+        $this->assertSame($this->dashboardFigures($viewOnly), $this->stats($reply));
+
+        $this->assertArrayHasKey('Score bands', $this->lists($this->ask($this->caller(['credit_scoring:view', 'credit_scoring:settings']), 'What are the score bands?')));
+    }
+
+    public function test_scored_members_counts_every_scored_row_as_the_dashboard_does(): void
+    {
+        // A scored row whose level is none of the six still counts, on the dashboard and here.
+        CreditScoreMember::query()->where('borrower_id', $this->members['ben']->id)->update(['risk_level' => null]);
+        $head = $this->headOffice();
+        $stats = $this->stats($this->ask($head));
+
+        $this->assertSame(5, $stats['Scored Members']);
+        $this->assertSame($this->dashboardFigures($head)['Scored Members'], $stats['Scored Members']);
+        $this->assertSame(0, $stats['Low Risk']);
+    }
+
     public function test_a_named_branch_and_a_branch_user_narrow_it(): void
     {
         $head = $this->headOffice();
@@ -275,7 +304,8 @@ class LindaCreditScoringAnswerTest extends TestCase
         $this->assertSame('credit_scoring_summary', $log->intent);
         $this->assertSame('CreditScoringSummaryAnswer', $log->answer_function);
         $this->assertEmpty($log->member_ids);
-        $logged = json_encode($log->getAttributes(), JSON_UNESCAPED_UNICODE);
+        // Ids, times and durations are bookkeeping numbers, never a member's score.
+        $logged = json_encode(Arr::except($log->getAttributes(), ['id', 'user_id', 'asked_at', 'duration_ms', 'created_at', 'updated_at']), JSON_UNESCAPED_UNICODE);
         $this->assertStringNotContainsString('due for review', $logged);
         $this->assertNothingPersonal($logged, 'the log');
     }
@@ -340,6 +370,10 @@ class LindaCreditScoringAnswerTest extends TestCase
         $this->assertNull(LindaMatcher::match('How many loans need review?'));
         $this->assertNull(LindaMatcher::match('How many loans are at risk?'));
         $this->assertSame(LindaIntent::BorrowerSummary, LindaMatcher::match('How many active members do we have?')?->intent);
+
+        // One member's score is a lookup, never this topic.
+        $this->assertNull(LindaMatcher::match('What is the credit score of Juan dela Cruz?'));
+        $this->assertNull(LindaMatcher::match('Credit score of BRW-000123'));
     }
 
     public function test_the_classifier_learns_the_intent(): void

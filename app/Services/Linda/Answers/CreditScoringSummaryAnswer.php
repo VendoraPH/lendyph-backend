@@ -29,7 +29,9 @@ use App\Services\Linda\LindaWording as W;
  *   "Scores Due for Review", narrowed to a named branch. Without
  *   `borrowers:view` open hard flags are left out, as on the dashboard, and
  *   the answer says so.
- * - The score bands: the current scorecard revision's (ScorecardEditor).
+ * - The score bands: the current scorecard revision's (ScorecardEditor),
+ *   only with `credit_scoring:settings` as well, which the scorecard API
+ *   needs (GET /credit-scoring/scorecard-config).
  * - For head office, each branch's counts, by the member's own branch, as
  *   the dashboard's branch table.
  *
@@ -83,14 +85,16 @@ final class CreditScoringSummaryAnswer extends Answer
     public function build(User $user, LindaScope $scope, ?LindaPeriod $period, #[\SensitiveParameter] ?string $question = null): LindaReply
     {
         $levels = $this->levels($user, $scope->branchId);
-        $scored = array_sum($levels);
+        $scored = $this->scores->currentScores($user, $scope->branchId)
+            ->where('credit_score_members.status', CreditScore::STATUS_SCORED)
+            ->count();
         $insufficient = $this->scores->currentScores($user, $scope->branchId)
             ->where('credit_score_members.status', CreditScore::STATUS_INSUFFICIENT_DATA)
             ->count();
         $due = $this->portfolio->dueForReview($user)
             ->when($scope->branchId !== null, fn ($q) => $q->where('borrowers.branch_id', $scope->branchId))
             ->count();
-        $bands = $this->bands();
+        $bands = $user->can('credit_scoring:settings') ? $this->bands() : [];
         $byBranch = $scope->branchId === null ? $this->byBranch($user) : [];
 
         $words = LindaText::words(LindaText::clean((string) $question));
@@ -103,7 +107,7 @@ final class CreditScoringSummaryAnswer extends Answer
 
         $answer = W::asOfToday().', '.$parts[0].' '.self::sentence($parts[1]);
 
-        if (array_intersect($words, self::BAND_WORDS) !== []) {
+        if ($bands !== [] && array_intersect($words, self::BAND_WORDS) !== []) {
             $answer = self::bandsSentence($bands).' '.$answer;
         }
 
@@ -115,19 +119,20 @@ final class CreditScoringSummaryAnswer extends Answer
             $answer .= ' '.W::todayOnly();
         }
 
-        $blocks = [
-            LindaReply::stats([
-                LindaReply::number('Scored Members', $scored),
-                ...array_map(fn (string $level) => LindaReply::number(self::LEVELS[$level], $levels[$level]), array_keys(self::LEVELS)),
-                LindaReply::number('Insufficient Data', $insufficient),
-                LindaReply::number('Scores Due for Review', $due),
-            ], W::asOfToday()),
-            LindaReply::list('Score bands', array_map(fn (array $band): array => [
+        $blocks = [LindaReply::stats([
+            LindaReply::number('Scored Members', $scored),
+            ...array_map(fn (string $level) => LindaReply::number(self::LEVELS[$level], $levels[$level]), array_keys(self::LEVELS)),
+            LindaReply::number('Insufficient Data', $insufficient),
+            LindaReply::number('Scores Due for Review', $due),
+        ], W::asOfToday())];
+
+        if ($bands !== []) {
+            $blocks[] = LindaReply::list('Score bands', array_map(fn (array $band): array => [
                 'title' => $band['label'],
                 'subtitle' => $band['range'],
                 'fields' => [],
-            ], $bands)),
-        ];
+            ], $bands));
+        }
 
         if (count($byBranch) > 1) {
             $blocks[] = LindaReply::list('By branch', $byBranch);
