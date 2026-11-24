@@ -246,6 +246,28 @@ class BranchClosureTest extends TestCase
         $this->requestClosure();
     }
 
+    /**
+     * An accrual whose journal was reversed by hand on the Journals screen
+     * keeps its unpaid status, but nothing is owed in the books, so it doesn't
+     * hold the closure (re-review of #369).
+     */
+    public function test_an_accrual_whose_journal_was_reversed_does_not_hold_the_closure(): void
+    {
+        $this->seedChartOfAccounts();
+        $id = $this->postJson('/api/accounting/expenses', [
+            'date' => now()->toDateString(), 'payee' => 'Meralco', 'expense_account_id' => $this->account('5030'),
+            'amount' => 150000, 'branch_id' => $this->quiet->id,
+        ])->assertCreated()->json('data.id');
+        $expense = AccountingExpense::query()->findOrFail($id);
+        $this->assertSame('unpaid', $expense->settlement_status);
+
+        $this->postJson("/api/accounting/journals/{$expense->journal_id}/reverse")->assertCreated();
+
+        $item = collect($this->getJson("/api/branches/{$this->quiet->id}/closure")->assertOk()->json('data.checklist'))->firstWhere('key', 'unpaid_payables');
+        $this->assertSame(['key' => 'unpaid_payables', 'label' => 'Unpaid payables', 'count' => 0, 'amount' => null, 'clear' => true], $item);
+        $this->assertSame('unpaid', $expense->refresh()->settlement_status);
+    }
+
     public function test_a_quiet_branch_has_a_clear_checklist(): void
     {
         $data = $this->getJson("/api/branches/{$this->quiet->id}/closure")->assertOk()->json('data');

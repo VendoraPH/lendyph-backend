@@ -437,11 +437,18 @@ class BranchStatus
     /**
      * Expenses recorded in the branch as owed and not yet settled in full.
      * Paying one posts into the branch, which a closed branch refuses, so a
-     * closure waits for them (finish run round 2, review of #369).
+     * closure waits for them (finish run round 2, review of #369). One whose
+     * journal was reversed by hand on the Journals screen keeps its unpaid
+     * status but owes nothing in the books, so it doesn't count; one with no
+     * journal does.
      */
     private function unpaidPayables(int $branchId): int
     {
-        return AccountingExpense::query()->where('branch_id', $branchId)->where('settlement_status', '!=', 'paid')->count();
+        return AccountingExpense::query()
+            ->where('branch_id', $branchId)
+            ->where('settlement_status', '!=', 'paid')
+            ->whereDoesntHave('journal', fn ($q) => $q->where('status', 'reversed'))
+            ->count();
     }
 
     /** Interbranch transfers in `$status` with the branch as their source or destination. */

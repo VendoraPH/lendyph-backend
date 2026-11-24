@@ -64,6 +64,14 @@ class BranchWriteLockRaceTest extends TestCase
     public function test_a_branch_closed_after_the_requests_check_is_seen_under_the_lock(): void
     {
         $closed = false;
+        $relocked = false;
+
+        DB::listen(function (QueryExecuted $query) use (&$relocked): void {
+            if ($query->connectionName !== self::OTHER_CONNECTION && DB::transactionLevel() > 0
+                && str_contains($query->sql, 'from `branches`') && str_contains($query->sql, 'lock in share mode')) {
+                $relocked = true;
+            }
+        });
 
         DB::listen(function (QueryExecuted $query) use (&$closed): void {
             if ($closed || $query->connectionName === self::OTHER_CONNECTION || DB::transactionLevel() > 0
@@ -89,6 +97,7 @@ class BranchWriteLockRaceTest extends TestCase
             ->assertJsonPath('errors.branch_id.0', 'Branch "Far Branch" (FAR) is closed, so nothing new can be added there.');
 
         $this->assertTrue($closed, "the branch closed right after BranchTakesNew's read");
+        $this->assertTrue($relocked, "the write read the branch again under its lock, so the request rule alone didn't refuse it");
         $this->assertSame(0, AccountingExpense::query()->where('branch_id', $this->far->id)->count());
     }
 
