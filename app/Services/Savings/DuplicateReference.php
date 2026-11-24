@@ -18,12 +18,19 @@ use Illuminate\Validation\ValidationException;
  *
  * "On record": a savings transaction or a placement with that method and
  * reference, unless the transaction was reversed (a reversed row frees its
- * reference for the entry that corrects it), or a withdrawal still waiting
- * for its checker with that method and reference in its request (review of
- * #378): it posts with them once approved, so it holds them while it waits,
- * and a rejected, cancelled or expired one frees them. The approval being
- * posted is left out of its own check. References compare as MySQL compares
- * the columns: case and trailing spaces ignored.
+ * reference for the entry that corrects it).
+ *
+ * "Held" (reviews of #378): a withdrawal still waiting for its checker with
+ * that method and reference in its request posts with them once approved,
+ * so it holds them while it waits, in words of its own that say where to
+ * look; a rejected, cancelled or expired one frees them. An approved
+ * withdrawal being posted counts only the ones requested before it (a lower
+ * id): of two waiting withdrawals that already share a reference (from
+ * before this check, or two requests at the same instant), the older posts
+ * and the newer is refused, whichever is approved first.
+ *
+ * References compare as MySQL compares the columns: case and trailing spaces
+ * ignored.
  *
  * Exempt: cash (a counter receipt, and a cash placement's reference is its
  * own TD number), and the writers that never call this: auto-credit runs and
@@ -37,6 +44,13 @@ use Illuminate\Validation\ValidationException;
  */
 class DuplicateReference
 {
+    /** "a … withdrawal", by method. */
+    private const WITHDRAWAL_WORDS = [
+        'bank_transfer' => 'bank transfer',
+        'gcash' => 'GCash',
+        'maya' => 'Maya',
+    ];
+
     /** "another …", by method. */
     private const RECORD_WORDS = [
         'bank_transfer' => 'bank transfer',
@@ -46,9 +60,9 @@ class DuplicateReference
     ];
 
     /**
-     * @param  int|null  $postingApprovalId  the approved withdrawal being posted, which doesn't count against itself
+     * @param  int|null  $postingApprovalId  the approved withdrawal being posted: only withdrawals waiting since before it count
      *
-     * @throws ValidationException when the reference is already on record for this method
+     * @throws ValidationException when the reference is already on record, or held, for this method
      */
     public function assertUnused(?string $method, ?string $reference, string $field = 'reference', ?int $postingApprovalId = null): void
     {
@@ -58,8 +72,12 @@ class DuplicateReference
             return;
         }
 
-        if ($this->onRecord($method, $reference, $postingApprovalId)) {
+        if ($this->onRecord($method, $reference)) {
             Refuse::field($field, self::message($method, $reference));
+        }
+
+        if ($this->heldByAWaitingWithdrawal($method, $reference, $postingApprovalId)) {
+            Refuse::field($field, self::heldMessage($method, $reference));
         }
     }
 
@@ -73,7 +91,19 @@ class DuplicateReference
         );
     }
 
-    private function onRecord(string $method, string $reference, ?int $postingApprovalId): bool
+    /** `Reference "BDO-9" is held by a bank transfer withdrawal waiting for approval. …` */
+    public static function heldMessage(string $method, string $reference): string
+    {
+        $words = self::WITHDRAWAL_WORDS[$method] ?? null;
+
+        return sprintf(
+            'Reference "%s" is held by a %s waiting for approval. Check the reference, or decide that withdrawal first.',
+            $reference,
+            $words === null ? 'withdrawal' : "{$words} withdrawal",
+        );
+    }
+
+    private function onRecord(string $method, string $reference): bool
     {
         $onSavings = SavingsTransaction::query()
             ->where('method', $method)
@@ -83,22 +113,21 @@ class DuplicateReference
                 ->whereColumn('reversals.reverses_transaction_id', 'savings_transactions.id'))
             ->exists();
 
-        return $onSavings
-            || TimeDeposit::query()->where('funding_method', $method)->where('reference', $reference)->exists()
-            || $this->heldByAWaitingWithdrawal($method, $reference, $postingApprovalId);
+        return $onSavings || TimeDeposit::query()->where('funding_method', $method)->where('reference', $reference)->exists();
     }
 
     /**
      * A withdrawal request waiting for its checker, with this method and
-     * reference in its stored request. The JSON value is compared in the
-     * columns' collation, so case and trailing spaces are ignored here too.
+     * reference in its stored request; for an approved one being posted, only
+     * those requested before it. The JSON value is compared in the columns'
+     * collation, so case and trailing spaces are ignored here too.
      */
     private function heldByAWaitingWithdrawal(string $method, string $reference, ?int $postingApprovalId): bool
     {
         return SavingsApproval::query()
             ->where('kind', 'withdrawal')
             ->where('status', 'pending')
-            ->when($postingApprovalId !== null, fn ($approvals) => $approvals->whereKeyNot($postingApprovalId))
+            ->when($postingApprovalId !== null, fn ($approvals) => $approvals->where('id', '<', $postingApprovalId))
             ->where('payload->payment_method', $method)
             ->whereNotNull('payload->reference')
             ->whereRaw("JSON_UNQUOTE(JSON_EXTRACT(`payload`, '$.reference')) COLLATE utf8mb4_unicode_ci = ?", [$reference])

@@ -9,6 +9,7 @@ use App\Models\ShareCapitalPledge;
 use App\Models\User;
 use App\Services\Accounting\AutomaticPoster;
 use App\Services\Branches\BranchRowLock;
+use Closure;
 use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Database\Eloquent\ModelNotFoundException;
 
@@ -38,6 +39,15 @@ class ShareCapitalService
     /** The 409 when a member moved branch while the run was being saved. */
     public const AUTO_CREDIT_MEMBER_MOVED = 'A member was moved to another branch while auto-credit was running. Nothing was posted; run it again.';
 
+    /** The 409 when the member withdrew while their entry was being saved. */
+    public const MEMBER_LEFT = 'This member withdrew from the cooperative while the entry was being saved, so no share capital is recorded for them. Nothing was saved.';
+
+    /** The 409 when a batch's member withdrew while it was being saved. */
+    public const BATCH_MEMBER_LEFT = 'A member in this batch withdrew from the cooperative while it was being saved, so no share capital is recorded for them. Nothing was posted; take them out of the batch and try again.';
+
+    /** The 409 when a member's membership ended while the run was being saved. */
+    public const AUTO_CREDIT_MEMBER_LEFT = 'A member\'s membership ended while auto-credit was running, so it no longer credits them. Nothing was posted; run it again.';
+
     public function __construct(private AutomaticPoster $poster, private CashReferences $cashReferences) {}
 
     /**
@@ -58,8 +68,9 @@ class ShareCapitalService
      * Its first statement locks the branches of the members it credits
      * (BranchRowLock): a member's branch that is closed or waiting to close
      * stops the whole run, in words, with nothing posted. The members' branches
-     * are then read again under their rows' shared locks, and a member moved
-     * since answers 409. Each row posts in the branch that was locked for it. The rows stay unnumbered: a run's
+     * and statuses are then read again under their rows' shared locks: a member
+     * moved since, or no longer a current member, answers 409. Each row posts
+     * in the branch that was locked for it. The rows stay unnumbered: a run's
      * credits get no CSH reference (finish run round 2, decision 5).
      */
     public function processAutoCredit(
@@ -85,6 +96,8 @@ class ShareCapitalService
             $this->assertMembersStayed(
                 $eligiblePledges->mapWithKeys(fn (ShareCapitalPledge $pledge): array => [$pledge->borrower_id => $pledge->borrower?->branch_id])->all(),
                 self::AUTO_CREDIT_MEMBER_MOVED,
+                fn (?string $status): bool => self::isCurrentMember($status),
+                self::AUTO_CREDIT_MEMBER_LEFT,
             );
 
             $today = now()->toDateString();
@@ -218,8 +231,8 @@ class ShareCapitalService
      * 1. the member's branch row (BranchRowLock), the write's first statement:
      *    a branch that is closed or waiting to close takes nothing, in words,
      *    on `borrower_id`. The row posts in that branch. Then the member's row
-     *    FOR SHARE: a member moved to another branch since it was read answers
-     *    409, with nothing saved.
+     *    FOR SHARE: a member moved to another branch since it was read, or who
+     *    withdrew meanwhile, answers 409, with nothing saved.
      * 2. Cash: the CSH series row, for the entry's `CSH-[id]-[year]-[0001]`
      *    (CashReferences, decision 5). A typed reference is ignored for cash;
      *    any other method keeps the one it was given.
@@ -243,7 +256,7 @@ class ShareCapitalService
 
         return GeneratedNumberWrite::run(function () use ($borrowerId, $branchId, $owner, $amount, $type, $date, $user, $description, $method, $referenceNumber): ShareCapitalLedger {
             BranchRowLock::lock(['borrower_id' => $branchId]);
-            $this->assertMembersStayed([$borrowerId => $branchId], self::MEMBER_MOVED);
+            $this->assertMembersStayed([$borrowerId => $branchId], self::MEMBER_MOVED, fn (?string $status): bool => self::takesEntries($status), self::MEMBER_LEFT);
 
             $reference = $method === 'cash'
                 ? $this->cashReferences->assign(CashReferences::SHARE_CAPITAL, $owner, [$date], 'reference_number')[0]
@@ -295,9 +308,10 @@ class ShareCapitalService
      * The first statement locks every row's member branch in one statement
      * (BranchRowLock): one closed or closing branch refuses the whole batch,
      * in words, on that row's `entries.N.pledge_id`. The members' branches
-     * are then read again under their rows' shared locks: a member moved since
-     * answers 409 with nothing posted. The pledges, their members' branches
-     * and the series' owner are read before the transaction.
+     * and statuses are then read again under their rows' shared locks: a
+     * member moved since, or who withdrew meanwhile, answers 409 with nothing
+     * posted. The pledges, their members' branches and the series' owner are
+     * read before the transaction.
      *
      * @param  list<array{pledge_id: int, amount: float|int|string, type: string, date: string, description?: string|null}>  $entries
      */
@@ -325,7 +339,7 @@ class ShareCapitalService
         // journal, since both are written in this one transaction.
         return LoanWriteTransaction::run(function () use ($entries, $pledges, $branches, $members, $owner, $user, $method, $referenceNumber) {
             BranchRowLock::lock($branches);
-            $this->assertMembersStayed($members, self::BATCH_MEMBER_MOVED);
+            $this->assertMembersStayed($members, self::BATCH_MEMBER_MOVED, fn (?string $status): bool => self::takesEntries($status), self::BATCH_MEMBER_LEFT);
 
             $references = $method === 'cash'
                 ? $this->cashReferences->assign(CashReferences::SHARE_CAPITAL, $owner, array_column($entries, 'date'), 'reference_number')
@@ -360,30 +374,64 @@ class ShareCapitalService
     }
 
     /**
-     * Read the members' branches again, under their rows' shared locks, right
-     * after their branch rows were locked. A member moved to another branch
-     * since the read before the transaction (a member transfer at the same
-     * moment) answers 409 in words, so nothing posts in a branch that wasn't
-     * locked and checked. The member rows stay locked until the write
-     * commits, so a transfer that starts now waits for it.
+     * Read the members' branches and statuses again, in one statement under
+     * their rows' shared locks, right after their branch rows were locked.
+     * Each answers 409 in words, with nothing saved:
+     *
+     * - a member who can no longer take the entry (`$mayTake`): their
+     *   membership was ended at the same moment (MembershipStatus::end()
+     *   locks the member FOR UPDATE, so this read waits for it and sees it);
+     * - a member moved to another branch since the read before the
+     *   transaction (a member transfer at the same moment), so nothing posts
+     *   in a branch that wasn't locked and checked.
+     *
+     * The member rows stay locked until the write commits, so a transfer or
+     * an ended membership that starts now waits for it.
      *
      * @param  array<int, int|null>  $expected  member id => the branch read before the transaction
+     * @param  Closure(string|null): bool  $mayTake  whether a member with this status still takes the entry
      */
-    private function assertMembersStayed(array $expected, string $conflict): void
+    private function assertMembersStayed(array $expected, string $moved, Closure $mayTake, string $left): void
     {
         if ($expected === []) {
             return;
         }
 
-        $now = Borrower::query()->whereIn('id', array_keys($expected))->orderBy('id')->sharedLock()->pluck('branch_id', 'id');
+        $now = Borrower::query()->whereIn('id', array_keys($expected))->orderBy('id')->sharedLock()->get(['id', 'branch_id', 'status'])->keyBy('id');
 
         foreach ($expected as $memberId => $branchId) {
-            $current = $now->get($memberId);
+            $member = $now->get($memberId);
 
-            if (($current === null ? null : (int) $current) !== $branchId) {
-                throw LoanWriteTransaction::conflict($conflict);
+            if ($member === null || ! $mayTake($member->status)) {
+                throw LoanWriteTransaction::conflict($left);
+            }
+
+            if (($member->branch_id === null ? null : (int) $member->branch_id) !== $branchId) {
+                throw LoanWriteTransaction::conflict($moved);
             }
         }
+    }
+
+    /**
+     * Whether a member with this status takes a standalone entry, as the
+     * requests decide (ShareCapitalPledgeController::assertBorrowerIsMember(),
+     * StoreShareCapitalLedgerRequest): not before their registration is
+     * approved and not once they withdrew. A deceased member's estate still
+     * settles through an entry (C1 review, M1).
+     */
+    private static function takesEntries(?string $status): bool
+    {
+        return $status !== null && $status !== 'withdrawn' && ! in_array($status, Borrower::NON_MEMBER_STATUSES, true);
+    }
+
+    /**
+     * Whether a member with this status is still credited by auto-credit:
+     * a current member (Borrower::scopeCurrentMembers()), whose membership
+     * hasn't ended.
+     */
+    private static function isCurrentMember(?string $status): bool
+    {
+        return $status !== null && ! in_array($status, [...Borrower::NON_MEMBER_STATUSES, ...Borrower::FORMER_MEMBER_STATUSES], true);
     }
 
     /** The member's branch, where a standalone entry for them posts. */
