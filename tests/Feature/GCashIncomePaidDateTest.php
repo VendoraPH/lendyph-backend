@@ -7,6 +7,7 @@ use App\Models\GCashTier;
 use App\Models\GCashTransaction;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 use Tests\TestCase;
 use Tests\Traits\PostsJournals;
 use Tests\Traits\SetupLendyPH;
@@ -108,6 +109,15 @@ class GCashIncomePaidDateTest extends TestCase
 
         $this->assertSame(3500, $this->postedChargeIncome('2026-10-01', '2026-10-31'));
         $this->assertSame(3500, $this->postedChargeIncome('2026-11-01', '2026-11-30'));
+    }
+
+    public function test_the_paid_date_range_is_served_by_an_index(): void
+    {
+        $this->assertTrue(Schema::hasIndex('gcash_transactions', 'gcash_transactions_paid_at_index'));
+
+        $plan = DB::select("EXPLAIN SELECT id FROM gcash_transactions WHERE type = 'cash_in' AND status = 'paid' AND paid_at BETWEEN ? AND ?", ['2026-11-01 00:00:00', '2026-11-30 23:59:59']);
+
+        $this->assertStringContainsString('gcash_transactions_paid_at_index', (string) $plan[0]->possible_keys);
     }
 
     /** A transaction recorded at `$at` (Manila) through the API. */

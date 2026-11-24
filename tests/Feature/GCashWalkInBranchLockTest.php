@@ -2,6 +2,7 @@
 
 namespace Tests\Feature;
 
+use App\Models\Borrower;
 use App\Models\Branch;
 use App\Models\BranchClosure;
 use App\Models\GCashNonMember;
@@ -27,6 +28,8 @@ class GCashWalkInBranchLockTest extends TestCase
     private Branch $far;
 
     private GCashNonMember $walkIn;
+
+    private ?Borrower $farMember = null;
 
     protected function setUp(): void
     {
@@ -88,7 +91,7 @@ class GCashWalkInBranchLockTest extends TestCase
         $this->assertLessThan($referenceLock, $branchLock, 'the branch row comes first, as the closure takes it');
     }
 
-    public function test_a_member_transaction_and_a_head_office_walk_in_take_no_branch_lock(): void
+    public function test_a_head_office_walk_in_takes_no_branch_lock(): void
     {
         $locked = false;
         DB::listen(function (QueryExecuted $query) use (&$locked): void {
@@ -100,6 +103,73 @@ class GCashWalkInBranchLockTest extends TestCase
             ->assertJsonPath('data.branch_id', null);
 
         $this->assertFalse($locked);
+    }
+
+    public function test_a_members_branch_waiting_to_close_refuses_the_members_transaction_in_the_same_words(): void
+    {
+        $this->closing();
+
+        $this->recordForMember()
+            ->assertUnprocessable()
+            ->assertJsonPath('errors.borrower_id.0', 'Branch "Far Branch" (FAR) is waiting to close, so nothing new can be added there.');
+
+        $this->assertSame(0, GCashTransaction::query()->where('borrower_id', $this->member()->id)->count());
+    }
+
+    public function test_a_members_suspended_branch_with_no_closure_request_still_takes_the_members_transaction(): void
+    {
+        $this->far->forceFill(['status' => Branch::STATUS_SUSPENDED])->save();
+
+        $this->recordForMember()->assertCreated()->assertJsonPath('data.branch_id', $this->far->id);
+    }
+
+    public function test_a_members_transaction_locks_the_member_then_the_members_branch_before_the_reference_lock(): void
+    {
+        $member = $this->member();
+        $locks = [];
+        DB::listen(function (QueryExecuted $query) use (&$locks): void {
+            if (str_contains($query->sql, 'for update') || str_contains($query->sql, 'for share') || str_contains($query->sql, 'lock in share mode')) {
+                $locks[] = [$query->sql, $query->bindings];
+            }
+        });
+
+        $this->recordForMember($member)->assertCreated();
+
+        $memberLock = array_key_first(array_filter($locks, fn (array $q): bool => str_contains($q[0], 'from `borrowers`') && $q[1] === [$member->id]));
+        $branchLock = array_key_first(array_filter($locks, fn (array $q): bool => str_contains($q[0], 'from `branches`') && str_contains($q[0], 'for update') && $q[1] === [$this->far->id]));
+        $referenceLock = array_key_first(array_filter($locks, fn (array $q): bool => str_contains($q[0], 'from `gcash_transactions`') && str_contains($q[0], '`reference_no` like')));
+
+        $this->assertNotNull($memberLock, "the member's row is read with a lock");
+        $this->assertNotNull($branchLock, "the member's branch row is locked FOR UPDATE");
+        $this->assertNotNull($referenceLock, 'the reference lock still runs');
+        $this->assertLessThan($branchLock, $memberLock, 'the member comes before the branch, as MemberTransfer takes them');
+        $this->assertLessThan($referenceLock, $branchLock, 'the branch row comes before the GCash rows');
+    }
+
+    private function closing(): void
+    {
+        $this->far->forceFill(['status' => Branch::STATUS_SUSPENDED])->save();
+        BranchClosure::create([
+            'branch_id' => $this->far->id,
+            'status' => BranchClosure::STATUS_PENDING,
+            'effective_on' => now()->toDateString(),
+            'reason' => 'Merging into Main',
+            'requested_by' => $this->admin->id,
+        ]);
+    }
+
+    private function member(): Borrower
+    {
+        return $this->farMember ??= Borrower::factory()->create(['branch_id' => $this->far->id]);
+    }
+
+    private function recordForMember(?Borrower $member = null): TestResponse
+    {
+        return $this->postJson('/api/gcash/transactions', [
+            'borrower_id' => ($member ?? $this->member())->id,
+            'type' => 'cash_in',
+            'amount' => 1000,
+        ]);
     }
 
     private function record(): TestResponse

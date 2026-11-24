@@ -2,6 +2,7 @@
 
 namespace Tests\Feature;
 
+use App\Models\Borrower;
 use App\Models\Branch;
 use App\Models\GCashNonMember;
 use App\Models\GCashTier;
@@ -12,7 +13,7 @@ use Tests\Traits\SetupLendyPH;
 
 /**
  * On two real connections: a branch closed after the request's own check
- * passed, but before the walk-in GCash transaction's transaction began, is
+ * passed, but before a walk-in's or a member's GCash transaction began, is
  * seen by the re-check under the branch row lock, and nothing is saved
  * (Finish run round 2, decision 4).
  *
@@ -52,16 +53,7 @@ class GCashWalkInBranchClosureRaceTest extends TestCase
         $far = Branch::factory()->create(['name' => 'Far Branch', 'code' => 'FAR', 'status' => Branch::STATUS_SUSPENDED]);
         $walkIn = GCashNonMember::factory()->create();
 
-        $closed = false;
-        DB::connection()->beforeStartingTransaction(function () use (&$closed, $far): void {
-            if ($closed) {
-                return;
-            }
-
-            $closed = true;
-            $other = DB::connection(self::OTHER_CONNECTION);
-            $other->transaction(fn () => $other->table('branches')->where('id', $far->id)->update(['status' => Branch::STATUS_CLOSED]));
-        });
+        $this->closeOnTheOtherConnectionBeforeTheWrite($far, $closed);
 
         $this->postJson('/api/gcash/transactions', [
             'gcash_non_member_id' => $walkIn->id,
@@ -74,5 +66,38 @@ class GCashWalkInBranchClosureRaceTest extends TestCase
 
         $this->assertTrue($closed, 'the branch closed between the check and the write');
         $this->assertSame(0, GCashTransaction::query()->where('branch_id', $far->id)->count());
+    }
+
+    public function test_a_members_branch_closed_after_validation_refuses_the_members_transaction(): void
+    {
+        $far = Branch::factory()->create(['name' => 'Far Branch', 'code' => 'FAR', 'status' => Branch::STATUS_SUSPENDED]);
+        $member = Borrower::factory()->create(['branch_id' => $far->id]);
+        $this->closeOnTheOtherConnectionBeforeTheWrite($far, $closed);
+
+        $this->postJson('/api/gcash/transactions', [
+            'borrower_id' => $member->id,
+            'type' => 'cash_in',
+            'amount' => 1000,
+        ])
+            ->assertUnprocessable()
+            ->assertJsonPath('errors.borrower_id.0', 'Branch "Far Branch" (FAR) is closed, so nothing new can be added there.');
+
+        $this->assertTrue($closed, 'the branch closed between the check and the write');
+        $this->assertSame(0, GCashTransaction::query()->where('borrower_id', $member->id)->count());
+    }
+
+    /** Close $branch on the other connection, committed, just before this connection's first transaction begins. */
+    private function closeOnTheOtherConnectionBeforeTheWrite(Branch $branch, ?bool &$closed): void
+    {
+        $closed = false;
+        DB::connection()->beforeStartingTransaction(function () use (&$closed, $branch): void {
+            if ($closed) {
+                return;
+            }
+
+            $closed = true;
+            $other = DB::connection(self::OTHER_CONNECTION);
+            $other->transaction(fn () => $other->table('branches')->where('id', $branch->id)->update(['status' => Branch::STATUS_CLOSED]));
+        });
     }
 }

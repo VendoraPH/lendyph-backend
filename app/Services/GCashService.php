@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Models\Borrower;
 use App\Models\Branch;
 use App\Models\BranchClosure;
 use App\Models\GCashTier;
@@ -45,10 +46,11 @@ class GCashService
      * charge, dated `transaction_date`. A pending Cash In posts nothing until
      * markPaid().
      *
-     * A walk-in transaction recorded in a branch first locks that branch's
-     * row and re-checks it (lockBranchForWalkIn(), Finish run round 2,
-     * decision 4), the row a closure request and its approval lock first, so
-     * the two never interleave. Then the reference lock (generateReferenceNo())
+     * A transaction that posts in a branch (a walk-in's recorded branch, a
+     * member's branch) first locks that branch's row and re-checks it
+     * (lockBranchTakingGCash(), Finish run round 2, decision 4), the row a
+     * closure request and its approval lock first, so the two never
+     * interleave. Then the reference lock (generateReferenceNo())
      * is the first statement on gcash_transactions, and the duplicate check
      * runs under it as a locking read (Lead's call 5). So an identical create
      * can't commit between the check and this insert, and the check reads what
@@ -65,8 +67,20 @@ class GCashService
         $isPending = (bool) ($payload['is_pending'] ?? false);
 
         return LoanWriteTransaction::run(function () use ($payload, $actor, $isPending) {
-            if (isset($payload['gcash_non_member_id']) && isset($payload['branch_id'])) {
-                $this->lockBranchForWalkIn((int) $payload['branch_id']);
+            if (isset($payload['gcash_non_member_id'])) {
+                if (isset($payload['branch_id'])) {
+                    $this->lockBranchTakingGCash((int) $payload['branch_id'], 'branch_id');
+                }
+            } elseif (isset($payload['borrower_id'])) {
+                // The member's row first, as MemberTransfer takes it (the
+                // member, then a branch); MemberLock keeps the member in this
+                // branch until the transaction ends. A locking read, so no plain
+                // read fixes the snapshot before the locks below.
+                $memberBranchId = Borrower::query()->whereKey($payload['borrower_id'])->sharedLock()->value('branch_id');
+
+                if ($memberBranchId !== null) {
+                    $this->lockBranchTakingGCash((int) $memberBranchId, 'borrower_id');
+                }
             }
 
             $now = now();
@@ -420,26 +434,29 @@ class GCashService
     }
 
     /**
-     * Lock the branch a walk-in transaction is recorded in and refuse it,
-     * under that lock, when the branch is closed or waiting to close (a
-     * pending closure request). StoreGCashTransactionRequest already refused a
-     * closed branch with a plain read; this re-check sees a closure approved
-     * or requested after it. A suspended branch with no closure request still
-     * takes GCash, as BranchTakesNew::openOnly() allows.
+     * Lock the branch a GCash transaction posts in (a walk-in's recorded
+     * branch, or a member's branch) and refuse it, under that lock, when the
+     * branch is closed or waiting to close (a pending closure request).
+     * StoreGCashTransactionRequest already refused a closed branch with a
+     * plain read; this re-check sees a closure approved or requested after it.
+     * A suspended branch with no closure request still takes GCash, as
+     * BranchTakesNew::openOnly() and MemberBranchTakesNew::openOnly() allow.
      *
-     * The transaction's first locking read, on the parent row: BranchStatus
-     * locks the branch row before its closure rows, and MemberTransfer the
-     * branch before the GCash rows, so all three take the same order.
+     * Taken before the reference lock, on the parent row: BranchStatus locks
+     * the branch row before its closure rows, and MemberTransfer the branch
+     * before the GCash rows, so all three take the same order.
      *
-     * @throws ValidationException 422 on `branch_id`, in words
+     * @param  string  $field  the field the 422 is reported on: `branch_id` for a walk-in, `borrower_id` for a member
+     *
+     * @throws ValidationException 422 in words
      */
-    private function lockBranchForWalkIn(int $branchId): void
+    private function lockBranchTakingGCash(int $branchId, string $field): void
     {
         $branch = Branch::query()->whereKey($branchId)->lockForUpdate()->firstOrFail(['id', 'name', 'code', 'status']);
 
         if ($branch->status === Branch::STATUS_CLOSED) {
             throw ValidationException::withMessages([
-                'branch_id' => [BranchWriteGuard::refusal($branch, BranchTakesNew::NOTHING_NEW)],
+                $field => [BranchWriteGuard::refusal($branch, BranchTakesNew::NOTHING_NEW)],
             ]);
         }
 
@@ -451,7 +468,7 @@ class GCashService
 
         if ($closing) {
             throw ValidationException::withMessages([
-                'branch_id' => [sprintf('Branch %s is waiting to close, so %s.', $branch->auditName(), BranchTakesNew::NOTHING_NEW)],
+                $field => [sprintf('Branch %s is waiting to close, so %s.', $branch->auditName(), BranchTakesNew::NOTHING_NEW)],
             ]);
         }
     }
