@@ -570,7 +570,7 @@ class CsvImportProcessor
             ->update([
                 'result' => 'skipped',
                 'result_category' => 'invalid_row',
-                'result_message' => 'This row did not pass validation at staging and was not imported. See its per-field errors.',
+                'result_message' => 'This row didn\'t pass the checks before import, so it wasn\'t imported. Its errors are listed by field.',
                 'updated_at' => now(),
             ]);
     }

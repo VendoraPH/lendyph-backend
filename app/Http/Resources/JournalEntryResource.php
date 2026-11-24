@@ -13,6 +13,7 @@ use App\Models\ShareCapitalLedger;
 use App\Services\Accounting\AutomaticPoster;
 use App\Services\Accounting\ExpenseRecorder;
 use App\Services\Branches\InterbranchTransferJournalGuard;
+use App\Services\GCashJournalGuard;
 use App\Services\Savings\SavingsJournalGuard;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\JsonResource;
@@ -120,7 +121,8 @@ class JournalEntryResource extends JsonResource
     public function toArray(Request $request): array
     {
         $notReversibleReason = SavingsJournalGuard::reasonNotReversible($this->resource)
-            ?? InterbranchTransferJournalGuard::reasonNotReversible($this->resource);
+            ?? InterbranchTransferJournalGuard::reasonNotReversible($this->resource)
+            ?? GCashJournalGuard::reasonNotReversible($this->resource);
 
         return [
             'id' => $this->id,
@@ -142,11 +144,12 @@ class JournalEntryResource extends JsonResource
             'reverses_journal_no' => $this->reversesJournalNo(),
             'reversed_by_journal_id' => $this->reversed_by_journal_id,
             // False only for an entry Savings posted, which is reversed from
-            // Savings (SavingsJournalGuard), or one an interbranch transfer
+            // Savings (SavingsJournalGuard), one an interbranch transfer
             // posted, which is reversed from the transfer
-            // (InterbranchTransferJournalGuard); the screen hides Reverse and
-            // shows the reason. Status checks (draft, already reversed) stay as they
-            // were.
+            // (InterbranchTransferJournalGuard), or a GCash Cash In or Cash
+            // Out, which nothing reverses (GCashJournalGuard); the screen hides
+            // Reverse and shows the reason. Status checks (draft, already
+            // reversed) stay as they were.
             'reversible' => $notReversibleReason === null,
             'not_reversible_reason' => $notReversibleReason,
             // The document that caused this entry. All three are null together
