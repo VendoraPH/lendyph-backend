@@ -83,6 +83,9 @@ jobs:
         export LOAN_ORIGINATION_OTP_TEST_CODES=true
         export LOAN_ORIGINATION_PUBLIC_URL=https://staging-app.lendyph.com
         export LOAN_ORIGINATION_QPDF_BINARY=/usr/bin/qpdf
+        # Staging only: receipt share links (Arvin, 2026-11-24, finish run round 2, decision 6). They
+        # stay off unless the proxy secret above is loaded, so each viewer has their own rate limit.
+        export RECEIPT_SHARE_LINKS_ENABLED=true
         # Linda's AI key, delivered by the step above (staging only). Exported so
         # config:cache bakes it in; never echoed, never on a command line. Without it
         # Linda answers with its matcher only (LINDA_DRIVER stays none).
