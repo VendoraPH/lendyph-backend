@@ -3,6 +3,7 @@
 namespace App\Http\Requests\Loan;
 
 use App\Enums\LoanFrequency;
+use App\Http\Requests\Concerns\DateInputMessages;
 use App\Http\Requests\Concerns\ValidatesDeductionAmounts;
 use App\Models\Collateral;
 use App\Models\Loan;
@@ -90,7 +91,7 @@ class PreviewLoanRequest extends FormRequest
             'interest_rate' => ['nullable', 'numeric', 'min:0', 'max:100', 'decimal:0,4'],
             'term' => ['nullable', 'integer', 'min:1'],
             'frequency' => ['nullable', LoanFrequency::rule()],
-            'start_date' => ['nullable', 'date'],
+            'start_date' => ['nullable', 'date', 'date_format:Y-m-d'],
             'scb_amount' => ['nullable', 'numeric', 'min:0'],
             'collaterals' => ['nullable', 'array'],
             'collaterals.*.collateral_id' => [
@@ -116,6 +117,7 @@ class PreviewLoanRequest extends FormRequest
     public function messages(): array
     {
         return [
+            ...DateInputMessages::calendar(['start_date' => 'start date']),
             'collaterals.*.collateral_id.exists' => 'This collateral is not registered to this member.',
             'collaterals.*.collateral_id.distinct' => 'Each collateral can be listed only once.',
         ];
