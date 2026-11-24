@@ -14,10 +14,13 @@ use App\Services\Accounting\JournalPoster;
 use App\Services\Accounting\JournalPreview;
 use App\Services\Accounting\YearEndCloser;
 use App\Services\BranchAccess;
+use App\Services\Branches\BranchRowLock;
 use App\Services\Branches\InterbranchTransferJournalGuard;
 use App\Services\LikePattern;
 use App\Services\Savings\SavingsJournalGuard;
+use Closure;
 use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Http\Exceptions\HttpResponseException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
 use Illuminate\Support\Facades\DB;
@@ -207,11 +210,12 @@ class AccountingJournalController extends Controller
     )]
     public function store(StoreJournalRequest $request): JsonResponse
     {
-        $journal = $this->poster->draft(
-            $request->journalAttributes(),
+        $attributes = $request->journalAttributes();
+        $journal = BranchRowLock::write(['branch_id' => $attributes['branch_id']], fn (): AccountingJournal => $this->poster->draft(
+            $attributes,
             $request->journalLines(),
             $request->user()?->id,
-        );
+        ));
 
         return $this->respond($journal, 201);
     }
@@ -318,11 +322,13 @@ class AccountingJournalController extends Controller
     )]
     public function update(UpdateJournalRequest $request, AccountingJournal $journal): JsonResponse
     {
-        $updated = $this->poster->updateDraft(
+        // The branch the draft is saved in, as on create.
+        $attributes = $request->journalAttributes();
+        $updated = BranchRowLock::write(['branch_id' => $attributes['branch_id']], fn (): AccountingJournal => $this->poster->updateDraft(
             $journal,
-            $request->journalAttributes(),
+            $attributes,
             $request->journalLines(),
-        );
+        ));
 
         return $this->respond($updated);
     }
@@ -344,7 +350,7 @@ class AccountingJournalController extends Controller
     )]
     public function post(PostJournalRequest $request, AccountingJournal $journal): JsonResponse
     {
-        $posted = $this->poster->post($journal, $request->user()?->id);
+        $posted = $this->inItsBranch($journal, fn (): AccountingJournal => $this->poster->post($journal, $request->user()?->id));
 
         return $this->respond($posted);
     }
@@ -382,14 +388,36 @@ class AccountingJournalController extends Controller
         // legs together (InterbranchTransferJournalGuard).
         InterbranchTransferJournalGuard::assertReversibleFromJournals($journal);
 
-        $reversal = $this->poster->reverse(
+        $reversal = $this->inItsBranch($journal, fn (): AccountingJournal => $this->poster->reverse(
             $journal,
             $request->input('date') ?: now()->toDateString(),
             $request->input('reason'),
             $request->user()?->id,
-        );
+        ));
 
         return $this->respond($reversal, 201);
+    }
+
+    /**
+     * Run a post or a reversal of `$journal` holding its branch's row lock
+     * (BranchRowLock): a closed or closing branch takes no new entry. The
+     * branch is read again under the lock, so a draft moved to another branch
+     * after this request loaded it answers 409 instead of posting into a
+     * branch that wasn't checked.
+     *
+     * @param  Closure(): AccountingJournal  $write
+     */
+    private function inItsBranch(AccountingJournal $journal, Closure $write): AccountingJournal
+    {
+        return BranchRowLock::write(['branch' => $journal->branch_id], function () use ($journal, $write): AccountingJournal {
+            $branchId = AccountingJournal::query()->whereKey($journal->getKey())->value('branch_id');
+
+            if (($branchId === null ? null : (int) $branchId) !== ($journal->branch_id === null ? null : (int) $journal->branch_id)) {
+                throw new HttpResponseException(response()->json(['message' => 'This entry changed while it was being saved. Reload it and try again.'], 409));
+            }
+
+            return $write();
+        });
     }
 
     /**

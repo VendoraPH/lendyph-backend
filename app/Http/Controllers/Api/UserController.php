@@ -13,11 +13,14 @@ use App\Http\Resources\UserResource;
 use App\Models\Branch;
 use App\Models\Role;
 use App\Models\User;
+use App\Rules\BranchTakesNew;
 use App\Services\AuditLogService;
 use App\Services\BranchAccess;
+use App\Services\Branches\BranchRowLock;
 use App\Services\LikePattern;
 use App\Services\UserReach;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
 use Illuminate\Support\Facades\DB;
 use OpenApi\Attributes as OA;
@@ -37,6 +40,9 @@ use OpenApi\Attributes as OA;
  */
 class UserController extends Controller
 {
+    /** The refusal's wording for a sent primary branch (BranchRowLock). */
+    private const PRIMARY_REFUSAL = ['primary_branch_id' => BranchTakesNew::NO_PRIMARY];
+
     #[OA\Get(
         path: '/api/users',
         summary: 'List users',
@@ -202,38 +208,44 @@ class UserController extends Controller
         // the client never sent the singular field. See ResolvesBranchAssignment.
         $branchIds = $request->branchAssignment() ?? [];
 
-        $user = User::create([
-            ...$request->safe()->except('role', 'branch_ids', 'primary_branch_id'),
-            'branch_id' => $request->primaryBranchId(),
-        ]);
+        // In one transaction that first locks the branches the user is placed
+        // in (BranchRowLock): a closed or closing branch is refused.
+        $user = BranchRowLock::write(self::branchLocks($request, $branchIds), function () use ($request, $branchIds): User {
+            $user = User::create([
+                ...$request->safe()->except('role', 'branch_ids', 'primary_branch_id'),
+                'branch_id' => $request->primaryBranchId(),
+            ]);
 
-        $user->assignRole($request->role);
-        $user->branches()->sync($branchIds);
+            $user->assignRole($request->role);
+            $user->branches()->sync($branchIds);
 
-        // The Auditable trait's `created` row carries the user's columns, and
-        // the role is not one of them — it lands in model_has_roles, which is
-        // mutable and keeps no history. Without this entry the trail cannot
-        // say which role an account was opened with.
-        AuditLogService::log(
-            action: 'role_assigned',
-            auditable: $user,
-            newValues: ['role' => $request->role],
-            description: sprintf('User %s created with role %s', $user->username, self::roleName($request->role)),
-        );
+            // The Auditable trait's `created` row carries the user's columns, and
+            // the role is not one of them — it lands in model_has_roles, which is
+            // mutable and keeps no history. Without this entry the trail cannot
+            // say which role an account was opened with.
+            AuditLogService::log(
+                action: 'role_assigned',
+                auditable: $user,
+                newValues: ['role' => $request->role],
+                description: sprintf('User %s created with role %s', $user->username, self::roleName($request->role)),
+            );
 
-        // Same gap, same fix, for the other pivot: `created` records
-        // `branch_id` and nothing else, so an account opened across three
-        // branches would be recorded as having been opened in one.
-        AuditLogService::log(
-            action: 'branches_assigned',
-            auditable: $user,
-            newValues: ['branch_ids' => $branchIds],
-            description: sprintf(
-                'User %s created with %s',
-                $user->username,
-                count($branchIds) === 1 ? '1 branch' : count($branchIds).' branches',
-            ),
-        );
+            // Same gap, same fix, for the other pivot: `created` records
+            // `branch_id` and nothing else, so an account opened across three
+            // branches would be recorded as having been opened in one.
+            AuditLogService::log(
+                action: 'branches_assigned',
+                auditable: $user,
+                newValues: ['branch_ids' => $branchIds],
+                description: sprintf(
+                    'User %s created with %s',
+                    $user->username,
+                    count($branchIds) === 1 ? '1 branch' : count($branchIds).' branches',
+                ),
+            );
+
+            return $user;
+        }, self::PRIMARY_REFUSAL);
 
         $user->load('branch', 'branches', 'roles');
 
@@ -321,6 +333,23 @@ class UserController extends Controller
         $branchIds = $request->branchAssignment($user);
         $previousBranchIds = $branchIds === null ? [] : $this->assignedBranchIds($user);
 
+        // In one transaction that first locks the branches the save places the
+        // user in (BranchRowLock): a closed or closing branch is refused.
+        BranchRowLock::write(self::branchLocks($request, $branchIds ?? []), fn () => $this->save($request, $user, $previousRole, $branchIds, $previousBranchIds), self::PRIMARY_REFUSAL);
+
+        $user->load('branch', 'branches', 'roles');
+
+        return new UserResource($user);
+    }
+
+    /**
+     * The update's writes, inside the branch row lock.
+     *
+     * @param  list<int>|null  $branchIds
+     * @param  list<int>  $previousBranchIds
+     */
+    private function save(UpdateUserRequest $request, User $user, ?string $previousRole, ?array $branchIds, array $previousBranchIds): void
+    {
         // `primary_branch_id` (Phase 6 MB-BE6) sets the column on its own; the
         // Auditable `updated` row describes the change in words
         // (User::describeAuditEvent()).
@@ -377,10 +406,22 @@ class UserController extends Controller
                 );
             }
         }
+    }
 
-        $user->load('branch', 'branches', 'roles');
-
-        return new UserResource($user);
+    /**
+     * The branches a save places the user in, by the field that sent them,
+     * for BranchRowLock: the assigned set and a sent primary branch. A
+     * derived primary is one of the set.
+     *
+     * @param  list<int>  $branchIds
+     * @return array<string, list<int|null>|int|null>
+     */
+    private static function branchLocks(Request $request, array $branchIds): array
+    {
+        return [
+            ($request->has('branch_ids') ? 'branch_ids' : 'branch_id') => $branchIds,
+            'primary_branch_id' => $request->has('primary_branch_id') && is_numeric($request->input('primary_branch_id')) ? (int) $request->input('primary_branch_id') : null,
+        ];
     }
 
     /**

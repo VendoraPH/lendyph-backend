@@ -10,6 +10,7 @@ use App\Http\Resources\AccountingExpenseResource;
 use App\Models\AccountingExpense;
 use App\Services\Accounting\ExpenseRecorder;
 use App\Services\BranchAccess;
+use App\Services\Branches\BranchRowLock;
 use Closure;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\JsonResponse;
@@ -154,7 +155,8 @@ class AccountingExpenseController extends Controller
     )]
     public function store(StoreExpenseRequest $request): JsonResponse
     {
-        $expense = $this->recorder->record($request->validated(), $request->user()?->id);
+        // A deadlock on the branch lock answers 409 (BranchRowLock).
+        $expense = BranchRowLock::transaction(fn (): AccountingExpense => $this->recorder->record($request->validated(), $request->user()?->id));
 
         return $this->respond($expense, 201);
     }
@@ -225,7 +227,7 @@ class AccountingExpenseController extends Controller
     )]
     public function pay(PayExpenseRequest $request, AccountingExpense $expense): JsonResponse
     {
-        $paid = $this->recorder->pay($expense, $request->validated(), $request->user()?->id);
+        $paid = BranchRowLock::transaction(fn (): AccountingExpense => $this->recorder->pay($expense, $request->validated(), $request->user()?->id));
 
         return $this->respond($paid);
     }
