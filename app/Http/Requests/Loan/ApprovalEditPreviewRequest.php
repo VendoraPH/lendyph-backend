@@ -39,7 +39,6 @@ class ApprovalEditPreviewRequest extends PreviewLoanRequest
         return [
             ...parent::rules(),
             'source_loan_id' => ['prohibited'],
-            'start_date' => ['nullable', 'date_format:Y-m-d'],
         ];
     }
 
@@ -51,7 +50,6 @@ class ApprovalEditPreviewRequest extends PreviewLoanRequest
         return [
             ...parent::messages(),
             'source_loan_id.prohibited' => 'A restructure\'s preview isn\'t part of this edit.',
-            'start_date.date_format' => ApprovalEditLoanRequest::START_DATE_FORMAT,
         ];
     }
 }

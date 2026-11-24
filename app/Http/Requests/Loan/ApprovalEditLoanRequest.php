@@ -27,9 +27,6 @@ use Illuminate\Validation\Validator;
  */
 class ApprovalEditLoanRequest extends UpdateLoanRequest
 {
-    /** The wording #359 uses for a date field. */
-    public const START_DATE_FORMAT = 'The start date must be a date written as year-month-day, such as 2026-11-24.';
-
     public function authorize(): bool
     {
         $user = $this->user();
@@ -48,12 +45,11 @@ class ApprovalEditLoanRequest extends UpdateLoanRequest
     public function rules(): array
     {
         return [
-            ...Arr::except(parent::rules(), ['remarks', 'policy_exception', 'policy_exception_details', 'principal_amount', 'start_date', 'scb_amount']),
+            ...Arr::except(parent::rules(), ['remarks', 'policy_exception', 'policy_exception_details', 'principal_amount', 'scb_amount']),
             'version' => ['required', 'string', 'max:100'],
             'principal_amount' => ['sometimes', 'numeric', 'min:1', 'decimal:0,2'],
             'term' => ['sometimes', 'integer', 'min:1'],
             'frequency' => ['sometimes', LoanFrequency::rule()],
-            'start_date' => ['sometimes', 'date_format:Y-m-d'],
             'scb_amount' => ['sometimes', 'numeric', 'min:0', 'decimal:0,2'],
             // Fixed on this path: the same value passes, another is refused (after()).
             'borrower_id' => ['sometimes', 'nullable', 'integer'],
@@ -74,7 +70,6 @@ class ApprovalEditLoanRequest extends UpdateLoanRequest
             'version.string' => 'Reload the loan and open the edit again: this save doesn\'t say which version of the loan it was made from.',
             'principal_amount.decimal' => 'The principal can have at most two decimals.',
             'scb_amount.decimal' => 'The share capital build-up can have at most two decimals.',
-            'start_date.date_format' => self::START_DATE_FORMAT,
             'frequency.in' => 'Choose a payment frequency from the list.',
         ];
     }

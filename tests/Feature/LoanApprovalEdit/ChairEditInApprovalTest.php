@@ -5,11 +5,13 @@ namespace Tests\Feature\LoanApprovalEdit;
 use App\Models\ApprovalWorkflowSetting;
 use App\Models\AuditLog;
 use App\Models\Borrower;
+use App\Models\Branch;
 use App\Models\Loan;
 use App\Models\LoanApprovalStep;
 use App\Models\LoanProduct;
 use App\Models\Role;
 use App\Models\User;
+use App\Services\BranchAccess;
 use App\Services\LoanService;
 use Illuminate\Support\Arr;
 use Illuminate\Testing\TestResponse;
@@ -379,6 +381,46 @@ class ChairEditInApprovalTest extends TestCase
         }
     }
 
+    public function test_only_an_approve_step_is_edited_even_where_the_chairs_role_holds_another(): void
+    {
+        ApprovalWorkflowSetting::updateOrCreate(['type' => ApprovalWorkflowSetting::TYPE_NORMAL], ['steps' => [
+            ['id' => 'chair-intake', 'name' => 'Chair Intake', 'role' => 'bod1', 'kind' => 'submit'],
+            ['id' => 'manager', 'name' => 'Manager', 'role' => 'manager', 'kind' => 'approve'],
+            ['id' => 'general-bookkeeper', 'name' => 'General Bookkeeper', 'role' => 'general_bookkeeper', 'kind' => 'release'],
+        ]]);
+        $loan = $this->submittedLoan();
+        $this->actingAs($this->manager)
+            ->patchJson("/api/loans/{$loan->id}/approval-steps/{$this->pendingStep($loan)->id}/send-back", ['target_step_order' => 0, 'remarks' => 'Check the purpose'])
+            ->assertOk();
+        $this->assertSame('submit', $this->pendingStep($loan)->kind);
+
+        $this->actingAs($this->chair)
+            ->getJson("/api/loans/{$loan->id}/approval-edit")
+            ->assertOk()
+            ->assertJsonPath('data.can_edit', false)
+            ->assertJsonPath('data.reason', 'You can edit this loan only while it waits at your approval step. It is at the "Chair Intake" step.');
+        $this->actingAs($this->chair)
+            ->patchJson("/api/loans/{$loan->id}/approval-edit", ['purpose' => 'x', 'version' => 'x'])
+            ->assertForbidden();
+    }
+
+    public function test_another_branchs_loan_answers_404(): void
+    {
+        $loan = $this->loanAtChairStep();
+        // A Chair who sees only another branch: the board's all-branch access taken away.
+        Role::where('name', 'bod1')->firstOrFail()->revokePermissionTo(BranchAccess::VIEW_ALL);
+        app(PermissionRegistrar::class)->forgetCachedPermissions();
+        $farChair = User::factory()->inBranches(Branch::factory()->create(['name' => 'Far Branch', 'code' => 'FAR']))->create();
+        $farChair->assignRole('bod1');
+
+        $this->actingAs($farChair)->getJson("/api/loans/{$loan->id}/approval-edit")->assertNotFound();
+        $this->actingAs($farChair)->postJson("/api/loans/{$loan->id}/approval-edit/preview", self::EDIT)->assertNotFound();
+        $this->actingAs($farChair)
+            ->patchJson("/api/loans/{$loan->id}/approval-edit", [...self::EDIT, 'version' => 'x'])
+            ->assertNotFound();
+        $this->assertSame('60000.00', $loan->fresh()->getRawOriginal('principal_amount'));
+    }
+
     public function test_a_step_forwarded_to_another_chair_is_theirs_alone(): void
     {
         $other = $this->staff('bod1', ['first_name' => 'Rosa', 'last_name' => 'Lim']);
@@ -430,8 +472,8 @@ class ChairEditInApprovalTest extends TestCase
             ['term', ['term' => 13], 'The term must be between 3 and 12 months for this product.'],
             ['frequency', ['frequency' => 'weekly'], 'The payment frequency must be Monthly or Semi-Monthly for this product.'],
             ['deductions', ['deductions' => [['name' => 'Processing Fee', 'amount' => 3, 'type' => 'percentage']]], 'The processing fee must be between 1% and 2% for this product.'],
-            ['deductions', ['deductions' => [['name' => 'Service Fee', 'amount' => 1.5, 'type' => 'percentage']]], 'The service fee must be between 0% and 1% for this product.'],
-            ['deductions', ['deductions' => [['name' => 'Other', 'amount' => 70000, 'type' => 'fixed']]], 'Total deductions exceed the principal amount.'],
+            ['deductions', ['deductions' => [['name' => 'Processing Fee', 'amount' => 2, 'type' => 'percentage'], ['name' => 'Service Fee', 'amount' => 1.5, 'type' => 'percentage']]], 'The service fee must be between 0% and 1% for this product.'],
+            ['deductions', ['deductions' => [['name' => 'Processing Fee', 'amount' => 2, 'type' => 'percentage'], ['name' => 'Other', 'amount' => 70000, 'type' => 'fixed']]], 'Total deductions exceed the principal amount.'],
         ];
 
         foreach ($cases as [$field, $edit, $message]) {
@@ -448,6 +490,63 @@ class ChairEditInApprovalTest extends TestCase
         $this->assertSame(6, (int) $fresh->term);
         $this->assertSame('monthly', $fresh->frequency);
         $this->assertSame(0, AuditLog::query()->where('id', '>', $before)->count());
+    }
+
+    public function test_a_fee_the_product_requires_cant_be_left_out_or_made_a_fixed_amount(): void
+    {
+        $loan = $this->loanAtChairStep();
+
+        foreach ([
+            'left out' => [['name' => 'Service Fee', 'amount' => 1, 'type' => 'percentage']],
+            'fixed' => [
+                ['name' => 'Processing Fee', 'amount' => 500, 'type' => 'fixed'],
+                ['name' => 'Service Fee', 'amount' => 1, 'type' => 'percentage'],
+            ],
+        ] as $case => $deductions) {
+            $version = $this->version($loan);
+            $this->actingAs($this->chair)
+                ->patchJson("/api/loans/{$loan->id}/approval-edit", ['deductions' => $deductions, 'version' => $version])
+                ->assertUnprocessable()
+                ->assertJsonPath('errors.deductions.0', 'The processing fee must be between 1% and 2% for this product.');
+            $this->assertSame('1800.00', $loan->fresh()->getRawOriginal('total_deductions'), $case);
+        }
+
+        // The service fee's minimum is 0%, so it may be left out.
+        $this->editAs($this->chair, $loan, ['deductions' => [['name' => 'Processing Fee', 'amount' => 2, 'type' => 'percentage']]])->assertOk();
+        $this->assertSame('1200.00', $loan->fresh()->getRawOriginal('total_deductions'));
+    }
+
+    public function test_a_rate_or_term_isnt_changed_once_the_product_quotes_another_period_or_unit(): void
+    {
+        $loan = $this->loanAtChairStep();
+        // Since the loan was made, its product quotes rates per year and counts its term in days.
+        $this->product->update([
+            'interest_rate_frequency' => 'annual',
+            'interest_rate' => 36,
+            'min_interest_rate' => 18,
+            'term_unit' => 'days',
+            'term' => 180,
+            'min_term' => 90,
+            'max_term' => 360,
+        ]);
+
+        $version = $this->version($loan);
+        $this->actingAs($this->chair)
+            ->patchJson("/api/loans/{$loan->id}/approval-edit", ['interest_rate' => 30, 'version' => $version])
+            ->assertUnprocessable()
+            ->assertJsonPath('errors.interest_rate.0', 'This loan\'s rate is quoted per month, but its product now quotes rates per year, so the rate can\'t be changed during approval.');
+
+        $version = $this->version($loan);
+        $this->actingAs($this->chair)
+            ->patchJson("/api/loans/{$loan->id}/approval-edit", ['term' => 200, 'version' => $version])
+            ->assertUnprocessable()
+            ->assertJsonPath('errors.term.0', 'This loan\'s term is counted in months, but its product now counts days, so the term can\'t be changed during approval.');
+
+        // The rest of the loan still can be, and its own rate and term stay.
+        $this->editAs($this->chair, $loan, ['interest_rate' => 3, 'term' => 6, 'purpose' => 'Store expansion'])->assertOk();
+        $this->assertSame('3.0000', $loan->fresh()->getRawOriginal('interest_rate'));
+        $this->assertSame(6, (int) $loan->fresh()->term);
+        $this->assertSame('Store expansion', $loan->fresh()->purpose);
     }
 
     public function test_the_build_up_holds_to_the_products_range(): void

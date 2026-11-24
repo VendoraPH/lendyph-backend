@@ -257,6 +257,14 @@ class LoanApprovalEditService
     }
 
     /**
+     * The refusal for a step that isn't the caller's approve step, in words.
+     */
+    private static function notYourStep(LoanApprovalStep $step): AuthorizationException
+    {
+        return new AuthorizationException("You can edit this loan only while it waits at your approval step. It is at the \"{$step->name}\" step.");
+    }
+
+    /**
      * What an edit must name to be saved: a fingerprint of the loan's row as
      * stored (every column, `updated_at` included), its co-makers and
      * collateral, and the step it waits at. Any change to any of them since
@@ -305,14 +313,20 @@ class LoanApprovalEditService
     }
 
     /**
-     * The step is `$user`'s to edit at: forwarded to them, or to nobody (or to
-     * someone who could no longer be given it), and its role is one they hold,
-     * active, that carries the permission.
+     * The step is `$user`'s to edit at: an approve step (a Submit step is the
+     * loan processor's to revise, and a Release step comes after approval),
+     * forwarded to them, or to nobody (or to someone who could no longer be
+     * given it), and its role is one they hold, active, that carries the
+     * permission.
      *
      * @throws AuthorizationException
      */
     private function assertStepIsTheirs(Loan $loan, LoanApprovalStep $step, User $user): void
     {
+        if ($step->kind !== LoanApprovalStep::KIND_APPROVE) {
+            throw self::notYourStep($step);
+        }
+
         $assignee = $this->assignees->effectiveAssignee($step, $loan);
 
         if ($assignee !== null && (int) $assignee->getKey() !== (int) $user->getKey()) {
@@ -322,7 +336,7 @@ class LoanApprovalEditService
         $role = $user->activeRoles()->first(fn (Role $role): bool => $role->name === $step->role);
 
         if ($role === null || ! $role->permissions()->where('name', self::PERMISSION)->exists()) {
-            throw new AuthorizationException("You can edit this loan only while it waits at your approval step. It is at the \"{$step->name}\" step.");
+            throw self::notYourStep($step);
         }
     }
 
@@ -433,11 +447,13 @@ class LoanApprovalEditService
         }
 
         if ($edited['interest_rate'] !== $stored['interest_rate']) {
+            $this->assertSameRatePeriod($loan, $product);
             $this->assertRateWithin($edited['interest_rate'], $product);
             [$old['interest_rate'], $new['interest_rate']] = [(float) $stored['interest_rate'], (float) $edited['interest_rate']];
         }
 
         if ($edited['term'] !== $stored['term']) {
+            $this->assertSameTermUnit($loan, $product);
             $this->assertTermWithin($edited['term'], $product);
             [$old['term'], $new['term']] = [$stored['term'], $edited['term']];
         }
@@ -670,6 +686,45 @@ class LoanApprovalEditService
     }
 
     /**
+     * A rate is checked against its product's range in the product's rate
+     * period, which is the loan's own unless the product has moved to another
+     * since the loan was made. Then a new rate would be stored per the loan's
+     * period but checked per the product's, so it can't change here.
+     *
+     * @throws ValidationException on `interest_rate`
+     */
+    private function assertSameRatePeriod(Loan $loan, LoanProduct $product): void
+    {
+        if ($loan->interest_rate_frequency === $product->interest_rate_frequency) {
+            return;
+        }
+
+        throw ValidationException::withMessages([
+            'interest_rate' => ['This loan\'s rate is quoted '.self::ratePeriod($loan->interest_rate_frequency)
+                .', but its product now quotes rates '.self::ratePeriod($product->interest_rate_frequency)
+                .', so the rate can\'t be changed during approval.'],
+        ]);
+    }
+
+    /**
+     * A term is checked against its product's range in the product's unit,
+     * which is the loan's own unless the product has moved to another since
+     * the loan was made. Then the term can't change here.
+     *
+     * @throws ValidationException on `term`
+     */
+    private function assertSameTermUnit(Loan $loan, LoanProduct $product): void
+    {
+        if ($loan->term_unit === $product->term_unit) {
+            return;
+        }
+
+        throw ValidationException::withMessages([
+            'term' => ["This loan's term is counted in {$loan->term_unit->value}, but its product now counts {$product->term_unit->value}, so the term can't be changed during approval."],
+        ]);
+    }
+
+    /**
      * The product's minimum rate (its rate when it has none) up to its rate.
      *
      * @throws ValidationException on `interest_rate`
@@ -764,8 +819,9 @@ class LoanApprovalEditService
     /**
      * The loan form's fee rule: the processing and service fee rates sit inside
      * the product's minimum (0 when it has none) and maximum (its rate when it
-     * has none), when it has a maximum above 0. A rate the edit leaves as it
-     * was stored isn't checked again.
+     * has none), when it has a maximum above 0. A fee whose minimum is above 0
+     * must be stated, as a percentage: left out or as a fixed amount, it is
+     * refused. A rate the edit leaves as it was stored isn't checked again.
      *
      * @param  array<int, array<string, mixed>>  $sent
      * @param  array<int, array<string, mixed>>  $stored
@@ -783,6 +839,12 @@ class LoanApprovalEditService
 
             $minimum = BigDecimal::of((string) ($product->{$minimumColumn} ?? '0'));
             $storedRate = collect($stored)->first(fn (mixed $item): bool => is_array($item) && ($item['type'] ?? null) === 'percentage' && ($item['name'] ?? null) === $name);
+            $range = "The {$words} must be between ".self::percent((string) $minimum).' and '.self::percent((string) $maximum).' for this product.';
+            $statedAsARate = collect($sent)->contains(fn (mixed $item): bool => is_array($item) && ($item['type'] ?? null) === 'percentage' && ($item['name'] ?? null) === $name);
+
+            if ($minimum->isPositive() && ! $statedAsARate) {
+                throw ValidationException::withMessages(['deductions' => [$range]]);
+            }
 
             foreach ($sent as $item) {
                 if (($item['type'] ?? null) !== 'percentage' || ($item['name'] ?? null) !== $name || ! is_numeric($item['amount'] ?? null)) {
@@ -796,9 +858,7 @@ class LoanApprovalEditService
                 }
 
                 if ($rate->isLessThan($minimum) || $rate->isGreaterThan($maximum)) {
-                    throw ValidationException::withMessages([
-                        'deductions' => ["The {$words} must be between ".self::percent((string) $minimum).' and '.self::percent((string) $maximum).' for this product.'],
-                    ]);
+                    throw ValidationException::withMessages(['deductions' => [$range]]);
                 }
             }
         }

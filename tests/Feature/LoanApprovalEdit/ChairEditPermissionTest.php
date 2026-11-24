@@ -1,6 +1,7 @@
 <?php
 
 use App\Models\AuditLog;
+use App\Models\Branch;
 use App\Models\Role;
 use App\Models\User;
 use Database\Seeders\RoleAndPermissionSeeder;
@@ -128,4 +129,48 @@ it('can\'t be handed to another role by an admin, who doesn\'t hold it', functio
         ->assertJsonValidationErrors(['permissions']);
 
     expect(chairEditHolders())->toBe(['bod1']);
+});
+
+/**
+ * A user in Main Branch with the role named, as the user-management tests
+ * make them.
+ */
+function chairEditStaff(string $role): User
+{
+    return tap(User::factory()->create(['branch_id' => Branch::query()->firstOrFail()->id]), fn (User $user) => $user->assignRole($role));
+}
+
+it('tells an admin in words that only a super admin can assign the Chair\'s role', function () {
+    $target = chairEditStaff('viewer');
+
+    $this->actingAs(chairEditStaff('admin'))
+        ->putJson("/api/users/{$target->id}", ['role' => 'bod1'])
+        ->assertUnprocessable()
+        ->assertJsonPath('errors.role.0', 'Only a super admin can assign a role that can edit loans during approval.');
+
+    expect($target->fresh()->getRoleNames()->all())->toBe(['viewer']);
+});
+
+it('lets a super admin assign the Chair\'s role', function () {
+    $target = chairEditStaff('viewer');
+
+    $this->putJson("/api/users/{$target->id}", ['role' => 'bod1'])->assertOk();
+
+    expect($target->fresh()->getRoleNames()->all())->toBe(['bod1']);
+});
+
+it('names the permissions a role would grant in words, never as keys', function () {
+    Role::create(['name' => 'user_desk', 'guard_name' => 'web', 'is_system' => false])
+        ->syncPermissions(['users:view', 'users:update', 'loans:view']);
+    Role::create(['name' => 'starting_desk', 'guard_name' => 'web', 'is_system' => false])
+        ->syncPermissions(['loans:view']);
+    $target = chairEditStaff('starting_desk');
+
+    $message = $this->actingAs(chairEditStaff('user_desk'))
+        ->putJson("/api/users/{$target->id}", ['role' => 'loan_officer'])
+        ->assertUnprocessable()
+        ->json('errors.role.0');
+
+    expect($message)->toStartWith('The selected role grants permissions you do not hold yourself: ')
+        ->and($message)->not->toMatch('/[a-z_]+:[a-z_]+/');
 });
