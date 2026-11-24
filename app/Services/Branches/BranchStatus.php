@@ -13,6 +13,7 @@ use App\Models\Loan;
 use App\Models\LoanAdjustment;
 use App\Models\PortalRequest;
 use App\Models\SavingsAccount;
+use App\Models\ShareCapitalPledge;
 use App\Models\User;
 use App\Services\Accounting\TrialBalanceBuilder;
 use App\Services\AuditLogService;
@@ -196,6 +197,7 @@ class BranchStatus
             $item('transfers_in_transit', 'Transfers in transit', $this->transfers($id, InterbranchTransfer::STATUS_IN_TRANSIT)),
             $item('pending_gcash_cash_ins', 'GCash Cash Ins not yet paid', $this->pendingCashIns($id)),
             $item('unpaid_payables', 'Unpaid payables', $this->unpaidPayables($id)),
+            $item('auto_credit_members', 'Members with share capital auto-credit on', $this->autoCreditMembers($id)),
             $item('assigned_users', 'Assigned users', DB::table('branch_user')->where('branch_id', $id)->count()),
         ];
     }
@@ -391,6 +393,7 @@ class BranchStatus
             'transfers_in_transit' => self::counted($item['count'], 'transfer').' in transit',
             'pending_gcash_cash_ins' => self::counted($item['count'], 'GCash Cash In').' not yet paid',
             'unpaid_payables' => self::counted($item['count'], 'unpaid payable'),
+            'auto_credit_members' => self::counted($item['count'], 'member').' with share capital auto-credit on',
             'assigned_users' => self::counted($item['count'], 'assigned user'),
         }, $open);
 
@@ -431,6 +434,24 @@ class BranchStatus
             ->where(fn ($q) => $q
                 ->where('branch_id', $branchId)
                 ->orWhereIn('borrower_id', Borrower::query()->select('id')->where('branch_id', $branchId)))
+            ->count();
+    }
+
+    /**
+     * The branch's members a share capital auto-credit run credits: auto-credit
+     * on, a pledge above ₱0.00 and a membership that hasn't ended, the run's
+     * own pick (ShareCapitalService::processAutoCredit()). A run refuses whole
+     * when a member's branch is closed or closing, so a closure waits until
+     * their auto-credit is off or they've moved (finish run round 2, review of
+     * #378).
+     */
+    private function autoCreditMembers(int $branchId): int
+    {
+        return ShareCapitalPledge::query()
+            ->forCurrentMembers()
+            ->whereHas('borrower', fn ($members) => $members->where('branch_id', $branchId))
+            ->where('auto_credit', true)
+            ->where('amount', '>', 0)
             ->count();
     }
 

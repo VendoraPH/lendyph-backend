@@ -41,8 +41,9 @@ use Illuminate\Validation\ValidationException;
  *   (both legs sit on savings deposits) and no tier.
  * - A deposit or withdrawal paid by any method but cash is refused when its
  *   reference is already on record for that method (DuplicateReference,
- *   finish run round 2, decision 11), under the account lock; an approved
- *   withdrawal is checked again when it posts.
+ *   finish run round 2, decision 11), under the account lock. A withdrawal
+ *   waiting for its checker holds its reference, and is checked again, apart
+ *   from itself, when it posts.
  */
 class Teller
 {
@@ -158,10 +159,11 @@ class Teller
      */
     public function postWithdrawal(SavingsAccount $account, int $centavos, array $data, WithdrawalFee $fee, int $makerId, ?int $approvalId, int $posterId, array $otherDeciders = []): SavingsTransaction
     {
-        // An approved request was checked when it was made; another entry may
-        // have taken its reference while it waited for its checker.
+        // An approved request was checked when it was made, and held its
+        // reference while it waited; a writer that never checks (auto-credit)
+        // may still have taken it. Its own approval doesn't count.
         if ($approvalId !== null) {
-            $this->duplicates->assertUnused($data['payment_method'] ?? null, $data['reference'] ?? null);
+            $this->duplicates->assertUnused($data['payment_method'] ?? null, $data['reference'] ?? null, 'reference', $approvalId);
         }
 
         $row = $this->ledger->debit($account, 'withdrawal', $centavos, [

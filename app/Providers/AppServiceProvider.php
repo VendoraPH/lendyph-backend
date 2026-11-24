@@ -357,6 +357,13 @@ class AppServiceProvider extends ServiceProvider
                 return Limit::none();
             }
 
+            // A shared receipt (`public-receipts.*`, api/public/receipts/) is
+            // anonymous too, and ReceiptShareServiceProvider meters it with its
+            // own limiter. The name and the path must both say so, as above.
+            if ($request->routeIs('public-receipts.*') && $request->is('api/public/receipts/*')) {
+                return Limit::none();
+            }
+
             // A portal user's id is not a staff id: portal user 7 and staff user
             // 7 must not share one bucket (§0, finding 4).
             $key = $caller instanceof PortalUser ? 'portal:'.$caller->getKey() : ($caller?->getKey() ?: $request->ip());

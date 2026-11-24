@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Http\Requests\Concerns\DateInputMessages;
 use App\Http\Requests\Savings\TimeDeposit\ListTimeDepositsRequest;
 use App\Http\Requests\Savings\TimeDeposit\PlaceTimeDepositRequest;
 use App\Http\Requests\Savings\TimeDeposit\PreterminateTimeDepositRequest;
@@ -163,19 +164,25 @@ class SavingsTimeDepositController extends Controller
     #[OA\Get(
         path: '/api/savings/time-deposits/cash-reference/next',
         summary: 'The next cash placement\'s TD number',
-        description: 'The reference number the next cash placement would get today: TD-[super admin id]-[year]-[0001]. A preview only: it reserves nothing, and the placement gets its number when it saves. `reference_number` is null while no super admin is active.',
+        description: 'The reference number the next cash placement dated `date` (today when left out) would get: TD-[super admin id]-[year]-[0001], in that date\'s year. A preview only: it reserves nothing, and the placement gets its number when it saves. `reference_number` is null while no super admin is active.',
         tags: ['Savings'],
         security: [['sanctum' => []]],
+        parameters: [new OA\Parameter(name: 'date', in: 'query', required: false, description: 'The placement date, year-month-day', schema: new OA\Schema(type: 'string', format: 'date'))],
         responses: [
             new OA\Response(response: 200, description: '{success, data: {reference_number}}'),
             new OA\Response(response: 403, description: 'Missing savings:create'),
+            new OA\Response(response: 422, description: 'A `date` not written year-month-day'),
         ],
     )]
-    public function nextCashReference(CashReferences $references): JsonResponse
+    public function nextCashReference(Request $request, CashReferences $references): JsonResponse
     {
         $this->authorize('savings:create');
 
-        return response()->json(['success' => true, 'data' => ['reference_number' => $references->next(CashReferences::TIME_DEPOSIT)]]);
+        $filters = $request->validate([
+            'date' => ['nullable', 'date', 'date_format:Y-m-d'],
+        ], DateInputMessages::calendar(['date' => 'placement date']));
+
+        return response()->json(['success' => true, 'data' => ['reference_number' => $references->next(CashReferences::TIME_DEPOSIT, $filters['date'] ?? null)]]);
     }
 
     #[OA\Post(

@@ -174,6 +174,7 @@ class BranchClosureTest extends TestCase
             ['key' => 'transfers_in_transit', 'label' => 'Transfers in transit', 'count' => 0, 'amount' => null, 'clear' => true],
             ['key' => 'pending_gcash_cash_ins', 'label' => 'GCash Cash Ins not yet paid', 'count' => 0, 'amount' => null, 'clear' => true],
             ['key' => 'unpaid_payables', 'label' => 'Unpaid payables', 'count' => 0, 'amount' => null, 'clear' => true],
+            ['key' => 'auto_credit_members', 'label' => 'Members with share capital auto-credit on', 'count' => 0, 'amount' => null, 'clear' => true],
             ['key' => 'assigned_users', 'label' => 'Assigned users', 'count' => 1, 'amount' => null, 'clear' => false],
         ], $data['checklist']);
 
@@ -243,6 +244,45 @@ class BranchClosureTest extends TestCase
 
         $unpaid->forceFill(['amount_paid' => 1500050, 'settlement_status' => 'paid'])->save();
         $partly->forceFill(['amount_paid' => 1500050, 'settlement_status' => 'paid'])->save();
+        $this->requestClosure();
+    }
+
+    /**
+     * Every share capital auto-credit run credits these members in the branch,
+     * and a run refuses a closed or closing member branch whole, so a closure
+     * waits until their auto-credit is off or they've moved (finish run round
+     * 2, review of #378). A pledge with no amount, a member whose membership
+     * ended and another branch's members don't count: a run credits none.
+     */
+    public function test_closing_waits_for_members_with_share_capital_auto_credit_on(): void
+    {
+        $member = fn (int $branchId, string $status = 'active'): Borrower => AuditLogService::withoutModelAuditing(
+            fn () => Borrower::factory()->create(['branch_id' => $branchId, 'status' => $status]),
+        );
+        $on = [$member($this->quiet->id), $member($this->quiet->id)];
+
+        foreach ($on as $credited) {
+            $credited->shareCapitalPledge->update(['auto_credit' => true, 'amount' => 500]);
+        }
+
+        $member($this->quiet->id)->shareCapitalPledge->update(['auto_credit' => true, 'amount' => 0]);
+        $member($this->quiet->id, 'withdrawn')->shareCapitalPledge->update(['auto_credit' => true, 'amount' => 500]);
+        $member($this->branch->id)->shareCapitalPledge->update(['auto_credit' => true, 'amount' => 500]);
+        $member($this->quiet->id);
+
+        $item = collect($this->getJson("/api/branches/{$this->quiet->id}/closure")->assertOk()->json('data.checklist'))->firstWhere('key', 'auto_credit_members');
+        $this->assertSame(['key' => 'auto_credit_members', 'label' => 'Members with share capital auto-credit on', 'count' => 2, 'amount' => null, 'clear' => false], $item);
+
+        $this->postJson("/api/branches/{$this->quiet->id}/closure", ['effective_on' => now()->toDateString(), 'reason' => 'Closing'])
+            ->assertUnprocessable()
+            ->assertJsonPath('errors.branch.0', "This branch can't be closed yet: 2 members with share capital auto-credit on.");
+
+        $on[0]->shareCapitalPledge->update(['auto_credit' => false]);
+        $this->postJson("/api/branches/{$this->quiet->id}/closure", ['effective_on' => now()->toDateString(), 'reason' => 'Closing'])
+            ->assertUnprocessable()
+            ->assertJsonPath('errors.branch.0', "This branch can't be closed yet: 1 member with share capital auto-credit on.");
+
+        $on[1]->shareCapitalPledge->update(['auto_credit' => false]);
         $this->requestClosure();
     }
 

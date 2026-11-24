@@ -2,6 +2,7 @@
 
 namespace App\Services\Savings;
 
+use App\Models\SavingsApproval;
 use App\Models\SavingsTransaction;
 use App\Models\TimeDeposit;
 use App\Services\Savings\Api\Refuse;
@@ -16,9 +17,13 @@ use Illuminate\Validation\ValidationException;
  * else (no member, account or branch).
  *
  * "On record": a savings transaction or a placement with that method and
- * reference, compared as MySQL compares them (case and trailing spaces
- * ignored), unless the transaction was reversed: a reversed row frees its
- * reference for the entry that corrects it.
+ * reference, unless the transaction was reversed (a reversed row frees its
+ * reference for the entry that corrects it), or a withdrawal still waiting
+ * for its checker with that method and reference in its request (review of
+ * #378): it posts with them once approved, so it holds them while it waits,
+ * and a rejected, cancelled or expired one frees them. The approval being
+ * posted is left out of its own check. References compare as MySQL compares
+ * the columns: case and trailing spaces ignored.
  *
  * Exempt: cash (a counter receipt, and a cash placement's reference is its
  * own TD number), and the writers that never call this: auto-credit runs and
@@ -41,9 +46,11 @@ class DuplicateReference
     ];
 
     /**
+     * @param  int|null  $postingApprovalId  the approved withdrawal being posted, which doesn't count against itself
+     *
      * @throws ValidationException when the reference is already on record for this method
      */
-    public function assertUnused(?string $method, ?string $reference, string $field = 'reference'): void
+    public function assertUnused(?string $method, ?string $reference, string $field = 'reference', ?int $postingApprovalId = null): void
     {
         $reference = $reference === null ? '' : trim($reference);
 
@@ -51,7 +58,7 @@ class DuplicateReference
             return;
         }
 
-        if ($this->onRecord($method, $reference)) {
+        if ($this->onRecord($method, $reference, $postingApprovalId)) {
             Refuse::field($field, self::message($method, $reference));
         }
     }
@@ -66,7 +73,7 @@ class DuplicateReference
         );
     }
 
-    private function onRecord(string $method, string $reference): bool
+    private function onRecord(string $method, string $reference, ?int $postingApprovalId): bool
     {
         $onSavings = SavingsTransaction::query()
             ->where('method', $method)
@@ -76,6 +83,25 @@ class DuplicateReference
                 ->whereColumn('reversals.reverses_transaction_id', 'savings_transactions.id'))
             ->exists();
 
-        return $onSavings || TimeDeposit::query()->where('funding_method', $method)->where('reference', $reference)->exists();
+        return $onSavings
+            || TimeDeposit::query()->where('funding_method', $method)->where('reference', $reference)->exists()
+            || $this->heldByAWaitingWithdrawal($method, $reference, $postingApprovalId);
+    }
+
+    /**
+     * A withdrawal request waiting for its checker, with this method and
+     * reference in its stored request. The JSON value is compared in the
+     * columns' collation, so case and trailing spaces are ignored here too.
+     */
+    private function heldByAWaitingWithdrawal(string $method, string $reference, ?int $postingApprovalId): bool
+    {
+        return SavingsApproval::query()
+            ->where('kind', 'withdrawal')
+            ->where('status', 'pending')
+            ->when($postingApprovalId !== null, fn ($approvals) => $approvals->whereKeyNot($postingApprovalId))
+            ->where('payload->payment_method', $method)
+            ->whereNotNull('payload->reference')
+            ->whereRaw("JSON_UNQUOTE(JSON_EXTRACT(`payload`, '$.reference')) COLLATE utf8mb4_unicode_ci = ?", [$reference])
+            ->exists();
     }
 }

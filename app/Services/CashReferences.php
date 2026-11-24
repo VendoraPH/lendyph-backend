@@ -36,8 +36,8 @@ use LogicException;
  * before the wait, and its later plain reads (the ledger's own SC- number)
  * would miss what the save it waited for committed.
  *
- * next() is the screens' preview: the number the next save would get, read
- * plainly, reserving nothing.
+ * next() is the screens' preview: the number the next save dated `$date`
+ * (today when null) would get, read plainly, reserving nothing.
  *
  * advance() moves a series past a number the app didn't give: an entry the
  * share capital import brought over whose reference is already in this
@@ -81,10 +81,13 @@ final class CashReferences
     }
 
     /**
-     * The number the next save in this series would get today, or null when
-     * no super admin is active. Writes and locks nothing.
+     * The number the next save in this series dated `$date` (a calendar date,
+     * Y-m-d; today in Manila when null) would get, or null when no super admin
+     * is active. A placement dated Dec 31 and entered on Jan 1 saves in the
+     * year before's series, so the preview follows the date the form carries.
+     * Writes and locks nothing.
      */
-    public function next(string $prefix): ?string
+    public function next(string $prefix, ?string $date = null): ?string
     {
         $owner = $this->owner();
 
@@ -92,7 +95,7 @@ final class CashReferences
             return null;
         }
 
-        $year = (int) now()->setTimezone(self::TIMEZONE)->year;
+        $year = $date === null ? (int) now()->setTimezone(self::TIMEZONE)->year : self::year($date);
         $last = DB::table(self::TABLE)->where('prefix', $prefix)->where('owner_id', $owner)->where('year', $year)->value('last_number');
 
         return self::format($prefix, $owner, $year, (int) $last + 1);

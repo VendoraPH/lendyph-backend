@@ -18,15 +18,18 @@ use Tests\Traits\SetupLendyPH;
  * Finish run round 2, decision 11: a deposit, withdrawal or opening deposit
  * paid by bank transfer, GCash or Maya whose reference is already on record
  * for the same method anywhere in the cooperative (a savings transaction or a
- * time deposit placement) is refused with a 422 that names only the
- * reference. Cash, auto-credit and the system's own rows are exempt. New
- * records only: a row that was reversed frees its reference.
+ * time deposit placement, or a withdrawal still waiting for its checker) is
+ * refused with a 422 that names only the reference. Cash, auto-credit and
+ * the system's own rows are exempt. New records only: a row that was reversed,
+ * or a withdrawal request rejected, frees its reference.
  */
 class DuplicateReferenceTest extends TestCase
 {
     use SavingsAccountsTestHelpers, SetupLendyPH;
 
     private const TAKEN = 'Reference "GC-778899" is already on record for another GCash transaction. Check the reference and enter the right one.';
+
+    private const BDO_9 = 'Reference "BDO-9" is already on record for another bank transfer. Check the reference and enter the right one.';
 
     private SavingsAccount $mine;
 
@@ -90,18 +93,45 @@ class DuplicateReferenceTest extends TestCase
         $this->assertFalse(SavingsAccount::query()->where('product_id', $product->id)->exists());
     }
 
+    public function test_a_withdrawal_waiting_for_its_checker_holds_its_reference_and_still_posts_with_it(): void
+    {
+        $this->actingAs($this->teller());
+        $approval = $this->withdrawal($this->mine, 'bank_transfer', 'BDO-9', '10000.01')->assertStatus(202)->json('data.approval');
+
+        $this->deposit($this->theirs, 'bank_transfer', 'BDO-9')->assertUnprocessable()->assertJsonPath('errors.reference.0', self::BDO_9);
+        $this->withdrawal($this->mine, 'bank_transfer', 'bdo-9')->assertUnprocessable()
+            ->assertJsonPath('errors.reference.0', 'Reference "bdo-9" is already on record for another bank transfer. Check the reference and enter the right one.');
+        $this->deposit($this->theirs, 'gcash', 'BDO-9')->assertCreated();
+
+        $this->actingAs($this->checker());
+        $this->postJson("/api/savings/approvals/{$approval['id']}/approve")->assertOk()->assertJsonPath('data.status', 'approved');
+        $this->assertSame('BDO-9', SavingsTransaction::query()->where('type', 'withdrawal')->sole()->external_reference);
+    }
+
+    public function test_a_rejected_withdrawal_frees_its_reference(): void
+    {
+        $this->actingAs($this->teller());
+        $approval = $this->withdrawal($this->mine, 'bank_transfer', 'BDO-9', '10000.01')->assertStatus(202)->json('data.approval');
+
+        $this->actingAs($this->checker());
+        $this->postJson("/api/savings/approvals/{$approval['id']}/reject", ['reason' => 'Wrong account'])->assertOk();
+
+        $this->actingAs($this->admin);
+        $this->deposit($this->theirs, 'bank_transfer', 'BDO-9')->assertCreated();
+    }
+
     public function test_an_approved_withdrawal_is_checked_again_when_it_posts(): void
     {
         $this->actingAs($this->teller());
         $approval = $this->withdrawal($this->mine, 'bank_transfer', 'BDO-9', '10000.01')->assertStatus(202)->json('data.approval');
 
-        // Taken while the withdrawal waited for its checker.
-        $this->deposit($this->theirs, 'bank_transfer', 'BDO-9')->assertCreated();
+        // Taken while the withdrawal waited, by a writer that never checks (an auto-credit run does this).
+        DB::transaction(fn () => app(SavingsLedger::class)->credit($this->theirs, 'deposit', 25_000, ['date' => '2026-11-10', 'method' => 'bank_transfer', 'external_reference' => 'BDO-9']));
 
         $this->actingAs($this->checker());
         $this->postJson("/api/savings/approvals/{$approval['id']}/approve")
             ->assertUnprocessable()
-            ->assertJsonPath('errors.reference.0', 'Reference "BDO-9" is already on record for another bank transfer. Check the reference and enter the right one.');
+            ->assertJsonPath('errors.reference.0', self::BDO_9);
         $this->assertSame(0, SavingsTransaction::query()->where('type', 'withdrawal')->count());
     }
 

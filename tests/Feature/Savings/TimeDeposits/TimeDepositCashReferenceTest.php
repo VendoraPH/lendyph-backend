@@ -122,6 +122,19 @@ class TimeDepositCashReferenceTest extends TestCase
         $this->getJson('/api/savings/time-deposits/cash-reference/next')->assertJsonPath('data.reference_number', "TD-{$owner}-2026-0002");
     }
 
+    public function test_the_preview_takes_the_placement_date(): void
+    {
+        Carbon::setTestNow(Carbon::parse('2027-01-01 10:00:00', 'Asia/Manila'));
+        $owner = $this->owner();
+        $this->place(['placement_date' => '2026-12-31'])->assertCreated()->assertJsonPath('data.reference', "TD-{$owner}-2026-0001");
+
+        $this->getJson('/api/savings/time-deposits/cash-reference/next?date=2026-12-31')->assertOk()->assertJsonPath('data.reference_number', "TD-{$owner}-2026-0002");
+        $this->getJson('/api/savings/time-deposits/cash-reference/next')->assertOk()->assertJsonPath('data.reference_number', "TD-{$owner}-2027-0001");
+        $this->getJson('/api/savings/time-deposits/cash-reference/next?date=20261231')
+            ->assertUnprocessable()
+            ->assertJsonPath('errors.date.0', 'The placement date must be a date written as year-month-day, such as 2026-11-24.');
+    }
+
     public function test_the_preview_needs_the_permission_to_place(): void
     {
         $this->actingAs($this->userWith(['savings:view']));
