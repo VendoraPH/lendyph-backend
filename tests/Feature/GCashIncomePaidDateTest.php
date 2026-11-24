@@ -57,8 +57,9 @@ class GCashIncomePaidDateTest extends TestCase
 
     /**
      * Paid at 00:30 on Nov 2 in Manila, which is 16:30 on Nov 1 in UTC (the
-     * API prints `paid_at` in UTC). The report and the journal both put it on
-     * Nov 2, the Manila day, never on the UTC date.
+     * API prints `paid_at` with its +08:00 offset; in UTC the moment falls on
+     * Nov 1). The report and the journal both put it on Nov 2, the Manila
+     * day, never on the UTC date.
      */
     public function test_the_paid_day_is_the_manila_day_not_the_utc_date(): void
     {
