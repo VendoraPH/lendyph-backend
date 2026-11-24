@@ -33,7 +33,7 @@ use OpenApi\Attributes as OA;
         new OA\Property(property: 'rejection_reason', type: 'string', nullable: true, description: 'Reason captured when a registration is rejected'),
         new OA\Property(property: 'possible_duplicate', type: 'object', nullable: true, description: 'The record a public registration may duplicate, linked by the server (the public form is never refused as a duplicate). '
             .'Present only on GET /borrowers/{id}; null when there is none. A caller with `borrowers:view` who can see that record\'s branch gets '
-            .'`{visible: true, id, borrower_code, full_name, is_member, reason, message}`, with the reason and message in words; anyone else gets '
+            .'`{visible: true, id, borrower_code, full_name, is_member, status, reason, message}`, with the reason and message in words; anyone else gets '
             .'`{visible: false, message}`, which names nobody. Approving such a registration needs `acknowledge_possible_duplicate: true`.'),
         new OA\Property(property: 'is_imported', type: 'boolean', description: 'True when this member was carried in by a CSV migration rather than registered through this system. '
             .'Imported members are created `active` with no documents and no KYC review, so `approved_at`/`approved_by` on them record who '

@@ -11,6 +11,8 @@ use App\Http\Middleware\Portal\EnsurePortalToken;
 use App\Http\Middleware\Portal\RequirePortalTerms;
 use App\Http\Middleware\PublicApply\EnsureOriginationEnabled;
 use App\Http\Middleware\PublicApply\PublicApplyNoStore;
+use App\Http\Middleware\ReceiptShare\EnsureReceiptShareLinksEnabled;
+use App\Http\Middleware\ReceiptShare\PublicReceiptHeaders;
 use App\Http\Middleware\RejectInvalidUtf8;
 use App\Http\Middleware\RequirePasswordChange;
 use App\Http\Middleware\SecurityHeaders;
@@ -111,6 +113,13 @@ return Application::configure(basePath: dirname(__DIR__))
         // request answers 404 (never 429) and every answer is no-store.
         $middleware->prependToPriorityList(ThrottleRequests::class, PublicApplyNoStore::class);
         $middleware->prependToPriorityList(ThrottleRequests::class, EnsureOriginationEnabled::class);
+
+        // A shared receipt's headers and server switch too (finish run round 2,
+        // decision 6): while RECEIPT_SHARE_LINKS_ENABLED is off every share link
+        // route answers its 404 (never 429), and every public receipt answer,
+        // a 429 included, is no-store.
+        $middleware->prependToPriorityList(ThrottleRequests::class, PublicReceiptHeaders::class);
+        $middleware->prependToPriorityList(ThrottleRequests::class, EnsureReceiptShareLinksEnabled::class);
 
         // Keep the three post-auth gates AHEAD of SubstituteBindings.
         //

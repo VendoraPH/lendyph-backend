@@ -412,6 +412,9 @@ class TimezoneShift
         // Phase 6 MB-BE5 (2026-11-20): interbranch transfers, well after the
         // cutover.
         'interbranch_transfers' => ['approved_at', 'cancelled_at', 'created_at', 'received_at', 'rejected_at', 'reversed_at', 'updated_at'],
+        // Receipt share links (finish run round 2, 2026-11-24), well after the
+        // cutover.
+        'receipt_share_links' => ['created_at', 'expires_at', 'revoked_at', 'updated_at'],
         // The shift's own bookkeeping, written after the cutover by definition.
         'timezone_shifts' => ['completed_at', 'cutover_at', 'started_at'],
     ];
