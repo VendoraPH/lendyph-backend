@@ -26,9 +26,11 @@ final class PossibleDuplicatePresenter
     /**
      * The registration's link for $viewer, or null when it has none.
      * `is_member` is false when the match is itself a registration (pending
-     * or rejected), so the screen links to its review instead.
+     * or rejected), so the screen links to its review instead and names it as
+     * the Registrations list does, by its `status` (stored value; the screen
+     * words it).
      *
-     * @return array{visible: true, id: int, borrower_code: string, full_name: string, is_member: bool, reason: string, message: string}|array{visible: false, message: string}|null
+     * @return array{visible: true, id: int, borrower_code: string, full_name: string, is_member: bool, status: string, reason: string, message: string}|array{visible: false, message: string}|null
      */
     public static function present(Borrower $registration, ?User $viewer): ?array
     {
@@ -50,6 +52,7 @@ final class PossibleDuplicatePresenter
             'borrower_code' => $match->borrower_code,
             'full_name' => $match->full_name,
             'is_member' => ! in_array($match->status, Borrower::NON_MEMBER_STATUSES, true),
+            'status' => $match->status,
             'reason' => $reason,
             'message' => sprintf('Possible duplicate of %s (%s): %s.', $match->borrower_code, $match->full_name, lcfirst($reason)),
         ];
