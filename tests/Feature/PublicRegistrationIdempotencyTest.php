@@ -103,19 +103,22 @@ it('issues a working upload token on the retry', function () {
     expect(Borrower::find($borrowerId)->photo_path)->not->toBeNull();
 });
 
-it('still rejects a genuine duplicate applicant that carries no key', function () {
-    // The guard that proves idempotency did not quietly defang
-    // NoDuplicateBorrower: without a key there is nothing to ignore, so a
-    // second person with the same name is still refused.
-    $this->postJson('/api/borrowers', idempotentApplicantPayload())->assertCreated();
+it('still flags a genuine duplicate applicant that carries no key', function () {
+    // The guard that proves idempotency did not quietly defang the duplicate
+    // check: without a key there is nothing to reuse, so a second person with
+    // the same name is a new registration linked to the first for the
+    // reviewer. A public registration is never refused as a duplicate
+    // (finish run round 2, decision 3).
+    $first = $this->postJson('/api/borrowers', idempotentApplicantPayload())->assertCreated();
 
-    $this->postJson('/api/borrowers', idempotentApplicantPayload([
+    $second = $this->postJson('/api/borrowers', idempotentApplicantPayload([
         'email' => 'someone.else@example.com',
         'contact_number' => '09171239877',
-    ]))->assertUnprocessable()
-        ->assertJsonValidationErrors(['first_name']);
+    ]))->assertCreated();
 
-    expect(Borrower::where('last_name', 'Bautista')->count())->toBe(1);
+    expect($second->json('data.id'))->not->toBe($first->json('data.id'));
+    expect(Borrower::find($second->json('data.id'))->possible_duplicate_of_id)->toBe($first->json('data.id'));
+    expect(Borrower::where('last_name', 'Bautista')->count())->toBe(2);
 });
 
 it('honours a key right up to the edge of the submission window', function () {
@@ -149,12 +152,20 @@ it('ignores a key whose submission has aged out of the window', function () {
 
     BorrowerSubmissionToken::query()->delete();
 
-    // Normal validation applies again, so the applicant's own stale row is now
-    // just a duplicate.
+    // Normal validation applies again. The stale row's email is taken, so the
+    // same payload is refused on it; its name is never refused as a duplicate
+    // (finish run round 2, decision 3).
     $this->postJson('/api/borrowers', $payload)
         ->assertUnprocessable()
-        ->assertJsonValidationErrors(['first_name']);
+        ->assertJsonValidationErrors(['email'])
+        ->assertJsonMissingValidationErrors(['first_name']);
 
+    // Without the taken email it is a new registration, and the applicant's
+    // own stale row is now just its possible duplicate.
+    $retry = $this->postJson('/api/borrowers', [...$payload, 'email' => null])->assertCreated();
+
+    expect($retry->json('data.id'))->not->toBe($borrowerId);
+    expect(Borrower::find($retry->json('data.id'))->possible_duplicate_of_id)->toBe($borrowerId);
     expect(BorrowerSubmissionToken::where('borrower_id', $borrowerId)->count())->toBe(0);
     expect(Borrower::where('registration_uuid', $key)->count())->toBe(1);
 });
@@ -188,10 +199,11 @@ it('never hands back an approved member for a key that points at one', function 
     expect($member->fresh()->first_name)->not->toBe('Marites');
 });
 
-it('applies normal duplicate validation when a key points at an approved member', function () {
+it('applies the normal duplicate check when a key points at an approved member', function () {
     // Same probe, but with the member's own details. The key is not honoured,
-    // so NoDuplicateBorrower runs with nothing to ignore and refuses — and the
-    // anonymous message still names nobody.
+    // so the duplicate check runs with nothing to ignore: the probe is saved
+    // as a new registration linked to the member for the reviewer, and its
+    // answer names nobody (finish run round 2, decision 3).
     $key = (string) Str::uuid();
 
     $member = Borrower::factory()->create([
@@ -207,10 +219,12 @@ it('applies normal duplicate validation when a key points at an approved member'
     $response = $this->postJson('/api/borrowers', idempotentApplicantPayload([
         'registration_uuid' => $key,
         'email' => 'probe@example.com',
-    ]))->assertUnprocessable()
-        ->assertJsonValidationErrors(['first_name']);
+    ]))->assertCreated();
 
-    expect($response->json('errors.first_name.0'))->not->toContain($member->borrower_code);
+    expect($response->json('data.id'))->not->toBe($member->id);
+    expect($response->getContent())->not->toContain($member->borrower_code);
+    expect(Borrower::find($response->json('data.id'))->possible_duplicate_of_id)->toBe($member->id);
+    expect(Borrower::find($response->json('data.id'))->registration_uuid)->toBeNull();
     expect(BorrowerSubmissionToken::where('borrower_id', $member->id)->count())->toBe(0);
 });
 
@@ -326,9 +340,10 @@ it('will not honour a key when any single identity field differs', function (arr
         array_merge(['registration_uuid' => $key], $override),
     ));
 
-    // The outcome varies — a changed birthdate still trips NoDuplicateBorrower
-    // on the identical name, a changed name does not. What must never vary is
-    // that the stored applicant is neither returned nor handed a token.
+    // The new registration varies — a changed birthdate still matches the
+    // identical name and is linked to it as a possible duplicate, a changed
+    // name is not. What must never vary is that the stored applicant is
+    // neither returned nor handed a token.
     expect($response->json('data.id'))->not->toBe($applicant->id);
     expect(BorrowerSubmissionToken::where('borrower_id', $applicant->id)->count())->toBe(0);
 })->with([

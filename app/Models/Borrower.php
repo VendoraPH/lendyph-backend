@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Services\BorrowerDuplicateDetector;
 use App\Services\BranchAccess;
 use App\Services\LikePattern;
 use App\Services\SequenceCode;
@@ -59,6 +60,19 @@ class Borrower extends Model
      */
     public const CODE_PREFIX = 'BRW';
 
+    /**
+     * The audit trail names a registration's possible duplicate by member code
+     * only (describeAuditEvent()), never by the link's id.
+     *
+     * @var list<string>
+     */
+    protected array $auditRedacted = ['possible_duplicate_of_id'];
+
+    /**
+     * `possible_duplicate_of_id` and `possible_duplicate_reason` are left out on
+     * purpose: only the server sets them (BorrowerRegistration), on a public
+     * registration that may duplicate a record on file.
+     */
     protected $fillable = [
         'registration_uuid',
         'external_account_no',
@@ -205,6 +219,48 @@ class Borrower extends Model
     public function rejectedBy(): BelongsTo
     {
         return $this->belongsTo(User::class, 'rejected_by');
+    }
+
+    /**
+     * The record a public registration may duplicate, linked by the server when
+     * the duplicate check matched it (finish run round 2, decision 3). Only a
+     * reviewer who can see that record is shown who it is
+     * (PossibleDuplicatePresenter).
+     */
+    public function possibleDuplicateOf(): BelongsTo
+    {
+        return $this->belongsTo(self::class, 'possible_duplicate_of_id');
+    }
+
+    /**
+     * The description on a member's automatic audit rows, only for a public
+     * registration saved as a possible duplicate: its creation and its approval
+     * name that record by member code only (`$auditRedacted` keeps the link's
+     * id out). Other rows keep no description, as before.
+     */
+    public function describeAuditEvent(string $action): ?string
+    {
+        if ($this->possible_duplicate_of_id === null) {
+            return null;
+        }
+
+        $code = $this->possibleDuplicateOf?->borrower_code;
+
+        if ($action === 'created') {
+            return sprintf(
+                'Public registration saved as a possible duplicate of %s (%s).',
+                $code,
+                lcfirst(BorrowerDuplicateDetector::reasonInWords($this->possible_duplicate_reason)),
+            );
+        }
+
+        $approved = $action === 'updated'
+            && ($this->getChanges()['status'] ?? null) === 'active'
+            && $this->getOriginal('status') === 'pending';
+
+        return $approved
+            ? sprintf('Registration approved after the reviewer checked the possible duplicate of %s.', $code)
+            : null;
     }
 
     public function coMakers(): HasMany

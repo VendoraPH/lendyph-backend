@@ -6,6 +6,17 @@ use App\Models\Borrower;
 
 class BorrowerDuplicateDetector
 {
+    /** Tier 1 matched: the same first, middle and last name. */
+    public const SAME_NAME = 'same_name';
+
+    /** Tier 2 matched: a name a slight spelling apart, and the same birthdate. */
+    public const SIMILAR_NAME_SAME_BIRTHDATE = 'similar_name_same_birthdate';
+
+    private const REASON_WORDS = [
+        self::SAME_NAME => 'Same full name',
+        self::SIMILAR_NAME_SAME_BIRTHDATE => 'Similar name and the same birthdate',
+    ];
+
     /**
      * Max Levenshtein distance (character edits) considered a "slight spelling difference".
      * A distance ≤ 2 catches typos like "Jaun" vs "Juan" while rejecting clearly different names.
@@ -46,6 +57,46 @@ class BorrowerDuplicateDetector
         }
 
         return $this->fuzzyMatch($normalizedFirst, $normalizedMiddle, $normalizedLast, $birthdate, $ignoreId);
+    }
+
+    /**
+     * The public registration's check (finish run round 2, decision 3): the
+     * same two tiers as findDuplicate(), with the tier that matched, so the
+     * registration can be saved linked to the match instead of refused.
+     *
+     * Both tiers always run, even once the first has matched, so a
+     * registration that matches costs the same queries as one that doesn't
+     * and its answer can't be told apart by its timing.
+     *
+     * @return array{borrower: Borrower, reason: string}|null
+     */
+    public function findPossibleDuplicate(string $firstName, ?string $middleName, string $lastName, ?string $birthdate): ?array
+    {
+        $normalizedFirst = $this->normalize($firstName);
+        $normalizedMiddle = $this->normalize($middleName ?? '');
+        $normalizedLast = $this->normalize($lastName);
+
+        if ($normalizedFirst === '' || $normalizedLast === '') {
+            return null;
+        }
+
+        $exact = $this->exactMatch($normalizedFirst, $normalizedMiddle, $normalizedLast, null);
+        $similar = $this->fuzzyMatch($normalizedFirst, $normalizedMiddle, $normalizedLast, $birthdate, null);
+
+        return match (true) {
+            $exact !== null => ['borrower' => $exact, 'reason' => self::SAME_NAME],
+            $similar !== null => ['borrower' => $similar, 'reason' => self::SIMILAR_NAME_SAME_BIRTHDATE],
+            default => null,
+        };
+    }
+
+    /**
+     * A stored match reason in words ("Same full name"); an unknown one reads
+     * as a similar name.
+     */
+    public static function reasonInWords(?string $reason): string
+    {
+        return self::REASON_WORDS[$reason] ?? 'Similar name';
     }
 
     private function exactMatch(string $first, string $middle, string $last, ?int $ignoreId): ?Borrower

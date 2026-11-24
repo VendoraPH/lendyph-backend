@@ -10,6 +10,7 @@ use App\Http\Requests\Borrower\StoreBorrowerRequest;
 use App\Http\Requests\Borrower\UpdateBorrowerRequest;
 use App\Http\Requests\Document\UploadFileTypes;
 use App\Http\Resources\BorrowerResource;
+use App\Http\Resources\PossibleDuplicatePresenter;
 use App\Models\Borrower;
 use App\Services\BorrowerLoanSummaryService;
 use App\Services\BorrowerPurgeService;
@@ -218,12 +219,14 @@ Create a new borrower profile.
 - `pledge_amount` max `9,999,999.99`
 - `birthdate` must be after 1900-01-01 and before today
 
-**Duplicate detection:** the request is rejected with 422 if a borrower with a similar name already exists:
-1. **Exact match** — same normalized first+middle+last (case/whitespace insensitive) → always rejected
+**Duplicate detection:** a borrower matches when one with a similar name already exists:
+1. **Exact match** — same normalized first+middle+last (case/whitespace insensitive)
 2. **Fuzzy match** — Levenshtein distance ≤ 2 on normalized full name, *and* birthdate matches
 
-A signed-in user holding `borrowers:create` may pass `force=true` in the body to bypass the duplicate check (frontend "Create Anyway" flow). An anonymous caller's `force` is ignored: the public registration form is always checked.
-On a duplicate rejection, the error message in `errors.first_name[0]` contains the matched borrower's code and DOB (staff only; anonymous callers get a generic message).
+A signed-in (staff) create that matches is rejected with 422. A signed-in user holding `borrowers:create` may pass `force=true` in the body to bypass the duplicate check (frontend "Create Anyway" flow).
+On a duplicate rejection, the error message in `errors.first_name[0]` contains the matched borrower's code and DOB when the caller can see that borrower's branch, and a generic message otherwise.
+
+An anonymous (public) registration is **never** rejected as a duplicate, and its `force` is ignored: it is always checked, and a match is saved pending with a server-set link to the matched record (`possible_duplicate` on GET /borrowers/{id}, shown only to a reviewer who can see that record). The answer is the same 201 whether or not it matched.
 
 **Idempotency (public registration):** an anonymous caller may send a client-generated `registration_uuid`
 (UUID **v4**, e.g. the browser's `crypto.randomUUID()`). A retry is honoured — same 201 shape, same borrower
@@ -365,7 +368,8 @@ DESC,
     {
         $this->authorize('borrowers:view');
 
-        $borrower->load('branch', 'coMakers.documents', 'documents', 'approvedBy', 'rejectedBy');
+        // `possibleDuplicateOf`: the registration review reads the link here.
+        $borrower->load('branch', 'coMakers.documents', 'documents', 'approvedBy', 'rejectedBy', 'possibleDuplicateOf');
 
         return new BorrowerResource($borrower);
     }
@@ -551,6 +555,7 @@ Approve a borrower whose status is `pending` (public-registration review).
 - Requires at least one valid ID (`type=valid_id` document) on file — returns 422 otherwise.
 - Returns 422 if the borrower is not currently `pending`. Use `/reactivate` to re-activate a previously-active member — keeping the two distinct preserves the audit distinction between "approved an application" and "reactivated a member".
 - `branch_id` (optional): the member's branch, one of the caller's (any branch with `branches:view_all`). Required (422) when the registration has no branch; when it already has one, it may only repeat it (422 otherwise), so approval never moves a member.
+- `acknowledge_possible_duplicate` (boolean): required as `true` when the registration was saved as a possible duplicate of a record on file (its `possible_duplicate`); otherwise 422 on `possible_duplicate`, in words, once every other check passes. It names the record only to a caller who can see it.
 DESC,
         tags: ['Borrowers'],
         security: [['sanctum' => []]],
@@ -562,6 +567,7 @@ DESC,
             content: new OA\JsonContent(
                 properties: [
                     new OA\Property(property: 'branch_id', type: 'integer', nullable: true, description: 'The member\'s branch, one of the caller\'s. Required when the registration has none; otherwise it must repeat the registration\'s branch.'),
+                    new OA\Property(property: 'acknowledge_possible_duplicate', type: 'boolean', example: true, description: 'The reviewer checked the record this registration may duplicate. Required as true when it has one.'),
                 ],
             ),
         ),
@@ -570,7 +576,7 @@ DESC,
             new OA\Response(response: 401, description: 'Unauthenticated'),
             new OA\Response(response: 403, description: 'Forbidden'),
             new OA\Response(response: 404, description: 'Not found, or in a branch the caller can\'t see'),
-            new OA\Response(response: 422, description: 'Borrower is not in pending status, has no valid ID on file, has no branch and none was chosen, or the chosen branch isn\'t the caller\'s or differs from the registration\'s'),
+            new OA\Response(response: 422, description: 'Borrower is not in pending status, has no valid ID on file, has no branch and none was chosen, the chosen branch isn\'t the caller\'s or differs from the registration\'s, or it may be a duplicate and `acknowledge_possible_duplicate` wasn\'t true'),
         ],
     )]
     public function approveRegistration(ApproveRegistrationRequest $request, Borrower $borrower): BorrowerResource
@@ -604,6 +610,15 @@ DESC,
         if ($borrower->branch_id !== null && $branchId !== null && (int) $branchId !== (int) $borrower->branch_id) {
             throw ValidationException::withMessages([
                 'branch_id' => 'This registration already belongs to '.($borrower->branch?->name ?? 'another branch').'. Approve it there; moving a member is done from the member\'s record.',
+            ]);
+        }
+
+        // A public registration saved as a possible duplicate (finish run round
+        // 2, decision 3) is approved only once the reviewer confirms they
+        // checked it. Asked last, so it never hides a check that would fail.
+        if ($borrower->possible_duplicate_of_id !== null && ! $request->boolean('acknowledge_possible_duplicate')) {
+            throw ValidationException::withMessages([
+                'possible_duplicate' => PossibleDuplicatePresenter::approvalRefusal($borrower, $request->user()),
             ]);
         }
 

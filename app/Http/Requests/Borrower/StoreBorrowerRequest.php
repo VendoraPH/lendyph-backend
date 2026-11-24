@@ -101,12 +101,12 @@ class StoreBorrowerRequest extends FormRequest
         $firstNameRules = ['required', 'string', 'max:255'];
 
         // Staff may skip the duplicate check with "Create Anyway" (forced()).
-        if (! $this->forced()) {
-            $firstNameRules[] = new NoDuplicateBorrower(
-                ignoreId: $ignoreId,
-                revealDetails: (bool) $this->user(),
-                viewer: $this->user(),
-            );
+        // A public registration is never refused as a duplicate (finish run
+        // round 2, decision 3): BorrowerRegistration checks it under the lock
+        // and saves it linked to the record it may duplicate, so the answer
+        // is the same whether or not the person is on file.
+        if ($this->user() !== null && ! $this->forced()) {
+            $firstNameRules[] = new NoDuplicateBorrower(revealDetails: true, viewer: $this->user());
         }
 
         // Anonymous public-registration applicants may omit branch_id — the
@@ -158,8 +158,9 @@ class StoreBorrowerRequest extends FormRequest
      * Whether this create skips the duplicate-member check: `force`, the
      * frontend's "Create Anyway" after staff have seen the match, sent by a
      * signed-in user holding `borrowers:create`. An anonymous caller's `force`
-     * is ignored, so a public registration is always checked, here and again
-     * under the lock (BorrowerRegistration::refuseDuplicateUnderLock()).
+     * is ignored, so a public registration is always checked under the lock
+     * and linked to its possible duplicate
+     * (BorrowerRegistration::checkDuplicateUnderLock()).
      */
     public function forced(): bool
     {

@@ -10,21 +10,22 @@ use Illuminate\Contracts\Validation\DataAwareRule;
 use Illuminate\Contracts\Validation\ValidationRule;
 
 /**
- * Rejects a borrower create/update if a similar borrower already exists.
+ * Rejects a staff borrower create/update if a similar borrower already exists.
  *
  * Attached to the `first_name` field so the error surfaces there in the standard
  * `{errors: {first_name: [...]}}` validation envelope. Staff can pass
- * `force=true` to bypass this rule; on a create it takes `borrowers:create`,
- * and an anonymous caller's `force` is ignored (StoreBorrowerRequest::forced()).
+ * `force=true` to bypass this rule; on a create it takes `borrowers:create`
+ * (StoreBorrowerRequest::forced()).
  *
- * The failure message is deliberately two-tiered. Public registration is
- * anonymous, and the exact-match tier needs only first+middle+last name — so
- * naming the match would let anyone confirm that a given person borrows here and
- * harvest their date of birth and borrower code. A DOB is an identity-theft
- * primitive and a standard account-recovery answer, and because the row is only
- * written when validation *passes*, a probe leaves no trace. Operators get the
- * detail they need to resolve the collision; anonymous applicants get a generic
- * message that tells them what to do without confirming anything.
+ * Not for the anonymous public registration (finish run round 2, decision 3).
+ * Even a refusal that names nobody let anyone confirm that a given person is on
+ * file and probe their date of birth, a probe that left no trace. So a public
+ * registration is never refused as a duplicate: BorrowerRegistration saves it
+ * pending, linked to the record it may duplicate, for the reviewer.
+ *
+ * The failure message is two-tiered. Staff who may see the match's branch get
+ * the detail they need to resolve the collision; anyone else learns only that
+ * a similar member exists, and the default fails closed to that.
  */
 class NoDuplicateBorrower implements DataAwareRule, ValidationRule
 {
