@@ -18,6 +18,7 @@ use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Testing\TestResponse;
+use Mockery\MockInterface;
 use Tests\Feature\Phase6\LoanOrigination\PublicIntake\PublicApplyHelpers;
 use Tests\TestCase;
 
@@ -168,6 +169,22 @@ it('works out the estimate with the loan form\'s own preview, and saves nothing'
         ->and($data['assumptions'])->not->toBeEmpty();
 
     expect(OriginationApplication::query()->sole()->version)->toBe($before);
+});
+
+it('adds the interest to the amount in exact decimals, even an interest figure that floats badly', function () {
+    $preview = app(LoanService::class)->formPreview([
+        'loan_product_id' => $this->product->id, 'principal_amount' => '20000', 'interest_rate' => (string) $this->product->interest_rate,
+        'term' => 6, 'frequency' => 'monthly', 'start_date' => Carbon::now('Asia/Manila')->toDateString(),
+    ]);
+    // As a float, 1200.215 is 1200.21499…, so round(1200.215 * 100) is
+    // 120021. Exactly, half up, it is ₱1,200.22.
+    $preview['amortization']['totals']['interest_due'] = 1200.215;
+    $this->partialMock(LoanService::class, fn (MockInterface $mock) => $mock->shouldReceive('formPreview')->once()->andReturn($preview));
+
+    $this->postJson("/api/public-apply/{$this->link->token}/estimate", [
+        'loan_product_id' => $this->product->id, 'amount' => '20000', 'term' => 6, 'frequency' => 'monthly',
+    ], $this->applicantSession($this->token))->assertOk()
+        ->assertJsonPath('data.total_repayment', '21200.22');
 });
 
 it('refuses an estimate outside the product or for a product the link doesn\'t offer', function () {

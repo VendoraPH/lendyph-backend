@@ -18,7 +18,8 @@ use Illuminate\Validation\ValidationException;
  *
  * - `total_repayment` is the contract total, principal plus interest; the
  *   charges, net proceeds and any share capital build-up are separate (the
- *   Total Payable rule).
+ *   Total Payable rule). It is added up in exact decimals, never through a
+ *   float, and sent as a two-decimal string.
  * - A request can't ask for unbounded work: the term is capped as the
  *   Amortization Calculator caps it (360 months or 10,950 days), and a term
  *   and schedule making more than AmortizationCalculatorService::MAX_PERIODS
@@ -60,8 +61,7 @@ final class PublicEstimate
             throw ValidationException::withMessages(['amount' => $deductions['error']]);
         }
 
-        $principalCentavos = (int) (string) $amount->multipliedBy(100)->toScale(0, RoundingMode::HalfUp);
-        $interestCentavos = (int) round(((float) $schedule['totals']['interest_due']) * 100);
+        $interest = BigDecimal::of((string) $schedule['totals']['interest_due'])->toScale(2, RoundingMode::HalfUp);
         $charges = [...($deductions['items'] ?? []), ...($deductions['configured_fees'] ?? [])];
 
         return [
@@ -70,7 +70,7 @@ final class PublicEstimate
             'frequency' => $frequency,
             'total_interest' => $schedule['totals']['interest_due'],
             'total_charges' => $deductions['total_deductions'] ?? 0,
-            'total_repayment' => ($principalCentavos + $interestCentavos) / 100,
+            'total_repayment' => (string) $amount->toScale(2, RoundingMode::HalfUp)->plus($interest),
             'net_proceeds' => $deductions['net_proceeds'] ?? null,
             'charges' => array_map(fn (array $item) => ['name' => (string) $item['name'], 'amount' => $item['amount']], $charges),
             'schedule' => array_map(fn (array $row) => [

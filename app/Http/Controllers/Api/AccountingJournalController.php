@@ -16,6 +16,7 @@ use App\Services\Accounting\YearEndCloser;
 use App\Services\BranchAccess;
 use App\Services\Branches\BranchRowLock;
 use App\Services\Branches\InterbranchTransferJournalGuard;
+use App\Services\GCashJournalGuard;
 use App\Services\LikePattern;
 use App\Services\Savings\SavingsJournalGuard;
 use Closure;
@@ -288,8 +289,8 @@ class AccountingJournalController extends Controller
                         new OA\Property(property: 'reverses_journal_id', type: 'integer', nullable: true, description: 'On a reversal, the entry it reverses.'),
                         new OA\Property(property: 'reverses_journal_no', type: 'string', nullable: true, example: 'JE-000042', description: 'On a reversal, the number of the entry it reverses; null on every other entry.'),
                         new OA\Property(property: 'reversed_by_journal_id', type: 'integer', nullable: true, description: 'The reversal that undid this entry.'),
-                        new OA\Property(property: 'reversible', type: 'boolean', description: 'False for an entry Savings posted or the reversal of one (reversed from Savings, or not at all); true otherwise (draft and already-reversed checks are unchanged).'),
-                        new OA\Property(property: 'not_reversible_reason', type: 'string', nullable: true, description: 'Why the entry can\'t be reversed here, in words: reverse it from Savings, or, for a time deposit or an account closing, record a correcting journal entry. Null when it can.'),
+                        new OA\Property(property: 'reversible', type: 'boolean', description: 'False for an entry Savings posted or the reversal of one (reversed from Savings, or not at all), a leg of an interbranch transfer (reversed from the transfer) and a GCash Cash In or Cash Out (not reversed); true otherwise (draft and already-reversed checks are unchanged).'),
+                        new OA\Property(property: 'not_reversible_reason', type: 'string', nullable: true, description: 'Why the entry can\'t be reversed here, in words: reverse it from Savings or from the interbranch transfer, or, for a time deposit, an account closing or a GCash Cash In or Cash Out, record a correcting journal entry. Null when it can.'),
                     ]),
                 ]),
             ),
@@ -358,7 +359,7 @@ class AccountingJournalController extends Controller
     #[OA\Post(
         path: '/api/accounting/journals/{id}/reverse',
         summary: 'Reverse a posted entry',
-        description: "Writes a MIRROR entry — every debit becomes a credit against the same account — built from the original's stored lines, and posts it. The original is not edited beyond `status` and `reversed_by_journal_id`, so both halves stay on the record and the pair nets to zero on every statement. Returns the REVERSAL, not the original. Refused with 422 on a draft, on an entry already reversed, on a year-end `closing` entry or the reversal of one (reopen the year instead), and on an entry Savings posted (`savings`, `savings_interest`, `time_deposit`, `time_deposit_settlement`) or the reversal of one: deposits, withdrawals and interest runs are reversed from Savings; time deposit placements and settlements, account-closing payouts and the interest credited at closing can't be reversed (record a correcting journal entry).",
+        description: "Writes a MIRROR entry — every debit becomes a credit against the same account — built from the original's stored lines, and posts it. The original is not edited beyond `status` and `reversed_by_journal_id`, so both halves stay on the record and the pair nets to zero on every statement. Returns the REVERSAL, not the original. Refused with 422 on a draft, on an entry already reversed, on a year-end `closing` entry or the reversal of one (reopen the year instead), and on an entry Savings posted (`savings`, `savings_interest`, `time_deposit`, `time_deposit_settlement`) or the reversal of one: deposits, withdrawals and interest runs are reversed from Savings; time deposit placements and settlements, account-closing payouts and the interest credited at closing can't be reversed (record a correcting journal entry). A GCash Cash In or Cash Out (`cash_in`, `cash_out`) is refused too: GCash has no reversal, so a correcting journal entry fixes one.",
         tags: ['Accounting'],
         security: [['sanctum' => []]],
         parameters: [
@@ -387,6 +388,9 @@ class AccountingJournalController extends Controller
         // An interbranch transfer's leg is reversed from the transfer, both
         // legs together (InterbranchTransferJournalGuard).
         InterbranchTransferJournalGuard::assertReversibleFromJournals($journal);
+        // A GCash Cash In or Cash Out mirrors its transaction, whose charge the
+        // GCash income report counts, and GCash has no reversal (GCashJournalGuard).
+        GCashJournalGuard::assertReversibleFromJournals($journal);
 
         $reversal = $this->inItsBranch($journal, fn (): AccountingJournal => $this->poster->reverse(
             $journal,

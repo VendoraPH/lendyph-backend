@@ -76,6 +76,17 @@ class ErrorReportBuilder
      */
     private const WRITTEN_RESULTS = ['imported', 'matched_existing', 'already_imported'];
 
+    /**
+     * Import failures that belong to one column, by `result_category`, so the
+     * report names that column (its label, and the cell as it arrived) instead
+     * of the whole row. A membership number another member holds is refused
+     * at import, where an earlier row of the same file counts too
+     * (CsvImportProcessor).
+     *
+     * @var array<string, string>
+     */
+    private const RESULT_CATEGORY_FIELDS = ['membership_number_taken' => 'membership_number'];
+
     /** Rows read per chunk when summarising or streaming. */
     private const CHUNK = 500;
 
@@ -468,13 +479,13 @@ class ErrorReportBuilder
                 $issues[] = $this->issue($base, self::SEVERITY_ERROR, [
                     'field' => '__row',
                     'code' => (string) ($row->result_category ?: 'invalid_row'),
-                    'message' => (string) ($row->result_message ?: 'This row was rejected during staging.'),
+                    'message' => (string) ($row->result_message ?: 'This row didn\'t pass the checks before import.'),
                 ], $shape, $normalized, $raw);
             }
 
             if ($row->result === 'failed') {
                 $issues[] = $this->issue($base, self::SEVERITY_ERROR, [
-                    'field' => '__row',
+                    'field' => self::RESULT_CATEGORY_FIELDS[(string) $row->result_category] ?? '__row',
                     'code' => (string) ($row->result_category ?: 'import_failed'),
                     'message' => (string) ($row->result_message ?: 'This row could not be imported.'),
                 ], $shape, $normalized, $raw);

@@ -3,6 +3,7 @@
 namespace App\Http\Requests\Borrower\Concerns;
 
 use App\Models\Borrower;
+use Closure;
 use Illuminate\Validation\Rule;
 
 trait HasBorrowerRules
@@ -71,7 +72,7 @@ trait HasBorrowerRules
                 Rule::unique('borrowers', 'email')->ignore($ignoreId),
             ],
             'employer_or_business' => ['nullable', 'string', 'max:255'],
-            'date_hired' => ['nullable', 'date', 'date_format:Y-m-d', 'after:1900-01-01', 'before_or_equal:today'],
+            'date_hired' => ['nullable', 'date', 'date_format:Y-m-d', 'after:1900-01-01', 'before_or_equal:today', $this->dateHiredNotBeforeBirthdate()],
             'monthly_income' => ['nullable', 'numeric', 'min:0', 'max:99999999.99'],
             'pledge_amount' => ['nullable', 'numeric', 'min:0', 'max:9999999.99'],
 
@@ -151,5 +152,34 @@ trait HasBorrowerRules
             'date_hired.before_or_equal' => 'The date hired cannot be in the future.',
             'membership_date.date_format' => 'The membership date must be a date written as year-month-day, such as 2026-01-15.',
         ];
+    }
+
+    /**
+     * A date hired can't fall before the member's birthdate, as the member
+     * form and the CSV import refuse it (CustomerRowNormalizer): the birthdate
+     * sent with it, or the one on file when an edit leaves it out. Only dates
+     * written year-month-day are compared, so a date written another way gets
+     * its own refusal and no second one here.
+     */
+    private function dateHiredNotBeforeBirthdate(): Closure
+    {
+        return function (string $attribute, mixed $value, Closure $fail): void {
+            $stored = $this->route('borrower');
+            $birthdate = $this->has('birthdate')
+                ? $this->input('birthdate')
+                : ($stored instanceof Borrower ? $stored->birthdate?->toDateString() : null);
+
+            if (self::isCalendarDate($value) && self::isCalendarDate($birthdate) && $value < $birthdate) {
+                $fail('The date hired cannot be before the birthdate.');
+            }
+        };
+    }
+
+    /** A date written year-month-day that is on the calendar. */
+    private static function isCalendarDate(mixed $value): bool
+    {
+        return is_string($value)
+            && preg_match('/^(\d{4})-(\d{2})-(\d{2})$/', $value, $parts) === 1
+            && checkdate((int) $parts[2], (int) $parts[3], (int) $parts[1]);
     }
 }

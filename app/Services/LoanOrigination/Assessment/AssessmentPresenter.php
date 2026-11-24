@@ -27,6 +27,10 @@ use Brick\Math\RoundingMode;
  * when they were entered), and neither counts nor gives back the member's
  * Lendy loans.
  *
+ * `requested_term` is a length in `term_unit`, the loan product's own unit
+ * (months or days), so the screen writes the term without reading the
+ * products.
+ *
  * Public so the application detail (LO-B3) can show the current revision the
  * same way.
  */
@@ -54,6 +58,7 @@ final class AssessmentPresenter
             'loan_product_name' => $assessment->loanProduct?->name,
             'requested_amount' => self::number((string) $assessment->requested_amount),
             'requested_term' => $assessment->requested_term,
+            'term_unit' => $assessment->loanProduct?->term_unit?->value,
             'frequency' => $assessment->frequency,
             'start_date' => $assessment->start_date?->toDateString(),
             'result' => $assessment->result,
