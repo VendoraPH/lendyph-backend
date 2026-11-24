@@ -13,7 +13,7 @@ use Tests\Traits\SetupLendyPH;
 
 /**
  * On two real connections: a branch closed after the request's own check
- * passed, but before a walk-in's or a member's GCash transaction began, is
+ * passed, but before a walk-in's or a member's GCash transaction, or a mark-paid, began, is
  * seen by the re-check under the branch row lock, and nothing is saved
  * (Finish run round 2, decision 4).
  *
@@ -84,6 +84,23 @@ class GCashWalkInBranchClosureRaceTest extends TestCase
 
         $this->assertTrue($closed, 'the branch closed between the check and the write');
         $this->assertSame(0, GCashTransaction::query()->where('borrower_id', $member->id)->count());
+    }
+
+    public function test_a_branch_closed_after_validation_refuses_marking_a_pending_cash_in_paid(): void
+    {
+        $far = Branch::factory()->create(['name' => 'Far Branch', 'code' => 'FAR', 'status' => Branch::STATUS_SUSPENDED]);
+        $tx = GCashTransaction::factory()->forNonMember(GCashNonMember::factory()->create())->create([
+            'branch_id' => $far->id, 'type' => 'cash_in', 'status' => 'pending', 'transactor_user_id' => $this->admin->id,
+        ]);
+        $this->closeOnTheOtherConnectionBeforeTheWrite($far, $closed);
+
+        $this->patchJson("/api/gcash/transactions/{$tx->id}/paid")
+            ->assertUnprocessable()
+            ->assertJsonPath('errors.branch.0', 'Branch "Far Branch" (FAR) is closed, so nothing new can be added there.');
+
+        $this->assertTrue($closed, 'the branch closed between the check and the write');
+        $this->assertSame('pending', $tx->fresh()->status);
+        $this->assertNull($tx->fresh()->paid_at);
     }
 
     /** Close $branch on the other connection, committed, just before this connection's first transaction begins. */

@@ -83,10 +83,10 @@ class GCashWalkInBranchLockTest extends TestCase
 
         $this->record()->assertCreated();
 
-        $branchLock = array_key_first(array_filter($locks, fn (string $sql): bool => str_contains($sql, 'from `branches`') && str_contains($sql, 'for update')));
+        $branchLock = array_key_first(array_filter($locks, fn (string $sql): bool => str_contains($sql, 'from `branches`') && str_contains($sql, 'lock in share mode')));
         $referenceLock = array_key_first(array_filter($locks, fn (string $sql): bool => str_contains($sql, 'from `gcash_transactions`') && str_contains($sql, '`reference_no` like')));
 
-        $this->assertNotNull($branchLock, 'the branch row is locked FOR UPDATE');
+        $this->assertNotNull($branchLock, 'the branch row is locked FOR SHARE');
         $this->assertNotNull($referenceLock, 'the reference lock still runs');
         $this->assertLessThan($referenceLock, $branchLock, 'the branch row comes first, as the closure takes it');
     }
@@ -95,7 +95,7 @@ class GCashWalkInBranchLockTest extends TestCase
     {
         $locked = false;
         DB::listen(function (QueryExecuted $query) use (&$locked): void {
-            $locked = $locked || (str_contains($query->sql, 'from `branches`') && str_contains($query->sql, 'for update'));
+            $locked = $locked || (str_contains($query->sql, 'from `branches`') && (str_contains($query->sql, 'lock in share mode') || str_contains($query->sql, 'for update')));
         });
 
         $this->postJson('/api/gcash/transactions', ['gcash_non_member_id' => $this->walkIn->id, 'branch_id' => null, 'type' => 'cash_in', 'amount' => 1200])
@@ -136,14 +136,64 @@ class GCashWalkInBranchLockTest extends TestCase
         $this->recordForMember($member)->assertCreated();
 
         $memberLock = array_key_first(array_filter($locks, fn (array $q): bool => str_contains($q[0], 'from `borrowers`') && $q[1] === [$member->id]));
-        $branchLock = array_key_first(array_filter($locks, fn (array $q): bool => str_contains($q[0], 'from `branches`') && str_contains($q[0], 'for update') && $q[1] === [$this->far->id]));
+        $branchLock = array_key_first(array_filter($locks, fn (array $q): bool => str_contains($q[0], 'from `branches`') && str_contains($q[0], 'lock in share mode') && $q[1] === [$this->far->id]));
         $referenceLock = array_key_first(array_filter($locks, fn (array $q): bool => str_contains($q[0], 'from `gcash_transactions`') && str_contains($q[0], '`reference_no` like')));
 
         $this->assertNotNull($memberLock, "the member's row is read with a lock");
-        $this->assertNotNull($branchLock, "the member's branch row is locked FOR UPDATE");
+        $this->assertNotNull($branchLock, "the member's branch row is locked FOR SHARE");
         $this->assertNotNull($referenceLock, 'the reference lock still runs');
         $this->assertLessThan($branchLock, $memberLock, 'the member comes before the branch, as MemberTransfer takes them');
         $this->assertLessThan($referenceLock, $branchLock, 'the branch row comes before the GCash rows');
+    }
+
+    public function test_marking_paid_a_pending_cash_in_in_a_branch_waiting_to_close_is_refused_in_the_same_words(): void
+    {
+        $walkIn = GCashTransaction::factory()->forNonMember($this->walkIn)->create([
+            'branch_id' => $this->far->id, 'type' => 'cash_in', 'status' => 'pending', 'transactor_user_id' => $this->admin->id,
+        ]);
+        $member = GCashTransaction::factory()->create([
+            'borrower_id' => $this->member()->id, 'type' => 'cash_in', 'status' => 'pending', 'transactor_user_id' => $this->admin->id,
+        ]);
+        $this->closing();
+
+        foreach ([$walkIn, $member] as $tx) {
+            $this->patchJson("/api/gcash/transactions/{$tx->id}/paid")
+                ->assertUnprocessable()
+                ->assertJsonPath('errors.branch.0', 'Branch "Far Branch" (FAR) is waiting to close, so nothing new can be added there.');
+            $this->assertSame('pending', $tx->fresh()->status);
+        }
+    }
+
+    public function test_marking_paid_in_a_suspended_branch_with_no_closure_request_still_works(): void
+    {
+        $this->far->forceFill(['status' => Branch::STATUS_SUSPENDED])->save();
+        $tx = GCashTransaction::factory()->forNonMember($this->walkIn)->create([
+            'branch_id' => $this->far->id, 'type' => 'cash_in', 'status' => 'pending', 'transactor_user_id' => $this->admin->id,
+        ]);
+
+        $this->patchJson("/api/gcash/transactions/{$tx->id}/paid")->assertOk()->assertJsonPath('data.status', 'paid');
+    }
+
+    public function test_marking_paid_takes_the_branch_lock_before_the_transactions_row(): void
+    {
+        $tx = GCashTransaction::factory()->forNonMember($this->walkIn)->create([
+            'branch_id' => $this->far->id, 'type' => 'cash_in', 'status' => 'pending', 'transactor_user_id' => $this->admin->id,
+        ]);
+        $locks = [];
+        DB::listen(function (QueryExecuted $query) use (&$locks): void {
+            if (str_contains($query->sql, 'for update') || str_contains($query->sql, 'lock in share mode')) {
+                $locks[] = $query->sql;
+            }
+        });
+
+        $this->patchJson("/api/gcash/transactions/{$tx->id}/paid")->assertOk();
+
+        $branchLock = array_key_first(array_filter($locks, fn (string $sql): bool => str_contains($sql, 'from `branches`') && str_contains($sql, 'lock in share mode')));
+        $rowLock = array_key_first(array_filter($locks, fn (string $sql): bool => str_contains($sql, 'from `gcash_transactions`') && str_contains($sql, 'for update')));
+
+        $this->assertNotNull($branchLock, 'the branch row is locked FOR SHARE');
+        $this->assertNotNull($rowLock);
+        $this->assertLessThan($rowLock, $branchLock);
     }
 
     private function closing(): void

@@ -68,19 +68,11 @@ class GCashService
 
         return LoanWriteTransaction::run(function () use ($payload, $actor, $isPending) {
             if (isset($payload['gcash_non_member_id'])) {
-                if (isset($payload['branch_id'])) {
-                    $this->lockBranchTakingGCash((int) $payload['branch_id'], 'branch_id');
-                }
+                $this->lockPostingBranch(isset($payload['branch_id']) ? (int) $payload['branch_id'] : null, null, 'branch_id');
             } elseif (isset($payload['borrower_id'])) {
-                // The member's row first, as MemberTransfer takes it (the
-                // member, then a branch); MemberLock keeps the member in this
-                // branch until the transaction ends. A locking read, so no plain
-                // read fixes the snapshot before the locks below.
-                $memberBranchId = Borrower::query()->whereKey($payload['borrower_id'])->sharedLock()->value('branch_id');
-
-                if ($memberBranchId !== null) {
-                    $this->lockBranchTakingGCash((int) $memberBranchId, 'borrower_id');
-                }
+                // MemberLock keeps the member in this branch until the
+                // transaction ends.
+                $this->lockPostingBranch(null, (int) $payload['borrower_id'], 'borrower_id');
             }
 
             $now = now();
@@ -183,15 +175,30 @@ class GCashService
     /**
      * Settles a pending Cash In and posts its journal, dated `paid_at`.
      *
-     * The row is locked and re-read first, so of two mark-paid requests only
-     * the first finds it pending: the second answers the same 422 as a Cash In
-     * that was already paid, and nothing posts twice. A deadlock or lock wait
-     * timeout answers 409 with nothing saved, never 500.
+     * The branch it posts in is locked and re-checked first, as a create
+     * takes it (lockBranchTakingGCash(), Finish run round 2, decision 4): a
+     * closed branch or one waiting to close is refused (422 on `branch`). Then
+     * the row is locked and re-read, so of two mark-paid requests only the
+     * first finds it pending: the second answers the same 422 as a Cash In
+     * that was already paid, and nothing posts twice. If the row's posting
+     * branch is no longer the one locked (its member moved in between), it
+     * answers 409. A deadlock or lock wait timeout answers 409 with nothing
+     * saved, never 500.
      */
     public function markPaid(GCashTransaction $tx, User $actor): GCashTransaction
     {
         return LoanWriteTransaction::run(function () use ($tx, $actor): GCashTransaction {
+            $branchId = $this->lockPostingBranch(
+                $tx->branch_id === null ? null : (int) $tx->branch_id,
+                $tx->branch_id === null && $tx->borrower_id !== null ? (int) $tx->borrower_id : null,
+                'branch',
+            );
+
             $locked = GCashTransaction::query()->whereKey($tx->getKey())->lockForUpdate()->firstOrFail();
+
+            if (BranchAttribution::gcashPostingBranch($locked) !== $branchId) {
+                throw new HttpResponseException(response()->json(['message' => self::MARK_PAID_CONFLICT], 409));
+            }
 
             if ($locked->type !== 'cash_in' || $locked->status !== 'pending') {
                 throw ValidationException::withMessages([
@@ -434,25 +441,34 @@ class GCashService
     }
 
     /**
-     * Lock the branch a GCash transaction posts in (a walk-in's recorded
-     * branch, or a member's branch) and refuse it, under that lock, when the
-     * branch is closed or waiting to close (a pending closure request).
-     * StoreGCashTransactionRequest already refused a closed branch with a
-     * plain read; this re-check sees a closure approved or requested after it.
-     * A suspended branch with no closure request still takes GCash, as
-     * BranchTakesNew::openOnly() and MemberBranchTakesNew::openOnly() allow.
+     * Lock and re-check the branch a GCash transaction posts in: `$branchId`
+     * when it carries one (a walk-in's recorded branch, a stamped member row),
+     * else `$memberId`'s branch, read with a lock on the member's row first,
+     * the order MemberTransfer takes (the member, then a branch), so no plain
+     * read fixes the snapshot before the locks. Returns the branch locked, or
+     * null when there is none (head office, a member with no branch).
      *
-     * Taken before the reference lock, on the parent row: BranchStatus locks
-     * the branch row before its closure rows, and MemberTransfer the branch
-     * before the GCash rows, so all three take the same order.
-     *
-     * @param  string  $field  the field the 422 is reported on: `branch_id` for a walk-in, `borrower_id` for a member
+     * @param  string  $field  the field a refusal is reported on
      *
      * @throws ValidationException 422 in words
      */
+    private function lockPostingBranch(?int $branchId, ?int $memberId, string $field): ?int
+    {
+        if ($branchId === null && $memberId !== null) {
+            $memberBranch = Borrower::query()->whereKey($memberId)->sharedLock()->value('branch_id');
+            $branchId = $memberBranch === null ? null : (int) $memberBranch;
+        }
+
+        if ($branchId !== null) {
+            $this->lockBranchTakingGCash($branchId, $field);
+        }
+
+        return $branchId;
+    }
+
     private function lockBranchTakingGCash(int $branchId, string $field): void
     {
-        $branch = Branch::query()->whereKey($branchId)->lockForUpdate()->firstOrFail(['id', 'name', 'code', 'status']);
+        $branch = Branch::query()->whereKey($branchId)->sharedLock()->firstOrFail(['id', 'name', 'code', 'status']);
 
         if ($branch->status === Branch::STATUS_CLOSED) {
             throw ValidationException::withMessages([

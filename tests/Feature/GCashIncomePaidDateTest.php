@@ -55,13 +55,26 @@ class GCashIncomePaidDateTest extends TestCase
         $this->assertSame([$settled->id], array_column($november2['transactions'], 'id'));
     }
 
-    public function test_the_paid_day_is_a_manila_day(): void
+    /**
+     * Paid at 00:30 on Nov 2 in Manila, which is 16:30 on Nov 1 in UTC (the
+     * API prints `paid_at` in UTC). The report and the journal both put it on
+     * Nov 2, the Manila day, never on the UTC date.
+     */
+    public function test_the_paid_day_is_the_manila_day_not_the_utc_date(): void
     {
+        $this->assertSame('Asia/Manila', config('app.timezone'));
+
         $early = $this->record('2026-11-01 18:00:00', 'cash_in', pending: true);
-        $this->markPaid($early, '2026-11-02 00:30:00');
+        $this->travelTo(Carbon::parse('2026-11-01 16:30:00', 'UTC')->timezone(config('app.timezone')));
+        $paidAt = $this->patchJson("/api/gcash/transactions/{$early->id}/paid")->assertOk()->json('data.paid_at');
+
+        $this->assertSame('2026-11-01', Carbon::parse($paidAt)->utc()->toDateString(), 'the instant falls on Nov 1 in UTC');
+        $this->assertSame('2026-11-02', Carbon::parse($paidAt)->timezone('Asia/Manila')->toDateString(), 'and on Nov 2 in Manila');
 
         $this->assertEquals(0.0, $this->income('2026-11-01', '2026-11-01')['total_income']);
         $this->assertEquals(20.0, $this->income('2026-11-02', '2026-11-02')['total_income']);
+        $this->assertSame(2000, $this->postedChargeIncome('2026-11-02', '2026-11-02'));
+        $this->assertSame(0, $this->postedChargeIncome('2026-11-01', '2026-11-01'));
     }
 
     public function test_a_pending_cash_in_is_income_in_no_period(): void
