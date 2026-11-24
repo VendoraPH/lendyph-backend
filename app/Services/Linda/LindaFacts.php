@@ -49,6 +49,7 @@ class LindaFacts
         LindaIntent::SavingsSummary,
         LindaIntent::ShareCapitalSummary,
         LindaIntent::CdaSummary,
+        LindaIntent::CreditScoringSummary,
     ];
 
     /** The most topics one pack reads. */

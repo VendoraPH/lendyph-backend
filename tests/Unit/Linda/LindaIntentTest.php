@@ -37,6 +37,7 @@ class LindaIntentTest extends TestCase
             'share_capital_summary',
             'cda_summary',
             'reminder_summary',
+            'credit_scoring_summary',
             'how_to',
             'open_question',
             'unsupported_question',
@@ -80,6 +81,7 @@ class LindaIntentTest extends TestCase
             LindaIntent::PortfolioSummary,
             LindaIntent::ShareCapitalSummary,
             LindaIntent::CdaSummary,
+            LindaIntent::CreditScoringSummary,
             LindaIntent::HowTo,
             LindaIntent::UnsupportedQuestion,
         ], $timeless);
