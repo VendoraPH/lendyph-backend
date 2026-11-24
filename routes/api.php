@@ -47,6 +47,7 @@ use App\Http\Controllers\Api\NotificationController;
 use App\Http\Controllers\Api\PromissoryNoteController;
 use App\Http\Controllers\Api\RepaymentController;
 use App\Http\Controllers\Api\ReportController;
+use App\Http\Controllers\Api\Reports\ProfitSharingReportController;
 use App\Http\Controllers\Api\RoleController;
 use App\Http\Controllers\Api\ShareCapitalLedgerController;
 use App\Http\Controllers\Api\ShareCapitalPledgeController;
@@ -365,6 +366,8 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
         Route::get('/share-capital', [ReportController::class, 'shareCapital']);
         Route::get('/performance', [ReportController::class, 'performance']);
         Route::get('/provisioning', [ReportController::class, 'provisioning']);
+        // Finish run round 2, decision 17: reports:view and share_capital:view.
+        Route::get('/profit-sharing', ProfitSharingReportController::class);
 
         // Feeds the printable Share Capital Certificate — unpaginated, unlike
         // GET /api/share-capital/ledger which caps per_page at 100.
