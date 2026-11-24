@@ -126,9 +126,23 @@ it('can\'t be handed to another role by an admin, who doesn\'t hold it', functio
     $this->actingAs($admin)
         ->putJson("/api/roles/{$manager->id}", ['permissions' => $permissions])
         ->assertUnprocessable()
-        ->assertJsonValidationErrors(['permissions']);
+        ->assertJsonPath('errors.permissions.0', 'Only a super admin can grant the permission to edit loans during approval.');
 
     expect(chairEditHolders())->toBe(['bod1']);
+});
+
+it('tells an admin who switched the Chair\'s role off, in words, that only a super admin can switch it back on', function () {
+    $admin = User::factory()->create();
+    $admin->assignRole('admin');
+    $chair = Role::where('name', 'bod1')->firstOrFail();
+
+    $this->actingAs($admin)->patchJson("/api/roles/{$chair->id}/deactivate")->assertOk();
+    $this->actingAs($admin)
+        ->patchJson("/api/roles/{$chair->id}/reactivate")
+        ->assertUnprocessable()
+        ->assertJsonPath('errors.role.0', 'Only a super admin can grant the permission to edit loans during approval.');
+
+    expect($chair->fresh()->is_active)->toBeFalse();
 });
 
 /**

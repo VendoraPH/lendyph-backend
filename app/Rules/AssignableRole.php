@@ -107,10 +107,10 @@ class AssignableRole implements ValidationRule
      */
     private static function refusal(array $missing): string
     {
-        $superAdminOnly = array_values(array_intersect_key(PermissionWords::SUPER_ADMIN_ONLY, array_flip($missing)));
+        $superAdminOnly = PermissionWords::superAdminOnly($missing);
 
-        if ($superAdminOnly !== []) {
-            return 'Only a super admin can assign a role that can '.implode(' or ', $superAdminOnly).'.';
+        if ($superAdminOnly !== null) {
+            return "Only a super admin can assign a role that can {$superAdminOnly}.";
         }
 
         return 'The selected role grants permissions you do not hold yourself: '.PermissionWords::list($missing).'.';

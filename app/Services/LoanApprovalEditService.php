@@ -147,11 +147,23 @@ class LoanApprovalEditService
             ...(isset($input['collaterals']) ? ['collaterals' => $input['collaterals']] : []),
         ], $user);
 
-        if ($preview['maturity_date'] !== null) {
+        // formPreview() reads the term in the product's unit, against the
+        // product's range. The loan's own term is kept even once its product
+        // counts another unit or has narrowed its range, as saving keeps it, so
+        // it still gets its maturity and schedule. A changed term gets them only
+        // where formPreview() found the term in the range, and never once the
+        // product counts another unit, since saving refuses that change.
+        $termKept = $values['term'] === (int) $loan->term;
+        $unitMoved = $loan->term_unit !== $loan->loanProduct()->firstOrFail()->term_unit;
+
+        if (! $termKept && $unitMoved) {
+            $preview['maturity_date'] = null;
+            $preview['amortization'] = null;
+        } elseif ($termKept || $preview['maturity_date'] !== null) {
             $projected = $this->projected($loan, $values);
             $preview['maturity_date'] = $projected->maturity_date->toDateString();
 
-            if ($preview['amortization'] !== null) {
+            if (BigDecimal::of($values['principal_amount'])->isPositive() && BigDecimal::of($values['interest_rate'])->isPositive()) {
                 $preview['amortization'] = $this->schedule($projected);
             }
         }

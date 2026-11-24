@@ -381,6 +381,36 @@ class ChairEditInApprovalTest extends TestCase
         }
     }
 
+    public function test_the_preview_keeps_the_loans_own_term_once_its_product_counts_another_unit(): void
+    {
+        $loan = $this->loanAtChairStep();
+        // Since the loan was made, its product counts its term in days.
+        $this->product->update(['term_unit' => 'days', 'term' => 180, 'min_term' => 90, 'max_term' => 360]);
+
+        $kept = $this->actingAs($this->chair)
+            ->postJson("/api/loans/{$loan->id}/approval-edit/preview", ['principal_amount' => 80000, 'term' => 6])
+            ->assertOk()
+            ->json('data');
+
+        $this->assertSame('2027-06-01', $kept['maturity_date']);
+        $this->assertCount(6, $kept['amortization']['rows']);
+
+        // Saving keeps the term too, with the schedule the preview showed.
+        $saved = $this->editAs($this->chair, $loan, ['principal_amount' => 80000])->assertOk();
+        $this->assertSame($kept['amortization']['rows'], $saved->json('amortization.rows'));
+
+        // A changed term gets no schedule: outside the product's range, or in
+        // the product's new unit, which saving refuses.
+        foreach ([9, 120] as $term) {
+            $changed = $this->actingAs($this->chair)
+                ->postJson("/api/loans/{$loan->id}/approval-edit/preview", ['term' => $term])
+                ->assertOk()
+                ->json('data');
+            $this->assertNull($changed['maturity_date'], "term {$term}");
+            $this->assertNull($changed['amortization'], "term {$term}");
+        }
+    }
+
     public function test_only_an_approve_step_is_edited_even_where_the_chairs_role_holds_another(): void
     {
         ApprovalWorkflowSetting::updateOrCreate(['type' => ApprovalWorkflowSetting::TYPE_NORMAL], ['steps' => [

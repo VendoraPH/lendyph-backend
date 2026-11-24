@@ -42,6 +42,21 @@ final class PermissionWords
     /** Short words that stay lower case in a title, unless they come first. */
     private const SMALL_WORDS = ['of', 'and', 'the', 'to', 'for', 'in', 'on'];
 
+    /**
+     * What the permissions only a super admin hands out let a role do, joined
+     * with "or" ("edit loans during approval"), or null when there are none
+     * among them.
+     *
+     * @param  iterable<string>  $permissions
+     */
+    public static function superAdminOnly(iterable $permissions): ?string
+    {
+        $list = is_array($permissions) ? array_values($permissions) : iterator_to_array($permissions, false);
+        $words = array_values(array_intersect_key(self::SUPER_ADMIN_ONLY, array_flip($list)));
+
+        return $words === [] ? null : implode(' or ', $words);
+    }
+
     /** "borrowers:view" → "Members: View". */
     public static function of(string $permission): string
     {
