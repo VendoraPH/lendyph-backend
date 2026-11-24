@@ -35,7 +35,8 @@ final class PermissionWords
     /** Actions whose words aren't the key's. */
     private const ACTIONS = [
         'view_all' => 'See all branches',
-        'edit_in_approval' => 'Edit during approval',
+        // The roles screen's own label, as the users dialog reads it.
+        'edit_in_approval' => 'Edit loans at their approval step',
         'write_off' => 'Write off restructure shortfall',
     ];
 

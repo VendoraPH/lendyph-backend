@@ -4,6 +4,7 @@ use App\Models\AuditLog;
 use App\Models\Branch;
 use App\Models\Role;
 use App\Models\User;
+use App\Services\PermissionWords;
 use Database\Seeders\RoleAndPermissionSeeder;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
@@ -187,4 +188,9 @@ it('names the permissions a role would grant in words, never as keys', function 
 
     expect($message)->toStartWith('The selected role grants permissions you do not hold yourself: ')
         ->and($message)->not->toMatch('/[a-z_]+:[a-z_]+/');
+});
+
+it('names the permission as the role editor does, wherever the server names it', function () {
+    expect(PermissionWords::of('loans:edit_in_approval'))->toBe('Loans: Edit loans at their approval step')
+        ->and(PermissionWords::of('borrowers:view'))->toBe('Members: View');
 });
