@@ -11,8 +11,10 @@ use Tests\Traits\SetupLendyPH;
  * A member's date hired can't fall before their birthdate or after today
  * (finish run round 2, from S8): the member form and the CSV import refuse it,
  * and so does the API, on the staff create and edit and on the public
- * registration, which sends `date_hired` too. An edit that leaves the
- * birthdate out is checked against the birthdate on file.
+ * registration, which sends `date_hired` too. Both sides of the pair are
+ * checked: the date hired against the birthdate, and the birthdate against
+ * the date hired, each against the other as sent or, when an edit leaves it
+ * out, as on file.
  */
 class MemberDateHiredBirthdateTest extends TestCase
 {
@@ -21,6 +23,8 @@ class MemberDateHiredBirthdateTest extends TestCase
     private const BEFORE_BIRTHDATE = 'The date hired cannot be before the birthdate.';
 
     private const IN_THE_FUTURE = 'The date hired cannot be in the future.';
+
+    private const AFTER_DATE_HIRED = 'The birthdate cannot be after the date hired.';
 
     protected function setUp(): void
     {
@@ -36,13 +40,14 @@ class MemberDateHiredBirthdateTest extends TestCase
         parent::tearDown();
     }
 
-    public function test_the_staff_create_refuses_a_date_hired_before_the_birthdate(): void
+    public function test_the_staff_create_refuses_the_pair_the_wrong_way_round_on_both_fields(): void
     {
         $before = Borrower::count();
 
         $this->postJson('/api/borrowers', $this->staffMember(['birthdate' => '1990-05-12', 'date_hired' => '1990-05-11']))
             ->assertUnprocessable()
-            ->assertJsonPath('errors.date_hired', [self::BEFORE_BIRTHDATE]);
+            ->assertJsonPath('errors.date_hired', [self::BEFORE_BIRTHDATE])
+            ->assertJsonPath('errors.birthdate', [self::AFTER_DATE_HIRED]);
 
         $this->assertSame($before, Borrower::count());
 
@@ -58,7 +63,8 @@ class MemberDateHiredBirthdateTest extends TestCase
 
         $this->postJson('/api/borrowers', $this->registration(['birthdate' => '1985-06-15', 'date_hired' => '1985-06-14']))
             ->assertUnprocessable()
-            ->assertJsonPath('errors.date_hired', [self::BEFORE_BIRTHDATE]);
+            ->assertJsonPath('errors.date_hired', [self::BEFORE_BIRTHDATE])
+            ->assertJsonPath('errors.birthdate', [self::AFTER_DATE_HIRED]);
 
         $this->postJson('/api/borrowers', $this->registration(['date_hired' => '2026-11-25']))
             ->assertUnprocessable()
@@ -82,7 +88,8 @@ class MemberDateHiredBirthdateTest extends TestCase
 
         $this->putJson("/api/borrowers/{$member->id}", ['birthdate' => '1996-01-10', 'date_hired' => '1995-03-01'])
             ->assertUnprocessable()
-            ->assertJsonPath('errors.date_hired', [self::BEFORE_BIRTHDATE]);
+            ->assertJsonPath('errors.date_hired', [self::BEFORE_BIRTHDATE])
+            ->assertJsonPath('errors.birthdate', [self::AFTER_DATE_HIRED]);
 
         $this->putJson("/api/borrowers/{$member->id}", ['date_hired' => '2026-11-25'])
             ->assertUnprocessable()
@@ -97,14 +104,40 @@ class MemberDateHiredBirthdateTest extends TestCase
         $this->assertSame('1980-02-02', $member->fresh()->date_hired->toDateString());
     }
 
-    public function test_a_birthdate_written_another_way_is_left_to_its_own_refusal(): void
+    public function test_an_edit_refuses_a_birthdate_after_the_date_hired_sent_or_on_file(): void
+    {
+        $member = Borrower::factory()->create(['branch_id' => $this->branch->id, 'birthdate' => '1990-05-12', 'date_hired' => '2008-06-01']);
+
+        $this->putJson("/api/borrowers/{$member->id}", ['birthdate' => '2008-07-01'])
+            ->assertUnprocessable()
+            ->assertJsonPath('errors.birthdate', [self::AFTER_DATE_HIRED])
+            ->assertJsonMissingValidationErrors(['date_hired']);
+        $this->assertSame('1990-05-12', $member->fresh()->birthdate->toDateString());
+
+        $this->putJson("/api/borrowers/{$member->id}", ['birthdate' => '2008-06-01'])->assertOk();
+        $this->assertSame('2008-06-01', $member->fresh()->birthdate->toDateString());
+
+        $this->putJson("/api/borrowers/{$member->id}", ['birthdate' => '2008-07-01', 'date_hired' => '2026-11-02'])->assertOk();
+        $this->assertSame('2008-07-01', $member->fresh()->birthdate->toDateString());
+
+        $this->putJson("/api/borrowers/{$member->id}", ['birthdate' => '2008-08-08', 'date_hired' => null])->assertOk();
+        $this->assertSame('2008-08-08', $member->fresh()->birthdate->toDateString());
+        $this->assertNull($member->fresh()->date_hired);
+    }
+
+    public function test_a_date_written_another_way_is_left_to_its_own_refusal(): void
     {
         $member = Borrower::factory()->create(['branch_id' => $this->branch->id, 'birthdate' => '1990-05-12', 'date_hired' => '2015-06-01']);
 
         $this->putJson("/api/borrowers/{$member->id}", ['birthdate' => '19960110', 'date_hired' => '1995-03-01'])
             ->assertUnprocessable()
-            ->assertJsonValidationErrors(['birthdate'])
+            ->assertJsonPath('errors.birthdate', ['The birthdate must be a date written as year-month-day, such as 1990-01-15.'])
             ->assertJsonMissingValidationErrors(['date_hired']);
+
+        $this->putJson("/api/borrowers/{$member->id}", ['birthdate' => '1996-01-10', 'date_hired' => '19950301'])
+            ->assertUnprocessable()
+            ->assertJsonPath('errors.date_hired', ['The date hired must be a date written as year-month-day, such as 2020-06-01.'])
+            ->assertJsonMissingValidationErrors(['birthdate']);
     }
 
     /**
