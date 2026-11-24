@@ -22,7 +22,9 @@ use RuntimeException;
  * - `subledger`: the share capital ledger's balance (credits − debits) dated
  *   on or before `as_of`, each row in the branch it posted in
  *   (BranchAttribution: its own branch, else its member's), the Share Capital
- *   report's closing balance for that branch.
+ *   report's closing balance for that branch, less imported entries dated on
+ *   or before the finalised opening balances, which count under No branch
+ *   with the opening-balance journal that holds them.
  * - `books`: the account's balance in its normal (credit) direction on posted
  *   and reversed journals dated on or before `as_of`, by journal branch, the
  *   trial balance's rule and figure.
