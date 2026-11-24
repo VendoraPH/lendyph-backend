@@ -4,7 +4,7 @@ namespace App\Services\Linda;
 
 /**
  * The deterministic matcher: answers the five suggested questions, collection
- * efficiency and branch and officer performance, in English, Tagalog/Taglish
+ * efficiency, branch and officer performance and the other topics, in English, Tagalog/Taglish
  * and Bisaya/Cebuano, with their periods, branches and follow-ups, without a
  * model.
  *
@@ -102,6 +102,21 @@ final class LindaMatcher
             'sms', 'sms reminder', 'sms reminders', 'email reminder', 'email reminders', 'text reminder', 'text reminders',
             'paalala', 'pahinumdom', 'pahimangno',
         ],
+        // Finish run round 2: credit scoring counts by risk level, members due
+        // for review and the score bands. Never a bare "risk" ("loans at risk"
+        // is PAR) or "review" ("loans for review" are for approval).
+        'credit_scoring_summary' => [
+            'credit score', 'credit scores', 'credit scoring', 'credit rating', 'credit ratings', 'credit risk',
+            'risk level', 'risk levels', 'risk band', 'risk bands', 'risk rating', 'risk ratings', 'risk category',
+            'risk categories', 'risk distribution', 'score band', 'score bands', 'score range', 'score ranges',
+            'scoring bands', 'very low risk', 'low risk', 'moderate risk', 'elevated risk', 'high risk', 'very high risk',
+            'risky members', 'risky member', 'scored members', 'members scored', 'due for review', 'due for a review',
+            'scores due for review', 'score due for review',
+            'mataas ang risk', 'mataas na risk', 'mababa ang risk', 'mababang risk', 'antas ng risk', 'level ng risk',
+            'mataas na panganib', 'mataas ang panganib',
+            'taas og risk', 'taas ug risk', 'taas ang risk', 'taas nga risk', 'ubos og risk', 'ubos ug risk', 'ubos ang risk',
+            'ubos nga risk', 'level sa risk', 'lebel sa risk',
+        ],
         'borrower_summary' => [
             'active members', 'active member', 'inactive members', 'inactive member', 'blacklisted members',
             'blacklisted member', 'new members', 'new member', 'repeat members', 'repeat member', 'repeat borrowers',
@@ -125,6 +140,11 @@ final class LindaMatcher
         'borrower_summary' => ['members', 'member', 'miyembro', 'myembro', 'kasapi'],
         // "Which documents are missing?" asks for the CDA documents.
         'cda_summary' => ['documents', 'document', 'dokumento', 'dokumentos'],
+        // "Ilang miyembro ang kailangang i-review?": members' scores, unless loans are named.
+        'credit_scoring_summary' => [
+            'need review', 'needs review', 'needing review', 'kailangang i review', 'kailangan i review', 'kailangang ireview',
+            'kailangan ireview', 'dapat i review', 'kinahanglan i review', 'kinahanglan ireview',
+        ],
     ];
 
     /**
@@ -137,6 +157,7 @@ final class LindaMatcher
     private const WEAK_CANCELLED_BY = [
         'borrower_summary' => ['loan', 'loans'],
         'cda_summary' => ['loan', 'loans', 'payment', 'payments', 'account', 'accounts'],
+        'credit_scoring_summary' => ['loan', 'loans', 'application', 'applications', 'payment', 'payments'],
     ];
 
     /**
@@ -165,6 +186,12 @@ final class LindaMatcher
             'emails', 'text', 'texts', 'message', 'messages', 'borrower', 'borrowers', 'receive', 'received', 'napadala',
             'naipadala', 'ipinadala', 'gipadala', 'nipadala', 'napadalhan', 'nasend', 'gisend', 'nag', 'nafail',
             'pumalya', 'napakyas', 'test', 'mode', 'due', 'date', 'delivery', 'status',
+        ],
+        'credit_scoring_summary' => [
+            'score', 'scores', 'scored', 'scoring', 'band', 'bands', 'range', 'ranges', 'level', 'levels', 'review',
+            'reviewed', 'risk', 'risky', 'high', 'low', 'very', 'moderate', 'elevated', 'mataas', 'mababa', 'taas', 'ubos',
+            'category', 'categories', 'distribution', 'breakdown', 'mean', 'means', 'meaning', 'threshold', 'thresholds',
+            'sabihin', 'ibig', 'kahulugan', 'pasabot', 'ireview', 'kailangan', 'kailangang', 'kinahanglan', 'due',
         ],
     ];
 
@@ -535,8 +562,10 @@ final class LindaMatcher
      * own:
      * - a branch or officer performance question ranks by the figure it
      *   names ("which branch collected the most"), so it wins over them all,
-     *   except savings: "which branch has the highest savings" is a savings
-     *   question, whose answer ranks the branches by their deposits;
+     *   except savings and credit scoring: "which branch has the highest
+     *   savings" is a savings question, whose answer ranks the branches by
+     *   their deposits, and "which branch has the most high risk members" a
+     *   credit scoring one, whose answer lists each branch's counts;
      * - reminders win over collections and overdue ("payment reminders",
      *   "overdue reminders");
      * - collection efficiency is about collections ("porsyento sa
@@ -578,8 +607,12 @@ final class LindaMatcher
         }
 
         if ($performance !== []) {
-            if ($performance === [LindaIntent::BranchPerformance] && array_keys($intents) === [LindaIntent::SavingsSummary->value]) {
-                return [$words, [LindaIntent::SavingsSummary]];
+            // "Which branch has the highest savings" and "which branch has the most
+            // high risk members" rank their own topic's figures by branch.
+            foreach ([LindaIntent::SavingsSummary, LindaIntent::CreditScoringSummary] as $ranked) {
+                if ($performance === [LindaIntent::BranchPerformance] && array_keys($intents) === [$ranked->value]) {
+                    return [$words, [$ranked]];
+                }
             }
 
             return [$words, $performance];
@@ -603,6 +636,11 @@ final class LindaMatcher
                 if (array_intersect($words, $cancelling) !== []) {
                     unset($weakIntents[$intent]);
                 }
+            }
+
+            // A member word only says whose scores are due for review.
+            if (isset($weakIntents[LindaIntent::CreditScoringSummary->value])) {
+                unset($weakIntents[LindaIntent::BorrowerSummary->value]);
             }
 
             $intents = $weakIntents;
