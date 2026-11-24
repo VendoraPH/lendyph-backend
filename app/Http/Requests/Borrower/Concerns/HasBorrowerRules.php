@@ -3,6 +3,7 @@
 namespace App\Http\Requests\Borrower\Concerns;
 
 use App\Models\Borrower;
+use Closure;
 use Illuminate\Validation\Rule;
 
 trait HasBorrowerRules
@@ -51,7 +52,7 @@ trait HasBorrowerRules
             // Member dates are written year-month-day: `date` alone accepts a
             // number (19900115), which the model's date cast then stores as a
             // Unix timestamp (1970-08-19).
-            'birthdate' => ['nullable', 'date', 'date_format:Y-m-d', 'after:1900-01-01', 'before_or_equal:-18 years'],
+            'birthdate' => ['nullable', 'date', 'date_format:Y-m-d', 'after:1900-01-01', 'before_or_equal:-18 years', $this->birthdateNotAfterDateHired()],
             'civil_status' => ['nullable', 'string', 'in:single,married,widowed,separated,divorced'],
             'gender' => ['nullable', 'string', 'in:male,female'],
 
@@ -77,7 +78,7 @@ trait HasBorrowerRules
                 ...($uniqueEmail ? [Rule::unique('borrowers', 'email')->ignore($ignoreId)] : []),
             ],
             'employer_or_business' => ['nullable', 'string', 'max:255'],
-            'date_hired' => ['nullable', 'date', 'date_format:Y-m-d', 'after:1900-01-01', 'before_or_equal:today'],
+            'date_hired' => ['nullable', 'date', 'date_format:Y-m-d', 'after:1900-01-01', 'before_or_equal:today', $this->dateHiredNotBeforeBirthdate()],
             'monthly_income' => ['nullable', 'numeric', 'min:0', 'max:99999999.99'],
             'pledge_amount' => ['nullable', 'numeric', 'min:0', 'max:9999999.99'],
 
@@ -123,7 +124,9 @@ trait HasBorrowerRules
             $rules[$field] = [
                 ...$presence,
                 'required',
-                ...array_values(array_diff($rules[$field], ['nullable'])),
+                // A strict filter: array_diff() would cast each rule to a
+                // string, and a birthdate's comparison rule is a closure.
+                ...array_values(array_filter($rules[$field], fn (mixed $rule): bool => $rule !== 'nullable')),
             ];
         }
 
@@ -153,5 +156,65 @@ trait HasBorrowerRules
             'date_hired.before_or_equal' => 'The date hired cannot be in the future.',
             'membership_date.date_format' => 'The membership date must be a date written as year-month-day, such as 2026-01-15.',
         ];
+    }
+
+    /**
+     * A date hired can't fall before the member's birthdate, as the member
+     * form and the CSV import refuse it (CustomerRowNormalizer). It is
+     * compared with the birthdate as this request leaves it
+     * (self::sentOrStoredDate()). Only dates written year-month-day are
+     * compared, so a date written another way gets its own refusal and no
+     * second one here.
+     */
+    private function dateHiredNotBeforeBirthdate(): Closure
+    {
+        return function (string $attribute, mixed $value, Closure $fail): void {
+            $birthdate = $this->sentOrStoredDate('birthdate');
+
+            if (self::isCalendarDate($value) && self::isCalendarDate($birthdate) && $value < $birthdate) {
+                $fail('The date hired cannot be before the birthdate.');
+            }
+        };
+    }
+
+    /**
+     * The other side of the same rule: a birthdate can't fall after the date
+     * hired as this request leaves it, so an edit that sends only a new
+     * birthdate can't put the pair the wrong way round either.
+     */
+    private function birthdateNotAfterDateHired(): Closure
+    {
+        return function (string $attribute, mixed $value, Closure $fail): void {
+            $dateHired = $this->sentOrStoredDate('date_hired');
+
+            if (self::isCalendarDate($value) && self::isCalendarDate($dateHired) && $value > $dateHired) {
+                $fail('The birthdate cannot be after the date hired.');
+            }
+        };
+    }
+
+    /**
+     * A member date as this request leaves it: the value sent (null when it
+     * clears the field), or the member's on file when an edit leaves it out.
+     * Only the member requests validate the two dates; the portal's
+     * ProfileFields shares these rules but leaves both fields out.
+     */
+    private function sentOrStoredDate(string $field): mixed
+    {
+        if ($this->has($field)) {
+            return $this->input($field);
+        }
+
+        $stored = $this->route('borrower');
+
+        return $stored instanceof Borrower ? $stored->{$field}?->toDateString() : null;
+    }
+
+    /** A date written year-month-day that is on the calendar. */
+    private static function isCalendarDate(mixed $value): bool
+    {
+        return is_string($value)
+            && preg_match('/^(\d{4})-(\d{2})-(\d{2})$/', $value, $parts) === 1
+            && checkdate((int) $parts[2], (int) $parts[3], (int) $parts[1]);
     }
 }

@@ -27,6 +27,10 @@ use App\Support\PhilippineMobile;
  * `contacts_hidden` says which. Member matches need `borrowers:view`
  * (`member_matches_hidden`).
  *
+ * `requested_term` is a length in `term_unit`, the loan product's own unit
+ * (months or days), so the screens write the term without reading the
+ * products; the unit reads null while no product is chosen.
+ *
  * Money comes from the server: `declared_totals` is DraftRules'. The
  * assessment is LO-B4's: the list row carries the current revision's result,
  * and the detail the revision itself as the assessment screen shows it to
@@ -66,6 +70,7 @@ final class ApplicationPresenter
             'loan_product_name' => $application->loanProduct?->name,
             'requested_amount' => $application->requested_amount,
             'requested_term' => $application->requested_term,
+            'term_unit' => $application->loanProduct?->term_unit?->value,
             'branch_id' => $application->branch_id,
             'branch_name' => $application->branch?->name,
             'status' => $application->status,

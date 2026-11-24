@@ -36,7 +36,7 @@ final class ApplicationQueue
 
         return $this->filtered($viewer, $filters)
             ->when(filled($filters['status'] ?? null), fn (Builder $q) => $q->where('status', $filters['status']))
-            ->with(['branch:id,name', 'loanProduct:id,name', 'assignedOfficer:id,first_name,last_name', 'latestAssessment'])
+            ->with(['branch:id,name', 'loanProduct:id,name,term_unit', 'assignedOfficer:id,first_name,last_name', 'latestAssessment'])
             ->orderBy($sort, $direction)
             ->orderBy('id', $direction)
             ->paginate($perPage);
