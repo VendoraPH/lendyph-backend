@@ -200,7 +200,9 @@ class StaffListTest extends TestCase
             'collector' => ['collector'],
             'general_bookkeeper' => ['general_bookkeeper'],
             'manager' => ['manager'],
-            'bod1' => ['bod1'],
+            // A board role. `bod1` is the Chair's, which edits loans at its
+            // approval step and so may list staff (below).
+            'bod2' => ['bod2'],
         ];
     }
 
@@ -257,7 +259,7 @@ class StaffListTest extends TestCase
     {
         $others = Permission::where('guard_name', 'web')
             ->where('name', 'like', 'loans:%')
-            ->whereNotIn('name', ['loans:create', 'loans:update', 'loans:restructure'])
+            ->whereNotIn('name', ['loans:create', 'loans:update', 'loans:restructure', 'loans:edit_in_approval'])
             ->pluck('name')
             ->all();
 
@@ -268,6 +270,35 @@ class StaffListTest extends TestCase
         $this->getJson('/api/staff')
             ->assertForbidden()
             ->assertJsonMissingPath('data');
+    }
+
+    /**
+     * The Chairman/Chairwoman edits loans at their approval step, the account
+     * officer included, so `loans:edit_in_approval` opens the list too: the
+     * same names-only rows as every other loan role's.
+     */
+    public function test_the_chair_lists_staff_as_id_and_full_name_only(): void
+    {
+        $chair = $this->userWithRole('bod1');
+        $colleague = $this->userWithRole('cashier', ['first_name' => 'Rosario', 'last_name' => 'Bautista', 'email' => 'rosario.private@example.test']);
+
+        $this->assertFalse($chair->canAny(['loans:create', 'loans:update', 'loans:restructure']));
+        $this->actingAs($chair);
+
+        $response = $this->getJson('/api/staff?per_page=100')->assertOk();
+
+        foreach ($response->json('data') as $row) {
+            $this->assertSame(['id', 'full_name'], array_keys($row));
+        }
+        $this->assertContains($colleague->id, array_column($response->json('data'), 'id'));
+        $response->assertDontSee('rosario.private@example.test');
+    }
+
+    public function test_a_role_holding_only_the_chairs_edit_lists_staff(): void
+    {
+        $this->actingAs($this->userWithOnlyPermissions('loans:edit_in_approval'));
+
+        $this->getJson('/api/staff')->assertOk();
     }
 
     public function test_admin_and_super_admin_can_list_staff(): void

@@ -21,7 +21,8 @@ use OpenApi\Attributes as OA;
  * Those pickers used to read `GET /api/users`, which only admin and
  * super_admin may call, so every loan officer saw an empty list. This is the
  * narrow alternative: names and ids of active staff, for anyone who can create,
- * edit or restructure a loan. It is NOT a second way into user management —
+ * edit or restructure a loan, the Chairman/Chairwoman's edit at their approval
+ * step included. It is NOT a second way into user management —
  * see ListStaffRequest for the gate and StaffResource for why the row is two
  * keys.
  */
@@ -31,8 +32,9 @@ class StaffController extends Controller
         path: '/api/staff',
         summary: 'List active staff for account-officer pickers',
         description: 'Active users only, as `{id, full_name}` — the same `full_name` a loan returns for '
-            .'`account_officer`. Allowed for any caller holding `loans:create`, `loans:update` or '
-            .'`loans:restructure` (the new-loan, loan-detail and restructure pickers), or with `for=savings` '
+            .'`account_officer`. Allowed for any caller holding `loans:create`, `loans:update`, '
+            .'`loans:restructure` or `loans:edit_in_approval` (the new-loan, loan-detail and restructure pickers, '
+            .'and the Chairman/Chairwoman\'s edit at their approval step), or with `for=savings` '
             .'`savings:create` (the savings opening form\'s account officer), with `for=origination` '
             .'`loan_origination:update`, listing only the active holders of `loan_origination:update` '
             .'(the online applications\' assign picker), or with `for=amla_cases` `amla:cases` and '
@@ -72,7 +74,7 @@ class StaffController extends Controller
                 ]),
             ),
             new OA\Response(response: 401, description: 'Unauthenticated'),
-            new OA\Response(response: 403, description: 'Holds none of loans:create, loans:update or loans:restructure (nor savings:create with for=savings); with for=origination, lacks loan_origination:update; with for=amla_cases, lacks amla:cases or branches:view_all'),
+            new OA\Response(response: 403, description: 'Holds none of loans:create, loans:update, loans:restructure or loans:edit_in_approval (nor savings:create with for=savings); with for=origination, lacks loan_origination:update; with for=amla_cases, lacks amla:cases or branches:view_all'),
             new OA\Response(response: 422, description: 'Validation error'),
         ],
     )]

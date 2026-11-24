@@ -124,12 +124,13 @@ class LoanApprovalChainTest extends TestCase
         // Board roles sign; they do not prepare. Their authority comes from
         // holding the role named on the step, not from a permission. They see
         // every branch (`branches:view_all`, decision 5b), which grants no
-        // action.
-        foreach (['bod1', 'bod7'] as $roleName) {
+        // action. The Chair's role (`bod1`) alone also edits a loan while it
+        // waits at its step (`loans:edit_in_approval`, finish run round 2).
+        foreach (['bod1' => ['loans:edit_in_approval'], 'bod7' => []] as $roleName => $own) {
             $this->assertEqualsCanonicalizing(
-                ['branches:view_all', 'loans:view'],
+                ['branches:view_all', 'loans:view', ...$own],
                 Role::where('name', $roleName)->firstOrFail()->permissions->pluck('name')->all(),
-                "{$roleName} holds more than loans:view and branches:view_all.",
+                "{$roleName} holds more than loans:view and branches:view_all, and the Chair's own edit.",
             );
         }
 
@@ -172,9 +173,9 @@ class LoanApprovalChainTest extends TestCase
 
         // Board roles get no accounting access at all, and the accounting
         // branch's preparer/approver split must not be widened from here.
-        foreach (['bod1', 'bod7'] as $roleName) {
+        foreach (['bod1' => ['loans:edit_in_approval'], 'bod7' => []] as $roleName => $own) {
             $this->assertEqualsCanonicalizing(
-                ['branches:view_all', 'loans:view'],
+                ['branches:view_all', 'loans:view', ...$own],
                 Role::where('name', $roleName)->firstOrFail()->fresh('permissions')->permissions->pluck('name')->all(),
                 "{$roleName} was granted accounting access it must not have.",
             );

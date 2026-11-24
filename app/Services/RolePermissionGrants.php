@@ -30,13 +30,21 @@ class RolePermissionGrants
     }
 
     /**
+     * The refusal in words, never permission keys: a permission only a super
+     * admin hands out (the Chair's edit during approval) says so, otherwise
+     * the first three missing permissions are named as the roles screen names
+     * them (PermissionWords), as AssignableRole words its own.
+     *
      * @param  list<string>  $missing
      */
     public static function refusal(array $missing): string
     {
-        return sprintf(
-            'You can\'t grant permissions you do not hold yourself (%s).',
-            implode(', ', array_slice($missing, 0, 3)).(count($missing) > 3 ? ', …' : ''),
-        );
+        $superAdminOnly = PermissionWords::superAdminOnly($missing);
+
+        if ($superAdminOnly !== null) {
+            return "Only a super admin can grant the permission to {$superAdminOnly}.";
+        }
+
+        return 'You can\'t grant permissions you do not hold yourself: '.PermissionWords::list($missing).'.';
     }
 }

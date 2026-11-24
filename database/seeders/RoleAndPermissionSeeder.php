@@ -107,6 +107,25 @@ class RoleAndPermissionSeeder extends Seeder
     ];
 
     /**
+     * The Chairman/Chairwoman's role: `bod1`, the board role the default
+     * chain's "BOD Chairwoman" step names (ApprovalWorkflowSetting).
+     */
+    public const CHAIR_ROLE = 'bod1';
+
+    /**
+     * Held by self::CHAIR_ROLE alone (finish run round 2, decision 14): editing
+     * a loan application while it waits at the Chair's approval step
+     * (LoanApprovalEditService). Not admin, not super_admin, not any other
+     * role, so neither Permission::all() sync below hands it out, and an admin
+     * can't grant it on (RolePermissionGrants). Mirrors
+     * 2026_11_24_300000_add_loans_edit_in_approval_permission, which grants it
+     * on the already-migrated deployments.
+     *
+     * @var list<string>
+     */
+    public const CHAIR_ONLY_PERMISSIONS = ['loans:edit_in_approval'];
+
+    /**
      * Seeding writes no audit rows: a fresh database's roles are the baseline,
      * not a change anyone made (Role is Auditable).
      */
@@ -134,6 +153,8 @@ class RoleAndPermissionSeeder extends Seeder
             'loans:view', 'loans:create', 'loans:update', 'loans:delete',
             'loans:approve', 'loans:reject', 'loans:release', 'loans:void',
             'loans:extend', 'loans:restructure', 'loans:write_off',
+            // The Chair's edit during approval: self::CHAIR_ROLE only.
+            ...self::CHAIR_ONLY_PERMISSIONS,
 
             // Loan Products. Creating, editing and deleting a product sets the
             // terms of every later application, so it has its own permission
@@ -340,13 +361,16 @@ class RoleAndPermissionSeeder extends Seeder
                 || str_starts_with($role, 'bod'),
         ));
 
+        // Every permission but the Chair's own (self::CHAIR_ONLY_PERMISSIONS).
+        $everyPermission = Permission::query()->whereNotIn('name', self::CHAIR_ONLY_PERMISSIONS)->get();
+
         // Super admin — developer-side role with every permission assigned
         // directly (so frontend permission gating renders the full app) plus
         // the Gate::before bypass in AppServiceProvider as defence-in-depth.
         Role::updateOrCreate(
             ['name' => 'super_admin', 'guard_name' => $guard],
             ['is_system' => true, 'is_active' => true, 'description' => $systemRoleAttrs['super_admin']['description']],
-        )->syncPermissions(Permission::all());
+        )->syncPermissions($everyPermission);
 
         // Admin — client-side full-access role for the lending organization's
         // admin staff. Same permission set as super_admin today, but kept as
@@ -355,7 +379,7 @@ class RoleAndPermissionSeeder extends Seeder
         Role::updateOrCreate(
             ['name' => 'admin', 'guard_name' => $guard],
             ['is_system' => true, 'is_active' => true, 'description' => $systemRoleAttrs['admin']['description']],
-        )->syncPermissions(Permission::all());
+        )->syncPermissions($everyPermission);
 
         Role::updateOrCreate(
             ['name' => 'loan_officer', 'guard_name' => $guard],
@@ -569,6 +593,8 @@ class RoleAndPermissionSeeder extends Seeder
                     'share_capital:view',
                 ] : [],
                 $roleName === 'manager' ? $managerAccountingPermissions : [],
+                // The Chair edits a loan while it waits at their step.
+                $roleName === self::CHAIR_ROLE ? self::CHAIR_ONLY_PERMISSIONS : [],
                 // Managers and the board oversee every branch.
                 $roleName === 'manager' || preg_match(self::BOARD_ROLE_PATTERN, $roleName) === 1
                     ? [BranchAccess::VIEW_ALL]
