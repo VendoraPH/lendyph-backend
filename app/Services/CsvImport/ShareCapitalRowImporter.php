@@ -56,9 +56,9 @@ use LogicException;
  *
  * ## What is written
  *
- * One entry, marked `is_imported`, with the ledger's own SC- reference and
- * branch (ShareCapitalLedger::booted()) and no payment method, since no money
- * moved in this app. It posts no journal, as an imported loan doesn't: these
+ * One entry, marked `is_imported`, in the member's branch that was locked,
+ * with the ledger's own SC- reference (ShareCapitalLedger::booted()) and no
+ * payment method, since no money moved in this app. It posts no journal, as an imported loan doesn't: these
  * are the old books' figures, and the accountant brings them over through the
  * opening balances. Its reference is never one of the app's CSH numbers given
  * here; when it is already in this deployment's own CSH format, the cash
@@ -193,6 +193,9 @@ final class ShareCapitalRowImporter
 
         $written = ShareCapitalLedger::create([
             'borrower_id' => $entry['member'],
+            // The branch that was locked and checked above, as every share
+            // capital write posts its row (ShareCapitalService).
+            'branch_id' => $branchId,
             'date' => $entry['date'],
             'description' => is_string($remarks) ? $remarks : ($entry['side'] === ShareCapitalRowNormalizer::CREDIT ? 'Contribution (imported)' : 'Withdrawal (imported)'),
             'debit' => $entry['side'] === ShareCapitalRowNormalizer::DEBIT ? $pesos : '0.00',
