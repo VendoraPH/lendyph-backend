@@ -28,10 +28,14 @@ class MembershipReviewFixesTest extends TestCase
         foreach (['pending', 'rejected'] as $status) {
             $person = Borrower::factory()->create(['branch_id' => $this->branch->id, 'status' => $status]);
 
-            $response = $this->putJson("/api/borrowers/{$person->id}", ['membership_date' => '2024-01-01'])
-                ->assertUnprocessable()->assertJsonValidationErrors('membership_date');
+            // The member update ignores it; the membership route refuses it.
+            $this->putJson("/api/borrowers/{$person->id}", ['membership_date' => '2024-01-01'])->assertOk();
+            $this->assertNull($person->fresh()->membership_date);
 
-            $this->assertStringContainsString('Approve the registration', $response->json('errors.membership_date.0'));
+            $response = $this->patchJson("/api/borrowers/{$person->id}/membership", ['membership_date' => '2024-01-01'])
+                ->assertUnprocessable()->assertJsonValidationErrors('status');
+
+            $this->assertStringContainsString('Approve the registration', $response->json('errors.status.0'));
             $this->assertNull($person->fresh()->membership_date);
         }
     }
@@ -41,11 +45,11 @@ class MembershipReviewFixesTest extends TestCase
         $member = Borrower::factory()->create(['branch_id' => $this->branch->id]);
         DB::table('borrowers')->where('id', $member->id)->update(['membership_date' => null, 'membership_number' => null]);
 
-        $this->putJson("/api/borrowers/{$member->id}", ['membership_date' => '2018-07-01'])->assertOk()
+        $this->patchJson("/api/borrowers/{$member->id}/membership", ['membership_date' => '2018-07-01'])->assertOk()
             ->assertJsonPath('data.membership_number', $member->borrower_code);
 
         DB::table('borrowers')->where('id', $member->id)->update(['membership_number' => 'KEEP-1']);
-        $this->putJson("/api/borrowers/{$member->id}", ['membership_date' => '2018-08-01'])->assertOk()
+        $this->patchJson("/api/borrowers/{$member->id}/membership", ['membership_date' => '2018-08-01'])->assertOk()
             ->assertJsonPath('data.membership_number', 'KEEP-1');
     }
 

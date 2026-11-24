@@ -31,6 +31,10 @@ use OpenApi\Attributes as OA;
         new OA\Property(property: 'approved_by_user', type: 'object', nullable: true, description: 'The reviewer who approved the registration, as a UserResource. Present only when the `approvedBy` relation is eager-loaded; absent otherwise, never lazily fetched.'),
         new OA\Property(property: 'rejected_by_user', type: 'object', nullable: true, description: 'The reviewer who rejected the registration, as a UserResource. Present only when the `rejectedBy` relation is eager-loaded; absent otherwise, never lazily fetched.'),
         new OA\Property(property: 'rejection_reason', type: 'string', nullable: true, description: 'Reason captured when a registration is rejected'),
+        new OA\Property(property: 'possible_duplicate', type: 'object', nullable: true, description: 'The record a public registration may duplicate, linked by the server (the public form is never refused as a duplicate). '
+            .'Present only on GET /borrowers/{id}; null when there is none. A caller with `borrowers:view` who can see that record\'s branch gets '
+            .'`{visible: true, id, borrower_code, full_name, is_member, reason, message}`, with the reason and message in words; anyone else gets '
+            .'`{visible: false, message}`, which names nobody. Approving such a registration needs `acknowledge_possible_duplicate: true`.'),
         new OA\Property(property: 'is_imported', type: 'boolean', description: 'True when this member was carried in by a CSV migration rather than registered through this system. '
             .'Imported members are created `active` with no documents and no KYC review, so `approved_at`/`approved_by` on them record who '
             .'ran the migration and the date the extract represents — not an identity check.'),
@@ -148,6 +152,18 @@ class BorrowerResource extends JsonResource
             'approved_by_user' => new UserResource($this->whenLoaded('approvedBy')),
             'rejected_by_user' => new UserResource($this->whenLoaded('rejectedBy')),
             'rejection_reason' => $this->rejection_reason,
+
+            /*
+             * The record a public registration may duplicate (finish run round
+             * 2, decision 3), named only to a caller who may see it. Present
+             * only when `possibleDuplicateOf` was loaded, as on GET
+             * /borrowers/{id}, which the registration review reads; never
+             * lazily fetched, so the list costs nothing per row.
+             */
+            'possible_duplicate' => $this->when(
+                $this->resource->relationLoaded('possibleDuplicateOf'),
+                fn (): ?array => PossibleDuplicatePresenter::present($this->resource, $request->user()),
+            ),
 
             /*
              * The imported-member backlog, in two fields the members list can
