@@ -12,6 +12,7 @@ use App\Services\Accounting\AutomaticPoster;
 use App\Services\Amla\Screening\OrderCredits;
 use App\Services\AuditLogService;
 use App\Services\Savings\ApprovalGate;
+use App\Services\Savings\DuplicateReference;
 use App\Services\Savings\SavingsLedger;
 use App\Services\Savings\SavingsLocks;
 use App\Services\Savings\SavingsMath;
@@ -52,6 +53,12 @@ use LogicException;
  * through a money method above tier 1 waits for a checker (202, a
  * `td_payout` or `pretermination` approval, carried out by its executor);
  * a payout into savings moves no cash, like a transfer, and posts at once.
+ * A payout's reference is optional (it exists only once the money is sent;
+ * finish run round 5). One given is kept on the placement as
+ * `payout_reference` beside its `payout_method`, and DuplicateReference
+ * checks it as it checks a withdrawal's: when asked for, while it waits (it
+ * holds the reference), and again when an approved payout posts (the
+ * executors).
  *
  * **Once only:** the settling write is conditioned on the placement still
  * being open (409 when no row changes), on top of the placement's row lock;
@@ -78,13 +85,14 @@ class Settlement
         private readonly SavingsLocks $locks,
         private readonly ApprovalGate $gate,
         private readonly AutomaticPoster $poster,
+        private readonly DuplicateReference $duplicates,
     ) {}
 
     /**
      * A settlement asked for at the counter: carried out now (201), or waiting
      * for a checker (202).
      *
-     * @param  array{date: string, action: string, payout_method?: string|null, payout_account_id?: int|null, next_instruction?: string|null}  $data
+     * @param  array{date: string, action: string, payout_method?: string|null, payout_account_id?: int|null, payout_reference?: string|null, next_instruction?: string|null}  $data
      * @return array{deposit: TimeDeposit, rolled: TimeDeposit|null, approval: SavingsApproval|null}
      *
      * @throws ValidationException
@@ -92,6 +100,7 @@ class Settlement
     public function requestSettlement(TimeDeposit $deposit, array $data, User $user): array
     {
         $payoutMethod = $data['payout_method'] ?? null;
+        $payoutReference = $data['payout_reference'] ?? null;
         $nextInstruction = $data['next_instruction'] ?? null;
         $pickedId = $payoutMethod === 'savings' && isset($data['payout_account_id']) ? (int) $data['payout_account_id'] : null;
         [$locked, $picked] = $this->lock($deposit, $payoutMethod === 'savings', $pickedId);
@@ -105,6 +114,7 @@ class Settlement
 
         if ($paidOut > 0) {
             $this->assertPayoutMethod($locked, $payoutMethod, $picked);
+            $this->duplicates->assertUnused($payoutMethod, $payoutReference, 'payout_reference');
 
             if ($payoutMethod !== 'savings' && $this->gate->needsApproval($paidOut)) {
                 $approval = $this->gate->open('td_payout', $paidOut, [
@@ -113,6 +123,7 @@ class Settlement
                         'date' => $data['date'],
                         'action' => $data['action'],
                         'payout_method' => $payoutMethod,
+                        'payout_reference' => $payoutReference,
                         'next_instruction' => $nextInstruction,
                         'post_maturity_tax_rate' => $split['post_maturity']['tax_rate'],
                     ],
@@ -122,7 +133,7 @@ class Settlement
             }
         }
 
-        $result = $this->settle($locked, $data['date'], $data['action'], $payoutMethod, $user->id, $nextInstruction, payoutAccount: $picked);
+        $result = $this->settle($locked, $data['date'], $data['action'], $payoutMethod, $user->id, $nextInstruction, payoutAccount: $picked, payoutReference: $payoutReference);
 
         return [...$result, 'approval' => null];
     }
@@ -135,12 +146,14 @@ class Settlement
      * so a tax rule added since then never changes or refuses it.
      * `$payoutAccount` is the savings account staff picked to pay into, as
      * the caller locked it (else the one named at placement).
+     * `$payoutReference` is kept with a payout over the counter, never with
+     * one into savings or a full rollover.
      *
      * @return array{deposit: TimeDeposit, rolled: TimeDeposit|null, credit: SavingsTransaction|null}
      *
      * @throws ValidationException
      */
-    public function settle(TimeDeposit $locked, string $date, string $action, ?string $payoutMethod, ?int $userId, ?string $nextInstruction = null, ?string $postMaturityTaxRate = null, ?SavingsAccount $payoutAccount = null): array
+    public function settle(TimeDeposit $locked, string $date, string $action, ?string $payoutMethod, ?int $userId, ?string $nextInstruction = null, ?string $postMaturityTaxRate = null, ?SavingsAccount $payoutAccount = null, ?string $payoutReference = null): array
     {
         $this->assertInTransaction();
         $this->assertOpen($locked);
@@ -169,6 +182,7 @@ class Settlement
             'settled_tax' => SavingsMath::pesos($tax),
             'settled_amount' => SavingsMath::pesos($paidOut),
             'payout_method' => $method,
+            'payout_reference' => self::counterReference($method, $payoutReference),
             'settled_by' => $userId,
         ];
 
@@ -214,7 +228,7 @@ class Settlement
      * A pre-termination asked for at the counter: carried out now (201), or
      * waiting for a checker (202).
      *
-     * @param  array{date: string, reason: string, payout_method: string, payout_account_id?: int|null}  $data
+     * @param  array{date: string, reason: string, payout_method: string, payout_account_id?: int|null, payout_reference?: string|null}  $data
      * @return array{deposit: TimeDeposit, approval: SavingsApproval|null}
      *
      * @throws ValidationException
@@ -230,30 +244,38 @@ class Settlement
 
         $figures = $this->quote->pretermination($locked, $data['date']);
         $this->assertPayoutMethod($locked, $data['payout_method'], $picked);
+        $payoutReference = $data['payout_reference'] ?? null;
+        $this->duplicates->assertUnused($data['payout_method'], $payoutReference, 'payout_reference');
 
         if ($data['payout_method'] !== 'savings' && $this->gate->needsApproval($figures['payout'])) {
             $approval = $this->gate->open('pretermination', $figures['payout'], [
                 'time_deposit_id' => $locked->id,
-                'payload' => ['date' => $data['date'], 'reason' => $data['reason'], 'payout_method' => $data['payout_method']],
+                'payload' => [
+                    'date' => $data['date'],
+                    'reason' => $data['reason'],
+                    'payout_method' => $data['payout_method'],
+                    'payout_reference' => $payoutReference,
+                ],
             ], $user->id);
 
             return ['deposit' => $locked, 'approval' => $approval];
         }
 
-        $this->preterminate($locked, $data['date'], $data['reason'], $data['payout_method'], $user->id, $picked);
+        $this->preterminate($locked, $data['date'], $data['reason'], $data['payout_method'], $user->id, $picked, $payoutReference);
 
         return ['deposit' => $locked, 'approval' => null];
     }
 
     /**
      * Break a placement early, under its lock: the quote's figures, paid out,
-     * audited with the reason. `$payoutAccount` as for {@see self::settle()}.
+     * audited with the reason. `$payoutAccount` and `$payoutReference` as for
+     * {@see self::settle()}.
      *
      * @return array{deposit: TimeDeposit, credit: SavingsTransaction|null, payout: int}
      *
      * @throws ValidationException
      */
-    public function preterminate(TimeDeposit $locked, string $date, string $reason, string $payoutMethod, ?int $userId, ?SavingsAccount $payoutAccount = null): array
+    public function preterminate(TimeDeposit $locked, string $date, string $reason, string $payoutMethod, ?int $userId, ?SavingsAccount $payoutAccount = null, ?string $payoutReference = null): array
     {
         $this->assertInTransaction();
         $this->assertCanPreterminate($locked);
@@ -269,6 +291,7 @@ class Settlement
             'settled_tax' => SavingsMath::pesos($figures['tax']),
             'settled_amount' => SavingsMath::pesos($figures['payout']),
             'payout_method' => $payoutMethod,
+            'payout_reference' => self::counterReference($payoutMethod, $payoutReference),
             'settled_by' => $userId,
         ]);
 
@@ -419,6 +442,18 @@ class Settlement
             ->where('time_deposit_id', $deposit->id)
             ->where('status', 'pending')
             ->exists();
+    }
+
+    /**
+     * The reference kept with a payout: only one over the counter carries it
+     * (a payout into savings is a move between the member's own records, and
+     * nothing paid out carries no method); a blank one is none.
+     */
+    private static function counterReference(?string $method, ?string $reference): ?string
+    {
+        $reference = $reference === null ? '' : trim($reference);
+
+        return $method === null || $method === 'savings' || $reference === '' ? null : $reference;
     }
 
     /**

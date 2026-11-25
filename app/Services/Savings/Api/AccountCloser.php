@@ -13,6 +13,7 @@ use App\Services\AuditLogService;
 use App\Services\Savings\AccruedInterest;
 use App\Services\Savings\ApprovalGate;
 use App\Services\Savings\AvailableBalance;
+use App\Services\Savings\DuplicateReference;
 use App\Services\Savings\SavingsLedger;
 use App\Services\Savings\SavingsLocks;
 use App\Services\Savings\SavingsMath;
@@ -34,6 +35,12 @@ use Illuminate\Validation\ValidationException;
  * `savings_interest` journal), pays the whole balance out (`closing`, a
  * `savings` journal), then marks the account closed and frees its `open_key`.
  * A payout above tier 1 waits for a checker (CloseExecutor), reserving it.
+ *
+ * The payout's reference is optional (it exists only once the money is
+ * sent; finish run round 5). One given is kept on the `closing` row as
+ * `external_reference`, as a withdrawal keeps its own, and DuplicateReference
+ * checks it the same way: when the close is asked for, while it waits (it
+ * holds the reference), and again when an approved close posts.
  */
 class AccountCloser
 {
@@ -50,6 +57,7 @@ class AccountCloser
         private readonly Teller $teller,
         private readonly LargeTransactionAlert $alert,
         private readonly AvailableBalance $available,
+        private readonly DuplicateReference $duplicates,
     ) {}
 
     /**
@@ -78,7 +86,7 @@ class AccountCloser
     /**
      * Close at once, or (above tier 1) open the approval.
      *
-     * @param  array{date: string, reason: string, payout_method: string}  $data
+     * @param  array{date: string, reason: string, payout_method: string, payout_reference?: string|null}  $data
      * @return array{account: SavingsAccount|null, approval: SavingsApproval|null}
      *
      * @throws ValidationException
@@ -88,6 +96,7 @@ class AccountCloser
         $account = $this->locks->account($accountId);
         $this->assertCanClose($account);
         $this->teller->assertNotBeforeLatest($account, $data['date']);
+        $this->duplicates->assertUnused($data['payout_method'], $data['payout_reference'] ?? null, 'payout_reference');
         $payout = $this->figures($account, $data['date'])['payout'];
 
         if ($this->gate->needsApprovalFor($account, $payout)) {
@@ -95,7 +104,12 @@ class AccountCloser
 
             return ['account' => null, 'approval' => $this->gate->open('close', $payout, [
                 'account_id' => $account->id,
-                'payload' => ['date' => $data['date'], 'reason' => $data['reason'], 'payout_method' => $data['payout_method']],
+                'payload' => [
+                    'date' => $data['date'],
+                    'reason' => $data['reason'],
+                    'payout_method' => $data['payout_method'],
+                    'payout_reference' => $data['payout_reference'] ?? null,
+                ],
             ], $user->id)];
         }
 
@@ -111,9 +125,11 @@ class AccountCloser
      * An approved close pays out only what the checkers approved: the payout
      * is worked out again for the request's date, and any change since the
      * request (a deposit, a hold released, interest) answers 409, so money
-     * never leaves on an amount nobody approved.
+     * never leaves on an amount nobody approved. Its reference was checked
+     * when it was asked for and held while it waited; it is checked again
+     * here against what is on record and the requests waiting since before it.
      *
-     * @param  array{date: string, reason: string, payout_method: string}  $data
+     * @param  array{date: string, reason: string, payout_method: string, payout_reference?: string|null}  $data
      *
      * @throws ValidationException
      */
@@ -123,6 +139,7 @@ class AccountCloser
 
         if ($approval !== null) {
             $this->assertPayoutUnchanged($account, $approval);
+            $this->duplicates->assertUnused($data['payout_method'], $data['payout_reference'] ?? null, 'payout_reference', $approval->id);
         }
 
         $date = $data['date'];
@@ -147,7 +164,10 @@ class AccountCloser
 
         if ($balance > 0) {
             $result = $this->ledger->debit($account, 'closing', $balance, [
-                ...$attributes, 'method' => $data['payout_method'], 'remarks' => $data['reason'],
+                ...$attributes,
+                'method' => $data['payout_method'],
+                'external_reference' => $data['payout_reference'] ?? null,
+                'remarks' => $data['reason'],
             ]);
             $this->poster->savingsTransaction($result, $posterId);
             $this->alert->afterPosting($result, [$closerId, $posterId, $approval?->first_checker_id]);

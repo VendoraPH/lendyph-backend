@@ -6,6 +6,7 @@ use App\Models\SavingsApproval;
 use App\Models\SavingsTransaction;
 use App\Models\TimeDeposit;
 use App\Models\User;
+use App\Services\Savings\DuplicateReference;
 use App\Services\Savings\SavingsLocks;
 use App\Services\Savings\SavingsMath;
 use App\Services\Savings\TimeDeposits\Settlement;
@@ -18,13 +19,16 @@ use Illuminate\Validation\ValidationException;
  * placement's; this re-checks the placement is still waiting to be settled
  * and that the payout is still the approved amount, then settles it as the
  * checker. Its own approval is no savings outflow, so no available-balance
- * check is involved.
+ * check is involved. Its payout reference, held while it waited, is checked
+ * again against what is on record and the requests waiting since before it
+ * (DuplicateReference, finish run round 5).
  */
 class TdPayoutExecutor implements ApprovalExecutor
 {
     public function __construct(
         private readonly Settlement $settlement,
         private readonly SavingsLocks $locks,
+        private readonly DuplicateReference $duplicates,
     ) {}
 
     public function accountIds(SavingsApproval $approval): array
@@ -67,6 +71,8 @@ class TdPayoutExecutor implements ApprovalExecutor
             ]]);
         }
 
+        $this->duplicates->assertUnused($payload['payout_method'] ?? null, $payload['payout_reference'] ?? null, 'payout_reference', $approval->id);
+
         return $this->settlement->settle(
             $deposit,
             (string) $payload['date'],
@@ -75,6 +81,7 @@ class TdPayoutExecutor implements ApprovalExecutor
             $checker->id,
             $payload['next_instruction'] ?? null,
             $taxRate,
+            payoutReference: $payload['payout_reference'] ?? null,
         )['credit'];
     }
 }

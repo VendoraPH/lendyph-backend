@@ -200,7 +200,7 @@ class SavingsTimeDepositController extends Controller
             new OA\Property(property: 'placement_date', type: 'string', format: 'date'),
             new OA\Property(property: 'maturity_instruction', type: 'string', enum: TimeDeposit::MATURITY_INSTRUCTIONS),
             new OA\Property(property: 'payment_method', type: 'string', enum: ['cash', 'bank_transfer', 'gcash', 'maya', 'savings']),
-            new OA\Property(property: 'reference', type: 'string', nullable: true, description: 'The payment reference. Ignored for cash, which gets its TD number.'),
+            new OA\Property(property: 'reference', type: 'string', nullable: true, description: 'The payment reference: required for bank transfer, GCash and Maya (422 in words), optional from savings, ignored for cash, which gets its TD number.'),
             new OA\Property(property: 'funding_account_id', type: 'integer', nullable: true),
             new OA\Property(property: 'payout_account_id', type: 'integer', nullable: true),
         ])),
@@ -238,6 +238,7 @@ class SavingsTimeDepositController extends Controller
             new OA\Property(property: 'action', type: 'string', enum: TimeDeposit::MATURITY_INSTRUCTIONS),
             new OA\Property(property: 'payout_method', type: 'string', enum: ['cash', 'bank_transfer', 'gcash', 'maya', 'savings']),
             new OA\Property(property: 'payout_account_id', type: 'integer', nullable: true, description: 'With payout_method savings: which of the member\'s savings accounts to pay into (same member, same branch, active); the one named at placement when left out. Ignored for other methods'),
+            new OA\Property(property: 'payout_reference', type: 'string', nullable: true, description: 'The payout\'s reference, optional: it exists only once the money is sent. Ignored for a payout into savings or a full rollover; kept on the placement; refused (422) when already on record for the method'),
             new OA\Property(property: 'next_instruction', type: 'string', enum: TimeDeposit::MATURITY_INSTRUCTIONS, nullable: true, description: 'On a rollover: the new placement\'s instruction; the old one\'s when left out'),
         ])),
         responses: [
@@ -312,6 +313,7 @@ class SavingsTimeDepositController extends Controller
             new OA\Property(property: 'reason', type: 'string'),
             new OA\Property(property: 'payout_method', type: 'string', enum: ['cash', 'bank_transfer', 'gcash', 'maya', 'savings']),
             new OA\Property(property: 'payout_account_id', type: 'integer', nullable: true, description: 'With payout_method savings: which of the member\'s savings accounts to pay into (same member, same branch, active); the one named at placement when left out. Ignored for other methods'),
+            new OA\Property(property: 'payout_reference', type: 'string', nullable: true, description: 'The payout\'s reference, optional: it exists only once the money is sent. Ignored for a payout into savings; kept on the placement; refused (422) when already on record for the method'),
         ])),
         responses: [
             new OA\Response(response: 201, description: 'The pre-terminated placement'),

@@ -41,6 +41,7 @@ class CloseExecutor implements ApprovalExecutor
             'date' => $payload['date'],
             'reason' => (string) ($payload['reason'] ?? 'Closed'),
             'payout_method' => $payload['payout_method'],
+            'payout_reference' => $payload['payout_reference'] ?? null,
         ], $approval->requested_by, $checker->id, $approval);
     }
 }
