@@ -21,6 +21,7 @@ use App\Services\BranchAccess;
 use App\Services\Cda\MembershipStatus;
 use App\Services\Diagnostics\ErrorDigest;
 use App\Services\MemberLedgerService;
+use App\Services\RegistrationReview;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
@@ -558,6 +559,7 @@ Approve a borrower whose status is `pending` (public-registration review).
 - `branch_id` (optional): the member's branch, one of the caller's (any branch with `branches:view_all`). Required (422) when the registration has no branch; when it already has one, it may only repeat it (422 otherwise), so approval never moves a member.
 - Returns 422 on `email` while the registration's email (case and spaces ignored) is on another member, whatever is acknowledged: change or clear it with PUT /borrowers/{id} first. It names that member only to a caller who can see them.
 - `acknowledge_possible_duplicate` (boolean): required as `true` when the registration was saved as a possible duplicate of a record on file (its `possible_duplicate`); otherwise 422 on `possible_duplicate`, in words, once every other check passes. It names the record only to a caller who can see it.
+- Returns 409, in words, when another write got there first: the registration was approved or rejected, or its branch changed, at the same moment, or a member was saved with its email. Reload and try again.
 DESC,
         tags: ['Borrowers'],
         security: [['sanctum' => []]],
@@ -579,6 +581,7 @@ DESC,
             new OA\Response(response: 403, description: 'Forbidden'),
             new OA\Response(response: 404, description: 'Not found, or in a branch the caller can\'t see'),
             new OA\Response(response: 422, description: 'Borrower is not in pending status, has no valid ID on file, has no branch and none was chosen, the chosen branch isn\'t the caller\'s or differs from the registration\'s, its email is on another member, or it may be a duplicate and `acknowledge_possible_duplicate` wasn\'t true'),
+            new OA\Response(response: 409, description: 'Another write got there first: the registration was approved, rejected or moved to another branch at the same moment, or a member was saved with its email'),
         ],
     )]
     public function approveRegistration(ApproveRegistrationRequest $request, Borrower $borrower): BorrowerResource
@@ -636,16 +639,10 @@ DESC,
             ]);
         }
 
-        // Approval makes the applicant a member today (CDA design §1): the
-        // membership date and number, where neither is set yet.
-        $borrower->update([
-            'branch_id' => $borrower->branch_id ?? (int) $branchId,
-            'status' => 'active',
-            'approved_by' => $request->user()->id,
-            'approved_at' => now(),
-            'membership_date' => $borrower->membership_date ?? now()->toDateString(),
-            'membership_number' => $borrower->membership_number ?? $borrower->borrower_code,
-        ]);
+        // Written under the registration's lock and the member duplicate
+        // check's, where the status, branch and email are checked again
+        // (finish run round 4): 409 when another write got there first.
+        app(RegistrationReview::class)->approve($borrower, $branchId === null ? null : (int) $branchId, $request->user());
 
         $borrower->load('branch', 'approvedBy', 'rejectedBy');
 
@@ -663,6 +660,7 @@ Reject a borrower whose status is `pending` **without hard-deleting the row**, p
 - Deletes the share-capital pledge auto-created at submission (a rejected applicant is not a member).
 - Returns the updated borrower.
 - Returns 422 if the borrower is not currently `pending`, or if `reason` is missing.
+- Returns 409, in words, when another write got there first: the registration was approved or rejected, or its branch changed, at the same moment. Nothing is written, so an approved member is never rejected and keeps their pledge.
 DESC,
         tags: ['Borrowers'],
         security: [['sanctum' => []]],
@@ -683,6 +681,7 @@ DESC,
             new OA\Response(response: 401, description: 'Unauthenticated'),
             new OA\Response(response: 403, description: 'Forbidden'),
             new OA\Response(response: 422, description: 'Borrower is not in pending status, or reason is missing'),
+            new OA\Response(response: 409, description: 'Another write got there first: the registration was approved, rejected or moved to another branch at the same moment'),
         ],
     )]
     public function reject(RejectBorrowerRequest $request, Borrower $borrower): BorrowerResource
@@ -693,16 +692,10 @@ DESC,
             ]);
         }
 
-        $borrower->update([
-            'status' => 'rejected',
-            'rejection_reason' => $request->validated('reason'),
-            'rejected_by' => $request->user()->id,
-            'rejected_at' => now(),
-        ]);
-
-        // A rejected applicant is not a member: remove the share-capital pledge
-        // auto-created at submission so it doesn't linger in share-capital totals.
-        $borrower->shareCapitalPledge()->delete();
+        // Written under the registration's lock, the one an approval takes
+        // first, where the status and branch are checked again (finish run
+        // round 4): 409 when another write got there first.
+        app(RegistrationReview::class)->reject($borrower, (string) $request->validated('reason'), $request->user());
 
         $borrower->load('branch', 'approvedBy', 'rejectedBy');
 

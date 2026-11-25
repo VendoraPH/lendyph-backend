@@ -257,7 +257,7 @@ class DecimalRatesAndFeesTest extends TestCase
         $this->putJson("/api/loans/{$loan->id}", ['interest_rate' => $rate, 'purpose' => 'Edited'])
             ->assertUnprocessable()
             ->assertJsonValidationErrors([
-                'interest_rate' => 'Interest rate must be between 2% and 2.5% for this product.',
+                'interest_rate' => 'The interest rate must be between 2% and 2.5% per month for this product.',
             ]);
 
         $loan->refresh();
@@ -282,7 +282,7 @@ class DecimalRatesAndFeesTest extends TestCase
         $this->putJson("/api/loans/{$loan->id}", ['interest_rate' => 2.25])
             ->assertUnprocessable()
             ->assertJsonValidationErrors([
-                'interest_rate' => 'Interest rate must be between 1.5% and 2% for this product.',
+                'interest_rate' => 'The interest rate must be between 1.5% and 2% per month for this product.',
             ]);
     }
 
@@ -299,7 +299,7 @@ class DecimalRatesAndFeesTest extends TestCase
             $this->fail('A rate outside the new product\'s range was accepted.');
         } catch (ValidationException $e) {
             $this->assertSame(
-                ['Interest rate must be between 3% and 4% for this product.'],
+                ['The interest rate must be between 3% and 4% per month for this product.'],
                 $e->errors()['interest_rate'],
             );
         }
