@@ -22,7 +22,10 @@ use InvalidArgumentException;
  * {@see DisclosureService::generateDisclosure()} and
  * {@see PromissoryNoteService::generatePromissoryNote()}, so a figure can't
  * differ between the paper and this check. The disclosure's catalog fees are
- * the provisional ones it computes before release.
+ * the provisional ones it computes before release. The document endpoints
+ * send {@see fingerprintOf()} of the very payload they answer with, and the
+ * print log stores it, so a print records the terms its paper shows even when
+ * they changed between opening the document and printing it.
  *
  * Each value is listed by name, never a whole section of a payload: a key
  * added to a document later must not silently change every fingerprint. The
@@ -60,9 +63,20 @@ final class LoanDocumentTerms
     {
         $terms = $this->terms($loan, $document);
 
-        return $terms === null
-            ? null
-            : hash('sha256', json_encode($terms, JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
+        return $terms === null ? null : self::hash($terms);
+    }
+
+    /**
+     * The fingerprint of a document already built: what GET
+     * /loans/{loan}/disclosure and /promissory-note send with the payload, so
+     * the print records the terms the paper it prints shows, by the same rule
+     * as the check.
+     *
+     * @param  array<string, mixed>  $payload  generateDisclosure() or generatePromissoryNote()
+     */
+    public function fingerprintOf(string $document, array $payload): string
+    {
+        return self::hash($this->termsOf($document, $payload));
     }
 
     /**
@@ -84,14 +98,33 @@ final class LoanDocumentTerms
         }
 
         try {
-            return match ($document) {
-                LoanDocumentPrint::DISCLOSURE => $this->disclosureTerms($this->disclosures->generateDisclosure($copy)),
-                LoanDocumentPrint::PROMISSORY_NOTE => $this->promissoryNoteTerms($this->promissoryNotes->generatePromissoryNote($copy, false)),
+            return $this->termsOf($document, match ($document) {
+                LoanDocumentPrint::DISCLOSURE => $this->disclosures->generateDisclosure($copy),
+                LoanDocumentPrint::PROMISSORY_NOTE => $this->promissoryNotes->generatePromissoryNote($copy, false),
                 default => throw new InvalidArgumentException("Unknown loan document [{$document}]."),
-            };
+            });
         } catch (ValidationException) {
             return null;
         }
+    }
+
+    /**
+     * @param  array<string, mixed>  $payload
+     * @return array<string, mixed>
+     */
+    private function termsOf(string $document, array $payload): array
+    {
+        return match ($document) {
+            LoanDocumentPrint::DISCLOSURE => $this->disclosureTerms($payload),
+            LoanDocumentPrint::PROMISSORY_NOTE => $this->promissoryNoteTerms($payload),
+            default => throw new InvalidArgumentException("Unknown loan document [{$document}]."),
+        };
+    }
+
+    /** @param  array<string, mixed>  $terms */
+    private static function hash(array $terms): string
+    {
+        return hash('sha256', json_encode($terms, JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
     }
 
     /**

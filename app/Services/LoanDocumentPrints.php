@@ -14,8 +14,8 @@ use Illuminate\Validation\ValidationException;
  * statement and the promissory note are printed for the member to sign, so
  * a loan must not be released on a signed copy whose terms no longer match.
  *
- * Each print records the terms the document stated ({@see record()}). A
- * printed document is out of date when all of these hold:
+ * Each print records the terms its paper shows ({@see record()}). A printed
+ * document is out of date when all of these hold:
  *
  * - the loan is `approved` (documents print from Approved on, and once the
  *   loan is released the release has settled its terms);
@@ -37,14 +37,21 @@ final class LoanDocumentPrints
 
     public function __construct(private LoanDocumentTerms $terms) {}
 
-    /** One print of `$document`, with the terms it states now. */
-    public function record(Loan $loan, string $document, User $printedBy): LoanDocumentPrint
+    /**
+     * One print of `$document`, with the terms its paper shows: `$printedTerms`
+     * as the document's payload sent them (GET /loans/{loan}/disclosure or
+     * /promissory-note), stored as they are; or, when a print sends none (a tab
+     * opened before the payload carried them), the terms it states now.
+     *
+     * @param  array{fingerprint: string|null, version: int}|null  $printedTerms
+     */
+    public function record(Loan $loan, string $document, User $printedBy, ?array $printedTerms = null): LoanDocumentPrint
     {
         return LoanDocumentPrint::query()->create([
             'loan_id' => $loan->getKey(),
             'document' => $document,
-            'terms_fingerprint' => $this->terms->fingerprint($loan, $document),
-            'terms_version' => LoanDocumentTerms::VERSION,
+            'terms_fingerprint' => $printedTerms === null ? $this->terms->fingerprint($loan, $document) : $printedTerms['fingerprint'],
+            'terms_version' => $printedTerms === null ? LoanDocumentTerms::VERSION : $printedTerms['version'],
             'printed_by' => $printedBy->getKey(),
             'printed_at' => now(),
         ]);

@@ -13,6 +13,7 @@ use App\Services\LoanDocumentTerms;
 use Illuminate\Database\Events\QueryExecuted;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
+use PHPUnit\Framework\Attributes\DataProvider;
 use RuntimeException;
 use Spatie\Permission\Models\Permission;
 use Tests\Feature\Ledger\Release\ReleasesLoans;
@@ -274,11 +275,148 @@ class LoanDocumentReprintTest extends TestCase
         $this->assertSame($viewer->id, (int) $this->latestPrint($loan, 'disclosure')->printed_by);
     }
 
+    public function test_the_documents_send_the_terms_they_state(): void
+    {
+        $loan = $this->approvedLoan();
+        $terms = app(LoanDocumentTerms::class);
+
+        $this->getJson("/api/loans/{$loan->id}/disclosure")
+            ->assertOk()
+            ->assertJsonPath('data.terms_fingerprint', $terms->fingerprint($loan, 'disclosure'))
+            ->assertJsonPath('data.terms_version', LoanDocumentTerms::VERSION);
+
+        $this->getJson("/api/loans/{$loan->id}/promissory-note")
+            ->assertOk()
+            ->assertJsonPath('data.terms_fingerprint', $terms->fingerprint($loan, 'promissory_note'))
+            ->assertJsonPath('data.terms_version', LoanDocumentTerms::VERSION);
+    }
+
+    public function test_a_print_tab_opened_before_a_terms_change_and_printed_after_it_leaves_the_document_out_of_date(): void
+    {
+        $loan = $this->approvedLoan();
+        // The print tab reads the statement, then a catalog fee is added before
+        // anyone presses Print: the paper still shows the terms it was read with.
+        $opened = $this->getJson("/api/loans/{$loan->id}/disclosure")->assertOk()->json('data');
+        Fee::create(['name' => 'Documentary Stamp Tax', 'type' => 'fixed', 'value' => 150, 'applicable_product_ids' => [$loan->loan_product_id]]);
+
+        $this->printedFrom($loan, 'disclosure', $opened);
+
+        $this->assertSame($opened['terms_fingerprint'], $this->latestPrint($loan, 'disclosure')->terms_fingerprint);
+        $this->assertOutdated($loan, [
+            ['document' => 'disclosure', 'label' => 'Disclosure Statement', 'printed_at' => '2026-11-25T02:04:00.000000Z'],
+        ]);
+        $this->patchJson("/api/loans/{$loan->id}/release")
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors(['documents' => "The loan's terms changed after the disclosure statement was printed on November 25, 2026. Print it again and have the member sign the new copy before releasing."]);
+    }
+
+    public function test_a_print_of_an_up_to_date_payload_clears_it(): void
+    {
+        $loan = $this->approvedLoan();
+        $opened = $this->getJson("/api/loans/{$loan->id}/disclosure")->assertOk()->json('data');
+        Fee::create(['name' => 'Documentary Stamp Tax', 'type' => 'fixed', 'value' => 150, 'applicable_product_ids' => [$loan->loan_product_id]]);
+        $this->printedFrom($loan, 'disclosure', $opened);
+        $this->assertCount(1, $this->getJson("/api/loans/{$loan->id}")->json('data.printed_documents_outdated'));
+
+        $reopened = $this->getJson("/api/loans/{$loan->id}/disclosure")->assertOk()->json('data');
+        $this->assertNotSame($opened['terms_fingerprint'], $reopened['terms_fingerprint']);
+        $this->printedFrom($loan, 'disclosure', $reopened);
+
+        $this->assertOutdated($loan, []);
+        $this->patchJson("/api/loans/{$loan->id}/release")->assertOk();
+    }
+
+    public function test_a_print_that_sends_no_terms_still_records_the_terms_as_they_stand(): void
+    {
+        $loan = $this->approvedLoan();
+        // A tab opened before this change: its payload had no terms to send.
+        $this->getJson("/api/loans/{$loan->id}/disclosure")->assertOk();
+        Fee::create(['name' => 'Documentary Stamp Tax', 'type' => 'fixed', 'value' => 150, 'applicable_product_ids' => [$loan->loan_product_id]]);
+
+        $this->printed($loan, 'disclosure');
+
+        $print = $this->latestPrint($loan, 'disclosure');
+        $this->assertSame(app(LoanDocumentTerms::class)->fingerprint($loan, 'disclosure'), $print->terms_fingerprint);
+        $this->assertSame(LoanDocumentTerms::VERSION, $print->terms_version);
+        $this->assertOutdated($loan, []);
+    }
+
+    public function test_sent_terms_are_stored_as_they_are(): void
+    {
+        $loan = $this->approvedLoan();
+
+        // A document that couldn't be built has no terms; a print from another
+        // version of the terms is kept as that version. Neither blocks.
+        $this->postJson("/api/loans/{$loan->id}/print-log", ['document' => 'disclosure', 'terms_fingerprint' => null, 'terms_version' => LoanDocumentTerms::VERSION])
+            ->assertCreated();
+        $this->postJson("/api/loans/{$loan->id}/print-log", ['document' => 'promissory_note', 'terms_fingerprint' => str_repeat('d', 64), 'terms_version' => LoanDocumentTerms::VERSION + 1])
+            ->assertCreated();
+
+        $this->assertNull($this->latestPrint($loan, 'disclosure')->terms_fingerprint);
+        $this->assertSame(LoanDocumentTerms::VERSION, $this->latestPrint($loan, 'disclosure')->terms_version);
+        $this->assertSame(str_repeat('d', 64), $this->latestPrint($loan, 'promissory_note')->terms_fingerprint);
+        $this->assertSame(LoanDocumentTerms::VERSION + 1, $this->latestPrint($loan, 'promissory_note')->terms_version);
+        $this->assertOutdated($loan, []);
+    }
+
+    /**
+     * @return array<string, array{0: array<string, mixed>, 1: string, 2: string}>
+     */
+    public static function malformedTerms(): array
+    {
+        $hex = str_repeat('a', 64);
+        $reference = "The printed document's terms reference isn't valid. Open the document again and print it.";
+        $version = "The printed document's terms version isn't valid. Open the document again and print it.";
+        $together = "Send the printed document's terms reference and terms version together.";
+
+        return [
+            'upper case' => [['terms_fingerprint' => strtoupper($hex), 'terms_version' => 1], 'terms_fingerprint', $reference],
+            'too short' => [['terms_fingerprint' => substr($hex, 1), 'terms_version' => 1], 'terms_fingerprint', $reference],
+            'too long' => [['terms_fingerprint' => $hex.'a', 'terms_version' => 1], 'terms_fingerprint', $reference],
+            'not hexadecimal' => [['terms_fingerprint' => str_repeat('g', 64), 'terms_version' => 1], 'terms_fingerprint', $reference],
+            'a list' => [['terms_fingerprint' => [$hex], 'terms_version' => 1], 'terms_fingerprint', $reference],
+            'a version in words' => [['terms_fingerprint' => $hex, 'terms_version' => 'one'], 'terms_version', $version],
+            'a null version' => [['terms_fingerprint' => $hex, 'terms_version' => null], 'terms_version', $version],
+            'a version out of range' => [['terms_fingerprint' => $hex, 'terms_version' => 70000], 'terms_version', $version],
+            'a reference with no version' => [['terms_fingerprint' => $hex], 'terms_version', $together],
+            'a version with no reference' => [['terms_version' => 1], 'terms_fingerprint', $together],
+        ];
+    }
+
+    /** @param  array<string, mixed>  $terms */
+    #[DataProvider('malformedTerms')]
+    public function test_malformed_terms_are_refused_in_words_and_record_nothing(array $terms, string $field, string $message): void
+    {
+        $loan = $this->approvedLoan();
+        $audits = AuditLog::count();
+
+        $this->postJson("/api/loans/{$loan->id}/print-log", ['document' => 'disclosure', ...$terms])
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors([$field => $message]);
+
+        $this->assertSame($audits, AuditLog::count());
+        $this->assertSame(0, LoanDocumentPrint::count());
+    }
+
     private function printed(Loan $loan, string $document): void
     {
         $this->postJson("/api/loans/{$loan->id}/print-log", ['document' => $document])
             ->assertCreated()
             ->assertExactJson(['logged' => true]);
+    }
+
+    /**
+     * A print logged by a tab that read `$payload`: the terms that paper states.
+     *
+     * @param  array<string, mixed>  $payload
+     */
+    private function printedFrom(Loan $loan, string $document, array $payload): void
+    {
+        $this->postJson("/api/loans/{$loan->id}/print-log", [
+            'document' => $document,
+            'terms_fingerprint' => $payload['terms_fingerprint'],
+            'terms_version' => $payload['terms_version'],
+        ])->assertCreated()->assertExactJson(['logged' => true]);
     }
 
     /** @param  list<array<string, string>>  $expected */
