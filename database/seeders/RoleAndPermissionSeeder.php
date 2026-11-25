@@ -296,6 +296,13 @@ class RoleAndPermissionSeeder extends Seeder
             // already-migrated deployments.
             'linda:use', 'linda:settings',
 
+            // Settings → Menu Visibility, which also needs the administrator
+            // override password (finish run round 6). admin and super_admin
+            // only, through Permission::all() below; no other role lists it.
+            // Mirrors 2026_11_25_700100_add_menu_visibility_manage_permission,
+            // which grants it on the already-migrated deployments.
+            'menu_visibility:manage',
+
             // Phase 6: self::PHASE6_PERMISSIONS (AMLA, executive dashboard,
             // branches, member transfer, inter-branch transfers, loan
             // origination).

@@ -44,6 +44,7 @@ use App\Http\Controllers\Api\LoanController;
 use App\Http\Controllers\Api\LoanLedgerController;
 use App\Http\Controllers\Api\LoanPrintLogController;
 use App\Http\Controllers\Api\LoanProductController;
+use App\Http\Controllers\Api\MenuVisibilityController;
 use App\Http\Controllers\Api\NotificationController;
 use App\Http\Controllers\Api\PromissoryNoteController;
 use App\Http\Controllers\Api\PublicReceiptController;
@@ -883,6 +884,21 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
     Route::put('/settings/branding', [BrandingController::class, 'update']);
     Route::post('/settings/branding/logo', [BrandingController::class, 'uploadLogo']);
     Route::delete('/settings/branding/logo', [BrandingController::class, 'deleteLogo']);
+
+    /*
+     * Menu Visibility (finish run round 6): the hidden modules for every
+     * signed-in user's screens, and Settings → Menu Visibility behind
+     * `menu_visibility:manage` and the administrator override (a bcrypt hash
+     * on the server, 15 minutes per sign-in). The override's own limiter
+     * counts only wrong passwords (MenuVisibilityServiceProvider). Never
+     * blocked by a hidden module (MenuModules::ALWAYS_OPEN).
+     */
+    Route::get('/menu-visibility/hidden', [MenuVisibilityController::class, 'hidden']);
+    Route::post('/menu-visibility/override', [MenuVisibilityController::class, 'grantOverride'])
+        ->middleware('throttle:menu-visibility-override');
+    Route::delete('/menu-visibility/override', [MenuVisibilityController::class, 'endOverride']);
+    Route::get('/menu-visibility', [MenuVisibilityController::class, 'show']);
+    Route::put('/menu-visibility', [MenuVisibilityController::class, 'update']);
 
     /*
      * Phase 6 module partials, in this order and each in file-name order:

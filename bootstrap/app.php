@@ -1,6 +1,7 @@
 <?php
 
 use App\Http\Middleware\AllowAuthOrSubmissionToken;
+use App\Http\Middleware\BlockHiddenModules;
 use App\Http\Middleware\CheckTokenExpiry;
 use App\Http\Middleware\EnsureUserIsActive;
 use App\Http\Middleware\OptionalSanctumAuth;
@@ -187,6 +188,17 @@ return Application::configure(basePath: dirname(__DIR__))
         $middleware->prependToPriorityList(SubstituteBindings::class, EnsurePortalMemberActive::class);
         $middleware->prependToPriorityList(SubstituteBindings::class, RequirePortalTerms::class);
 
+        // A module hidden in Settings → Menu Visibility answers 404 on its own
+        // API (finish run round 6). Listed last, so it sorts after every gate
+        // above, staff and portal: an idle token is still expired and deleted
+        // by CheckTokenExpiry (Sanctum has already bumped last_used_at, so a
+        // 404 ahead of it would revive the session), and a deactivated or
+        // locked sign-in still gets its own answer. Still ahead of
+        // SubstituteBindings, so a hidden module's ids are never looked up.
+        // The limiters run first: a hidden module's requests are metered like
+        // any other's.
+        $middleware->prependToPriorityList(SubstituteBindings::class, BlockHiddenModules::class);
+
         // An API guest is answered, never redirected. The framework default
         // sends every guest to route('login'), which this API-only app does
         // not have, so an unauthenticated api/* call without
@@ -213,8 +225,13 @@ return Application::configure(basePath: dirname(__DIR__))
             ThrottleRequests::class.':api',
         ]);
 
+        // BlockHiddenModules sits on the whole `api` group, so every route
+        // file, staff, member portal and public, is covered without naming it
+        // on each route (MenuModules decides which routes a hidden module
+        // owns). Its place in the stack is the priority entry above.
         $middleware->api(append: [
             EnsureFrontendRequestsAreStateful::class,
+            BlockHiddenModules::class,
         ]);
     })
     ->withExceptions(function (Exceptions $exceptions): void {

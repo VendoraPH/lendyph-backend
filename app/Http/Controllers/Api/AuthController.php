@@ -9,6 +9,7 @@ use App\Http\Requests\Auth\UpdateMeRequest;
 use App\Http\Resources\UserResource;
 use App\Models\User;
 use App\Services\AuditLogService;
+use App\Services\MenuVisibility\AdministratorOverride;
 use App\Services\TokenTimeout;
 use Carbon\CarbonInterface;
 use Illuminate\Contracts\Auth\StatefulGuard;
@@ -310,7 +311,7 @@ class AuthController extends Controller
             new OA\Response(response: 423, description: 'Password change required — change the password first, then log in again'),
         ],
     )]
-    public function refresh(Request $request): JsonResponse
+    public function refresh(Request $request, AdministratorOverride $overrides): JsonResponse
     {
         $user = $request->user();
         $currentToken = $user->currentAccessToken();
@@ -333,11 +334,18 @@ class AuthController extends Controller
             ], 400);
         }
 
+        // Menu Visibility's administrator override belongs to the sign-in, not
+        // to one token: read it before the delete cascades it away, then carry
+        // it to the new token with the same expiry, never longer.
+        $override = $overrides->openOn($currentToken);
+
         $currentToken->delete();
 
         $expiry = now()->addMinutes(TokenTimeout::minutes());
 
         $token = $user->createToken('auth-token', ['*'], $expiry);
+
+        $overrides->carry($override, $token->accessToken);
 
         return response()->json([
             'token' => $token->plainTextToken,
