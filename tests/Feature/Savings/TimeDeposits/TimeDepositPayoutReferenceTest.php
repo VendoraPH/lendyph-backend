@@ -14,18 +14,19 @@ use Tests\TestCase;
 
 /**
  * Finish run round 5, time deposit payouts: money paid out at maturity or on
- * pre-termination by bank transfer, GCash or Maya needs its
- * `payout_reference` (422 in words), kept on the placement beside its payout
- * method. Cash needs none, nor does a payout into the member's savings or a
- * full rollover. Round 2's duplicate-reference rule covers it as it covers
- * withdrawals: checked when asked for, held while the payout waits for its
- * checker, and checked again when it posts.
+ * pre-termination is money going out, like a withdrawal, so its
+ * `payout_reference` is optional by any method (it exists only once the
+ * money is sent, after a checker approves above tier 1). One given is kept
+ * on the placement beside its payout method; a payout into the member's
+ * savings or a full rollover keeps none. Round 2's duplicate-reference rule
+ * covers it as it covers withdrawals: checked when asked for, held while the
+ * payout waits for its checker, and checked again when it posts.
  */
 class TimeDepositPayoutReferenceTest extends TestCase
 {
     use TimeDepositFixtures;
 
-    private const WORDS = ['bank_transfer' => 'bank transfer', 'gcash' => 'GCash', 'maya' => 'Maya'];
+    private const METHODS = ['bank_transfer', 'gcash', 'maya'];
 
     protected function setUp(): void
     {
@@ -39,20 +40,26 @@ class TimeDepositPayoutReferenceTest extends TestCase
         parent::tearDown();
     }
 
-    public function test_a_non_cash_payout_at_maturity_without_its_reference_is_refused(): void
+    public function test_a_non_cash_payout_at_maturity_needs_no_reference(): void
     {
-        $deposit = $this->placed(['principal' => '9000.00']);
+        $deposits = [];
+        foreach (self::METHODS as $method) {
+            $deposits[$method] = $this->placed(['principal' => '9000.00']);
+        }
+        $interestOnly = $this->placed();
+        $above = $this->placed();
         $this->toMaturity();
 
-        foreach (self::WORDS as $method => $words) {
-            foreach (['payout', 'rollover_principal'] as $action) {
-                $this->settle($deposit, ['action' => $action, 'payout_method' => $method])
-                    ->assertUnprocessable()
-                    ->assertJsonPath('errors.payout_reference.0', "Enter the {$words} reference for this payout.");
-            }
+        foreach ($deposits as $method => $deposit) {
+            $this->settle($deposit, ['payout_method' => $method, 'payout_reference' => ' '])
+                ->assertCreated()
+                ->assertJsonPath('data.payout_method', $method)
+                ->assertJsonPath('data.payout_reference', null);
         }
+        $this->settle($interestOnly, ['action' => 'rollover_principal', 'payout_method' => 'gcash'])->assertCreated();
 
-        $this->assertSame('active', $deposit->refresh()->status);
+        // Above tier 1 the money isn't sent until a checker approves, so there is no reference yet.
+        $this->settle($above, ['payout_method' => 'bank_transfer'])->assertStatus(202)->assertJsonPath('data.approval.kind', 'td_payout');
     }
 
     public function test_with_its_reference_a_payout_at_maturity_keeps_it_on_the_placement(): void
@@ -81,17 +88,14 @@ class TimeDepositPayoutReferenceTest extends TestCase
         $this->settle($rollover, ['action' => 'rollover_all', 'payout_method' => 'gcash'])->assertCreated();
     }
 
-    public function test_a_non_cash_pretermination_without_its_reference_is_refused(): void
+    public function test_a_non_cash_pretermination_needs_no_reference(): void
     {
-        $deposit = $this->placed();
+        $this->preterminate($this->placed(['principal' => '9000.00']), ['payout_method' => 'maya'])
+            ->assertCreated()
+            ->assertJsonPath('data.status', 'preterminated')
+            ->assertJsonPath('data.payout_reference', null);
 
-        foreach (self::WORDS as $method => $words) {
-            $this->preterminate($deposit, ['payout_method' => $method])
-                ->assertUnprocessable()
-                ->assertJsonPath('errors.payout_reference.0', "Enter the {$words} reference for this payout.");
-        }
-
-        $this->assertSame('active', $deposit->refresh()->status);
+        $this->preterminate($this->placed(), ['payout_method' => 'bank_transfer'])->assertStatus(202)->assertJsonPath('data.approval.kind', 'pretermination');
     }
 
     public function test_a_pretermination_waiting_for_its_checker_holds_its_reference_then_keeps_it(): void

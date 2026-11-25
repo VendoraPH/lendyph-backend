@@ -53,11 +53,12 @@ use LogicException;
  * through a money method above tier 1 waits for a checker (202, a
  * `td_payout` or `pretermination` approval, carried out by its executor);
  * a payout into savings moves no cash, like a transfer, and posts at once.
- * A payout by bank transfer, GCash or Maya carries its reference (required;
- * finish run round 5), kept on the placement as `payout_reference` beside
- * its `payout_method`; DuplicateReference checks it as it checks a
- * withdrawal's: when asked for, while it waits (it holds the reference), and
- * again when an approved payout posts (the executors).
+ * A payout's reference is optional (it exists only once the money is sent;
+ * finish run round 5). One given is kept on the placement as
+ * `payout_reference` beside its `payout_method`, and DuplicateReference
+ * checks it as it checks a withdrawal's: when asked for, while it waits (it
+ * holds the reference), and again when an approved payout posts (the
+ * executors).
  *
  * **Once only:** the settling write is conditioned on the placement still
  * being open (409 when no row changes), on top of the placement's row lock;

@@ -26,9 +26,10 @@ use OpenApi\Attributes as OA;
  * `borrowers:update` (profile), `savings:transact` (withdrawal; the savings
  * tiers apply) or `savings:create` (new account). The order is: the queue
  * permission (403), the request (404), the type permission (403), then the
- * body (422). Approving a payout or an opening deposit paid by bank
- * transfer, GCash or Maya needs its reference (SavingsReference, finish run
- * round 5).
+ * body (422). Approving a new account whose opening deposit came in by bank
+ * transfer, GCash or Maya needs the deposit's reference; a payout's is
+ * optional, since it exists only once the money is sent (SavingsReference,
+ * finish run round 5).
  */
 class PortalRequestQueueController extends Controller
 {
@@ -116,7 +117,7 @@ class PortalRequestQueueController extends Controller
         path: '/api/portal-admin/requests/{request}/decision',
         summary: 'Decide a member portal request',
         description: 'member_portal:requests plus the type\'s permission. `decision`: under_review, need_info (message required), reject (message required; a withdrawal\'s hold is released) or approve. '
-            .'Approve needs an `Idempotency-Key` header: a withdrawal (payout{date, method, reference}) releases its hold and posts through the savings teller: 201 completed up to tier 1, 202 approved above it (the savings approvals queue decides; maker ≠ checker); a new account (deposit{date, method, reference}) opens it with the deposit received: 201; a profile change writes the member: 200. The reference is required unless the method is cash (or, for a new account, nothing is deposited): 422 on `payout.reference` or `deposit.reference`. A stale status is 409.',
+            .'Approve needs an `Idempotency-Key` header: a withdrawal (payout{date, method, reference}) releases its hold and posts through the savings teller: 201 completed up to tier 1, 202 approved above it (the savings approvals queue decides; maker ≠ checker); a new account (deposit{date, method, reference}) opens it with the deposit received: 201; a profile change writes the member: 200. A new account\'s deposit reference is required unless it is paid in cash or nothing is deposited (422 on `deposit.reference`); a payout\'s reference is optional. A stale status is 409.',
         tags: ['Member Portal (staff)'],
         security: [['sanctum' => []]],
         parameters: [
@@ -179,7 +180,7 @@ class PortalRequestQueueController extends Controller
                 'payout' => ['required', 'array'],
                 'payout.date' => ['required', ...$businessDate],
                 'payout.method' => ['required', 'string', Rule::in(OpenSavingsAccountRequest::PAYMENT_METHODS)],
-                'payout.reference' => SavingsReference::rules($http->input('payout.method'), 64),
+                'payout.reference' => SavingsReference::optional(64),
             ];
         }
 
@@ -209,7 +210,6 @@ class PortalRequestQueueController extends Controller
             'payout.date.after_or_equal' => 'The payout date can be today or yesterday only.',
             'payout.method.required' => 'Choose how the money was paid out: cash, bank transfer, GCash or Maya.',
             'payout.method.in' => 'Choose how the money was paid out: cash, bank transfer, GCash or Maya.',
-            'payout.reference.required' => SavingsReference::message($http->input('payout.method'), SavingsReference::PAYOUT),
             'payout.reference.string' => 'The reference must be text.',
             'payout.reference.max' => 'The reference can be at most 64 characters.',
             'deposit.required' => 'Enter the opening deposit received: the date, method and reference.',

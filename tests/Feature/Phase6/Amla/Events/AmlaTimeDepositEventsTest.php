@@ -68,7 +68,7 @@ class AmlaTimeDepositEventsTest extends TestCase
     {
         $deposit = $this->placed();
         $this->travelTo(Carbon::parse('2026-12-10 09:00:00', 'Asia/Manila'));
-        $data = $this->idem("/api/savings/time-deposits/{$deposit->id}/preterminate", ['date' => '2026-12-10', 'reason' => 'Member needs the money.', 'payout_method' => 'bank_transfer', 'payout_reference' => 'BDO-PT-1'])
+        $data = $this->idem("/api/savings/time-deposits/{$deposit->id}/preterminate", ['date' => '2026-12-10', 'reason' => 'Member needs the money.', 'payout_method' => 'bank_transfer'])
             ->assertCreated()->json('data');
         $this->harvestAt('2026-12-10 09:05:00');
 
@@ -92,7 +92,7 @@ class AmlaTimeDepositEventsTest extends TestCase
     {
         $deposit = $this->placed();
         $this->travelTo(Carbon::parse('2027-02-08 09:00:00', 'Asia/Manila'));
-        $new = $this->idem("/api/savings/time-deposits/{$deposit->id}/settle", ['date' => '2027-02-08', 'action' => 'rollover_principal', 'payout_method' => 'gcash', 'payout_reference' => 'GC-INT-1'])->assertCreated()->json('data');
+        $new = $this->idem("/api/savings/time-deposits/{$deposit->id}/settle", ['date' => '2027-02-08', 'action' => 'rollover_principal', 'payout_method' => 'gcash'])->assertCreated()->json('data');
         $this->harvestAt('2027-02-08 09:05:00');
 
         $payout = $this->event($deposit, 'time_deposit_payout');

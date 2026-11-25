@@ -170,7 +170,7 @@ class TimeDepositSettlementTest extends TestCase
         $deposit = $this->placed(['maturity_instruction' => 'rollover_principal']);
         $this->toMaturity();
 
-        $new = $this->settle($deposit, ['action' => 'rollover_principal', 'payout_method' => 'gcash', 'payout_reference' => 'GC-INT-1'])->assertCreated()->json('data');
+        $new = $this->settle($deposit, ['action' => 'rollover_principal', 'payout_method' => 'gcash'])->assertCreated()->json('data');
 
         $this->assertSame('100000.00', $new['principal']);
         $journal = $this->journalFor(TimeDeposit::class, $deposit->id, 'time_deposit_settlement');

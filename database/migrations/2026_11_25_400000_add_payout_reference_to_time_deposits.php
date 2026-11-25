@@ -8,10 +8,11 @@ use Illuminate\Support\Facades\Schema;
  * Finish run round 5: the reference of a time deposit's payout.
  *
  * - `time_deposits.payout_reference`: the reference of the money paid out at
- *   maturity or on pre-termination by bank transfer, GCash or Maya (required
- *   for those methods, App\Http\Requests\Savings\SavingsReference), beside
- *   the placement's `payout_method`. Null for cash given none, a payout into
- *   savings, a full rollover and every placement settled before this.
+ *   maturity or on pre-termination, when the teller has one (optional: it
+ *   exists only once the money is sent; App\Http\Requests\Savings\
+ *   SavingsReference), beside the placement's `payout_method`. Null when none
+ *   was given, for a payout into savings or a full rollover, and for every
+ *   placement settled before this.
  * - An index for the duplicate reference check (App\Services\Savings\
  *   DuplicateReference), which looks a reference up by its method on
  *   payouts too.

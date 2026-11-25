@@ -15,14 +15,15 @@ use Tests\TestCase;
 use Tests\Traits\SetupLendyPH;
 
 /**
- * Finish run round 5: a deposit, a withdrawal or an opening deposit paid by
+ * Finish run round 5: money coming in (a deposit or an opening deposit) by
  * bank transfer, GCash or Maya needs the reference of that payment (422 in
  * words that name the method and the entry), as loan payments and share
- * capital entries do. Cash needs none, and so does everything that never
- * comes through the counter's requests: transfers between accounts,
- * auto-credit runs, interest and reversals. New records only: an entry saved
- * without one, or a withdrawal already waiting for its checker, is never
- * re-checked. Round 2's duplicate-reference rule still runs after this.
+ * capital entries do. Money going out doesn't: a withdrawal's reference
+ * exists only once the money is sent, which is after its checker approves,
+ * so it stays optional, and round 2's duplicate check still runs on one
+ * given. Cash needs none, nor does anything that never comes through the
+ * counter's requests: transfers between accounts, auto-credit runs, interest
+ * and reversals. New records only.
  */
 class ReferenceRequiredTest extends TestCase
 {
@@ -61,21 +62,31 @@ class ReferenceRequiredTest extends TestCase
         $this->assertSame($before, SavingsTransaction::query()->count());
     }
 
-    public function test_a_withdrawal_by_bank_transfer_gcash_or_maya_without_a_reference_is_refused_in_words(): void
+    public function test_a_withdrawal_needs_no_reference_by_any_method_and_waits_for_its_checker_without_one(): void
     {
-        foreach (self::METHOD_WORDS as $method => $words) {
+        foreach (array_keys(self::METHOD_WORDS) as $method) {
             $this->money("/api/savings/accounts/{$this->mine->id}/withdrawals", $this->body($method))
-                ->assertUnprocessable()
-                ->assertJsonPath('errors.reference.0', "Enter the {$words} reference for this withdrawal.");
+                ->assertCreated()
+                ->assertJsonPath('data.method', $method)
+                ->assertJsonPath('data.external_reference', null);
         }
 
-        // Above tier 1 too: nothing waits for a checker without its reference.
+        // Above tier 1 the money isn't sent until a checker approves, so there is no reference yet.
         $this->money("/api/savings/accounts/{$this->mine->id}/withdrawals", $this->body('gcash', ['amount' => '10000.01']))
-            ->assertUnprocessable()
-            ->assertJsonPath('errors.reference.0', 'Enter the GCash reference for this withdrawal.');
+            ->assertStatus(202)
+            ->assertJsonPath('data.approval.kind', 'withdrawal');
 
-        $this->assertSame(0, SavingsTransaction::query()->where('type', 'withdrawal')->count());
-        $this->assertSame(0, SavingsApproval::query()->count());
+        $this->assertSame(3, SavingsTransaction::query()->where('type', 'withdrawal')->count());
+        $this->assertSame(1, SavingsApproval::query()->count());
+    }
+
+    public function test_a_withdrawal_reference_given_is_still_checked_for_duplicates(): void
+    {
+        $this->money("/api/savings/accounts/{$this->mine->id}/deposits", $this->body('bank_transfer', ['reference' => 'BDO-5']))->assertCreated();
+
+        $this->money("/api/savings/accounts/{$this->mine->id}/withdrawals", $this->body('bank_transfer', ['reference' => 'BDO-5']))
+            ->assertUnprocessable()
+            ->assertJsonPath('errors.reference.0', 'Reference "BDO-5" is already on record for another bank transfer. Check the reference and enter the right one.');
     }
 
     public function test_with_its_reference_a_non_cash_deposit_and_withdrawal_save_it(): void

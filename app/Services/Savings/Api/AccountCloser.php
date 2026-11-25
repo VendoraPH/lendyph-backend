@@ -36,11 +36,11 @@ use Illuminate\Validation\ValidationException;
  * `savings` journal), then marks the account closed and frees its `open_key`.
  * A payout above tier 1 waits for a checker (CloseExecutor), reserving it.
  *
- * The payout's reference (required unless it is paid in cash; finish run
- * round 5) is kept on the `closing` row as `external_reference`, as a
- * withdrawal keeps its own, and DuplicateReference checks it the same way:
- * when the close is asked for, while it waits (it holds the reference), and
- * again when an approved close posts.
+ * The payout's reference is optional (it exists only once the money is
+ * sent; finish run round 5). One given is kept on the `closing` row as
+ * `external_reference`, as a withdrawal keeps its own, and DuplicateReference
+ * checks it the same way: when the close is asked for, while it waits (it
+ * holds the reference), and again when an approved close posts.
  */
 class AccountCloser
 {

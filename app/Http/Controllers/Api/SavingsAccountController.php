@@ -250,7 +250,7 @@ class SavingsAccountController extends Controller
             new OA\Property(property: 'amount', type: 'string', example: '1000.00'),
             new OA\Property(property: 'date', type: 'string', format: 'date', description: 'Today or yesterday (Manila)'),
             new OA\Property(property: 'payment_method', type: 'string', enum: OpenSavingsAccountRequest::PAYMENT_METHODS),
-            new OA\Property(property: 'reference', type: 'string', nullable: true, description: 'The payment reference: required unless the method is cash (422 in words)'),
+            new OA\Property(property: 'reference', type: 'string', nullable: true, description: 'The payment reference, optional: it exists only once the money is sent. One given is refused (422) when already on record for the method'),
             new OA\Property(property: 'remarks', type: 'string', nullable: true),
         ])),
         responses: [
@@ -354,7 +354,7 @@ class SavingsAccountController extends Controller
             new OA\Property(property: 'date', type: 'string', format: 'date'),
             new OA\Property(property: 'reason', type: 'string'),
             new OA\Property(property: 'payout_method', type: 'string', enum: OpenSavingsAccountRequest::PAYMENT_METHODS),
-            new OA\Property(property: 'payout_reference', type: 'string', nullable: true, description: 'The payout\'s reference: required unless it is paid in cash (422 in words); kept on the closing row as `external_reference`'),
+            new OA\Property(property: 'payout_reference', type: 'string', nullable: true, description: 'The payout\'s reference, optional: it exists only once the money is sent. Kept on the closing row as `external_reference`; refused (422) when already on record for the method'),
         ])),
         responses: [
             new OA\Response(response: 201, description: 'The closed account'),

@@ -6,25 +6,29 @@ use App\Services\Accounting\Money;
 use Illuminate\Validation\Rule;
 
 /**
- * A savings entry paid by bank transfer, GCash or Maya needs the reference of
- * that payment (finish run round 5), as a loan payment or a share capital
- * entry does: a deposit, a withdrawal, an opening deposit (staff's or a
- * member portal request's), a time deposit placement, a member portal
+ * Money coming in by bank transfer, GCash or Maya needs the reference of that
+ * payment (finish run round 5), as a loan payment or a share capital entry
+ * does: a deposit, an opening deposit (staff's, or a member portal request's
+ * new account) and a time deposit placement. That reference exists before
+ * the money is recorded. A blank one is a 422 in words that name the method
+ * and the entry ("Enter the GCash reference for this deposit."), and the
+ * screens say the same before sending.
+ *
+ * Money going out never needs one (optional()): a withdrawal, a member portal
  * payout, and a payout at closing, at a time deposit's maturity or on its
- * pre-termination (`payout_reference`: money leaving, like a withdrawal). A
- * blank one is a 422 in words that name the method and the entry ("Enter the
- * GCash reference for this deposit."), and the screens say the same before
- * sending.
+ * pre-termination (`payout_reference`). Their reference exists only once the
+ * money is sent, so requiring it when the request is made would make a
+ * teller send the money before the checker approves it (above tier 1), or
+ * before an AMLA order refuses it. A teller who has one records it, and
+ * DuplicateReference checks it like any other.
  *
- * Exempt: cash (a counter receipt; a cash time deposit takes its TD number),
- * `savings` (a placement paid from, or a payout into, the member's own
- * savings: a move between their savings records), an opening deposit of
- * ₱0.00 and a full rollover (nothing is paid), and every writer that never
- * comes through these requests: auto-credit runs, interest, transfers
- * between accounts, the maturity job's own settlements, and reversals.
+ * Also exempt: cash (a counter receipt; a cash time deposit takes its TD
+ * number), `savings` (a placement paid from the member's own savings, a move
+ * between their savings records), an opening deposit of ₱0.00 (nothing is
+ * paid), and every writer that never comes through these requests:
+ * auto-credit runs, interest, transfers between accounts and reversals.
  *
- * New records only: it is a request rule, so nothing stored is re-checked,
- * and a withdrawal already waiting for its checker posts as it was asked.
+ * New records only: it is a request rule, so nothing stored is re-checked.
  * DuplicateReference (round 2) then checks the reference given.
  */
 final class SavingsReference
@@ -38,13 +42,9 @@ final class SavingsReference
 
     public const DEPOSIT = 'this deposit';
 
-    public const WITHDRAWAL = 'this withdrawal';
-
     public const OPENING_DEPOSIT = 'the opening deposit';
 
     public const TIME_DEPOSIT = 'this time deposit';
-
-    public const PAYOUT = 'this payout';
 
     /** Whether money moved by `$method` needs its reference. */
     public static function needed(mixed $method): bool
@@ -53,14 +53,25 @@ final class SavingsReference
     }
 
     /**
-     * The reference field's rules: required when `$method` needs one and money
-     * moves (`$paid`), otherwise optional; at most `$max` characters.
+     * The rules of money coming in: required when `$method` needs one and
+     * money moves (`$paid`), otherwise optional; at most `$max` characters.
      *
      * @return list<mixed>
      */
     public static function rules(mixed $method, int $max, bool $paid = true): array
     {
         return [Rule::requiredIf($paid && self::needed($method)), 'nullable', 'string', "max:{$max}"];
+    }
+
+    /**
+     * The rules of money going out: optional by every method, at most `$max`
+     * characters.
+     *
+     * @return list<string>
+     */
+    public static function optional(int $max): array
+    {
+        return ['nullable', 'string', "max:{$max}"];
     }
 
     /** `Enter the GCash reference for this deposit.` */
