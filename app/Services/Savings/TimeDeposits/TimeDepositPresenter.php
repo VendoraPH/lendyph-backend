@@ -5,6 +5,8 @@ namespace App\Services\Savings\TimeDeposits;
 use App\Http\Resources\Savings\SavingsUserRef;
 use App\Models\SavingsApproval;
 use App\Models\TimeDeposit;
+use App\Models\User;
+use App\Services\Savings\PayoutReferences;
 use App\Services\Savings\SavingsMath;
 use Carbon\CarbonImmutable;
 use Illuminate\Database\Eloquent\Builder;
@@ -36,7 +38,10 @@ use Throwable;
  */
 class TimeDepositPresenter
 {
-    public function __construct(private readonly Quote $quote) {}
+    public function __construct(
+        private readonly Quote $quote,
+        private readonly PayoutReferences $payoutReferences,
+    ) {}
 
     /** The relations {@see self::present()} reads, for eager loading. */
     public const RELATIONS = [
@@ -64,6 +69,7 @@ class TimeDepositPresenter
     public function present(TimeDeposit $deposit): array
     {
         $deposit->loadMissing(self::RELATIONS);
+        $caller = auth()->user();
 
         return [
             'id' => $deposit->id,
@@ -101,6 +107,8 @@ class TimeDepositPresenter
             'settled_amount' => $deposit->settled_amount,
             'payout_method' => $deposit->payout_method,
             'payout_reference' => $deposit->payout_reference,
+            // Finish run round 6: whether the caller may record this payout's reference now.
+            'can_record_reference' => $this->payoutReferences->canRecordOnTimeDeposit($caller instanceof User ? $caller : null, $deposit),
             'settled_by' => SavingsUserRef::from($deposit->settler),
             ...$this->postMaturity($deposit),
             'rolled_over_from_id' => $deposit->rolled_over_from_id,

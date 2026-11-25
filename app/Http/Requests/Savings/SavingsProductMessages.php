@@ -39,6 +39,9 @@ final class SavingsProductMessages
             'annual_interest_rate.required' => 'Enter the product\'s interest rate.',
             'annual_interest_rate.prohibited' => 'A rate is never edited. Add a new rate from a date under the product\'s rates instead.',
             'is_active.boolean' => 'Say whether the product is on or off.',
+            'portal_account_requests.boolean' => 'Say yes or no to new-account requests from the member portal.',
+            'portal_account_requests.declined_if' => 'Only a regular savings product can be requested from the member portal.',
+            'portal_account_requests.declined' => 'Only a regular savings product can be requested from the member portal.',
         ];
     }
 }

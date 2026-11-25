@@ -2,6 +2,7 @@
 
 namespace App\Services\Savings\Dashboard;
 
+use App\Services\Savings\PayoutsMissingReference;
 use App\Services\Savings\Reports\GlControl;
 use App\Services\Savings\Reports\SavingsReports;
 use App\Services\Savings\SavingsMath;
@@ -41,6 +42,7 @@ class SavingsDashboard
         private readonly DepositSummary $summary,
         private readonly GlControl $control,
         private readonly SavingsReports $reports,
+        private readonly PayoutsMissingReference $missingReferences,
     ) {}
 
     /** @return array<string, mixed> */
@@ -77,6 +79,8 @@ class SavingsDashboard
                 'time_deposit_interest_paid' => ['gross' => SavingsMath::pesos($tdInterest['gross']), 'tax' => SavingsMath::pesos($tdInterest['tax'])],
                 'maturing_30_days' => $this->money($buckets[0], ['count', 'principal', 'maturity_amount']),
                 'gl_control' => $this->glControl($scope, $to),
+                // Finish run round 6: non-cash payouts still without a reference, today, in the scope's branches (the period and product don't apply).
+                'payouts_missing_reference' => $this->missingReferences->count($scope['branch_ids'] ?? null, $scope['branch_id'] ?? null),
             ],
             'series' => $this->series($scope, $to),
             'by_product' => $this->breakdown($scope, $from, $to, DepositFigures::GROUP_PRODUCT, $totals),
