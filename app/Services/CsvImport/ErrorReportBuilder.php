@@ -459,7 +459,8 @@ class ErrorReportBuilder
                     $issue['loan_no'],
                     $issue['severity'],
                     // Words, as the screen shows them; the code is for grouping.
-                    IssueCategoryWords::for($issue['category']),
+                    // A skipped row's title never says what the import did.
+                    IssueCategoryWords::for($issue['category'], $issue['severity']),
                     $issue['field_label'],
                     /**
                      * Message before Original Value, and BOTH reach

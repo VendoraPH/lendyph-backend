@@ -64,6 +64,23 @@ class IssueCategoryWordsTest extends TestCase
         $this->assertSame('Report stopped early', IssueCategoryWords::for('export_failed'));
     }
 
+    public function test_a_skipped_rows_title_never_says_what_the_import_did_to_the_cell(): void
+    {
+        // The row was not imported, so nothing was left blank, cut or stored.
+        $this->assertSame('Value not recognised', IssueCategoryWords::for('enum_unmapped', 'skipped'));
+        $this->assertSame('Longer than the field holds', IssueCategoryWords::for('truncated', 'skipped'));
+        $this->assertSame('Membership number has spaces', IssueCategoryWords::for('membership_number_spaces', 'skipped'));
+
+        // Imported rows keep theirs.
+        $this->assertSame('Value not recognised, left blank', IssueCategoryWords::for('enum_unmapped', 'warning'));
+        $this->assertSame('Value not recognised, left blank', IssueCategoryWords::for('enum_unmapped'));
+        $this->assertSame('Shortened to fit', IssueCategoryWords::for('truncated', 'warning'));
+
+        foreach (self::CODES as $code) {
+            $this->assertDoesNotMatchRegularExpression('/left blank|Shortened|stored/', IssueCategoryWords::for($code, 'skipped'), $code);
+        }
+    }
+
     public function test_an_unmatched_product_reads_with_its_name_and_a_new_code_still_reads_as_words(): void
     {
         $this->assertSame('Loan product not matched: Salary Loan', IssueCategoryWords::for('unmapped_product:Salary Loan'));

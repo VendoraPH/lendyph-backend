@@ -130,14 +130,33 @@ final class IssueCategoryWords
         'export_failed' => 'Report stopped early',
     ];
 
+    /**
+     * A skipped row's title for a note that names what the import did to a
+     * cell: the row was not imported, so nothing was left blank, cut or stored
+     * (finish run, round 5). Imported rows keep the titles above. The screen
+     * uses the same words (`import-issue-words.ts`, SKIPPED_CATEGORY_WORDS).
+     *
+     * @var array<string, string>
+     */
+    public const SKIPPED_WORDS = [
+        'enum_unmapped' => 'Value not recognised',
+        'truncated' => 'Longer than the field holds',
+        'membership_number_spaces' => 'Membership number has spaces',
+    ];
+
     /** The prefix of a loan whose product has no match; the product follows it. */
     private const UNMAPPED_PRODUCT = 'unmapped_product:';
 
     /**
-     * A report category in words.
+     * A report category in words, for a line of this severity
+     * (ErrorReportBuilder::SEVERITIES).
      */
-    public static function for(string $code): string
+    public static function for(string $code, ?string $severity = null): string
     {
+        if ($severity === ErrorReportBuilder::SEVERITY_SKIPPED && isset(self::SKIPPED_WORDS[$code])) {
+            return self::SKIPPED_WORDS[$code];
+        }
+
         if (str_starts_with($code, self::UNMAPPED_PRODUCT)) {
             $product = substr($code, strlen(self::UNMAPPED_PRODUCT));
 

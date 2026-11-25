@@ -139,8 +139,12 @@ class ImportSkippedRowsTest extends TestCase
             $this->assertStringNotContainsString('was imported', $message, $category);
         }
 
-        // The downloaded report reads the same.
+        // The downloaded report reads the same, titles included: a skipped
+        // row's title never says the value was left blank.
         $csv = $this->get("/api/imports/{$run->id}/errors.csv")->assertOk()->streamedContent();
+        $this->assertStringContainsString(',skipped,"Value not recognised",', $csv);
+        $this->assertStringContainsString(',warning,"Value not recognised, left blank",', $csv);
+        $this->assertStringNotContainsString(',skipped,"Value not recognised, left blank"', $csv);
         $this->assertStringContainsString('"""pedro-at-example"" is not an email address this system accepts, so it would be imported as blank.', $csv);
         $this->assertStringContainsString('"""juana-at-example"" is not an email address this system accepts, so it was imported as blank.', $csv);
     }
