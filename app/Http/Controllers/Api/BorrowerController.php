@@ -21,7 +21,7 @@ use App\Services\BranchAccess;
 use App\Services\Cda\MembershipStatus;
 use App\Services\Diagnostics\ErrorDigest;
 use App\Services\MemberLedgerService;
-use App\Services\RegistrationApproval;
+use App\Services\RegistrationReview;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
@@ -642,7 +642,7 @@ DESC,
         // Written under the registration's lock and the member duplicate
         // check's, where the status, branch and email are checked again
         // (finish run round 4): 409 when another write got there first.
-        app(RegistrationApproval::class)->approve($borrower, $branchId === null ? null : (int) $branchId, $request->user());
+        app(RegistrationReview::class)->approve($borrower, $branchId === null ? null : (int) $branchId, $request->user());
 
         $borrower->load('branch', 'approvedBy', 'rejectedBy');
 
@@ -660,6 +660,7 @@ Reject a borrower whose status is `pending` **without hard-deleting the row**, p
 - Deletes the share-capital pledge auto-created at submission (a rejected applicant is not a member).
 - Returns the updated borrower.
 - Returns 422 if the borrower is not currently `pending`, or if `reason` is missing.
+- Returns 409, in words, when another write got there first: the registration was approved or rejected, or its branch changed, at the same moment. Nothing is written, so an approved member is never rejected and keeps their pledge.
 DESC,
         tags: ['Borrowers'],
         security: [['sanctum' => []]],
@@ -680,6 +681,7 @@ DESC,
             new OA\Response(response: 401, description: 'Unauthenticated'),
             new OA\Response(response: 403, description: 'Forbidden'),
             new OA\Response(response: 422, description: 'Borrower is not in pending status, or reason is missing'),
+            new OA\Response(response: 409, description: 'Another write got there first: the registration was approved, rejected or moved to another branch at the same moment'),
         ],
     )]
     public function reject(RejectBorrowerRequest $request, Borrower $borrower): BorrowerResource
@@ -690,16 +692,10 @@ DESC,
             ]);
         }
 
-        $borrower->update([
-            'status' => 'rejected',
-            'rejection_reason' => $request->validated('reason'),
-            'rejected_by' => $request->user()->id,
-            'rejected_at' => now(),
-        ]);
-
-        // A rejected applicant is not a member: remove the share-capital pledge
-        // auto-created at submission so it doesn't linger in share-capital totals.
-        $borrower->shareCapitalPledge()->delete();
+        // Written under the registration's lock, the one an approval takes
+        // first, where the status and branch are checked again (finish run
+        // round 4): 409 when another write got there first.
+        app(RegistrationReview::class)->reject($borrower, (string) $request->validated('reason'), $request->user());
 
         $borrower->load('branch', 'approvedBy', 'rejectedBy');
 

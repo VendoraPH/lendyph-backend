@@ -186,8 +186,8 @@ final class BorrowerRegistration
      * the other has committed. checkDuplicateUnderLock() takes it for a staff
      * create, a public registration and the online hand-off's member, and
      * approving a registration takes it before its email check
-     * (RegistrationApproval), so that check waits for a member still being
-     * created and sees them.
+     * (RegistrationReview::approve()), so that check waits for a member still
+     * being created and sees them.
      *
      * A locking read: it comes before the transaction's first plain read, or
      * that read would fix a snapshot from before the other write committed.

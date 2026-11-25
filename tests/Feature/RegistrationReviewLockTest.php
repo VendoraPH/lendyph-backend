@@ -5,6 +5,7 @@ namespace Tests\Feature;
 use App\Models\AuditLog;
 use App\Models\Borrower;
 use App\Models\Branch;
+use App\Models\ShareCapitalPledge;
 use App\Models\User;
 use Closure;
 use Exception;
@@ -22,25 +23,26 @@ use Tests\TestCase;
 use Tests\Traits\SetupLendyPH;
 
 /**
- * Approving a public registration while another write collides with it
- * (finish run round 4). The approval locks the registration's row and reads
- * it again under that lock, then takes the lock a staff create's duplicate
- * check takes and checks the email under it. A collision answers 409 in
- * words with nothing written: never two outcomes, never a 500.
+ * Approving or rejecting a public registration while another write collides
+ * with it (finish run round 4). Both lock the registration's row first and
+ * read it again under that lock; an approval then takes the lock a staff
+ * create's duplicate check takes and checks the email under it. A collision
+ * answers 409 in words with nothing written: never two outcomes, never a 500.
  *
  * The colliding write lands on a second connection and commits right before
- * the approval's first lock, as another reviewer's decision, an edit or a
- * staff create would. So this file opts out of the per-test transaction: the
- * other connection can only see committed rows, and the approval's own
- * transaction must be a real one for a deadlock to roll it back.
+ * the review's first lock or write on the registration's row, as another
+ * reviewer's decision, an edit or a staff create would. So this file opts out
+ * of the per-test transaction: the other connection can only see committed
+ * rows, and the review's own transaction must be a real one for a deadlock to
+ * roll it back.
  */
-class RegistrationApprovalLockTest extends TestCase
+class RegistrationReviewLockTest extends TestCase
 {
     use SetupLendyPH;
 
     protected bool $wrapsEachTestInTransaction = false;
 
-    private const OTHER_CONNECTION = 'registration_approval_lock';
+    private const OTHER_CONNECTION = 'registration_review_lock';
 
     private const DECIDED = 'This registration was approved or rejected at the same moment. Reload to see it.';
 
@@ -163,17 +165,97 @@ class RegistrationApprovalLockTest extends TestCase
         $this->assertSame(0, AuditLog::query()->where('id', '>', $audit)->count());
     }
 
-    public function test_an_approval_locks_the_registration_then_takes_the_lock_a_staff_creates_duplicate_check_takes(): void
+    public function test_a_rejection_after_an_approval_committed_answers_409_and_the_member_and_pledge_stay(): void
     {
         $registration = $this->registration();
+        $reviewer = User::factory()->create();
+        $landed = $this->atTheRegistrationLock($registration, fn () => $this->other()->table('borrowers')->where('id', $registration->id)->update([
+            'status' => 'active',
+            'approved_by' => $reviewer->id,
+            'approved_at' => '2026-11-25 09:00:00',
+            'membership_date' => '2026-11-25',
+            'membership_number' => $registration->borrower_code,
+        ]));
+        $audit = (int) AuditLog::query()->max('id');
+
+        $this->reject($registration)->assertStatus(409)->assertExactJson(['message' => self::DECIDED]);
+
+        $this->assertTrue($landed(), 'the approval landed first');
+        $member = DB::table('borrowers')->where('id', $registration->id)->first();
+        $this->assertSame('active', $member->status);
+        $this->assertEquals($reviewer->id, $member->approved_by);
+        $this->assertNull($member->rejected_by);
+        $this->assertNull($member->rejection_reason);
+        $this->assertTrue(ShareCapitalPledge::query()->where('borrower_id', $registration->id)->exists(), 'the member keeps their pledge');
+        $this->assertSame(0, AuditLog::query()->where('id', '>', $audit)->count(), 'the refused rejection wrote no audit row');
+    }
+
+    public function test_a_second_rejection_answers_409_and_the_first_stands(): void
+    {
+        $registration = $this->registration();
+        $reviewer = User::factory()->create();
+        $first = ['status' => 'rejected', 'rejected_by' => $reviewer->id, 'rejected_at' => '2026-11-25 09:00:00', 'rejection_reason' => 'The ID does not match.'];
+        $landed = $this->atTheRegistrationLock($registration, fn () => $this->other()->table('borrowers')->where('id', $registration->id)->update($first));
+        $audit = (int) AuditLog::query()->max('id');
+
+        $this->reject($registration, 'A second reason.')->assertStatus(409)->assertExactJson(['message' => self::DECIDED]);
+
+        $this->assertTrue($landed(), 'the first rejection landed first');
+        $this->assertEquals($first, (array) DB::table('borrowers')->where('id', $registration->id)->first(array_keys($first)), 'the first rejection stands');
+        $this->assertSame(0, AuditLog::query()->where('id', '>', $audit)->count());
+    }
+
+    public function test_a_registration_moved_to_another_branch_while_this_rejection_waited_answers_409(): void
+    {
+        $registration = $this->registration();
+        $elsewhere = Branch::factory()->create(['name' => 'Town Branch', 'code' => 'TWN']);
+        $landed = $this->atTheRegistrationLock($registration, fn () => $this->other()->table('borrowers')->where('id', $registration->id)->update(['branch_id' => $elsewhere->id]));
+
+        $this->reject($registration)->assertStatus(409)->assertExactJson(['message' => self::CONFLICT]);
+
+        $this->assertTrue($landed(), 'the edit landed first');
+        $fresh = $registration->fresh();
+        $this->assertSame('pending', $fresh->status);
+        $this->assertNull($fresh->rejected_by);
+        $this->assertTrue(ShareCapitalPledge::query()->where('borrower_id', $registration->id)->exists());
+    }
+
+    /**
+     * @param  array{0: string, 1: int, 2: string}  $errorInfo
+     */
+    #[DataProvider('concurrencyErrors')]
+    public function test_a_rejection_the_database_rolls_back_answers_409_and_writes_nothing(array $errorInfo): void
+    {
+        $registration = $this->registration();
+        $audit = (int) AuditLog::query()->max('id');
+        $this->failOn(fn (string $sql, array $bindings): bool => str_starts_with($sql, 'update `borrowers`') && in_array('rejected', $bindings, true), $errorInfo);
+
+        $this->reject($registration)->assertStatus(409)->assertExactJson(['message' => self::CONFLICT]);
+
+        $fresh = $registration->fresh();
+        $this->assertSame('pending', $fresh->status);
+        $this->assertNull($fresh->rejected_by);
+        $this->assertTrue(ShareCapitalPledge::query()->where('borrower_id', $registration->id)->exists());
+        $this->assertSame(0, AuditLog::query()->where('id', '>', $audit)->count());
+    }
+
+    public function test_a_review_locks_the_registration_first_and_an_approval_then_takes_the_lock_a_staff_creates_duplicate_check_takes(): void
+    {
+        $registration = $this->registration();
+        $rejected = $this->registration(['email' => 'second.applicant@example.com']);
 
         $approval = $this->lockingReads(fn () => $this->approve($registration)->assertOk()->assertJsonPath('data.status', 'active'));
+        $rejection = $this->lockingReads(fn () => $this->reject($rejected)->assertOk()->assertJsonPath('data.status', 'rejected'));
         $create = $this->lockingReads(fn () => $this->postJson('/api/borrowers', $this->staffCreate())->assertCreated());
 
         $this->assertGreaterThanOrEqual(2, count($approval), 'the approval takes two locks');
         $this->assertSame([$registration->id], $this->lockedIds($approval[0]), 'the registration\'s own row first');
         $this->assertNotEmpty($create);
         $this->assertSame($create[0]['sql'], $approval[1]['sql'], 'then the very lock a staff create\'s duplicate check takes');
+
+        $this->assertNotEmpty($rejection, 'the rejection takes a lock');
+        $this->assertSame([$rejected->id], $this->lockedIds($rejection[0]), 'a rejection takes the registration\'s own row first too');
+        $this->assertSame($approval[0]['sql'], $rejection[0]['sql'], 'by the same statement, so the two queue on it');
     }
 
     private function registration(array $overrides = []): Borrower
@@ -221,6 +303,11 @@ class RegistrationApprovalLockTest extends TestCase
         return $this->patchJson("/api/borrowers/{$registration->id}/approve-registration");
     }
 
+    private function reject(Borrower $registration, string $reason = 'The applicant asked to withdraw.'): TestResponse
+    {
+        return $this->patchJson("/api/borrowers/{$registration->id}/reject", ['reason' => $reason]);
+    }
+
     private function other(): Connection
     {
         return DB::connection(self::OTHER_CONNECTION);
@@ -228,9 +315,9 @@ class RegistrationApprovalLockTest extends TestCase
 
     /**
      * Run `$change` on the other connection, where it commits at once, right
-     * before the approval's lock on the registration's row: another reviewer's
-     * decision, an edit or a staff create landing between the approval's
-     * checks and its lock.
+     * before the review's first lock or write on the registration's row (its
+     * lock, where there is one): another reviewer's decision, an edit or a
+     * staff create landing between the review's checks and its write.
      *
      * @return Closure(): bool whether it landed
      */
@@ -239,9 +326,11 @@ class RegistrationApprovalLockTest extends TestCase
         $landed = false;
 
         DB::connection()->beforeExecuting(function (string $query, array $bindings) use (&$landed, $registration, $change): void {
+            $locksOrWritesTheRow = (str_contains($query, 'from `borrowers`') && str_contains($query, 'for update'))
+                || str_starts_with($query, 'update `borrowers`');
+
             if ($landed
-                || ! str_contains($query, 'from `borrowers`')
-                || ! str_contains($query, 'for update')
+                || ! $locksOrWritesTheRow
                 || ! in_array((string) $registration->id, array_map('strval', $bindings), true)) {
                 return;
             }
