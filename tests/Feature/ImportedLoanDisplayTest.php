@@ -140,6 +140,41 @@ class ImportedLoanDisplayTest extends TestCase
         );
     }
 
+    public function test_the_statement_line_for_what_was_paid_before_the_import_shows_its_parts(): void
+    {
+        $loan = $this->importLoan();
+        $this->pay($loan, 2000);
+
+        $statement = $this->staffGet("/api/reports/statement-of-account/{$loan->id}")->assertOk()->json('data');
+        $line = collect($statement['transactions'])->firstWhere('description', 'Paid before the loan was imported');
+
+        // Money paid, so its parts show and add up to its credit; no receipt.
+        $this->assertSame('paid_before_import', $line['type']);
+        $this->assertSame(23600.0, (float) $line['credit']);
+        $this->assertNull($line['debit']);
+        $this->assertSame(20000.0, (float) $line['principal_applied']);
+        $this->assertSame(3600.0, (float) $line['interest_applied']);
+        $this->assertSame(0.0, (float) $line['penalty_applied']);
+        $this->assertSame(0.0, (float) $line['amount_paid']);
+        $this->assertSame(
+            $this->centavos($line['credit']),
+            $this->centavos($line['principal_applied']) + $this->centavos($line['interest_applied'])
+                + $this->centavos($line['penalty_applied']) + $this->centavos($line['insurance_applied']),
+        );
+
+        // The statement's identities still hold.
+        $this->assertSame(
+            $this->centavos($statement['summary']['outstanding_balance']),
+            $this->centavos($statement['transaction_totals']['debit']) - $this->centavos($statement['transaction_totals']['credit']),
+        );
+        $this->assertSame(
+            $this->centavos($statement['summary']['total_paid']),
+            array_sum(array_map(fn (string $part): int => $this->centavos($statement['summary'][$part]), [
+                'principal_paid', 'interest_paid', 'penalty_paid', 'insurance_paid', 'build_up_paid', 'overpayment_paid',
+            ])),
+        );
+    }
+
     public function test_the_subsidiary_ledger_counts_it_on_the_release_date_as_the_loan_ledger_dates_it(): void
     {
         $loan = $this->importLoan();

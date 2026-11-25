@@ -82,6 +82,9 @@ final class LoanLedgerService
 
     public const RESTATED = 'Balance restated to the schedule';
 
+    /** The row of what an imported loan was paid before the import (importedEvents()). */
+    public const PAID_BEFORE_IMPORT = 'Paid before the loan was imported';
+
     public function __construct(private LoanService $loanService) {}
 
     /**
@@ -235,7 +238,7 @@ final class LoanLedgerService
 
         return [$this->event($loan->released_at, $loan->released_at, 'imported', $loan->id, [
             'kind' => 'adjustment',
-            'description' => 'Paid before the loan was imported',
+            'description' => self::PAID_BEFORE_IMPORT,
             ...$effect,
         ], $effect)];
     }

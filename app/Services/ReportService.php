@@ -495,9 +495,13 @@ class ReportService
             $lowered = $principal + $interest + $penalty;
 
             return [
-                'type' => match ($row['kind']) {
-                    'release' => 'release',
-                    'penalty_charge', 'extension_charge' => 'charge',
+                // What an imported loan was paid before the import is money
+                // paid, with no receipt: its own type, so the screen shows its
+                // parts, which add up to its credit.
+                'type' => match (true) {
+                    $row['kind'] === 'release' => 'release',
+                    in_array($row['kind'], ['penalty_charge', 'extension_charge'], true) => 'charge',
+                    $row['description'] === LoanLedgerService::PAID_BEFORE_IMPORT => 'paid_before_import',
                     default => 'adjustment',
                 },
                 'kind' => $row['kind'],
