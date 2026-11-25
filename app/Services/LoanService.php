@@ -146,9 +146,9 @@ class LoanService
      * `penalty_rate` 0, see PenaltyTerms::forProduct()).
      *
      * The one list. createLoanRecord() copies it onto a new loan, and the
-     * form preview builds its unsaved loan from it, so the preview's schedule
-     * follows the same product terms the saved loan will. The loan keeps them
-     * even if the product changes afterwards.
+     * form preview builds its unsaved loan from it (an edited loan's own terms
+     * over it, previewTerms()), so its schedule follows the terms the saved
+     * loan keeps, even if the product changes afterwards.
      *
      * @return array{interest_method: string, term_unit: string, interest_rate_frequency: string, penalty_rate: mixed, penalty_config_id: int|null, penalty_config_name: string|null, penalty_brackets: list<array{days_from: int, days_to: int|null, rate: float}>|null, grace_period_days: mixed}
      */
@@ -2526,10 +2526,11 @@ class LoanService
      * - `deductions`: what the loan would withhold (formDeductions()). Null
      *   until the product and a principal above 0 are known.
      * - `amortization`: the schedule {@see self::buildAmortizationPreview()}
-     *   writes at release, built from an unsaved loan carrying what
-     *   createLoan() would store — the product's interest method, term unit and
-     *   rate frequency, the form's rate, term, frequency and start date — plus
-     *   the share capital build-up added to each period, and the column totals.
+     *   writes at release, built from an unsaved loan carrying what saving
+     *   would store — the interest method, term unit and rate frequency
+     *   (previewTerms(): the product's for a new loan, the loan's own with
+     *   `loan_id`), the form's rate, term, frequency and start date — plus the
+     *   share capital build-up added to each period, and the column totals.
      *   Null until the maturity date is known and a principal and a rate above
      *   0 are too.
      * - `restructure`, only with `source_loan_id` (the restructure page):
@@ -2568,7 +2569,7 @@ class LoanService
         );
 
         $product = isset($input['loan_product_id']) ? LoanProduct::find($input['loan_product_id']) : null;
-        $maturity = $this->formMaturity($product, $input);
+        $maturity = $this->formMaturity($product, $input, $edited);
 
         $preview = [
             // Withheld when what it counts includes a share capital pledge the
@@ -2578,8 +2579,8 @@ class LoanService
                 ? CollateralSecurity::withheld()
                 : CollateralSecurity::summary($principal, $pledged),
             'maturity_date' => $maturity?->toDateString(),
-            'deductions' => $product === null || $principal <= 0 ? null : $this->formDeductions($product, $input, $principal, $maturity, $edited?->term_unit),
-            'amortization' => $product === null || $maturity === null ? null : $this->formSchedule($product, $input, $principal, $maturity),
+            'deductions' => $product === null || $principal <= 0 ? null : $this->formDeductions($product, $input, $principal, $maturity, $edited),
+            'amortization' => $product === null || $maturity === null ? null : $this->formSchedule($product, $input, $principal, $maturity, $edited),
         ];
 
         if ($source !== null) {
@@ -2741,23 +2742,55 @@ class LoanService
      * maturity and no schedule. This also bounds the work a single preview can
      * ask for.
      *
+     * An edited loan matures by its own term unit (previewTerms()). Once its
+     * product counts terms in another unit, the product's range can't be read
+     * against the loan's term, so only the loan's own term, the one its edit
+     * keeps, has a maturity.
+     *
      * @param  array<string, mixed>  $input
      */
-    private function formMaturity(?LoanProduct $product, array $input): ?Carbon
+    private function formMaturity(?LoanProduct $product, array $input, ?Loan $edited = null): ?Carbon
     {
         if ($product === null || empty($input['term']) || empty($input['frequency']) || empty($input['start_date'])) {
             return null;
         }
 
         $term = (int) $input['term'];
+        $termUnit = $edited?->term_unit ?? $product->term_unit;
 
-        try {
-            $this->assertTermWithinProductRange($term, $product);
-        } catch (ValidationException) {
-            return null;
+        if ($termUnit !== $product->term_unit) {
+            if ($term !== (int) $edited?->term) {
+                return null;
+            }
+        } else {
+            try {
+                $this->assertTermWithinProductRange($term, $product);
+            } catch (ValidationException) {
+                return null;
+            }
         }
 
-        return $this->maturityDateFor($input['start_date'], $term, $product->term_unit->value, $input['frequency']);
+        return $this->maturityDateFor($input['start_date'], $term, $termUnit->value, $input['frequency']);
+    }
+
+    /**
+     * The interest method, term unit and rate period a form preview's loan is
+     * built on. A new loan, a restructure's included, copies its product's
+     * (productSnapshot()). An edited loan keeps its own whatever its product
+     * quotes now, as PUT /loans/{id} keeps them and its release schedules
+     * them, so its preview takes them from the loan (finish run round 4).
+     *
+     * @return array{interest_method: string, term_unit: string, interest_rate_frequency: string}
+     */
+    private function previewTerms(LoanProduct $product, ?Loan $edited): array
+    {
+        $from = $edited ?? $product;
+
+        return [
+            'interest_method' => $from->interest_method,
+            'term_unit' => $from->term_unit->value,
+            'interest_rate_frequency' => $from->interest_rate_frequency->value,
+        ];
     }
 
     /**
@@ -2786,12 +2819,12 @@ class LoanService
      * @param  array<string, mixed>  $input
      * @return array{items: list<array<string, mixed>>, stated_total: float|int, configured_fees: list<array<string, mixed>>, configured_total: float|int, total_deductions: float|int|null, net_proceeds: float|int|null, error: string|null}
      */
-    private function formDeductions(LoanProduct $product, array $input, int $principal, ?Carbon $maturity, ?TermUnit $storedTermUnit = null): array
+    private function formDeductions(LoanProduct $product, array $input, int $principal, ?Carbon $maturity, ?Loan $edited = null): array
     {
-        // The unit the loan carries at release: an edited loan's own stored
-        // one; a new loan, a restructure's included, copies the product's.
-        $termUnit = $storedTermUnit ?? $product->term_unit;
-        $termMonths = FeeAmount::termMonths($input['term'] ?? null, $termUnit);
+        // The unit and rate period the loan carries at release: an edited
+        // loan's own; a new loan, a restructure's included, copies the product's.
+        $terms = $this->previewTerms($product, $edited);
+        $termMonths = FeeAmount::termMonths($input['term'] ?? null, $terms['term_unit']);
         $items = $this->deductionItems($principal / 100, $input['deductions'] ?? $this->productFeeDeductions($product), $termMonths);
         $stated = 0;
 
@@ -2806,14 +2839,14 @@ class LoanService
                 'loan_product_id' => $product->id,
                 'principal_amount' => $principal / 100,
                 // The term a per-month formula fee multiplies by: the form's, in
-                // the product's unit, as the saved loan will carry it.
+                // the unit the saved loan will carry it in.
                 'term' => $input['term'] ?? null,
-                'term_unit' => $termUnit,
+                'term_unit' => $terms['term_unit'],
                 // The rate a written formula's Interest Rate reads: the form's,
-                // else the product's, per the product's rate period, as
-                // createLoan() stores them.
+                // else the product's, per the rate period the saved loan
+                // carries, as createLoan() and an edit store them.
                 'interest_rate' => $input['interest_rate'] ?? $product->interest_rate,
-                'interest_rate_frequency' => $product->interest_rate_frequency,
+                'interest_rate_frequency' => $terms['interest_rate_frequency'],
                 'start_date' => $input['start_date'] ?? null,
                 'maturity_date' => $maturity?->toDateString(),
                 'deductions' => $items,
@@ -2858,7 +2891,7 @@ class LoanService
      * @param  array<string, mixed>  $input
      * @return array{maturity_date: string, interest_method: string, rows: list<array<string, mixed>>, totals: array<string, float|int>}|null
      */
-    private function formSchedule(LoanProduct $product, array $input, int $principal, Carbon $maturity): ?array
+    private function formSchedule(LoanProduct $product, array $input, int $principal, Carbon $maturity, ?Loan $edited = null): ?array
     {
         $rate = (float) ($input['interest_rate'] ?? 0);
 
@@ -2868,6 +2901,7 @@ class LoanService
 
         $loan = (new Loan)->forceFill([
             ...$this->productSnapshot($product),
+            ...$this->previewTerms($product, $edited),
             'principal_amount' => $principal / 100,
             'interest_rate' => $rate,
             'term' => (int) $input['term'],
@@ -2880,7 +2914,7 @@ class LoanService
 
         return [
             'maturity_date' => $loan->maturity_date->toDateString(),
-            'interest_method' => $product->interest_method,
+            'interest_method' => $loan->interest_method,
             'rows' => array_map(fn (array $row): array => [
                 'period_number' => $row['period_number'],
                 'due_date' => $row['due_date'],
