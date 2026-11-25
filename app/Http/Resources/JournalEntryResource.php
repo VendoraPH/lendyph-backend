@@ -11,6 +11,7 @@ use App\Models\LoanAdjustment;
 use App\Models\Repayment;
 use App\Models\ShareCapitalLedger;
 use App\Services\Accounting\AutomaticPoster;
+use App\Services\Accounting\ExpenseJournalGuard;
 use App\Services\Accounting\ExpenseRecorder;
 use App\Services\Branches\InterbranchTransferJournalGuard;
 use App\Services\GCashJournalGuard;
@@ -122,7 +123,8 @@ class JournalEntryResource extends JsonResource
     {
         $notReversibleReason = SavingsJournalGuard::reasonNotReversible($this->resource)
             ?? InterbranchTransferJournalGuard::reasonNotReversible($this->resource)
-            ?? GCashJournalGuard::reasonNotReversible($this->resource);
+            ?? GCashJournalGuard::reasonNotReversible($this->resource)
+            ?? ExpenseJournalGuard::reasonNotReversible($this->resource);
 
         return [
             'id' => $this->id,
@@ -146,8 +148,10 @@ class JournalEntryResource extends JsonResource
             // False only for an entry Savings posted, which is reversed from
             // Savings (SavingsJournalGuard), one an interbranch transfer
             // posted, which is reversed from the transfer
-            // (InterbranchTransferJournalGuard), or a GCash Cash In or Cash
-            // Out, which nothing reverses (GCashJournalGuard); the screen hides
+            // (InterbranchTransferJournalGuard), a GCash Cash In or Cash
+            // Out, which nothing reverses (GCashJournalGuard), or an expense's
+            // or a payment's entry, which is reversed from Expenses & Payables,
+            // and the reversal of one (ExpenseJournalGuard); the screen hides
             // Reverse and shows the reason. Status checks (draft, already
             // reversed) stay as they were.
             'reversible' => $notReversibleReason === null,

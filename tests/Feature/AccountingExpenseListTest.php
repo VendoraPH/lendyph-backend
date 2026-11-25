@@ -195,8 +195,8 @@ class AccountingExpenseListTest extends TestCase
     }
 
     /**
-     * An owed expense recorded through the API, with its journal then reversed
-     * on the Journals screen: it reads "reversed".
+     * An owed expense recorded through the API, then reversed from Expenses &
+     * Payables: it reads "reversed".
      */
     private function recordAndReverseAnExpense(): void
     {
@@ -205,8 +205,7 @@ class AccountingExpenseListTest extends TestCase
             'amount' => 50000,
         ])->assertCreated()->json('data.id');
 
-        $journalId = AccountingExpense::query()->findOrFail($id)->journal_id;
-        $this->postJson("/api/accounting/journals/{$journalId}/reverse")->assertCreated();
+        $this->postJson("/api/accounting/expenses/{$id}/reverse", ['reason' => 'Entered in error'])->assertOk();
     }
 
     public function test_an_unknown_status_is_refused_rather_than_returning_everything(): void

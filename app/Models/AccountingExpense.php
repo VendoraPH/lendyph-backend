@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Services\Accounting\Money;
 use App\Services\BranchAccess;
 use App\Services\LikePattern;
 use App\Support\StaffRouteBinding;
@@ -12,6 +13,9 @@ use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Str;
 
 /**
  * An operating cost, paid on the spot or owed.
@@ -59,14 +63,19 @@ class AccountingExpense extends Model
     public const SETTLEMENT_STATUSES = ['unpaid', 'partially_paid', 'paid'];
 
     /**
-     * The relations status() and amountDue() read, for a list to eager-load:
-     * the journal and the first two entries in its chain of reversals. A
-     * longer chain loads the rest as it's read.
+     * The relations status(), paidAmount() and amountDue() read, for a list to
+     * eager-load: the journal and the first two entries in its chain of
+     * reversals, and each payment with its journal's. A longer chain loads
+     * the rest as it's read.
      */
     public const STATUS_RELATIONS = [
         'journal:id,status,reversed_by_journal_id',
         'journal.reversedBy:id,status,reversed_by_journal_id',
         'journal.reversedBy.reversedBy:id,status,reversed_by_journal_id',
+        'payments:id,accounting_expense_id,date,amount,payment_account_id,journal_id',
+        'payments.journal:id,journal_no,status,reversed_by_journal_id',
+        'payments.journal.reversedBy:id,status,reversed_by_journal_id',
+        'payments.journal.reversedBy.reversedBy:id,status,reversed_by_journal_id',
     ];
 
     protected $fillable = [
@@ -133,10 +142,85 @@ class AccountingExpense extends Model
         return $this->hasMany(AccountingExpensePayment::class, 'accounting_expense_id');
     }
 
-    /** What is still owed, in centavos. Never negative — the CHECK sees to it. */
+    /**
+     * What is still owed, in centavos: the amount less what has been paid and
+     * still stands (self::paidAmount()). Never negative: a payment is refused
+     * above what is outstanding.
+     */
     public function outstanding(): int
     {
-        return $this->amount - $this->amount_paid;
+        return $this->amount - $this->paidAmount();
+    }
+
+    /**
+     * What has been paid and still stands, in centavos (finish run round 5,
+     * the twin of the Reversed rule below):
+     *
+     * - paid on the spot: the amount, since the expense's own journal is the
+     *   payment; nothing once that journal stands reversed;
+     * - owed: the payments whose journal stands (AccountingExpensePayment::
+     *   isReversed()). A payment reversed from Expenses & Payables, or by hand
+     *   on the Journals screen before that was refused, no longer counts.
+     *
+     * Every paid figure reads this rule, never the stored `amount_paid` and
+     * `settlement_status`: past hand reversals left those as they were, and
+     * nothing stored is rewritten. Paying and reversing a payment still write
+     * them (ExpenseRecorder), as what stands after the write.
+     *
+     * {@see self::paidSql()} is its SQL twin. Reads the journal and the
+     * `payments` relation with their journals; a list eager-loads
+     * self::STATUS_RELATIONS.
+     */
+    public function paidAmount(): int
+    {
+        if ($this->wasPaidOnTheSpot()) {
+            return $this->isReversed() ? 0 : $this->amount;
+        }
+
+        return (int) $this->standingPayments()->sum('amount');
+    }
+
+    /**
+     * The payments whose journal stands, oldest first.
+     *
+     * @return Collection<int, AccountingExpensePayment>
+     */
+    public function standingPayments(): Collection
+    {
+        return $this->paymentsInOrder()
+            ->reject(static fn (AccountingExpensePayment $payment): bool => $payment->isReversed())
+            ->values();
+    }
+
+    /**
+     * Every payment, by date and then as recorded.
+     *
+     * @return Collection<int, AccountingExpensePayment>
+     */
+    public function paymentsInOrder(): Collection
+    {
+        return $this->payments
+            ->sortBy([
+                static fn (AccountingExpensePayment $a, AccountingExpensePayment $b): int => [$a->date?->toDateString(), $a->id] <=> [$b->date?->toDateString(), $b->id],
+            ])
+            ->values();
+    }
+
+    /**
+     * Why Reverse expense is refused while the expense's journal stands: its
+     * payments that still stand, in words. Null when none does.
+     */
+    public function reverseBlockedReason(): ?string
+    {
+        $standing = $this->standingPayments();
+
+        return $standing->isEmpty() ? null : self::reversePaymentsFirst((int) $standing->sum('amount'), $standing->count());
+    }
+
+    /** "Reverse its payments first: ₱4,000.00 paid in 2 payments." */
+    public static function reversePaymentsFirst(int $paid, int $payments): string
+    {
+        return sprintf('Reverse its payments first: %s paid in %d %s.', Money::format($paid), $payments, Str::plural('payment', $payments));
     }
 
     /**
@@ -187,16 +271,16 @@ class AccountingExpense extends Model
      * as `partially_paid` would drop it out of the Overdue filter, which is the
      * one view whose entire purpose is to be complete.
      *
-     * `reversed` comes first, whatever the settlement column says: an expense
-     * whose journal stands reversed on the Journals screen cost nothing and
-     * owes nothing in the books, so it counts in no total, count or other
-     * status (finish run round 4). Once that reversal is itself reversed it
-     * reads its settlement status again. The branch closure checklist reads
-     * the same rule.
+     * `reversed` comes first: an expense whose journal stands reversed cost
+     * nothing and owes nothing in the books, so it counts in no total, count
+     * or other status (finish run round 4). Once that reversal is itself
+     * reversed it reads its settlement again. The others read what has been
+     * paid and still stands (self::paidAmount(), round 5). The branch closure
+     * checklist reads the same rules.
      *
      * {@see self::scopeWithStatus()} is the SQL twin of this ladder, and
-     * AccountingExpenseListTest and ReversedExpenseTest assert the two agree
-     * row for row.
+     * AccountingExpenseListTest, ReversedExpenseTest and StandingPaymentsTest
+     * assert the two agree row for row.
      */
     public function status(): string
     {
@@ -204,7 +288,9 @@ class AccountingExpense extends Model
             return 'reversed';
         }
 
-        if ($this->amount_paid >= $this->amount) {
+        $paid = $this->paidAmount();
+
+        if ($paid >= $this->amount) {
             return 'paid';
         }
 
@@ -212,7 +298,7 @@ class AccountingExpense extends Model
             return 'overdue';
         }
 
-        return $this->amount_paid > 0 ? 'partially_paid' : 'unpaid';
+        return $paid > 0 ? 'partially_paid' : 'unpaid';
     }
 
     /**
@@ -224,7 +310,7 @@ class AccountingExpense extends Model
      */
     public function isOverdue(): bool
     {
-        if ($this->due_date === null || $this->amount_paid >= $this->amount) {
+        if ($this->due_date === null || $this->paidAmount() >= $this->amount) {
             return false;
         }
 
@@ -268,19 +354,27 @@ class AccountingExpense extends Model
      * amount_paid, amount_due}` over every expense $matching selects that
      * counts ({@see self::scopeCounted()}), in one aggregate. An expense whose
      * journal stands reversed counts in none of them, under the Reversed
-     * filter too. Integer centavos; `amount_due` is `amount - amount_paid` summed in
-     * SQL, the same figure as each row's `amount_due`. Linda's expense answer
-     * reads the same totals.
+     * filter too. Integer centavos; `amount_paid` is what has been paid and
+     * still stands ({@see self::paidSql()}) and `amount_due` the amount less
+     * it, summed in SQL, the same figures as each row's. Linda's expense
+     * answer reads the same totals.
      *
      * @param  Builder<AccountingExpense>  $matching
      * @return array{count: int, amount: int, amount_paid: int, amount_due: int}
      */
     public static function listTotals(Builder $matching): array
     {
-        $row = $matching
+        [$paid, $bindings] = self::paidSql();
+
+        $counted = $matching
             ->counted()
             ->toBase()
-            ->selectRaw('COUNT(*) as row_count, COALESCE(SUM(amount), 0) as amount, COALESCE(SUM(amount_paid), 0) as amount_paid, COALESCE(SUM(amount - amount_paid), 0) as amount_due')
+            ->select('accounting_expenses.amount')
+            ->selectRaw("{$paid} as paid", $bindings);
+
+        $row = DB::query()
+            ->fromSub($counted, 'counted')
+            ->selectRaw('COUNT(*) as row_count, COALESCE(SUM(amount), 0) as amount, COALESCE(SUM(paid), 0) as amount_paid, COALESCE(SUM(amount - paid), 0) as amount_due')
             ->first();
 
         return [
@@ -317,6 +411,41 @@ class AccountingExpense extends Model
     }
 
     /**
+     * Expenses that count and still owe something: the SQL twin of
+     * `! isReversed() && outstanding() > 0`. The branch closure checklist's
+     * unpaid payables, and the Overdue and Partially paid filters.
+     */
+    public function scopeOwing(Builder $query): Builder
+    {
+        [$paid, $bindings] = self::paidSql();
+
+        return $query->counted()->whereRaw("{$paid} < {$this->qualifyColumn('amount')}", $bindings);
+    }
+
+    /**
+     * The SQL twin of {@see self::paidAmount()}: what has been paid and still
+     * stands, in centavos, as an expression over a row of
+     * `accounting_expenses`. The amount of an expense paid on the spot unless
+     * its journal stands reversed; else the payments whose journal doesn't
+     * stand reversed (one with no journal counts). AccountingJournal::
+     * reversedIdsSql() decides both.
+     *
+     * @return array{0: string, 1: list<string>} the expression, and its bindings
+     */
+    public static function paidSql(): array
+    {
+        [$reversed, $bindings] = AccountingJournal::reversedIdsSql();
+
+        $sql = '(CASE WHEN accounting_expenses.payment_account_id IS NOT NULL'
+            ." THEN (CASE WHEN accounting_expenses.journal_id IN ({$reversed}) THEN 0 ELSE accounting_expenses.amount END)"
+            .' ELSE COALESCE((SELECT SUM(paid.amount) FROM accounting_expense_payments AS paid'
+            .' WHERE paid.accounting_expense_id = accounting_expenses.id'
+            ." AND (paid.journal_id IS NULL OR paid.journal_id NOT IN ({$reversed}))), 0) END)";
+
+        return [$sql, [...$bindings, ...$bindings]];
+    }
+
+    /**
      * Rows whose DERIVED status is `$status`.
      *
      * The SQL twin of {@see self::status()}, and it has to stay a twin: a filter
@@ -327,6 +456,7 @@ class AccountingExpense extends Model
     public function scopeWithStatus(Builder $query, string $status): Builder
     {
         $today = self::today();
+        [$paid, $bindings] = self::paidSql();
 
         $isOverdue = static fn (Builder $q): Builder => $q
             ->whereNotNull('due_date')
@@ -334,10 +464,10 @@ class AccountingExpense extends Model
 
         return match ($status) {
             'reversed' => $query->reversed(),
-            'paid' => $query->counted()->where('settlement_status', 'paid'),
-            'overdue' => $query->counted()->where('settlement_status', '!=', 'paid')->where($isOverdue),
-            'partially_paid' => $query->counted()->where('settlement_status', 'partially_paid')->whereNot($isOverdue),
-            'unpaid' => $query->counted()->where('settlement_status', 'unpaid')->whereNot($isOverdue),
+            'paid' => $query->counted()->whereRaw("{$paid} >= {$this->qualifyColumn('amount')}", $bindings),
+            'overdue' => $query->owing()->where($isOverdue),
+            'partially_paid' => $query->owing()->whereRaw("{$paid} > 0", $bindings)->whereNot($isOverdue),
+            'unpaid' => $query->counted()->whereRaw("{$paid} = 0", $bindings)->whereNot($isOverdue),
             // An unknown status matches nothing rather than everything. The form
             // request already rejects it; this is what stops a future caller
             // that skips validation from getting the whole table back under a

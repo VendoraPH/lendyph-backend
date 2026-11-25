@@ -5,6 +5,7 @@ namespace Tests\Feature\Accounting\Expenses;
 use App\Models\AccountingExpense;
 use App\Models\AccountingExpensePayment;
 use App\Models\AccountingJournal;
+use App\Services\Accounting\JournalPoster;
 use Carbon\CarbonImmutable;
 use Tests\TestCase;
 use Tests\Traits\PostsJournals;
@@ -17,6 +18,11 @@ use Tests\Traits\SetupLendyPH;
  * status filter of the Expenses & Payables list. The list still shows it, and
  * the Reversed filter finds it. Nothing stored changes: the rule is read from
  * the journal's status, the one the branch closure checklist already reads.
+ *
+ * The Journals screen refuses expense entries since round 5
+ * (ExpenseJournalGuardTest), so these are the hand reversals made before,
+ * which stay as they are: posted here through JournalPoster, as that screen
+ * did.
  */
 class ReversedExpenseTest extends TestCase
 {
@@ -147,7 +153,7 @@ class ReversedExpenseTest extends TestCase
 
         $this->pay($id, 10000);
 
-        $this->postJson("/api/accounting/journals/{$reversal}/reverse", ['reason' => 'Entered in error'])->assertCreated();
+        app(JournalPoster::class)->reverse(AccountingJournal::query()->findOrFail($reversal), now()->toDateString(), 'Entered in error', $this->admin->id);
         $this->assertSame(['reversed', 0], [$this->row($id)['status'], $this->row($id)['amount_due']]);
         $this->assertSame(1, $this->getJson('/api/accounting/expenses')->json('meta.totals.count'));
     }
@@ -204,12 +210,12 @@ class ReversedExpenseTest extends TestCase
         ], $overrides))->assertCreated()->json('data.id');
     }
 
-    /** Reverses the expense's own journal on the Journals screen. */
+    /** Reverses the expense's own journal by hand, as the Journals screen did before round 5. */
     private function reverse(int $expenseId): void
     {
         $journalId = AccountingExpense::query()->findOrFail($expenseId)->journal_id;
 
-        $this->postJson("/api/accounting/journals/{$journalId}/reverse", ['reason' => 'Entered in error'])->assertCreated();
+        app(JournalPoster::class)->reverse(AccountingJournal::query()->findOrFail($journalId), now()->toDateString(), 'Entered in error', $this->admin->id);
         $this->assertSame('reversed', AccountingJournal::query()->findOrFail($journalId)->status);
     }
 
@@ -225,7 +231,7 @@ class ReversedExpenseTest extends TestCase
             $journal = AccountingJournal::query()->findOrFail($journal->reversed_by_journal_id);
         }
 
-        return $this->postJson("/api/accounting/journals/{$journal->id}/reverse", ['reason' => 'Reversed in error'])->assertCreated()->json('data.id');
+        return app(JournalPoster::class)->reverse($journal, now()->toDateString(), 'Reversed in error', $this->admin->id)->id;
     }
 
     private function pay(int $expenseId, int $amount): void

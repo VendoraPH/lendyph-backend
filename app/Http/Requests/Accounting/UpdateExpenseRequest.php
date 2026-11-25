@@ -22,14 +22,15 @@ use Illuminate\Foundation\Http\FormRequest;
  * They are REFUSED with an explanation rather than silently dropped. Silently
  * dropping is worse than either alternative: the request returns 200, the
  * dialog closes, and the user believes they corrected a figure that did not
- * move. The remedy for a wrong amount is to reverse the journal and record the
- * expense again, which is the same remedy the journals screen offers and for
- * the same reason.
+ * move. The remedy for a wrong amount is to reverse the expense on Expenses &
+ * Payables (its payments first) and record it again, the remedy a posted
+ * entry always has.
  *
  * `payee`, `reference`, `description` and `due_date` are free to change. None
  * of them is on the journal, and `due_date` in particular is the field someone
  * most often needs to fix — it is what decides whether a payable reads as
- * overdue.
+ * overdue. A reversed expense takes no edit at all (422,
+ * ExpenseRecorder::update(), finish run round 5).
  */
 class UpdateExpenseRequest extends FormRequest
 {
@@ -78,8 +79,8 @@ class UpdateExpenseRequest extends FormRequest
                 }
 
                 $v->errors()->add($field, ucfirst($because).', and the entry has already been posted. '
-                    .'A posted entry cannot be edited — reverse the journal on the Journals screen and record '
-                    .'the expense again.');
+                    .'A posted entry cannot be edited — reverse the expense on Expenses & Payables (its payments '
+                    .'first) and record it again.');
             }
         });
     }
