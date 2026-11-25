@@ -39,6 +39,10 @@ use PDOException;
  * bulkManualEntries()). Tried again, either could post a second time, so a
  * collision answers 409 once with nothing posted.
  *
+ * Approving and rejecting a public registration touch no loan either and use
+ * it the same way (RegistrationReview::approve(), reject()). They lock no
+ * collateral or loan row; their own lock order is in RegistrationReview.
+ *
  * ── The lock order ───────────────────────────────────────────────────────
  *
  * The order every collateral write takes too (see CollateralAttacher), so no

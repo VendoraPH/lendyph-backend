@@ -32,12 +32,18 @@ use Illuminate\Http\Exceptions\HttpResponseException;
  *
  * Both are locking reads ahead of any plain read, so the email check's
  * snapshot is taken once both are held and sees every member committed by
- * then. Once it holds lock 2, neither an approval nor a create waits for a
- * registration's row, and a rejection never takes lock 2, so decisions queue
- * rather than deadlock. A create that holds lock 2 while an approval waits for
- * it can still deadlock with that approval when it inserts its row, as two
- * creates can. MySQL then rolls one of them back: a create is tried again
- * (GeneratedNumberWrite), an approval answers 409.
+ * then. Two decisions queue on lock 1 rather than deadlock: once it holds
+ * lock 2, an approval waits for no other registration's row, and a rejection
+ * never takes lock 2. A create that holds lock 2 while an approval waits for
+ * it can still deadlock with that approval, two ways:
+ * - its insert waits behind the gap lock the waiting approval was granted at
+ *   lock 2, as two creates can deadlock;
+ * - a public registration linked to the registration being approved
+ *   (`possible_duplicate_of_id`) checks that link under a shared lock on its
+ *   row, which the approval holds.
+ * MySQL then rolls one of them back: a create is tried again
+ * (GeneratedNumberWrite), an approval answers 409. A rejection only makes
+ * such a create wait, since it waits for nothing the create holds.
  *
  * Under the locks, what the checks decided on is read again from the locked
  * row, and a change since then answers 409 in words, with nothing written:
