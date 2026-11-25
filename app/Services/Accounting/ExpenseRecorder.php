@@ -4,6 +4,7 @@ namespace App\Services\Accounting;
 
 use App\Models\AccountingExpense;
 use App\Models\AccountingExpensePayment;
+use App\Models\AccountingJournal;
 use App\Services\Branches\BranchRowLock;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
@@ -176,6 +177,15 @@ class ExpenseRecorder
                 ->lockForUpdate()
                 ->firstOrFail();
 
+            // A reversed expense owes nothing: its payable was undone in the
+            // books, so a payment would pay out cash against nothing (finish
+            // run round 4). Refused before anything is written.
+            if ($this->standsReversed($locked)) {
+                throw ValidationException::withMessages([
+                    'expense' => ["This expense was reversed, so it can't be paid. Record it again if it's still owed."],
+                ]);
+            }
+
             if ($locked->wasPaidOnTheSpot()) {
                 throw ValidationException::withMessages([
                     'expense' => [
@@ -253,5 +263,29 @@ class ExpenseRecorder
 
             return $locked->refresh();
         });
+    }
+
+    /**
+     * Whether the expense's journal stands reversed
+     * (AccountingJournal::endsReversed()), read under FOR UPDATE locks on the
+     * journal and each entry that reversed it, in chain order.
+     *
+     * Those are the rows JournalPoster::reverse() locks. A reversal never
+     * touches the expense row, so the expense row lock alone wouldn't stop
+     * one, and the branch lock is shared (and absent with no branch). This
+     * way a reversal in flight finishes first and is seen here, or waits
+     * until this payment commits.
+     */
+    private function standsReversed(AccountingExpense $expense): bool
+    {
+        $lock = static fn (?int $journalId): ?AccountingJournal => $journalId === null ? null : AccountingJournal::query()
+            ->whereKey($journalId)
+            ->lockForUpdate()
+            ->first(['id', 'status', 'reversed_by_journal_id']);
+
+        return AccountingJournal::endsReversed(
+            $lock($expense->journal_id),
+            static fn (AccountingJournal $journal): ?AccountingJournal => $lock($journal->reversed_by_journal_id),
+        );
     }
 }

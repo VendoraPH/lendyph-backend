@@ -45,10 +45,14 @@ use Illuminate\Support\Facades\DB;
  *     covered was counted when the allowance was provided, and the part
  *     unearned interest covered was never income. A restructure with no write-
  *     off journal (no books when it was released) loses all of it.
- *   An expense or allowance posting whose journal was reversed on or before the
- *   cutoff date is left out. A write-off whose journal was reversed by then
- *   counts all of its principal as lost, the safe side, as a write-off with no
- *   journal does. A journal reversed after the cutoff date still stood on it.
+ *   An expense or allowance posting whose journal stood reversed on the cutoff
+ *   date is left out. A write-off whose journal stood reversed then counts all
+ *   of its principal as lost, the safe side, as a write-off with no journal
+ *   does. A journal stood reversed when its chain of reversals dated on or
+ *   before the cutoff ends on a reversal (AccountingJournal::reversedIdsSql(),
+ *   the Expenses screen's rule as of the cutoff): a reversal dated after it
+ *   doesn't count yet, and a reversal that was itself reversed by then puts
+ *   the entry back (finish run round 4).
  * - **Earnings** are (share capital ÷ all members' share capital) × the
  *   profit, in exact maths, half up to the centavo
  *   (ProfitSharingDistribution); what the rounding leaves over is reported.
@@ -63,7 +67,7 @@ final class ProfitSharingReport
         .'from 1 January to the cutoff date (interest, penalty, and processing, service and other loan fees, as the Income report '
         .'counts them), less the expenses recorded in Expenses, less credit losses: the allowance for credit losses provided less '
         .'released, and principal written off by restructures beyond what the allowance or interest never received already '
-        .'covered. Expenses whose entry was reversed by the cutoff date are left out, unlike the Expenses screen\'s totals. '
+        .'covered. Expenses whose entry was reversed by the cutoff date are left out. '
         .'Principal repayments are never income, and savings interest, GCash income and journal entries made by hand are not '
         .'counted. Each member\'s share capital is their balance on the cutoff date. This report only calculates: nothing is '
         .'credited to members or posted to the books.';
@@ -296,17 +300,16 @@ final class ProfitSharingReport
     }
 
     /**
-     * A journal that still stood on the cutoff date: never reversed, or
-     * reversed by an entry dated after it.
+     * A journal that still stood on the cutoff date: not reversed as of it, by
+     * the one rule the Expenses screen uses (AccountingJournal::reversedIdsSql()
+     * with the cutoff). Never reversed, reversed by an entry dated after the
+     * cutoff, or reversed by a reversal that was itself reversed by then.
      */
     private static function standingOn(string $cutoff, string $journal): Closure
     {
-        return fn (Builder $query) => $query->where(fn (Builder $standing) => $standing
-            ->whereNull("{$journal}.reversed_by_journal_id")
-            ->orWhereExists(fn (Builder $reversal) => $reversal
-                ->from('accounting_journals as reversal')
-                ->whereColumn('reversal.id', "{$journal}.reversed_by_journal_id")
-                ->where('reversal.date', '>', $cutoff)));
+        [$reversed, $bindings] = AccountingJournal::reversedIdsSql($cutoff);
+
+        return fn (Builder $query) => $query->whereRaw("{$journal}.id not in ({$reversed})", $bindings);
     }
 
     /** A decimal peso amount as the database sends it ("1500.00"), in centavos, exactly. */

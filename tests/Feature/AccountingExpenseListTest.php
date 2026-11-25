@@ -168,10 +168,12 @@ class AccountingExpenseListTest extends TestCase
         AccountingExpense::factory()->partiallyPaid()->create();                       // partially paid
         AccountingExpense::factory()->partiallyPaid()->create(['due_date' => '2020-01-01']); // overdue
         AccountingExpense::factory()->paid()->create();                                // paid
+        $this->recordAndReverseAnExpense();                                            // reversed
 
         $all = $this->getJson('/api/accounting/expenses?per_page=100')->assertOk()->json('data');
+        $this->assertContains('reversed', array_column($all, 'status'));
 
-        foreach (['unpaid', 'partially_paid', 'paid', 'overdue'] as $status) {
+        foreach (['unpaid', 'partially_paid', 'paid', 'overdue', 'reversed'] as $status) {
             $filtered = $this->getJson("/api/accounting/expenses?status={$status}&per_page=100")
                 ->assertOk()->json('data');
 
@@ -190,6 +192,21 @@ class AccountingExpenseListTest extends TestCase
                 $this->assertSame($status, $row['status']);
             }
         }
+    }
+
+    /**
+     * An owed expense recorded through the API, with its journal then reversed
+     * on the Journals screen: it reads "reversed".
+     */
+    private function recordAndReverseAnExpense(): void
+    {
+        $id = $this->postJson('/api/accounting/expenses', [
+            'date' => now()->toDateString(), 'payee' => 'Entered in error', 'expense_account_id' => $this->account('5030'),
+            'amount' => 50000,
+        ])->assertCreated()->json('data.id');
+
+        $journalId = AccountingExpense::query()->findOrFail($id)->journal_id;
+        $this->postJson("/api/accounting/journals/{$journalId}/reverse")->assertCreated();
     }
 
     public function test_an_unknown_status_is_refused_rather_than_returning_everything(): void

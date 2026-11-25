@@ -90,12 +90,12 @@ class ExpenseListTotalsTest extends TestCase
         $this->expense(32000, 32000, 'paid', null);
         $this->expense(500, 0, 'unpaid', null, ['date' => '2026-08-01']);
 
-        $stats = ['unpaid' => 1, 'partially_paid' => 1, 'paid' => 1, 'overdue' => 1];
+        $stats = ['unpaid' => 1, 'partially_paid' => 1, 'paid' => 1, 'overdue' => 1, 'reversed' => 0];
 
         $this->assertSame($stats, $this->getJson('/api/accounting/expenses?from=2026-09-01&status=paid')->assertOk()->json('meta.stats'));
         $this->assertSame($stats, $this->getJson('/api/accounting/expenses?from=2026-09-01')->assertOk()->json('meta.stats'));
         $this->assertSame(
-            ['unpaid' => 2, 'partially_paid' => 1, 'paid' => 1, 'overdue' => 1],
+            ['unpaid' => 2, 'partially_paid' => 1, 'paid' => 1, 'overdue' => 1, 'reversed' => 0],
             $this->getJson('/api/accounting/expenses?status=overdue')->assertOk()->json('meta.stats'),
         );
     }

@@ -9,6 +9,7 @@ use App\Services\Branches\InterbranchTransferJournalGuard;
 use App\Services\Savings\SavingsJournalGuard;
 use App\Support\StaffRouteBinding;
 use App\Traits\Auditable;
+use Closure;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Collection as EloquentCollection;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
@@ -211,6 +212,12 @@ class AccountingJournal extends Model
      */
     public const HISTORICAL_STATUSES = ['posted', 'reversed'];
 
+    /**
+     * The longest chain of reversals self::endsReversed() and its SQL twin
+     * follow: far beyond any real one, so a damaged link can't loop.
+     */
+    public const MAX_REVERSALS = 100;
+
     protected $table = 'accounting_journals';
 
     /**
@@ -332,6 +339,73 @@ class AccountingJournal extends Model
     public function reversedBy(): BelongsTo
     {
         return $this->belongsTo(self::class, 'reversed_by_journal_id');
+    }
+
+    /**
+     * Whether the chain of reversals that starts at `$journal` ends on a
+     * reversal, so the entry stands undone in the books.
+     *
+     * JournalPoster::reverse() marks the entry it reverses `reversed` and links
+     * it to the reversal (`reversed_by_journal_id`); the reversal is posted,
+     * and can be reversed the same way. So an entry reversed once,
+     * three times, … stands undone, and one reversed twice, four times, …
+     * stands again. `$reversalOf` reads the next entry: the relation, or the
+     * row under a lock (ExpenseRecorder::pay()). self::reversedIdsSql() is the
+     * SQL twin.
+     *
+     * @param  Closure(self): ?self  $reversalOf
+     */
+    public static function endsReversed(?self $journal, Closure $reversalOf): bool
+    {
+        $reversed = false;
+
+        for ($reversals = 0; $reversals < self::MAX_REVERSALS && $journal !== null
+            && $journal->status === 'reversed' && $journal->reversed_by_journal_id !== null; $reversals++) {
+            $reversed = ! $reversed;
+            $journal = $reversalOf($journal);
+        }
+
+        return $reversed;
+    }
+
+    /**
+     * The ids of the journals that stand reversed: the SQL twin of
+     * self::endsReversed(). It follows `reversed_by_journal_id` from each
+     * reversed journal, counting the reversals, and keeps the journals whose
+     * chain holds an odd number of them.
+     *
+     * With `$asOf` (Y-m-d), only reversals dated on or before it count, so the
+     * chain stops at the first one dated after it: the journals that stood
+     * reversed on that date. Reversals are never dated before the entry they
+     * reverse (ReverseJournalRequest).
+     *
+     * @return array{0: string, 1: list<string>} the SELECT, and its bindings
+     */
+    public static function reversedIdsSql(?string $asOf = null): array
+    {
+        $max = self::MAX_REVERSALS;
+        $onTime = $asOf === null ? '' : ' AND reversal.date <= ?';
+
+        $sql = <<<SQL
+            WITH RECURSIVE reversal_chain (reversed_journal_id, journal_id, reversals) AS (
+                SELECT reversed.id, reversal.id, 1
+                FROM accounting_journals AS reversed
+                JOIN accounting_journals AS reversal ON reversal.id = reversed.reversed_by_journal_id
+                WHERE reversed.status = 'reversed'{$onTime}
+                UNION ALL
+                SELECT chain.reversed_journal_id, reversal.id, chain.reversals + 1
+                FROM reversal_chain AS chain
+                JOIN accounting_journals AS reversed ON reversed.id = chain.journal_id
+                JOIN accounting_journals AS reversal ON reversal.id = reversed.reversed_by_journal_id
+                WHERE reversed.status = 'reversed' AND chain.reversals < {$max}{$onTime}
+            )
+            SELECT chain.reversed_journal_id
+            FROM reversal_chain AS chain
+            GROUP BY chain.reversed_journal_id
+            HAVING MOD(MAX(chain.reversals), 2) = 1
+            SQL;
+
+        return [$sql, $asOf === null ? [] : [$asOf, $asOf]];
     }
 
     /** The lending event that caused this entry — a Loan, a Repayment. */

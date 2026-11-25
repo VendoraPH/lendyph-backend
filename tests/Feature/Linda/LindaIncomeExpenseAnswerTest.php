@@ -109,6 +109,33 @@ class LindaIncomeExpenseAnswerTest extends LindaTopicTestCase
         $this->assertSame(0, $this->stats($this->ask($head, LindaIntent::ExpenseSummary, LindaPeriod::named('last_month')))['Expenses']);
     }
 
+    /**
+     * An expense whose journal was reversed on the Journals screen counts in
+     * no answer, as on the Expenses & Payables list (finish run round 4).
+     */
+    public function test_an_expense_whose_journal_was_reversed_counts_in_no_expense_answer(): void
+    {
+        $this->actingAs($this->admin);
+        $id = $this->postJson('/api/accounting/expenses', [
+            'date' => now()->toDateString(), 'payee' => 'Entered twice', 'expense_account_id' => $this->account('5030'),
+            'amount' => 500000, 'branch_id' => $this->branch->id,
+        ])->assertCreated()->json('data.id');
+        $journalId = AccountingExpense::query()->findOrFail($id)->journal_id;
+        $this->postJson("/api/accounting/journals/{$journalId}/reverse", ['reason' => 'Entered twice'])->assertCreated();
+
+        $head = $this->headOffice(['expenses:view', 'accounting:view']);
+        $this->actingAs($head);
+        $totals = $this->expenseTotals();
+        $reply = $this->ask($head, LindaIntent::ExpenseSummary);
+        $stats = $this->stats($reply);
+
+        $this->assertSame(['count' => 3, 'amount' => 269950, 'amount_paid' => 150000, 'amount_due' => 119950], $totals);
+        $this->assertSame($totals['count'], $stats['Expenses']);
+        $this->assertEquals($totals['amount'] / 100, $stats['Total Amount']);
+        $this->assertEquals($totals['amount_due'] / 100, $stats['Still Due']);
+        $this->assertStringContainsString('3 expenses were recorded across all branches, totalling ₱2,699.50: ₱1,500.00 paid and ₱1,199.50 still due.', $reply->answer);
+    }
+
     public function test_a_branch_user_sees_only_their_branches_expenses_and_needs_the_permission(): void
     {
         $branchUser = $this->branchUser(['expenses:view', 'accounting:view']);

@@ -22,8 +22,9 @@ use Illuminate\Http\Resources\Json\JsonResource;
  *    `meta.totals.amount_due`, summed on the server over every matching
  *    expense; the screen adds nothing up.
  * 2. **`status` is derived, not stored.** The column holds only the settlement
- *    state; `overdue` is a function of `due_date` against today. See
- *    AccountingExpense::status().
+ *    state; `overdue` is a function of `due_date` against today, and
+ *    `reversed` of the journal's status. See AccountingExpense::status().
+ *    The controller eager-loads AccountingExpense::STATUS_RELATIONS for it.
  */
 class AccountingExpenseResource extends JsonResource
 {
@@ -46,15 +47,15 @@ class AccountingExpenseResource extends JsonResource
             // CENTAVOS, as integers.
             'amount' => (int) $this->amount,
             'amount_paid' => (int) $this->amount_paid,
-            // What is still owed (AccountingExpense::outstanding()), so the
-            // screen never subtracts.
-            'amount_due' => $this->outstanding(),
+            // What is still owed (AccountingExpense::amountDue()), so the
+            // screen never subtracts: 0 while the journal stands reversed.
+            'amount_due' => $this->amountDue(),
             'payment_account_id' => $this->payment_account_id,
             'branch_id' => $this->branch_id,
             'reference' => $this->reference,
             'description' => $this->description,
             'due_date' => $this->due_date?->toDateString(),
-            // One of unpaid | partially_paid | paid | overdue.
+            // One of unpaid | partially_paid | paid | overdue | reversed.
             'status' => $this->status(),
             'journal_id' => $this->journal_id,
             'created_at' => $this->created_at,
