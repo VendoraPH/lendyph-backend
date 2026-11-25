@@ -63,7 +63,7 @@ final class ProfitSharingReport
         .'from 1 January to the cutoff date (interest, penalty, and processing, service and other loan fees, as the Income report '
         .'counts them), less the expenses recorded in Expenses, less credit losses: the allowance for credit losses provided less '
         .'released, and principal written off by restructures beyond what the allowance or interest never received already '
-        .'covered. Expenses whose entry was reversed by the cutoff date are left out, unlike the Expenses screen\'s totals. '
+        .'covered. Expenses whose entry was reversed by the cutoff date are left out. '
         .'Principal repayments are never income, and savings interest, GCash income and journal entries made by hand are not '
         .'counted. Each member\'s share capital is their balance on the cutoff date. This report only calculates: nothing is '
         .'credited to members or posted to the books.';

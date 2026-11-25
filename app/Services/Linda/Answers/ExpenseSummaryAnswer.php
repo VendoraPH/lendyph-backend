@@ -15,9 +15,11 @@ use App\Services\Linda\LindaWording as W;
  * "What are our expenses this month?": the Expenses & Payables list's
  * `meta.totals` for the period (AccountingExpense::listTotals(), GET
  * /accounting/expenses with `from`, `to` and `branch_id`): how many expenses
- * were recorded, their amount, what was paid and what is still due. In the
- * caller's branches (an expense with no branch only for `branches:view_all`),
- * this month by default; needs `expenses:view`, as the list does.
+ * were recorded, their amount, what was paid and what is still due. An
+ * expense whose journal was reversed on the Journals screen counts in none of
+ * them, as on the list. In the caller's branches (an expense with no branch
+ * only for `branches:view_all`), this month by default; needs
+ * `expenses:view`, as the list does.
  */
 final class ExpenseSummaryAnswer extends Answer
 {

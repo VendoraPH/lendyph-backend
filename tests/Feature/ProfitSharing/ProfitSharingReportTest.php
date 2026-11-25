@@ -116,7 +116,9 @@ class ProfitSharingReportTest extends TestCase
         ], $data['totals']);
 
         $this->assertStringStartsWith('To confirm with the owner', $data['basis_note']);
-        $this->assertStringContainsString('Expenses whose entry was reversed by the cutoff date are left out, unlike the Expenses screen\'s totals.', $data['basis_note']);
+        // The Expenses screen leaves reversed expenses out too (finish run round 4).
+        $this->assertStringContainsString('Expenses whose entry was reversed by the cutoff date are left out.', $data['basis_note']);
+        $this->assertStringNotContainsString('unlike the Expenses screen', $data['basis_note']);
     }
 
     public function test_the_income_is_the_income_reports_own(): void

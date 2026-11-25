@@ -460,15 +460,16 @@ class BranchStatus
      * Paying one posts into the branch, which a closed branch refuses, so a
      * closure waits for them (finish run round 2, review of #369). One whose
      * journal was reversed by hand on the Journals screen keeps its unpaid
-     * status but owes nothing in the books, so it doesn't count; one with no
-     * journal does.
+     * settlement column but owes nothing in the books, so it doesn't count;
+     * one with no journal does. The Expenses list's rule
+     * (AccountingExpense::scopeCounted(), finish run round 4).
      */
     private function unpaidPayables(int $branchId): int
     {
         return AccountingExpense::query()
             ->where('branch_id', $branchId)
             ->where('settlement_status', '!=', 'paid')
-            ->whereDoesntHave('journal', fn ($q) => $q->where('status', 'reversed'))
+            ->counted()
             ->count();
     }
 
