@@ -7,7 +7,6 @@ use App\Services\LikePattern;
 use App\Support\StaffRouteBinding;
 use App\Traits\Auditable;
 use Carbon\CarbonImmutable;
-use Closure;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
@@ -58,12 +57,6 @@ class AccountingExpense extends Model
 
     /** The stored settlement state. `overdue` and `reversed` are never one of these. */
     public const SETTLEMENT_STATUSES = ['unpaid', 'partially_paid', 'paid'];
-
-    /**
-     * The longest chain of reversals {@see self::endsReversed()} and its SQL
-     * twin follow: far beyond any real one, so a damaged link can't loop.
-     */
-    public const MAX_REVERSALS = 100;
 
     /**
      * The relations status() and amountDue() read, for a list to eager-load:
@@ -162,8 +155,8 @@ class AccountingExpense extends Model
      * The reversal undid the cost, and an accrual's payable, in the books,
      * while the row and its settlement column stay as they were. Reversing
      * that reversal puts the cost back, so the expense counts again, and so on
-     * along the chain (self::endsReversed()). An expense with no journal isn't
-     * reversed.
+     * along the chain (AccountingJournal::endsReversed()). An expense with no
+     * journal isn't reversed.
      *
      * {@see self::scopeCounted()} and {@see self::scopeReversed()} are its SQL
      * twins. Reads the `journal` relation and its reversals; a list
@@ -171,36 +164,10 @@ class AccountingExpense extends Model
      */
     public function isReversed(): bool
     {
-        return self::endsReversed(
+        return AccountingJournal::endsReversed(
             $this->journal_id === null ? null : $this->journal,
             static fn (AccountingJournal $journal): ?AccountingJournal => $journal->reversedBy,
         );
-    }
-
-    /**
-     * Whether the chain of reversals that starts at `$journal` ends on a
-     * reversal, so the entry stands undone in the books.
-     *
-     * JournalPoster::reverse() marks the entry it reverses `reversed` and links
-     * it to the reversal (`reversed_by_journal_id`); the reversal is posted,
-     * and can be reversed the same way. So an entry reversed once, three
-     * times, … stands undone, and one reversed twice, four times, … stands
-     * again. `$reversalOf` reads the next entry: the relation, or the row
-     * under a lock (ExpenseRecorder::pay()).
-     *
-     * @param  Closure(AccountingJournal): ?AccountingJournal  $reversalOf
-     */
-    public static function endsReversed(?AccountingJournal $journal, Closure $reversalOf): bool
-    {
-        $reversed = false;
-
-        for ($reversals = 0; $reversals < self::MAX_REVERSALS && $journal !== null
-            && $journal->status === 'reversed' && $journal->reversed_by_journal_id !== null; $reversals++) {
-            $reversed = ! $reversed;
-            $journal = $reversalOf($journal);
-        }
-
-        return $reversed;
     }
 
     /** True when this was paid on the spot, so there is no payable to settle. */
@@ -334,49 +301,19 @@ class AccountingExpense extends Model
     public function scopeCounted(Builder $query): Builder
     {
         $journal = $this->qualifyColumn('journal_id');
+        [$reversed, $bindings] = AccountingJournal::reversedIdsSql();
 
         return $query->where(fn (Builder $counted): Builder => $counted
             ->whereNull($journal)
-            ->orWhereRaw("{$journal} not in (".self::reversedJournalsSql().')'));
+            ->orWhereRaw("{$journal} not in ({$reversed})", $bindings));
     }
 
     /** Expenses whose journal stands reversed: the SQL twin of {@see self::isReversed()}. */
     public function scopeReversed(Builder $query): Builder
     {
-        return $query->whereRaw($this->qualifyColumn('journal_id').' in ('.self::reversedJournalsSql().')');
-    }
+        [$reversed, $bindings] = AccountingJournal::reversedIdsSql();
 
-    /**
-     * The ids of expense journals whose chain of reversals ends on a reversal:
-     * the SQL twin of self::endsReversed(). It follows `reversed_by_journal_id`
-     * from each reversed expense journal, counting the reversals, to the entry
-     * that stands, and keeps the journals reversed an odd number of times.
-     */
-    private static function reversedJournalsSql(): string
-    {
-        $max = self::MAX_REVERSALS;
-
-        return <<<SQL
-            WITH RECURSIVE reversal_chain (expense_journal_id, journal_id, reversals) AS (
-                SELECT expense_journal.id, expense_journal.reversed_by_journal_id, 1
-                FROM accounting_journals AS expense_journal
-                WHERE expense_journal.status = 'reversed'
-                  AND expense_journal.reversed_by_journal_id IS NOT NULL
-                  AND expense_journal.id IN (SELECT expense.journal_id FROM accounting_expenses AS expense)
-                UNION ALL
-                SELECT chain.expense_journal_id, reversal.reversed_by_journal_id, chain.reversals + 1
-                FROM reversal_chain AS chain
-                JOIN accounting_journals AS reversal ON reversal.id = chain.journal_id
-                WHERE reversal.status = 'reversed'
-                  AND reversal.reversed_by_journal_id IS NOT NULL
-                  AND chain.reversals < {$max}
-            )
-            SELECT chain.expense_journal_id
-            FROM reversal_chain AS chain
-            JOIN accounting_journals AS standing ON standing.id = chain.journal_id
-            WHERE (chain.reversals = {$max} OR NOT (standing.status = 'reversed' AND standing.reversed_by_journal_id IS NOT NULL))
-              AND MOD(chain.reversals, 2) = 1
-            SQL;
+        return $query->whereRaw($this->qualifyColumn('journal_id')." in ({$reversed})", $bindings);
     }
 
     /**

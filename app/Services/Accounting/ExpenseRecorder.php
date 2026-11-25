@@ -267,7 +267,7 @@ class ExpenseRecorder
 
     /**
      * Whether the expense's journal stands reversed
-     * (AccountingExpense::endsReversed()), read under FOR UPDATE locks on the
+     * (AccountingJournal::endsReversed()), read under FOR UPDATE locks on the
      * journal and each entry that reversed it, in chain order.
      *
      * Those are the rows JournalPoster::reverse() locks. A reversal never
@@ -283,7 +283,7 @@ class ExpenseRecorder
             ->lockForUpdate()
             ->first(['id', 'status', 'reversed_by_journal_id']);
 
-        return AccountingExpense::endsReversed(
+        return AccountingJournal::endsReversed(
             $lock($expense->journal_id),
             static fn (AccountingJournal $journal): ?AccountingJournal => $lock($journal->reversed_by_journal_id),
         );

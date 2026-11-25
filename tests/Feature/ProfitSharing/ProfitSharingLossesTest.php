@@ -135,6 +135,47 @@ class ProfitSharingLossesTest extends TestCase
         $this->assertEquals(0, $after['expenses']);
     }
 
+    /**
+     * Reversing the reversal puts the entry back in the books, so on a cutoff
+     * after both it counts again; between the two it stood reversed. The
+     * Expenses screen's rule, as of the cutoff (finish run round 4).
+     */
+    public function test_an_entry_whose_reversal_was_reversed_by_the_cutoff_counts(): void
+    {
+        $this->seedChartOfAccounts();
+        $expense = $this->expense('2026-03-01', 30_000);
+        $posting = $this->allowancePosting('2026-03-31', 100_000);
+
+        foreach ([$expense->journal_id, $posting->accounting_journal_id] as $journalId) {
+            $reversal = $this->reverseJournal($journalId, '2026-04-10');
+            $this->reverseJournal($reversal->id, '2026-04-20');
+        }
+
+        $after = $this->profitSharing('2026-05-31')->assertOk()->json('data.profit');
+        $this->assertEquals(300, $after['expenses']);
+        $this->assertEquals(1000, $after['allowance_for_credit_losses']);
+
+        $between = $this->profitSharing('2026-04-15')->assertOk()->json('data.profit');
+        $this->assertEquals(0, $between['expenses']);
+        $this->assertEquals(0, $between['allowance_for_credit_losses']);
+    }
+
+    /**
+     * Only reversals dated on or before the cutoff count: a reversal reversed
+     * after the cutoff still stood on it, so the expense was reversed then,
+     * and counts again on a cutoff after the second reversal.
+     */
+    public function test_an_expense_whose_reversal_was_reversed_after_the_cutoff_stood_reversed_on_it(): void
+    {
+        $this->seedChartOfAccounts();
+        $expense = $this->expense('2026-03-01', 30_000);
+        $reversal = $this->reverseJournal($expense->journal_id, '2026-04-10');
+        $this->reverseJournal($reversal->id, '2026-06-15');
+
+        $this->assertEquals(0, $this->profitSharing('2026-05-31')->assertOk()->json('data.profit.expenses'));
+        $this->assertEquals(300, $this->profitSharing('2026-06-30')->assertOk()->json('data.profit.expenses'));
+    }
+
     public function test_every_branchs_losses_count_whatever_branch_is_sent(): void
     {
         $this->seedChartOfAccounts();
