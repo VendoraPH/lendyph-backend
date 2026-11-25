@@ -290,6 +290,24 @@ final class ApplicantIntake
         });
     }
 
+    /**
+     * The link's Test setting as committed, read under a lock on its row
+     * inside startOrFind()'s transaction (finish run round 5), never as the
+     * request read the link when it began. Staff may switch a link between
+     * test and real only while it has no applications, under a lock on the
+     * same row (OriginationLinkController::update()), so the two take turns: a
+     * switch that lands first is copied here, and one that comes after finds
+     * this application and is refused.
+     *
+     * A row lock rather than a shared one: start() then counts the start on
+     * the same row, and two starts on one link each holding a shared lock
+     * would deadlock upgrading it.
+     */
+    private function isTestUnderLock(OriginationLink $link): bool
+    {
+        return (bool) OriginationLink::query()->whereKey($link->id)->lockForUpdate()->value('is_test');
+    }
+
     private function start(OriginationLink $link, string $mobile, string $hash): OriginationApplication
     {
         $application = new OriginationApplication;
@@ -299,7 +317,7 @@ final class ApplicantIntake
             'mobile' => PhilippineMobile::normalise($mobile),
             'mobile_hash' => $hash,
             'draft' => $this->rules->empty(),
-            'is_test' => $link->is_test,
+            'is_test' => $this->isTestUnderLock($link),
             'started_at' => now(),
             'last_saved_at' => now(),
         ]);
