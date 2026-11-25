@@ -25,6 +25,9 @@ use App\Models\User;
  *   due date and the loan's grace period), not their whole balance.
  * - `total_paid`: every posted (not voided) payment on the member's loans,
  *   insurance premium included; `insurance_paid` is the premium inside it.
+ *   On a loan the CSV importer brought in, it adds what the file says was paid
+ *   before the import (PaidBeforeImport), as each loan's Total Paid does;
+ *   `paid_before_import` is that part.
  * - `counts`: the member's loans per status, every status present, and
  *   `current_loans`, the loans in Loan::ACTIVE_STATUSES.
  *
@@ -48,7 +51,7 @@ class BorrowerLoanSummaryService
     ];
 
     /**
-     * @return array{total_borrowed: float|int, total_outstanding: float, outstanding_principal: float, overdue_amount: float, total_paid: float|int, insurance_paid: float|int, current_loans: int, counts: array<string, int>}
+     * @return array{total_borrowed: float|int, total_outstanding: float, outstanding_principal: float, overdue_amount: float, total_paid: float|int, paid_before_import: float|int, insurance_paid: float|int, current_loans: int, counts: array<string, int>}
      */
     public function summarize(Borrower $borrower, User $viewer): array
     {
@@ -61,7 +64,7 @@ class BorrowerLoanSummaryService
      * always sees their own loans. Equal to summarize() for a viewer who sees
      * every branch.
      *
-     * @return array{total_borrowed: float|int, total_outstanding: float, outstanding_principal: float, overdue_amount: float, total_paid: float|int, insurance_paid: float|int, current_loans: int, counts: array<string, int>}
+     * @return array{total_borrowed: float|int, total_outstanding: float, outstanding_principal: float, overdue_amount: float, total_paid: float|int, paid_before_import: float|int, insurance_paid: float|int, current_loans: int, counts: array<string, int>}
      */
     public function forMember(Borrower $borrower): array
     {
@@ -71,7 +74,7 @@ class BorrowerLoanSummaryService
     /**
      * Without a viewer, every loan of the member's counts (forMember()).
      *
-     * @return array{total_borrowed: float|int, total_outstanding: float, outstanding_principal: float, overdue_amount: float, total_paid: float|int, insurance_paid: float|int, current_loans: int, counts: array<string, int>}
+     * @return array{total_borrowed: float|int, total_outstanding: float, outstanding_principal: float, overdue_amount: float, total_paid: float|int, paid_before_import: float|int, insurance_paid: float|int, current_loans: int, counts: array<string, int>}
      */
     private function build(Borrower $borrower, ?User $viewer): array
     {
@@ -105,12 +108,17 @@ class BorrowerLoanSummaryService
             ->selectRaw('COALESCE(SUM(amount_paid), 0) as amount_paid, COALESCE(SUM(insurance_applied), 0) as insurance_applied')
             ->first();
 
+        $paidBeforeImport = array_sum(PaidBeforeImport::totalsByLoan(
+            $visible($borrower->loans())->reorder()->pluck('loans.id')->map(fn (mixed $id): int => (int) $id)->all(),
+        ));
+
         return [
             'total_borrowed' => $borrowed / 100,
             'total_outstanding' => $owed['total_outstanding'],
             'outstanding_principal' => $owed['outstanding_principal'],
             'overdue_amount' => $owed['overdue_amount'],
-            'total_paid' => LoanService::toCentavos((float) $paid->amount_paid) / 100,
+            'total_paid' => (LoanService::toCentavos((float) $paid->amount_paid) + $paidBeforeImport) / 100,
+            'paid_before_import' => $paidBeforeImport / 100,
             'insurance_paid' => LoanService::toCentavos((float) $paid->insurance_applied) / 100,
             'current_loans' => array_sum(array_intersect_key($counts, array_flip(Loan::ACTIVE_STATUSES))),
             'counts' => $counts,

@@ -83,7 +83,8 @@ class ReportTotalsFromServerTest extends TestCase
         $this->assertEquals([5170.10, 1234.57], array_column($payments, 'credit'));
         $this->assertSame([null, null], array_column($payments, 'debit'));
         // The release's ₱10,300.20 and the ₱20.00 penalty charge.
-        $this->assertEquals(['debit' => 10320.20, 'credit' => 6404.67, 'overpayment_applied' => 0], $data['transaction_totals']);
+        // `amount_paid` is the Receipt Amount column: the posted receipts.
+        $this->assertEquals(['debit' => 10320.20, 'credit' => 6404.67, 'overpayment_applied' => 0, 'amount_paid' => 6404.67], $data['transaction_totals']);
         $this->assertEquals($data['summary']['total_paid'], $data['transaction_totals']['credit']);
     }
 

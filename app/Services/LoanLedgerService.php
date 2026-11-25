@@ -82,6 +82,9 @@ final class LoanLedgerService
 
     public const RESTATED = 'Balance restated to the schedule';
 
+    /** The row of what an imported loan was paid before the import (importedEvents()). */
+    public const PAID_BEFORE_IMPORT = 'Paid before the loan was imported';
+
     public function __construct(private LoanService $loanService) {}
 
     /**
@@ -213,7 +216,8 @@ final class LoanLedgerService
 
     /**
      * On a loan migrated in from an existing book, what its periods were paid
-     * before the import, which no repayment here records.
+     * before the import, which no repayment here records: PaidBeforeImport,
+     * the figure Total Paid adds on every screen.
      *
      * @param  EloquentCollection<int, AmortizationSchedule>  $schedules
      * @param  EloquentCollection<int, Repayment>  $repayments
@@ -221,16 +225,11 @@ final class LoanLedgerService
      */
     private function importedEvents(Loan $loan, EloquentCollection $schedules, EloquentCollection $repayments): array
     {
-        if (! $loan->isImported()) {
-            return [];
-        }
-
-        $posted = $repayments->where('status', 'posted');
+        $paid = PaidBeforeImport::forLoan($loan, $schedules, $repayments);
         $effect = [];
 
         foreach (['principal', 'interest', 'penalty'] as $column) {
-            $effect[$column] = $posted->sum(fn (Repayment $r): int => $this->centavos($r->{"{$column}_applied"}))
-                - $schedules->sum(fn (AmortizationSchedule $s): int => $this->centavos($s->{"{$column}_paid"}));
+            $effect[$column] = -$paid[$column];
         }
 
         if ($effect === ['principal' => 0, 'interest' => 0, 'penalty' => 0]) {
@@ -239,7 +238,7 @@ final class LoanLedgerService
 
         return [$this->event($loan->released_at, $loan->released_at, 'imported', $loan->id, [
             'kind' => 'adjustment',
-            'description' => 'Paid before the loan was imported',
+            'description' => self::PAID_BEFORE_IMPORT,
             ...$effect,
         ], $effect)];
     }

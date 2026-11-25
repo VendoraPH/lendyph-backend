@@ -331,7 +331,12 @@ class CustomerRowNormalizer
         }
 
         if ($number !== mb_strtoupper($value)) {
-            $notes->warn('membership_number', 'membership_number_spaces', "\"{$value}\" was stored as {$number}: members sign in with their number without spaces.");
+            $notes->warn(
+                'membership_number',
+                'membership_number_spaces',
+                "\"{$value}\" was stored as {$number}: members sign in with their number without spaces.",
+                "\"{$value}\" would be stored as {$number}: members sign in with their number without spaces.",
+            );
         }
 
         return $number;
@@ -403,19 +408,34 @@ class CustomerRowNormalizer
         $date = Carbon::parse($value);
 
         if ($date->isFuture()) {
-            $notes->warn('birthdate', 'birthdate_future', "\"{$value}\" is in the future, which cannot be a birthdate, so it was imported as blank.");
+            $notes->warn(
+                'birthdate',
+                'birthdate_future',
+                "\"{$value}\" is in the future, which cannot be a birthdate, so it was imported as blank.",
+                "\"{$value}\" is in the future, which cannot be a birthdate, so it would be imported as blank.",
+            );
 
             return null;
         }
 
         if ($date->lt(Carbon::create(1900, 1, 1))) {
-            $notes->warn('birthdate', 'birthdate_implausible', "\"{$value}\" is before 1900 and was imported as blank.");
+            $notes->warn(
+                'birthdate',
+                'birthdate_implausible',
+                "\"{$value}\" is before 1900 and was imported as blank.",
+                "\"{$value}\" is before 1900, so it would be imported as blank.",
+            );
 
             return null;
         }
 
         if ($date->gt(Carbon::today()->subYears(18))) {
-            $notes->warn('birthdate', 'birthdate_under_18', "\"{$value}\" makes this member under 18. The record was imported as-is because it is a fact on the coop's books, but the member form requires 18+, so this member cannot be saved in the app until the birthdate is corrected.");
+            $notes->warn(
+                'birthdate',
+                'birthdate_under_18',
+                "\"{$value}\" makes this member under 18. The record was imported as-is because it is a fact on the coop's books, but the member form requires 18+, so this member cannot be saved in the app until the birthdate is corrected.",
+                "\"{$value}\" makes this member under 18. The record would be imported as-is because it is a fact on the coop's books, but the member form requires 18+, so this member could not be saved in the app until the birthdate is corrected.",
+            );
         }
 
         return $value;
@@ -429,7 +449,12 @@ class CustomerRowNormalizer
             return $value;
         }
 
-        $notes->warn($field, 'amount_above_app_maximum', "This amount is above the {$maxLabel} the member form allows, so it was imported as blank rather than leaving a member who cannot be saved.");
+        $notes->warn(
+            $field,
+            'amount_above_app_maximum',
+            "This amount is above the {$maxLabel} the member form allows, so it was imported as blank rather than leaving a member who cannot be saved.",
+            "This amount is above the {$maxLabel} the member form allows, so it would be imported as blank rather than leaving a member who cannot be saved.",
+        );
 
         return null;
     }

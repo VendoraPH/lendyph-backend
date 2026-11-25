@@ -122,7 +122,7 @@ class PortalContractTest extends TestCase
         $this->assertKeys(self::LOAN_ROW, $get('/api/portal/loans')['data'][0], 'loans');
         $this->assertKeys([...self::LOAN_ROW, 'term', 'term_unit', 'frequency', 'interest_rate', 'interest_rate_frequency', 'interest_method',
             'outstanding_interest', 'outstanding_penalty', 'insurance_owed', 'total_repaid', 'principal_paid', 'interest_paid',
-            'penalty_paid'], $get("/api/portal/loans/{$loan->id}")['data'], 'loan');
+            'penalty_paid', 'paid_before_import'], $get("/api/portal/loans/{$loan->id}")['data'], 'loan');
 
         $schedule = $get("/api/portal/loans/{$loan->id}/schedule")['data'];
         $this->assertKeys(['periods', 'totals'], $schedule, 'schedule');

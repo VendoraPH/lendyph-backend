@@ -18,7 +18,8 @@ use App\Services\RepaymentService;
  * (LN-) or application number (LA-), with the loan page's own figures
  * (RepaymentService::getLoanSummary()): Outstanding, Principal Balance, Past
  * Due (after grace), the next due date and amount, plus its status in words
- * (Loan::displayStatus()), product, principal and its latest posted payment.
+ * (Loan::displayStatus()), product, principal and its latest posted payment
+ * (or, on an imported loan with none since, what was paid before the import).
  * A loan that was never released shows its status and amount and says it has
  * no balance yet. The member shows by name and code only.
  *
@@ -111,9 +112,15 @@ final class LoanLookupAnswer extends LookupAnswer
             .($summary['next_due_date'] === null
                 ? ''
                 : ' '.W::nextDue($summary['next_due_amount'], $summary['next_due_date'], (float) $summary['overdue_amount'] <= 0))
-            .($last === null
-                ? ' No payment has been made yet.'
-                : ' The last payment was '.W::money((string) $last->amount_paid).' on '.W::date($last->payment_date->toDateString()).'.');
+            .match (true) {
+                $last !== null => ' The last payment was '.W::money((string) $last->amount_paid).' on '.W::date($last->payment_date->toDateString()).'.',
+                // A loan brought in from the cooperative's earlier books was
+                // paid there, which no payment here records (the summary's
+                // `paid_before_import`).
+                (float) $summary['paid_before_import'] > 0 => ' No payment has been recorded since the import; '
+                    .W::money((string) $summary['paid_before_import']).' was paid before it.',
+                default => ' No payment has been made yet.',
+            };
 
         return $this->reply(
             $answer,

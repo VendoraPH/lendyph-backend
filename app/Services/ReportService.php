@@ -187,9 +187,15 @@ class ReportService
             ->orderBy('id')
             ->get();
         $repayments = $allRepayments->where('status', 'posted')->values();
-
-        $totalPaid = $repayments->sum(fn ($r) => (float) $r->amount_paid);
         $schedules = $loan->amortizationSchedules;
+
+        // The money received: every posted receipt, plus, on a loan the CSV
+        // importer brought in, what its file says was paid before the import
+        // (PaidBeforeImport), the Ledger's "Paid before the loan was imported"
+        // line, which no receipt records.
+        $paidBeforeImport = PaidBeforeImport::forLoan($loan, $schedules, $allRepayments);
+        $receiptsCentavos = $repayments->sum(fn ($r) => LoanService::toCentavos((float) $r->amount_paid));
+        $totalPaid = ($receiptsCentavos + $paidBeforeImport['total']) / 100;
 
         $outstandingPrincipal = $schedules->sum(fn ($s) => max(0, (float) $s->principal_due - (float) $s->principal_paid));
         $outstandingInterest = $schedules->sum(fn ($s) => max(0, (float) $s->interest_due - (float) $s->interest_paid));
@@ -224,7 +230,7 @@ class ReportService
         $openingBalance = $openingCentavos / 100;
 
         $transactions = $this->statementLines($loan, $allRepayments, $openingCentavos);
-        $receivedParts = $this->statementPaidParts($transactions);
+        $receivedParts = $this->statementPaidParts($transactions, $paidBeforeImport);
         ['rows' => $rowNotes, 'note' => $extensionNote] = $this->extensionNotes($loan);
 
         // The demand letter's arrears, worked out here so the letter computes
@@ -352,7 +358,13 @@ class ReportService
                 'address' => $loan->borrower->address,
             ],
             'transactions' => $transactions,
-            'transaction_totals' => self::columnTotals($transactions, ['debit' => 'money', 'credit' => 'money', 'overpayment_applied' => 'money']),
+            'transaction_totals' => [
+                ...self::columnTotals($transactions, ['debit' => 'money', 'credit' => 'money', 'overpayment_applied' => 'money']),
+                // The Receipt Amount column: the posted receipts, its own lines.
+                // Not `summary.total_paid` on an imported loan, which adds what
+                // was paid before the import.
+                'amount_paid' => $receiptsCentavos / 100,
+            ],
             'amortization_schedule' => $schedule,
             'schedule_note' => self::joinedNotes($this->scheduleNote($loan), $extensionNote),
             'schedule_totals' => $scheduleTotals,
@@ -363,11 +375,14 @@ class ReportService
             'total_demanded' => $totalDemanded,
             'demand_totals' => $demandTotals,
             'summary' => [
-                'total_paid' => round($totalPaid, 2),
+                'total_paid' => $totalPaid,
                 // The money received, by what it went to: these add up to
                 // `total_paid`. `overpayment_paid` is an excess a payment could
                 // not credit anywhere, normally 0.
                 ...$receivedParts,
+                // The part of `total_paid` paid before the import, inside the
+                // parts above; 0 on a loan that was not imported.
+                'paid_before_import' => $paidBeforeImport['total'] / 100,
                 'opening_balance' => $openingBalance,
                 'outstanding_principal' => round($outstandingPrincipal, 2),
                 'outstanding_interest' => round($outstandingInterest, 2),
@@ -480,9 +495,13 @@ class ReportService
             $lowered = $principal + $interest + $penalty;
 
             return [
-                'type' => match ($row['kind']) {
-                    'release' => 'release',
-                    'penalty_charge', 'extension_charge' => 'charge',
+                // What an imported loan was paid before the import is money
+                // paid, with no receipt: its own type, so the screen shows its
+                // parts, which add up to its credit.
+                'type' => match (true) {
+                    $row['kind'] === 'release' => 'release',
+                    in_array($row['kind'], ['penalty_charge', 'extension_charge'], true) => 'charge',
+                    $row['description'] === LoanLedgerService::PAID_BEFORE_IMPORT => 'paid_before_import',
                     default => 'adjustment',
                 },
                 'kind' => $row['kind'],
@@ -561,25 +580,30 @@ class ReportService
 
     /**
      * The money received, by what it went to, added up from the statement's
-     * posted payment lines in whole centavos.
+     * posted payment lines in whole centavos. On an imported loan, what its
+     * file says was paid before the import (PaidBeforeImport) is added to the
+     * principal, interest and penalty paid, so they still add up to Total Paid.
      *
      * @param  list<array<string, mixed>>  $lines
+     * @param  array{principal: int, interest: int, penalty: int, total: int}  $paidBeforeImport
      * @return array{principal_paid: float, interest_paid: float, penalty_paid: float, insurance_paid: float, build_up_paid: float, overpayment_paid: float}
      */
-    private function statementPaidParts(array $lines): array
+    private function statementPaidParts(array $lines, array $paidBeforeImport): array
     {
         $payments = array_filter($lines, fn (array $line): bool => $line['type'] === 'payment' && ! $line['voided']);
         $parts = [];
 
         foreach ([
-            'principal_paid' => 'principal_applied',
-            'interest_paid' => 'interest_applied',
-            'penalty_paid' => 'penalty_applied',
-            'insurance_paid' => 'insurance_applied',
-            'build_up_paid' => 'build_up_applied',
-            'overpayment_paid' => 'overpayment_applied',
-        ] as $part => $column) {
-            $parts[$part] = self::sumOfFigures(array_column($payments, $column));
+            'principal_paid' => ['principal_applied', 'principal'],
+            'interest_paid' => ['interest_applied', 'interest'],
+            'penalty_paid' => ['penalty_applied', 'penalty'],
+            'insurance_paid' => ['insurance_applied', null],
+            'build_up_paid' => ['build_up_applied', null],
+            'overpayment_paid' => ['overpayment_applied', null],
+        ] as $part => [$column, $beforeImport]) {
+            $centavos = LoanService::toCentavos(self::sumOfFigures(array_column($payments, $column)))
+                + ($beforeImport === null ? 0 : $paidBeforeImport[$beforeImport]);
+            $parts[$part] = $centavos / 100;
         }
 
         return $parts;
@@ -820,6 +844,16 @@ class ReportService
                 $repayments = $repayments->where('payment_date', '<=', Carbon::parse($filters['date_to']));
             }
 
+            // What an imported loan's file says was paid before the import
+            // (PaidBeforeImport) counts on the day the loan's Ledger dates it,
+            // the release, so a range after the import leaves it out.
+            $releasedOn = $loan->released_at?->toDateString();
+            $paidBeforeImport = $releasedOn !== null
+                && (empty($filters['date_from']) || $releasedOn >= Carbon::parse($filters['date_from'])->toDateString())
+                && (empty($filters['date_to']) || $releasedOn <= Carbon::parse($filters['date_to'])->toDateString())
+                ? PaidBeforeImport::forLoan($loan, $loan->amortizationSchedules, $loan->repayments)['total']
+                : 0;
+
             // Loan::owedCentavos(), the rule GET /loans/{id}/summary and
             // LoanResource state, so the figures agree to the centavo.
             $owed = $loan->owedCentavos($loan->amortizationSchedules);
@@ -834,7 +868,10 @@ class ReportService
                 // "Past Due" for a released or ongoing loan past grace, from
                 // the periods loaded above; loans.status is unchanged.
                 'display_status' => $loan->displayStatus(),
-                'total_paid' => round($repayments->sum(fn ($r) => (float) $r->amount_paid), 2),
+                // Total Paid: the receipts in the range, plus what was paid
+                // before the import when the range holds the release.
+                'total_paid' => ($repayments->sum(fn ($r) => LoanService::toCentavos((float) $r->amount_paid)) + $paidBeforeImport) / 100,
+                'paid_before_import' => $paidBeforeImport / 100,
                 // Deprecated alias, kept one release: unpaid principal plus
                 // the premium owed, never interest or penalty.
                 'outstanding_balance' => $loan->outstanding_balance,
@@ -849,6 +886,7 @@ class ReportService
         $loansTotals = self::columnTotals($loanSummaries, [
             'principal_amount' => 'money',
             'total_paid' => 'money',
+            'paid_before_import' => 'money',
             'payments_count' => 'count',
             'outstanding_balance' => 'money',
             'total_outstanding' => 'money',
@@ -874,6 +912,8 @@ class ReportService
                 // reads.
                 'total_principal' => round($totalPortfolio, 2),
                 'total_paid' => $loansTotals['total_paid'],
+                // The part of `total_paid` paid before the loans were imported.
+                'paid_before_import' => $loansTotals['paid_before_import'],
                 // Everything the loans still owe: the rows' total_outstanding.
                 'total_outstanding' => $loansTotals['total_outstanding'],
             ],

@@ -1247,7 +1247,12 @@ class RepaymentService
             ->sortBy('due_date')
             ->first();
 
-        $totalRepaid = $loan->repayments()->where('status', 'posted')->sum('amount_paid');
+        // Every posted receipt, plus, on a loan the CSV importer brought in,
+        // what its file says was paid before the import (PaidBeforeImport),
+        // which no receipt here records. So Total Paid agrees with Principal
+        // Paid and Interest Paid, which read the periods.
+        $paidBeforeImport = PaidBeforeImport::forLoan($loan, $schedules)['total'];
+        $totalRepaid = LoanService::toCentavos((float) $loan->repayments()->where('status', 'posted')->sum('amount_paid')) + $paidBeforeImport;
 
         return [
             'loan_id' => $loan->id,
@@ -1256,7 +1261,10 @@ class RepaymentService
             'principal_amount' => (float) $loan->principal_amount,
             'total_due' => round($totalDue, 2),
             'total_paid' => round($totalPaid, 2),
-            'total_repaid' => round($totalRepaid, 2),
+            'total_repaid' => $totalRepaid / 100,
+            // The part of `total_repaid` paid before the import; 0 on a loan
+            // that was not imported.
+            'paid_before_import' => $paidBeforeImport / 100,
             // Paid breakdown — frontend renders each as its own row
             'principal_paid' => round((float) $totalPrincipalPaid, 2),
             'interest_paid' => round((float) $totalInterestPaid, 2),

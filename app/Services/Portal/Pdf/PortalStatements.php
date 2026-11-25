@@ -75,6 +75,11 @@ final class PortalStatements
                     ['Outstanding', Pesos::printed($summary['outstanding_balance'])],
                     ['Past due', Pesos::printed($summary['overdue_amount'])],
                     ['Total paid', Pesos::printed($summary['total_paid'])],
+                    // Inside Total paid, on a loan brought in from the
+                    // cooperative's earlier books: the Ledger line's words.
+                    ...(Pesos::centavos($summary['paid_before_import']) > 0
+                        ? [['Paid before the loan was imported', Pesos::printed($summary['paid_before_import'])]]
+                        : []),
                 ]),
                 $this->table('Transactions', ['Date', 'Particulars', 'Receipt', 'Debit', 'Credit'], [3, 4], $rows, [
                     'Total', null, null,

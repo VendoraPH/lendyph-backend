@@ -372,6 +372,8 @@ class RowNormalizerTest extends TestCase
                 'field' => 'purpose',
                 'code' => 'truncated',
                 'message' => "This Purpose is {$length} characters, longer than the 500 a loan's purpose can hold, so only its first 500 were kept.",
+                // What the report says on a row that is not imported.
+                'message_if_not_imported' => "This Purpose is {$length} characters, longer than the 500 a loan's purpose can hold, so only its first 500 would be kept.",
             ]], $row->warningsToArray(), "{$length} characters");
         }
 

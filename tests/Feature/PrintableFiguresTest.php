@@ -147,6 +147,8 @@ class PrintableFiguresTest extends TestCase
         $this->assertEquals([
             'principal_amount' => 90000.55,
             'total_paid' => 600.10,
+            // Neither loan was imported, so nothing was paid before an import.
+            'paid_before_import' => 0,
             'payments_count' => 2,
             'outstanding_balance' => round($rows[0]['outstanding_balance'] + $rows[1]['outstanding_balance'], 2),
             'total_outstanding' => round($rows[0]['total_outstanding'] + $rows[1]['total_outstanding'], 2),

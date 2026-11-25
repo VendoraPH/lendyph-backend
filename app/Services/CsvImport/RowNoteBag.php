@@ -17,9 +17,13 @@ final class RowNoteBag
     /** @var list<RowNote> */
     private array $errors = [];
 
-    public function warn(string $field, string $code, string $message): void
+    /**
+     * `$ifNotImported` is the same note for a row that is never imported
+     * (RowNote::$ifNotImported); left null when `$message` reads true either way.
+     */
+    public function warn(string $field, string $code, string $message, ?string $ifNotImported = null): void
     {
-        $this->warnings[] = new RowNote($field, $code, $message);
+        $this->warnings[] = new RowNote($field, $code, $message, $ifNotImported);
     }
 
     public function fail(string $field, string $code, string $message): void
