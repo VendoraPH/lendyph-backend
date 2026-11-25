@@ -96,6 +96,25 @@ class ClosingPayoutReferenceTest extends TestCase
         $this->assertSame('BDO-77', SavingsTransaction::query()->where('type', 'closing')->sole()->external_reference);
     }
 
+    public function test_a_rejected_close_frees_the_reference_it_held(): void
+    {
+        $this->fund($this->savings, 1_000_000, '2026-11-11');
+        $this->actingAs($this->teller());
+        $approval = $this->close(['payout_method' => 'bank_transfer', 'payout_reference' => 'BDO-88'])->assertStatus(202)->json('data.approval');
+        $deposit = ['amount' => '100.00', 'date' => '2026-11-11', 'payment_method' => 'bank_transfer', 'reference' => 'BDO-88'];
+
+        $this->money("/api/savings/accounts/{$this->other()->id}/deposits", $deposit)
+            ->assertUnprocessable()
+            ->assertJsonPath('errors.reference.0', 'Reference "BDO-88" is held by a bank transfer payout waiting for approval. Check the reference, or decide that payout first.');
+
+        $this->actingAs($this->checker());
+        $this->postJson("/api/savings/approvals/{$approval['id']}/reject", ['reason' => 'Wrong account'])->assertOk();
+
+        $this->actingAs($this->admin);
+        $this->money("/api/savings/accounts/{$this->other()->id}/deposits", $deposit)->assertCreated()->assertJsonPath('data.external_reference', 'BDO-88');
+        $this->assertSame('active', $this->savings->refresh()->status);
+    }
+
     public function test_a_reference_on_record_is_refused_both_ways(): void
     {
         $this->money("/api/savings/accounts/{$this->other()->id}/deposits", ['amount' => '100.00', 'date' => '2026-11-11', 'payment_method' => 'gcash', 'reference' => 'GC-1'])->assertCreated();
