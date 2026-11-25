@@ -12,7 +12,8 @@ use Illuminate\Http\Resources\Json\JsonResource;
  * A public application link, as the frontend's ApplicationLink. `url` is
  * built by the server from LOAN_ORIGINATION_PUBLIC_URL, or null while that
  * isn't usable. Per-link logos are later (v2), so `display_logo_url` is
- * always null.
+ * always null. `can_change_test` is false once the link has applications
+ * (OriginationLink::canChangeTest()).
  *
  * @mixin OriginationLink
  */
@@ -35,6 +36,8 @@ class OriginationLinkResource extends JsonResource
             'status' => $status,
             'status_label' => OriginationLink::STATUS_LABELS[$status],
             'is_test' => $link->is_test,
+            // False once the link has applications: its Test setting stays.
+            'can_change_test' => $link->canChangeTest(),
             'branch_id' => $link->branch_id,
             'branch_name' => $link->branch?->name,
             'loan_product_ids' => $products->map(fn (LoanProduct $p) => $p->id)->values()->all(),

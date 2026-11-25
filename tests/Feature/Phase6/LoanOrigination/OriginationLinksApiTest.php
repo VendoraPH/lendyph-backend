@@ -3,6 +3,7 @@
 use App\Models\AuditLog;
 use App\Models\Branch;
 use App\Models\LoanProduct;
+use App\Models\OriginationApplication;
 use App\Models\OriginationLink;
 use App\Models\Role;
 use App\Models\User;
@@ -145,6 +146,57 @@ it('updates a link\'s products, switch and expiry, and never its token or counte
     $this->actingAs($admin)->getJson("/api/loan-origination/links/{$link->id}")
         ->assertJsonPath('data.status', 'expired')
         ->assertJsonPath('data.status_label', 'Expired');
+});
+
+/*
+ * Finish run round 5: once a link has applications, its Test setting stays.
+ * Each application keeps the kind of link it was made on (its own `is_test`),
+ * which the dashboard and Track go by. The link's other settings still change.
+ */
+it('keeps a link\'s Test setting once it has applications, and takes its other edits', function (bool $isTest) {
+    $admin = User::query()->where('username', 'super_admin')->firstOrFail();
+    $link = OriginationLink::query()->create(['name' => 'Fair', 'token' => str_repeat('e', 32), 'branch_id' => $this->main->id, 'is_test' => $isTest]);
+    OriginationApplication::query()->create(['link_id' => $link->id, 'is_test' => $isTest, 'mobile_hash' => OriginationApplication::mobileHash('09171234567')]);
+
+    $this->actingAs($admin)->getJson("/api/loan-origination/links/{$link->id}")->assertOk()->assertJsonPath('data.can_change_test', false);
+    $this->actingAs($admin)->getJson('/api/loan-origination/links')->assertOk()
+        ->assertJsonPath('data.0.id', $link->id)
+        ->assertJsonPath('data.0.can_change_test', false);
+
+    $this->actingAs($admin)->patchJson("/api/loan-origination/links/{$link->id}", ['is_test' => ! $isTest, 'name' => 'Renamed'])
+        ->assertUnprocessable()
+        ->assertJsonPath('errors.is_test', ['This link already has applications, so it can\'t be changed to or from a test link. Make a new link instead.']);
+
+    expect($link->fresh())->is_test->toBe($isTest)->name->toBe('Fair');
+
+    // The form sends the whole link back: its own Test setting saves with the rest.
+    $this->actingAs($admin)->patchJson("/api/loan-origination/links/{$link->id}", ['is_test' => $isTest, 'name' => 'Renamed', 'active' => false])
+        ->assertOk()
+        ->assertJsonPath('data.name', 'Renamed')
+        ->assertJsonPath('data.active', false)
+        ->assertJsonPath('data.is_test', $isTest)
+        ->assertJsonPath('data.can_change_test', false);
+})->with(['a real link' => false, 'a test link' => true]);
+
+it('lets a link change its Test setting while it has no applications of its own', function () {
+    $admin = User::query()->where('username', 'super_admin')->firstOrFail();
+    $created = $this->actingAs($admin)->postJson('/api/loan-origination/links', loLinkInput(['branch_id' => $this->main->id]))
+        ->assertCreated()
+        ->assertJsonPath('data.can_change_test', true);
+    $other = OriginationLink::query()->create(['name' => 'Other', 'token' => str_repeat('f', 32), 'branch_id' => $this->main->id]);
+    OriginationApplication::query()->create(['link_id' => $other->id, 'mobile_hash' => OriginationApplication::mobileHash('09171234567')]);
+    $id = $created->json('data.id');
+
+    $this->actingAs($admin)->patchJson("/api/loan-origination/links/{$id}", ['is_test' => true])
+        ->assertOk()
+        ->assertJsonPath('data.is_test', true)
+        ->assertJsonPath('data.can_change_test', true);
+
+    $this->actingAs($admin)->getJson('/api/loan-origination/links')->assertOk()
+        ->assertJsonPath('data.0.id', $other->id)
+        ->assertJsonPath('data.0.can_change_test', false)
+        ->assertJsonPath('data.1.id', $id)
+        ->assertJsonPath('data.1.can_change_test', true);
 });
 
 it('refuses a link with a past expiry, an unknown product or a bad contact, in words', function () {
