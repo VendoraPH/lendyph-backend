@@ -236,6 +236,42 @@ class CsvImportUploadApiTest extends TestCase
         $this->assertSame(0, CsvImportRun::count());
     }
 
+    /**
+     * The date order the Check step settled for each date column travels with
+     * the run, which reads those columns with it (finish run round 4). A column
+     * that needed no order is sent as null.
+     */
+    public function test_a_run_carries_the_date_orders_the_check_step_settled(): void
+    {
+        $orders = [
+            'customers' => ['birthdate' => 'dmy', 'date_hired' => null],
+            'loans' => ['date_released' => 'dmy', 'maturity_date' => 'mdy'],
+        ];
+
+        $runId = $this->postJson('/api/imports', $this->openRunPayload('a', 'b', ['date_orders' => $orders]))
+            ->assertCreated()
+            ->json('run.id');
+
+        // assertEquals: a JSON column keeps the keys, not their order.
+        $this->assertEquals($orders, CsvImportRun::findOrFail($runId)->date_orders);
+    }
+
+    public function test_a_date_order_is_day_first_or_month_first_on_a_date_column_of_its_own_file(): void
+    {
+        foreach ([
+            ['customers' => ['birthdate' => 'ymd']],
+            ['customers' => ['last_name' => 'dmy']],
+            ['loans' => ['birthdate' => 'dmy']],
+            ['share_capital' => ['transaction_date' => 'dmy']],
+            ['loans' => 'dmy'],
+        ] as $orders) {
+            $this->postJson('/api/imports', $this->openRunPayload('a', 'b', ['date_orders' => $orders]))
+                ->assertStatus(422);
+        }
+
+        $this->assertSame(0, CsvImportRun::count());
+    }
+
     public function test_a_file_larger_than_the_import_limit_is_refused_before_any_bytes_are_sent(): void
     {
         $service = app(CsvImportUploadService::class);

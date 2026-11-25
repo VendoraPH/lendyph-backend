@@ -349,6 +349,8 @@ class CsvImportUploadService
             $run = CsvImportRun::create([
                 'branch_id' => $data['branch_id'],
                 'as_of_date' => $data['as_of_date'] ?? now()->toDateString(),
+                // Read when each file is staged (CsvImportRun::dateOrdersFor()).
+                'date_orders' => $data['date_orders'] ?? null,
                 'phase' => 'uploading',
                 'initiated_by' => $actorId,
                 'initiated_ip' => $actorIp,

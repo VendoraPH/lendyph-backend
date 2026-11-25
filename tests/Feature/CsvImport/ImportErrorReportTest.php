@@ -200,7 +200,9 @@ class ImportErrorReportTest extends TestCase
             'File,"Row Number","Account No.","Loan No.",Severity,Category,Field,Message,"Original Value"',
             $csv,
         );
-        $this->assertStringContainsString('binhs-loans-2026.csv,4813,A-77,2019-0007,error,date_invalid,"Maturity Date"', $csv);
+        // The category in the screen's words, never its code.
+        $this->assertStringContainsString('binhs-loans-2026.csv,4813,A-77,2019-0007,error,"Not a date","Maturity Date"', $csv);
+        $this->assertStringNotContainsString('date_invalid', $csv);
         $this->assertStringNotContainsString(',4812,', $csv);
     }
 
@@ -372,7 +374,9 @@ class ImportErrorReportTest extends TestCase
         // What the operator downloads: the rows that made it, then an honest
         // final line — never a stack trace in a spreadsheet.
         $this->assertStringContainsString('L-1', $body);
-        $this->assertStringContainsString('export_failed', $body);
+        // Its category in words, as every other line's (IssueCategoryWords).
+        $this->assertStringContainsString('Report stopped early', $body);
+        $this->assertStringNotContainsString('export_failed', $body);
         $this->assertStringContainsString('This report stopped early and is incomplete.', $body);
         $this->assertStringNotContainsString('Dela Cruz', $body, "The failing query was appended to the operator's CSV.");
         $this->assertStringNotContainsString('Lock wait timeout', $body);

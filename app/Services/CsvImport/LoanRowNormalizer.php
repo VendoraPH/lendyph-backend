@@ -89,7 +89,12 @@ class LoanRowNormalizer
 
     public function __construct(private readonly ValueNormalizer $values = new ValueNormalizer) {}
 
-    public function normalize(CsvRow $row): NormalizedRow
+    /**
+     * @param  array<string, string>  $dateOrders  The date order the Check step
+     *                                             settled per date column, `dmy` or `mdy`
+     *                                             (CsvImportRun::dateOrdersFor()).
+     */
+    public function normalize(CsvRow $row, array $dateOrders = []): NormalizedRow
     {
         $notes = new RowNoteBag;
         $cells = $this->cellsByKey($row, $notes);
@@ -111,8 +116,8 @@ class LoanRowNormalizer
             'term_in_months' => $this->values->integer($cells['term_in_months'], 'term_in_months', $notes, min: 1, max: self::MAX_TERM_MONTHS, required: true),
             'payment_frequency' => $this->values->enum($cells['payment_frequency'], self::frequencyMap(), 'payment_frequency', $notes, required: true, label: 'payment frequency', words: self::FREQUENCY_WORDS),
             'interest_type' => $this->values->enum($cells['interest_type'], self::INTEREST_TYPE_MAP, 'interest_type', $notes, required: true, label: 'interest type', words: self::INTEREST_TYPE_WORDS),
-            'date_released' => $this->values->date($cells['date_released'], 'date_released', $notes, required: true),
-            'maturity_date' => $this->values->date($cells['maturity_date'], 'maturity_date', $notes, required: true),
+            'date_released' => $this->values->date($cells['date_released'], 'date_released', $notes, required: true, order: $dateOrders['date_released'] ?? null),
+            'maturity_date' => $this->values->date($cells['maturity_date'], 'maturity_date', $notes, required: true, order: $dateOrders['maturity_date'] ?? null),
             // Fees are deductions taken at release. They do not enter the
             // schedule arithmetic at all — LoanService keeps them in
             // `deductions`/`total_deductions`/`net_proceeds` — so they are

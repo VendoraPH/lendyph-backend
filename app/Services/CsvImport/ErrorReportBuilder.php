@@ -394,7 +394,7 @@ class ErrorReportBuilder
                 'last_row_id' => $lastRowId,
             ]);
 
-            yield ['', '', '', '', self::SEVERITY_ERROR, 'export_failed', '', 'This report stopped early and is incomplete. Please download it again.', ''];
+            yield ['', '', '', '', self::SEVERITY_ERROR, IssueCategoryWords::for('export_failed'), '', 'This report stopped early and is incomplete. Please download it again.', ''];
         }
     }
 
@@ -422,7 +422,8 @@ class ErrorReportBuilder
                     $issue['account_no'],
                     $issue['loan_no'],
                     $issue['severity'],
-                    $issue['category'],
+                    // Words, as the screen shows them; the code is for grouping.
+                    IssueCategoryWords::for($issue['category']),
                     $issue['field_label'],
                     /**
                      * Message before Original Value, and BOTH reach

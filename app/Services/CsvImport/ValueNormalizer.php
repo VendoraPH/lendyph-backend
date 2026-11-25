@@ -51,6 +51,12 @@ class ValueNormalizer
     private const DAY_FIRST_COUNTERPARTS = ['m/d/Y' => 'd/m/Y', 'n/j/Y' => 'j/n/Y'];
 
     /**
+     * A day and month then a four-digit year, split by "/", "-" or ".", as the
+     * Check step reads one (lendyph-frontend, import-date.ts).
+     */
+    private const DAY_MONTH_YEAR = '#^(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})$#';
+
+    /**
      * Range of Excel serial dates we will convert: roughly 1954 to 2064.
      *
      * Bounded on purpose. Outside this window an all-digit cell is far more
@@ -275,8 +281,15 @@ class ValueNormalizer
      * 2021-02-14, a date that appears nowhere in the file and that no operator
      * would ever spot in a success report. Re-formatting the result and
      * comparing it to the input is the only thing that catches it.
+     *
+     * `$order` is the date order the admin settled for the column on the Check
+     * step: `dmy` (day-first) or `mdy` (month-first). It decides a day/month/
+     * year cell outright, with no "reads two ways" warning, since a person has
+     * already decided it. Without one (the column needed none, or the run
+     * started before orders were kept), a slash date reads month-first as it
+     * always has.
      */
-    public function date(?string $raw, string $field, RowNoteBag $notes, bool $required = false): ?string
+    public function date(?string $raw, string $field, RowNoteBag $notes, bool $required = false, ?string $order = null): ?string
     {
         $value = $this->text($raw);
 
@@ -284,6 +297,20 @@ class ValueNormalizer
             if ($required) {
                 $notes->fail($field, 'date_required', 'This date is required and the cell is blank.');
             }
+
+            return null;
+        }
+
+        if (($order === 'dmy' || $order === 'mdy') && preg_match(self::DAY_MONTH_YEAR, $value, $parts) === 1) {
+            [$day, $month] = $order === 'dmy' ? [(int) $parts[1], (int) $parts[2]] : [(int) $parts[2], (int) $parts[1]];
+            $year = (int) $parts[3];
+
+            if (checkdate($month, $day, $year)) {
+                return sprintf('%04d-%02d-%02d', $year, $month, $day);
+            }
+
+            $reading = $order === 'dmy' ? 'day-first' : 'month-first';
+            $notes->fail($field, 'date_invalid', "\"{$value}\" is not a real date read {$reading}, the order chosen for this column.");
 
             return null;
         }

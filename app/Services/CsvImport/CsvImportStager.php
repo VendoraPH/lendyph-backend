@@ -111,6 +111,8 @@ class CsvImportStager
 
         $result = $this->reader->readFromDisk(CsvImportReader::PII_DISK, $file->assembled_path, $shape);
         $mayImportMembership = $shape === CsvImportSchema::CUSTOMERS && ($file->run?->starterMayEditMembers() ?? false);
+        // The date order the admin settled on the Check step, per date column.
+        $dateOrders = $file->run?->dateOrdersFor($file->kind) ?? [];
         // A fresh one per file: it remembers the file's own earlier rows.
         $shareCapital = new ShareCapitalRowNormalizer;
 
@@ -124,9 +126,9 @@ class CsvImportStager
 
         foreach ($result->rows() as $row) {
             $normalized = match ($shape) {
-                CsvImportSchema::LOANS => $this->loans->normalize($row),
+                CsvImportSchema::LOANS => $this->loans->normalize($row, $dateOrders),
                 CsvImportSchema::SHARE_CAPITAL => $shareCapital->normalize($row),
-                default => $this->customers->normalize($row, $mayImportMembership),
+                default => $this->customers->normalize($row, $mayImportMembership, $dateOrders),
             };
 
             if ($shape === CsvImportSchema::LOANS) {
