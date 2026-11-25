@@ -12,6 +12,9 @@ use App\Services\Reminders\Drivers\ReminderDriver;
  * permits, as the portal's OTP is. Today every driver reaches nobody (`log`,
  * `fake`), so no code is ever sent and no link takes an application outside
  * the staging test-code mode.
+ *
+ * A staff account's mobile number counts only for that mode, whose codes are
+ * shown on screen and never sent (TestCodes); it never widens who is texted.
  */
 class ApplicantSms
 {
