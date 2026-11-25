@@ -28,6 +28,11 @@ use Illuminate\Validation\ValidationException;
  * built) block nothing. Nor do they clear a hold: a newer print under another
  * version, or one with no terms, isn't compared, so the print before it still
  * is.
+ *
+ * The loan page also gets when each document was last printed, any print
+ * ({@see forLoanPage()}): the Release dialog reminds the cashier to print it
+ * again after release when an insurance premium or a co-maker is added there,
+ * which never holds the release (finish run round 4).
  */
 final class LoanDocumentPrints
 {
@@ -60,40 +65,44 @@ final class LoanDocumentPrints
     }
 
     /**
+     * What GET /loans/{id} shows of the prints, both lists from one read of
+     * the loan's prints (printsOf()), in the order of LoanDocumentPrint::LABELS:
+     *
+     * - `printed`: the latest print of each document, whatever its terms
+     *   version and whether it carries terms, since it only says when the paper
+     *   was printed (finish run round 4: the Release dialog reminds the cashier
+     *   to print it again after a change made there);
+     * - `outdated`: as outdated().
+     *
+     * Both are empty, with nothing read, unless the loan is approved.
+     *
+     * @return array{printed: list<array{document: string, label: string, printed_at: Carbon}>, outdated: list<array{document: string, label: string, printed_at: Carbon}>}
+     */
+    public function forLoanPage(Loan $loan): array
+    {
+        if ($loan->status !== 'approved') {
+            return ['printed' => [], 'outdated' => []];
+        }
+
+        $prints = $this->printsOf($loan);
+
+        return [
+            'printed' => self::listed($prints->unique('document')->keyBy('document')),
+            'outdated' => $this->outdatedAmong($loan, $prints),
+        ];
+    }
+
+    /**
      * The printed documents whose terms changed since they were printed, in
      * the order of LoanDocumentPrint::LABELS. Empty unless the loan is
      * approved. The terms are worked out only for an approved loan with a
-     * print to compare (comparablePrints()), and only for that print's
-     * document.
+     * print to compare (comparable()), and only for that print's document.
      *
      * @return list<array{document: string, label: string, printed_at: Carbon}>
      */
     public function outdated(Loan $loan): array
     {
-        if ($loan->status !== 'approved') {
-            return [];
-        }
-
-        $comparable = $this->comparablePrints($loan);
-        $outdated = [];
-
-        foreach (LoanDocumentPrint::LABELS as $document => $label) {
-            $print = $comparable->get($document);
-
-            if ($print === null) {
-                continue;
-            }
-
-            $now = $this->terms->fingerprint($loan, $document);
-
-            if ($now === null || hash_equals($print->terms_fingerprint, $now)) {
-                continue;
-            }
-
-            $outdated[] = ['document' => $document, 'label' => $label, 'printed_at' => $print->printed_at];
-        }
-
-        return $outdated;
+        return $this->forLoanPage($loan)['outdated'];
     }
 
     /**
@@ -141,23 +150,74 @@ final class LoanDocumentPrints
     }
 
     /**
-     * The print each document is compared with, keyed by document: its latest
-     * print under the current VERSION that carries a fingerprint. One query for
-     * the loan, on the (loan, document, id) index, newest first; the first row
-     * of each document is kept. A loan has a handful of prints, so reading them
-     * all costs nothing.
+     * The printed documents among `$prints` (printsOf()) whose terms changed
+     * since their comparable print, as outdated() describes.
      *
-     * @return Collection<string, LoanDocumentPrint>
+     * @param  Collection<int, LoanDocumentPrint>  $prints
+     * @return list<array{document: string, label: string, printed_at: Carbon}>
      */
-    private function comparablePrints(Loan $loan): Collection
+    private function outdatedAmong(Loan $loan, Collection $prints): array
+    {
+        $changed = self::comparable($prints)->filter(function (LoanDocumentPrint $print) use ($loan): bool {
+            $now = $this->terms->fingerprint($loan, $print->document);
+
+            return $now !== null && ! hash_equals($print->terms_fingerprint, $now);
+        });
+
+        return self::listed($changed);
+    }
+
+    /**
+     * Every print of the loan, newest first: one query on the (loan, document,
+     * id) index, shared by both lists of forLoanPage(). A loan has a handful of
+     * prints, so reading them all costs nothing.
+     *
+     * @return Collection<int, LoanDocumentPrint>
+     */
+    private function printsOf(Loan $loan): Collection
     {
         return LoanDocumentPrint::query()
             ->where('loan_id', $loan->getKey())
-            ->where('terms_version', LoanDocumentTerms::VERSION)
-            ->whereNotNull('terms_fingerprint')
             ->orderByDesc('id')
-            ->get()
+            ->get();
+    }
+
+    /**
+     * The print each document is compared with, keyed by document: its latest
+     * print under the current VERSION that carries a fingerprint. `$prints`
+     * are newest first, so the first of each document is kept.
+     *
+     * @param  Collection<int, LoanDocumentPrint>  $prints
+     * @return Collection<string, LoanDocumentPrint>
+     */
+    private static function comparable(Collection $prints): Collection
+    {
+        return $prints
+            ->filter(fn (LoanDocumentPrint $print): bool => $print->terms_version === LoanDocumentTerms::VERSION
+                && $print->terms_fingerprint !== null)
             ->unique('document')
             ->keyBy('document');
+    }
+
+    /**
+     * One print per document, keyed by document, as the items GET /loans/{id}
+     * sends, in the order of LoanDocumentPrint::LABELS.
+     *
+     * @param  Collection<string, LoanDocumentPrint>  $byDocument
+     * @return list<array{document: string, label: string, printed_at: Carbon}>
+     */
+    private static function listed(Collection $byDocument): array
+    {
+        $items = [];
+
+        foreach (LoanDocumentPrint::LABELS as $document => $label) {
+            $print = $byDocument->get($document);
+
+            if ($print !== null) {
+                $items[] = ['document' => $document, 'label' => $label, 'printed_at' => $print->printed_at];
+            }
+        }
+
+        return $items;
     }
 }

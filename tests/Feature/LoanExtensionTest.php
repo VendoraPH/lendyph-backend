@@ -466,6 +466,9 @@ class LoanExtensionTest extends TestCase
             array_keys($showResponse->json('data')),
             array_keys($extendResponse->json('data')),
         );
+        // The show's prints come too: an extended loan is released, so both lists are empty.
+        $this->assertSame([], $extendResponse->json('data.printed_documents'));
+        $this->assertSame([], $extendResponse->json('data.printed_documents_outdated'));
     }
 
     public function test_it_writes_audit_log_via_auditable_trait_for_loan_update(): void
