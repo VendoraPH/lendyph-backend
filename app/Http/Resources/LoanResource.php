@@ -119,6 +119,11 @@ use OpenApi\Attributes as OA;
         new OA\Property(property: 'source_loan_id', type: 'integer', nullable: true, description: 'The loan this one was restructured out of'),
         new OA\Property(property: 'is_restructure', type: 'boolean', description: 'True when source_loan_id is set'),
         new OA\Property(property: 'can_send_back_approved', type: 'boolean', description: 'True only for an approved restructure (not released yet) and a caller holding loans:release: the loan page may offer PATCH /api/loans/{id}/send-back-approved.'),
+        new OA\Property(property: 'printed_documents_outdated', type: 'array', description: 'GET /loans/{id} only (and POST /loans/{id}/extend, which answers in its shape); absent elsewhere (lists never work it out). While the loan is approved, each printed disclosure statement or promissory note whose terms (amounts, rates, term and frequency, penalty terms, dates, deductions and charges, net proceeds and schedule) changed since its latest print, in that order. The release is refused (422 on `documents`) until it is printed again. Empty when nothing is out of date, when the loan is not approved, and for a document never printed or printed before the terms were recorded.', items: new OA\Items(properties: [
+            new OA\Property(property: 'document', type: 'string', enum: ['disclosure', 'promissory_note']),
+            new OA\Property(property: 'label', type: 'string', example: 'Disclosure Statement', description: '"Disclosure Statement" or "Promissory Note"'),
+            new OA\Property(property: 'printed_at', type: 'string', format: 'date-time', description: 'When that latest print was made'),
+        ], type: 'object')),
         new OA\Property(property: 'restructured_at', type: 'string', format: 'date-time', nullable: true, description: 'When this loan was closed because its balance moved to a restructure'),
         new OA\Property(property: 'restructured_balance', type: 'number', nullable: true, description: 'What was still owed on this loan when the restructure closed it'),
         new OA\Property(property: 'write_off_amount', type: 'number', nullable: true, description: 'On a source loan: the forgiveness approved, the approved balance (principal, interest and penalty) minus the new loan\'s principal, when the restructure took on less than the full balance. Not what the books wrote off: that is the new loan\'s `restructure_written_off_principal`.'),
@@ -166,6 +171,27 @@ class LoanResource extends JsonResource
      * @var array{principal: int, interest: int, penalty: int}|null
      */
     private ?array $summaryPeriods = null;
+
+    /**
+     * The printed documents out of date, set by withPrintedDocumentsOutdated():
+     * on GET /loans/{id} (and the extend answer, in its shape) only. Null
+     * leaves the key out.
+     *
+     * @var list<array{document: string, label: string, printed_at: mixed}>|null
+     */
+    private ?array $printedDocumentsOutdated = null;
+
+    /**
+     * GET /loans/{id}'s `printed_documents_outdated`: LoanDocumentPrints::outdated().
+     *
+     * @param  list<array{document: string, label: string, printed_at: mixed}>  $items
+     */
+    public function withPrintedDocumentsOutdated(array $items): static
+    {
+        $this->printedDocumentsOutdated = $items;
+
+        return $this;
+    }
 
     /**
      * The rows of GET /loans?view=summary: what a list shows, with no schedule.
@@ -430,6 +456,13 @@ class LoanResource extends JsonResource
             'can_send_back_approved' => $this->isRestructure()
                 && $this->status === 'approved'
                 && (bool) $request->user()?->can('loans:release'),
+            // The signed papers whose terms changed since they were printed
+            // (LoanDocumentPrints), on the single loan only: left out where
+            // the controller didn't work it out, so a list never pays for it.
+            'printed_documents_outdated' => $this->when(
+                $this->printedDocumentsOutdated !== null,
+                fn () => $this->printedDocumentsOutdated,
+            ),
             'restructured_at' => $this->restructured_at,
             'restructured_balance' => $this->restructured_balance !== null
                 ? (float) $this->restructured_balance

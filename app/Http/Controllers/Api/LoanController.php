@@ -39,6 +39,7 @@ use App\Services\CreditScoring\PolicyFlags;
 use App\Services\LikePattern;
 use App\Services\LoanAdjustmentService;
 use App\Services\LoanApprovalChainService;
+use App\Services\LoanDocumentPrints;
 use App\Services\LoanListTotals;
 use App\Services\LoanReleaseFeeService;
 use App\Services\LoanService;
@@ -636,7 +637,7 @@ DESC,
     #[OA\Get(
         path: '/api/loans/{id}',
         summary: 'Show loan',
-        description: '`current_approver` names the approval step a `for_review` loan is waiting on: the first `pending` step of `current_steps` in `GET /api/loans/{id}/approval-steps`. Null when the loan is not `for_review`, no step is pending, or the step name is blank. Never an empty string. Same value as the loan\'s row on `GET /api/loans`.',
+        description: '`current_approver` names the approval step a `for_review` loan is waiting on: the first `pending` step of `current_steps` in `GET /api/loans/{id}/approval-steps`. Null when the loan is not `for_review`, no step is pending, or the step name is blank. Never an empty string. Same value as the loan\'s row on `GET /api/loans`. `printed_documents_outdated` (here only, never on lists): while the loan is approved, each printed disclosure statement or promissory note whose terms changed since its latest print, with when it was printed; the release is refused until it is printed again. Empty otherwise.',
         tags: ['Loans'],
         security: [['sanctum' => []]],
         parameters: [
@@ -647,7 +648,7 @@ DESC,
             new OA\Response(response: 404, description: 'Not found'),
         ],
     )]
-    public function show(Loan $loan): LoanResource
+    public function show(Loan $loan, LoanDocumentPrints $prints): LoanResource
     {
         $this->authorize('loans:view');
 
@@ -666,7 +667,9 @@ DESC,
             'collaterals',
         );
 
-        return new LoanResource($loan);
+        // On the single loan only (and extend, which answers in this shape),
+        // never on a list: it builds the printed documents again.
+        return (new LoanResource($loan))->withPrintedDocumentsOutdated($prints->outdated($loan));
     }
 
     #[OA\Put(
@@ -898,7 +901,7 @@ DESC,
             new OA\Response(response: 200, description: 'Loan released'),
             new OA\Response(response: 403, description: 'Missing loans:release, or the release step was forwarded to someone else who still holds it (admin and super_admin may release it anyway)'),
             new OA\Response(response: 409, description: 'The fee configuration changed since the preview this release quoted, or another change to this loan was saved at the same time; nothing was written. Reload and try again'),
-            new OA\Response(response: 422, description: 'Invalid status transition, fees exceeding principal, a sent premium that is not the server\'s, a partial amount above the premium, insurance above the net proceeds, share capital withheld for a borrower who is not a member, an unknown `method` or a missing `reference_number`, or a restructure whose source was paid down after approval below its principal (on `principal_amount`)'),
+            new OA\Response(response: 422, description: 'Invalid status transition, fees exceeding principal, a sent premium that is not the server\'s, a partial amount above the premium, insurance above the net proceeds, share capital withheld for a borrower who is not a member, an unknown `method` or a missing `reference_number`, a restructure whose source was paid down after approval below its principal (on `principal_amount`), or (on `documents`, one sentence naming each document and the day it was printed, Manila time) a printed disclosure statement or promissory note whose terms changed since it was printed: "The loan\'s terms changed after the disclosure statement was printed on November 25, 2026. Print it again and have the member sign the new copy before releasing." Nothing is written.'),
         ],
     )]
     public function release(ReleaseLoanRequest $request, Loan $loan, LoanApprovalChainService $chain, BranchWriteGuard $branches): JsonResponse
@@ -1254,7 +1257,7 @@ DESC,
             new OA\Response(response: 422, description: 'Loan does not have a one-month term (term 1 in months, paid monthly or at maturity; `errors.term`), is not in released/ongoing status (`errors.status`), or has no open period, more than one open period, or no principal left to carry ("Nothing is left to extend: the principal is already paid") (`errors.loan`); also when the collection could not be applied as quoted, with nothing charged (`errors.loan`)'),
         ],
     )]
-    public function extend(ExtendLoanRequest $request, Loan $loan): JsonResponse
+    public function extend(ExtendLoanRequest $request, Loan $loan, LoanDocumentPrints $prints): JsonResponse
     {
         $this->loanAdjustmentService->extendLoan(
             $loan,
@@ -1276,9 +1279,11 @@ DESC,
             'collaterals',
         );
 
+        // The show's `printed_documents_outdated` too, for the same shape: an
+        // extended loan is released, so it is always empty and reads nothing.
         return response()->json([
             'message' => 'Loan extended.',
-            'data' => new LoanResource($loan),
+            'data' => (new LoanResource($loan))->withPrintedDocumentsOutdated($prints->outdated($loan)),
         ]);
     }
 
