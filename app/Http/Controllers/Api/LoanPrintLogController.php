@@ -59,7 +59,7 @@ class LoanPrintLogController extends Controller
                 required: ['document'],
                 properties: [
                     new OA\Property(property: 'document', type: 'string', enum: ['disclosure', 'promissory_note']),
-                    new OA\Property(property: 'terms_fingerprint', type: 'string', nullable: true, pattern: '^[0-9a-f]{64}$', description: 'Optional, with `terms_version`: the `terms_fingerprint` of the document payload that was printed (64 lowercase hexadecimal characters, or null when that payload had none).'),
+                    new OA\Property(property: 'terms_fingerprint', type: 'string', pattern: '^[0-9a-f]{64}$', description: 'Optional, with `terms_version`: the `terms_fingerprint` of the document payload that was printed, 64 lowercase hexadecimal characters. Never null: a print whose payload had none sends neither field.'),
                     new OA\Property(property: 'terms_version', type: 'integer', minimum: 1, maximum: 65535, description: 'Optional, with `terms_fingerprint`: the `terms_version` of the document payload that was printed.'),
                 ],
             ),
@@ -74,7 +74,7 @@ class LoanPrintLogController extends Controller
             ),
             new OA\Response(response: 403, description: 'Missing loans:view'),
             new OA\Response(response: 404, description: 'Loan not found, or in a branch the caller cannot see'),
-            new OA\Response(response: 422, description: 'Unknown document, a loan status the document is not available for, or (in words, nothing recorded) a `terms_fingerprint` that isn\'t 64 lowercase hexadecimal characters or null, a `terms_version` that isn\'t a whole number from 1 to 65535, or one of the two sent without the other'),
+            new OA\Response(response: 422, description: 'Unknown document, a loan status the document is not available for, or (in words, nothing recorded) a `terms_fingerprint` that isn\'t 64 lowercase hexadecimal characters (null included), a `terms_version` that isn\'t a whole number from 1 to 65535, or one of the two sent without the other'),
         ],
     )]
     public function __invoke(Request $request, Loan $loan, LoanDocumentPrints $prints): JsonResponse
@@ -84,8 +84,9 @@ class LoanPrintLogController extends Controller
         $validated = $request->validate([
             'document' => ['required', 'string', Rule::in(array_keys(self::DOCUMENTS))],
             // The terms the printed payload carried, stored as they are; both
-            // or neither (an older tab sends neither).
-            'terms_fingerprint' => ['present_with:terms_version', 'nullable', 'string', 'regex:/^[0-9a-f]{64}$/'],
+            // or neither (an older tab sends neither). Never null: a print with
+            // no terms would be no print to compare (LoanDocumentPrints).
+            'terms_fingerprint' => ['present_with:terms_version', 'string', 'regex:/^[0-9a-f]{64}$/'],
             'terms_version' => ['present_with:terms_fingerprint', 'integer', 'between:1,65535'],
         ], [
             'terms_fingerprint.present_with' => self::NOT_TOGETHER,

@@ -152,10 +152,13 @@ final class LoanDocumentTerms
             'grace_period_days' => self::whole($terms['grace_period_days']),
             'start_date' => self::date($terms['start_date']),
             'maturity_date' => self::date($terms['maturity_date']),
-            // The stored items, then the catalog fees the release will charge.
+            // The stored items, then the catalog fees the release will charge:
+            // each by what the statement prints, its name and amount. Never its
+            // calculation type (fixed, percentage, formula), which isn't
+            // printed; a change of class shows in the finance and non-finance
+            // totals.
             'deductions' => array_values(array_map(fn (array $item): array => [
                 'name' => self::word($item['name'] ?? null),
-                'type' => self::word($item['type'] ?? null),
                 'amount' => self::money($item['amount'] ?? null),
             ], array_filter($disclosure['deductions']['items'], is_array(...)))),
             'total_deductions' => self::money($totals['total_deductions']),

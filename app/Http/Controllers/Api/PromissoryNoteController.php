@@ -19,7 +19,7 @@ class PromissoryNoteController extends Controller
     #[OA\Get(
         path: '/api/loans/{loan}/promissory-note',
         summary: 'Generate promissory note',
-        description: 'Returns borrower promise-to-pay data, co-maker details, loan terms, and signature fields. `borrower.address` and each `co_makers[].address` are null for a caller without `borrowers:view` or who cannot see the member\'s branch. `terms_fingerprint` and `terms_version` are the terms this note states (a versioned fingerprint of its amounts, rate, term and frequency, dates, instalments and penalty clause; never names, codes or addresses), worked out from this very payload by the rule the release check uses: send both with POST /api/loans/{loan}/print-log when it is printed. `terms_fingerprint` is null when the terms can\'t be worked out.',
+        description: 'Returns borrower promise-to-pay data, co-maker details, loan terms, and signature fields. `borrower.address` and each `co_makers[].address` are null for a caller without `borrowers:view` or who cannot see the member\'s branch. `terms_fingerprint` and `terms_version` are the terms this note states (a versioned fingerprint of its amounts, rate, term and frequency, dates, instalments and penalty clause; never names, codes or addresses), worked out from this very payload by the rule the release check uses: send both with POST /api/loans/{loan}/print-log when it is printed. Always set while the note is served.',
         tags: ['Loan Documents'],
         security: [['sanctum' => []]],
         parameters: [
@@ -31,7 +31,7 @@ class PromissoryNoteController extends Controller
                 description: 'Promissory note data',
                 content: new OA\JsonContent(properties: [
                     new OA\Property(property: 'data', type: 'object', properties: [
-                        new OA\Property(property: 'terms_fingerprint', type: 'string', nullable: true, pattern: '^[0-9a-f]{64}$', description: 'The terms this note states, for POST /api/loans/{loan}/print-log'),
+                        new OA\Property(property: 'terms_fingerprint', type: 'string', pattern: '^[0-9a-f]{64}$', description: 'The terms this note states, for POST /api/loans/{loan}/print-log'),
                         new OA\Property(property: 'terms_version', type: 'integer', example: 1, description: 'The version of the terms rule `terms_fingerprint` was worked out by'),
                     ]),
                 ]),

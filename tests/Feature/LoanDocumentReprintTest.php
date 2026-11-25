@@ -40,6 +40,9 @@ class LoanDocumentReprintTest extends TestCase
     {
         parent::setUp();
         $this->seedAndLogin();
+        // Releases post their journals, so "a refused release writes nothing"
+        // covers the books too.
+        $this->seedChartOfAccounts();
         $this->travelTo(Carbon::parse('2026-11-25 10:04:00'));
     }
 
@@ -149,6 +152,7 @@ class LoanDocumentReprintTest extends TestCase
         $this->assertOutdated($new, []);
         $this->patchJson("/api/loans/{$new->id}/release")->assertOk();
         $this->assertSame('restructured', $source->fresh()->status);
+        $this->assertNotNull($this->journalFor($new, 'loan_release'));
     }
 
     public function test_a_restructure_whose_figures_were_taken_again_at_the_same_principal_needs_no_reprint(): void
@@ -190,6 +194,12 @@ class LoanDocumentReprintTest extends TestCase
         $this->printed($loan, 'disclosure');
         $this->assertOutdated($loan, []);
         $this->patchJson("/api/loans/{$loan->id}/release")->assertOk();
+
+        // The release posts its journal, so the refusals' "nothing written"
+        // checks in this file cover the books.
+        $journal = $this->journalFor($loan, 'loan_release');
+        $this->assertNotNull($journal);
+        $this->assertGreaterThan(0, $this->assertBalances($journal));
     }
 
     public function test_a_document_never_printed_blocks_nothing(): void
@@ -344,19 +354,86 @@ class LoanDocumentReprintTest extends TestCase
     public function test_sent_terms_are_stored_as_they_are(): void
     {
         $loan = $this->approvedLoan();
+        $current = app(LoanDocumentTerms::class)->fingerprint($loan, 'disclosure');
 
-        // A document that couldn't be built has no terms; a print from another
-        // version of the terms is kept as that version. Neither blocks.
-        $this->postJson("/api/loans/{$loan->id}/print-log", ['document' => 'disclosure', 'terms_fingerprint' => null, 'terms_version' => LoanDocumentTerms::VERSION])
+        // The payload's own terms, and a print from another version of the
+        // terms, each kept exactly as sent. Neither blocks.
+        $this->postJson("/api/loans/{$loan->id}/print-log", ['document' => 'disclosure', 'terms_fingerprint' => $current, 'terms_version' => LoanDocumentTerms::VERSION])
             ->assertCreated();
         $this->postJson("/api/loans/{$loan->id}/print-log", ['document' => 'promissory_note', 'terms_fingerprint' => str_repeat('d', 64), 'terms_version' => LoanDocumentTerms::VERSION + 1])
             ->assertCreated();
 
-        $this->assertNull($this->latestPrint($loan, 'disclosure')->terms_fingerprint);
+        $this->assertSame($current, $this->latestPrint($loan, 'disclosure')->terms_fingerprint);
         $this->assertSame(LoanDocumentTerms::VERSION, $this->latestPrint($loan, 'disclosure')->terms_version);
         $this->assertSame(str_repeat('d', 64), $this->latestPrint($loan, 'promissory_note')->terms_fingerprint);
         $this->assertSame(LoanDocumentTerms::VERSION + 1, $this->latestPrint($loan, 'promissory_note')->terms_version);
         $this->assertOutdated($loan, []);
+    }
+
+    public function test_an_explicit_null_reference_is_refused_in_words_and_the_hold_stays(): void
+    {
+        $loan = $this->approvedLoan();
+        $this->printed($loan, 'disclosure');
+        Fee::create(['name' => 'Documentary Stamp Tax', 'type' => 'fixed', 'value' => 150, 'applicable_product_ids' => [$loan->loan_product_id]]);
+        $audits = AuditLog::count();
+
+        $this->postJson("/api/loans/{$loan->id}/print-log", ['document' => 'disclosure', 'terms_fingerprint' => null, 'terms_version' => LoanDocumentTerms::VERSION])
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors(['terms_fingerprint' => "The printed document's terms reference isn't valid. Open the document again and print it."]);
+
+        $this->assertSame($audits, AuditLog::count());
+        $this->assertSame(1, LoanDocumentPrint::count());
+        $this->assertOutdated($loan, [
+            ['document' => 'disclosure', 'label' => 'Disclosure Statement', 'printed_at' => '2026-11-25T02:04:00.000000Z'],
+        ]);
+        $this->patchJson("/api/loans/{$loan->id}/release")->assertUnprocessable()->assertJsonValidationErrors('documents');
+    }
+
+    public function test_a_later_print_under_another_version_or_with_no_terms_never_clears_a_hold(): void
+    {
+        $loan = $this->approvedLoan();
+        $this->printed($loan, 'disclosure');
+        $held = [['document' => 'disclosure', 'label' => 'Disclosure Statement', 'printed_at' => '2026-11-25T02:04:00.000000Z']];
+        Fee::create(['name' => 'Documentary Stamp Tax', 'type' => 'fixed', 'value' => 150, 'applicable_product_ids' => [$loan->loan_product_id]]);
+        $this->assertOutdated($loan, $held);
+
+        // A later print under another version of the terms, even one carrying
+        // today's fingerprint, isn't compared, so it leaves the hold in place.
+        $this->travelTo(Carbon::parse('2026-11-26 09:00:00'));
+        $this->postJson("/api/loans/{$loan->id}/print-log", [
+            'document' => 'disclosure',
+            'terms_fingerprint' => app(LoanDocumentTerms::class)->fingerprint($loan, 'disclosure'),
+            'terms_version' => LoanDocumentTerms::VERSION + 1,
+        ])->assertCreated();
+        $this->assertOutdated($loan, $held);
+
+        // Nor does one made while the statement couldn't be built (no terms).
+        $oversized = Fee::create(['name' => 'Oversized Fee', 'type' => 'fixed', 'value' => 999999, 'applicable_product_ids' => [$loan->loan_product_id]]);
+        $this->printed($loan, 'disclosure');
+        $this->assertNull($this->latestPrint($loan, 'disclosure')->terms_fingerprint);
+        $oversized->delete();
+        $this->assertOutdated($loan, $held);
+
+        $this->patchJson("/api/loans/{$loan->id}/release")
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors(['documents' => "The loan's terms changed after the disclosure statement was printed on November 25, 2026. Print it again and have the member sign the new copy before releasing."]);
+    }
+
+    public function test_a_catalog_fee_switched_from_percentage_to_fixed_at_the_same_amount_does_not_hold_the_release(): void
+    {
+        // ₱60,000.00 principal: 2% is ₱1,200.00, the same amount as the fixed fee.
+        $loan = $this->approvedLoan();
+        $fee = Fee::create(['name' => 'Release Fee', 'type' => 'percentage', 'value' => 2, 'applicable_product_ids' => [$loan->loan_product_id]]);
+        $this->printed($loan, 'disclosure');
+
+        $fee->update(['type' => 'fixed', 'value' => 1200]);
+
+        $this->assertOutdated($loan, []);
+        $this->patchJson("/api/loans/{$loan->id}/release")->assertOk();
+        $this->assertContains(['name' => 'Release Fee', 'amount' => 1200], array_map(
+            fn (array $item): array => ['name' => $item['name'], 'amount' => (int) round((float) $item['amount'])],
+            $loan->fresh()->deductions,
+        ));
     }
 
     /**
@@ -380,6 +457,7 @@ class LoanDocumentReprintTest extends TestCase
             'a version out of range' => [['terms_fingerprint' => $hex, 'terms_version' => 70000], 'terms_version', $version],
             'a reference with no version' => [['terms_fingerprint' => $hex], 'terms_version', $together],
             'a version with no reference' => [['terms_version' => 1], 'terms_fingerprint', $together],
+            'a null reference' => [['terms_fingerprint' => null, 'terms_version' => 1], 'terms_fingerprint', $reference],
         ];
     }
 

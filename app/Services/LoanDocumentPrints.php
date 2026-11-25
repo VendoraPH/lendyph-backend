@@ -19,13 +19,15 @@ use Illuminate\Validation\ValidationException;
  *
  * - the loan is `approved` (documents print from Approved on, and once the
  *   loan is released the release has settled its terms);
- * - the latest print of that document carries the current
- *   {@see LoanDocumentTerms::VERSION} and a fingerprint;
- * - the fingerprint of the terms now isn't null and differs from it.
+ * - it has a print to compare: the latest print of that document that carries
+ *   the current {@see LoanDocumentTerms::VERSION} and a fingerprint;
+ * - the fingerprint of the terms now isn't null and differs from that print's.
  *
- * So a document never printed, a print from before this change (no row), a
- * print under another version and one whose document couldn't be built block
- * nothing.
+ * So a document never printed, a print from before this change (no row), and
+ * prints only under another version or with no terms (the document couldn't be
+ * built) block nothing. Nor do they clear a hold: a newer print under another
+ * version, or one with no terms, isn't compared, so the print before it still
+ * is.
  */
 final class LoanDocumentPrints
 {
@@ -43,7 +45,7 @@ final class LoanDocumentPrints
      * /promissory-note), stored as they are; or, when a print sends none (a tab
      * opened before the payload carried them), the terms it states now.
      *
-     * @param  array{fingerprint: string|null, version: int}|null  $printedTerms
+     * @param  array{fingerprint: string, version: int}|null  $printedTerms
      */
     public function record(Loan $loan, string $document, User $printedBy, ?array $printedTerms = null): LoanDocumentPrint
     {
@@ -61,7 +63,8 @@ final class LoanDocumentPrints
      * The printed documents whose terms changed since they were printed, in
      * the order of LoanDocumentPrint::LABELS. Empty unless the loan is
      * approved. The terms are worked out only for an approved loan with a
-     * print to compare, and only for that print's document.
+     * print to compare (comparablePrints()), and only for that print's
+     * document.
      *
      * @return list<array{document: string, label: string, printed_at: Carbon}>
      */
@@ -71,13 +74,13 @@ final class LoanDocumentPrints
             return [];
         }
 
-        $latest = $this->latestPrints($loan);
+        $comparable = $this->comparablePrints($loan);
         $outdated = [];
 
         foreach (LoanDocumentPrint::LABELS as $document => $label) {
-            $print = $latest->get($document);
+            $print = $comparable->get($document);
 
-            if ($print === null || $print->terms_version !== LoanDocumentTerms::VERSION || $print->terms_fingerprint === null) {
+            if ($print === null) {
                 continue;
             }
 
@@ -138,19 +141,23 @@ final class LoanDocumentPrints
     }
 
     /**
-     * The latest print of each document for `$loan`, keyed by document: one
-     * query on the (loan, document, id) index.
+     * The print each document is compared with, keyed by document: its latest
+     * print under the current VERSION that carries a fingerprint. One query for
+     * the loan, on the (loan, document, id) index, newest first; the first row
+     * of each document is kept. A loan has a handful of prints, so reading them
+     * all costs nothing.
      *
      * @return Collection<string, LoanDocumentPrint>
      */
-    private function latestPrints(Loan $loan): Collection
+    private function comparablePrints(Loan $loan): Collection
     {
         return LoanDocumentPrint::query()
-            ->whereIn('id', LoanDocumentPrint::query()
-                ->selectRaw('MAX(id)')
-                ->where('loan_id', $loan->getKey())
-                ->groupBy('document'))
+            ->where('loan_id', $loan->getKey())
+            ->where('terms_version', LoanDocumentTerms::VERSION)
+            ->whereNotNull('terms_fingerprint')
+            ->orderByDesc('id')
             ->get()
+            ->unique('document')
             ->keyBy('document');
     }
 }
