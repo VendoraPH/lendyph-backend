@@ -686,19 +686,34 @@ class CsvImportProcessorTest extends TestCase
      * and never created a second time with its balance. A different loan whose
      * number shares those 20 characters is refused, never created.
      */
+    /**
+     * A loan as an import stored it before round 4: its Loan No. cut to the
+     * first 20 characters, and its import row's note saying so, as redaction
+     * leaves it (the note's field and code, and the row's loan).
+     */
+    private function storeLoanCutShort(LoanProduct $product, string $fullLoanNo): Loan
+    {
+        $earlier = $this->makeRun(['product_mapping' => ['Salary Loan' => $product->id]]);
+        $this->makeFile($earlier, 'customers', [$this->customerRow('A-001')]);
+        $loans = $this->makeFile($earlier, 'loans', [$this->loanRow('A-001', mb_substr($fullLoanNo, 0, 20))]);
+        $this->runToIdle($earlier);
+
+        $row = CsvImportRow::where('csv_import_file_id', $loans->id)->firstOrFail();
+        DB::table('csv_import_rows')->where('id', $row->id)->update(['normalized' => json_encode([
+            'shape' => CsvImportSchema::LOANS,
+            'row' => $row->record_number,
+            'warnings' => [['field' => 'loan_no', 'code' => 'truncated']],
+        ])]);
+
+        return Loan::findOrFail($row->loan_id);
+    }
+
     public function test_a_loan_stored_under_its_cut_number_is_already_imported_when_named_in_full(): void
     {
         $this->seedForImport();
 
         $product = $this->salaryLoanProduct();
-
-        // The earlier import, as it stored the loan: its first 20 characters.
-        $earlier = $this->makeRun(['product_mapping' => ['Salary Loan' => $product->id]]);
-        $this->makeFile($earlier, 'customers', [$this->customerRow('A-001')]);
-        $this->makeFile($earlier, 'loans', [$this->loanRow('A-001', 'LN-2023-000000000001')]);
-        $this->runToIdle($earlier);
-
-        $stored = Loan::where('external_loan_no', 'LN-2023-000000000001')->firstOrFail();
+        $stored = $this->storeLoanCutShort($product, 'LN-2023-000000000001-A');
 
         // The same export again, the loan named in full, beside a different
         // loan whose number shares the same first 20 characters.
@@ -723,6 +738,65 @@ class CsvImportProcessorTest extends TestCase
         $this->assertSame('loan_no_shortened_earlier', $rows[1]->result_category);
         $this->assertSame(
             "An earlier import filed loan {$stored->application_number} under LN-2023-000000000001, this Loan No.'s first 20 characters, and its member, date released or loan amount differ from this row's. The row wasn't imported, so the two aren't mixed up: check it against {$stored->application_number}.",
+            $rows[1]->result_message,
+        );
+    }
+
+    /**
+     * Only a number that was cut is looked for by its first 20 characters. A
+     * genuine 20-character Loan No., with no cut noted on its import row,
+     * doesn't stand in for a longer number that starts with it.
+     */
+    public function test_a_genuine_20_character_loan_no_does_not_block_a_longer_one_that_starts_with_it(): void
+    {
+        $this->seedForImport();
+
+        $product = $this->salaryLoanProduct();
+        $first = $this->makeRun(['product_mapping' => ['Salary Loan' => $product->id]]);
+        $this->makeFile($first, 'customers', [$this->customerRow('A-001')]);
+        $this->makeFile($first, 'loans', [$this->loanRow('A-001', 'LN-2023-000000000001')]);
+        $this->runToIdle($first);
+
+        $then = $this->makeRun(['product_mapping' => ['Salary Loan' => $product->id]]);
+        $this->makeFile($then, 'customers', [$this->customerRow('A-001')]);
+        $loans = $this->makeFile($then, 'loans', [$this->loanRow('A-001', 'LN-2023-000000000001-A')]);
+        $this->runToIdle($then);
+
+        $this->assertSame('imported', CsvImportRow::where('csv_import_file_id', $loans->id)->firstOrFail()->result);
+        $this->assertSame(
+            ['LN-2023-000000000001', 'LN-2023-000000000001-A'],
+            Loan::whereNotNull('external_loan_no')->orderBy('id')->pluck('external_loan_no')->all(),
+        );
+    }
+
+    /**
+     * A stored loan is claimed once per run. Two rows with different full
+     * numbers, both matching one loan stored under their first 20 characters,
+     * can't both be that loan: the second is refused, never silently skipped.
+     */
+    public function test_a_loan_stored_cut_short_is_claimed_once_per_run(): void
+    {
+        $this->seedForImport();
+
+        $product = $this->salaryLoanProduct();
+        $stored = $this->storeLoanCutShort($product, 'LN-2023-000000000001-A');
+
+        $again = $this->makeRun(['product_mapping' => ['Salary Loan' => $product->id]]);
+        $this->makeFile($again, 'customers', [$this->customerRow('A-001')]);
+        $loans = $this->makeFile($again, 'loans', [
+            $this->loanRow('A-001', 'LN-2023-000000000001-A'),
+            $this->loanRow('A-001', 'LN-2023-000000000001-B'),
+        ]);
+        $this->runToIdle($again);
+
+        $this->assertSame([$stored->id], Loan::whereNotNull('external_loan_no')->pluck('id')->all());
+
+        $rows = CsvImportRow::where('csv_import_file_id', $loans->id)->orderBy('id')->get();
+        $this->assertSame(['already_imported', 'failed'], $rows->pluck('result')->all());
+        $this->assertSame('loan_no_shortened_earlier', $rows[1]->result_category);
+        $this->assertNull($rows[1]->loan_id);
+        $this->assertSame(
+            "Loan LN-2023-000000000001-B matches loan {$stored->application_number}, which an earlier import filed under LN-2023-000000000001, but line {$rows[0]->line_number} of this file already matched that loan. The row wasn't imported, so one loan isn't matched twice: check which of the two rows is that loan.",
             $rows[1]->result_message,
         );
     }
