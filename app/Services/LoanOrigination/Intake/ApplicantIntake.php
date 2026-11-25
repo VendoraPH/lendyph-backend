@@ -36,7 +36,9 @@ use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
  * - open(): after a verified code. `apply` returns the mobile's open draft or
  *   starts one (one open draft per mobile, by the unique `open_mobile_hash`);
  *   `resume` finds the open draft on this link; `track` finds a submitted
- *   application by its reference and the mobile together.
+ *   application by its reference and the mobile together, made on a link of
+ *   the same kind (its own `is_test`, copied from its link when it started),
+ *   so a staging test code never opens a real application, nor the reverse.
  * - saveDraft(): the whitelist, the link's products and branches, completion
  *   worked out on the server; an incomplete draft comes back to draft.
  * - upload() / removeDocument(): while the draft is open; while tracking,
@@ -86,6 +88,7 @@ final class ApplicantIntake
                 ->where('reference_number', $reference)
                 ->where('mobile_hash', $hash)
                 ->whereNotIn('status', OriginationApplication::UNSUBMITTED_STATUSES)
+                ->where('is_test', $link->is_test)
                 ->first() ?? throw new NotFoundHttpException(self::NO_APPLICATION);
         }
 

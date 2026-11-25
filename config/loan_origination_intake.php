@@ -11,11 +11,12 @@
 | no link takes an application.
 |
 | `LOAN_ORIGINATION_OTP_TEST_CODES` (off by default) is the staging test-code
-| mode: a code asked for on a link marked as a test by a staff number (one
-| listed in REMINDERS_ALLOW_LIST, or the mobile number on an active staff
-| account) is shown on screen as "Test mode: not sent" instead of being sent;
-| any other number, and any number on a real link, gets nothing. The app
-| refuses to boot in production with it on (LoanOriginationServiceProvider).
+| mode: a code asked for on an open link marked as a test by a staff number
+| (one listed in REMINDERS_ALLOW_LIST, or the mobile number on an active
+| staff account that works on loan origination) is shown on screen as "Test
+| mode: not sent" instead of being sent; any other number, and any number on
+| a real or closed link, gets nothing. The app refuses to boot in production
+| with it on (LoanOriginationServiceProvider).
 |
 | `LOAN_ORIGINATION_OTP_DAILY_CAP` is the most codes that reach someone the
 | deployment hands out in a Manila day, against SMS pumping, and
