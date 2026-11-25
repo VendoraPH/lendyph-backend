@@ -68,6 +68,21 @@ final class PaidBeforeImport
      */
     public static function totalsByLoan(array $loanIds): array
     {
+        return array_filter(
+            array_map(fn (array $parts): int => $parts['total'], self::partsByLoan($loanIds)),
+            fn (int $total): bool => $total !== 0,
+        );
+    }
+
+    /**
+     * forLoan() for each imported loan among `$loanIds`, part by part, in two
+     * grouped queries. Every imported loan has a key.
+     *
+     * @param  list<int>  $loanIds
+     * @return array<int, array{principal: int, interest: int, penalty: int, total: int}> centavos by loan id
+     */
+    public static function partsByLoan(array $loanIds): array
+    {
         $imported = $loanIds === [] ? [] : Loan::query()
             ->whereIn('id', $loanIds)
             ->where(fn (Builder $q) => $q->whereNotNull('external_loan_no')->orWhereNotNull('imported_arrears_baseline'))
@@ -81,21 +96,19 @@ final class PaidBeforeImport
 
         $paid = self::sumsByLoan(DB::table('amortization_schedules')->whereIn('loan_id', $imported), '_paid');
         $applied = self::appliedByLoan($imported);
-        $totals = [];
+        $byLoan = [];
 
         foreach ($imported as $loanId) {
-            $total = 0;
+            $parts = [];
 
             foreach (self::PARTS as $part) {
-                $total += ($paid[$loanId][$part] ?? 0) - ($applied[$loanId][$part] ?? 0);
+                $parts[$part] = ($paid[$loanId][$part] ?? 0) - ($applied[$loanId][$part] ?? 0);
             }
 
-            if ($total !== 0) {
-                $totals[$loanId] = $total;
-            }
+            $byLoan[$loanId] = [...$parts, 'total' => array_sum($parts)];
         }
 
-        return $totals;
+        return $byLoan;
     }
 
     /**

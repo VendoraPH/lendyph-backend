@@ -18,10 +18,13 @@ use InvalidArgumentException;
 
 /**
  * The imported loans whose "paid before the import" figure (PaidBeforeImport)
- * should be checked before it is relied on: below zero, or not what the
- * loan's import row says was paid (the Loan Amount less the Loan Balance, plus
- * the Interest Amount less the Interest Balance), where that row still holds
- * the file's figures.
+ * should be checked before it is relied on, part by part:
+ *  - a part (principal, interest or penalty) below zero, even when the other
+ *    parts keep the total above it;
+ *  - any penalty part at all, since the importer writes paid penalty as 0;
+ *  - a total that is not what the loan's import row says was paid (the Loan
+ *    Amount less the Loan Balance, plus the Interest Amount less the Interest
+ *    Balance), where that row still holds the file's figures.
  *
  * The figure is read back from the schedule: what its periods were paid, less
  * what posted payments here applied. Before 2026-10-02, extensions,
@@ -35,9 +38,9 @@ use InvalidArgumentException;
  *
  * Every statement is a SELECT: nothing is written, floored or corrected, so it
  * is safe to run on production as it is. A row `imports:redact-rows` has
- * redacted no longer holds the file's figures: such a loan is listed only
- * when its figure is below zero, and the run says how many loans could not be
- * compared with the file.
+ * redacted no longer holds the file's figures: such a loan is listed only by
+ * its parts, and the run says how many loans could not be compared with the
+ * file.
  *
  * Loans are read in chunks by id, with each chunk's figures, members and
  * import rows fetched in a fixed number of queries.
@@ -50,6 +53,11 @@ class CheckPaidBeforeImport extends Command
 
     /** The import row's four figures, by the loans file's column keys. */
     private const FILE_FIGURES = ['loan_amount', 'loan_balance', 'interest_amount', 'interest_balance'];
+
+    /** The figure's parts, in words. */
+    private const PART_WORDS = ['principal' => 'Principal', 'interest' => 'Interest', 'penalty' => 'Penalty'];
+
+    private const NO_PARTS = ['principal' => 0, 'interest' => 0, 'penalty' => 0, 'total' => 0];
 
     public function handle(): int
     {
@@ -77,13 +85,13 @@ class CheckPaidBeforeImport extends Command
             ->with('borrower:id,borrower_code')
             ->select(['id', 'borrower_id', 'branch_id', 'loan_account_number', 'application_number', 'external_loan_no'])
             ->chunkById(self::CHUNK, function (EloquentCollection $loans) use (&$listed, &$read, &$notCompared): void {
-                $figures = PaidBeforeImport::totalsByLoan($loans->modelKeys());
+                $figures = PaidBeforeImport::partsByLoan($loans->modelKeys());
                 $inFile = $this->filePaidByLoan($loans->modelKeys());
 
                 foreach ($loans as $loan) {
                     $read++;
                     $notCompared += isset($inFile[$loan->id]) ? 0 : 1;
-                    $row = $this->row($loan, $figures[$loan->id] ?? 0, $inFile[$loan->id] ?? null);
+                    $row = $this->row($loan, $figures[$loan->id] ?? self::NO_PARTS, $inFile[$loan->id] ?? null);
 
                     if ($row !== null) {
                         $listed[] = $row;
@@ -97,20 +105,31 @@ class CheckPaidBeforeImport extends Command
     }
 
     /**
-     * The loan's line when its figure is below zero or not what its file
-     * says; null when it reads as the file (or, with no file, isn't negative).
+     * The loan's line, with every reason to check it in words; null when there
+     * is none.
      *
+     * @param  array{principal: int, interest: int, penalty: int, total: int}  $parts
      * @return list<string>|null
      */
-    private function row(Loan $loan, int $figure, ?int $inFile): ?array
+    private function row(Loan $loan, array $parts, ?int $inFile): ?array
     {
-        $why = match (true) {
-            $figure < 0 => 'Below zero',
-            $inFile !== null && $figure !== $inFile => 'Not what the file says',
-            default => null,
-        };
+        $reasons = [];
 
-        if ($why === null) {
+        foreach (self::PART_WORDS as $part => $words) {
+            if ($parts[$part] < 0) {
+                $reasons[] = "{$words} below zero: ".Money::format($parts[$part]);
+            }
+        }
+
+        if ($parts['penalty'] > 0) {
+            $reasons[] = 'Penalty not zero, though the import writes none: '.Money::format($parts['penalty']);
+        }
+
+        if ($inFile !== null && $parts['total'] !== $inFile) {
+            $reasons[] = 'Not what the file says';
+        }
+
+        if ($reasons === []) {
             return null;
         }
 
@@ -118,9 +137,9 @@ class CheckPaidBeforeImport extends Command
             (string) ($loan->loan_account_number ?? $loan->application_number),
             (string) ($loan->external_loan_no ?? '—'),
             (string) ($loan->borrower?->borrower_code ?? '—'),
-            Money::format($figure),
+            Money::format($parts['total']),
             $inFile === null ? 'Not kept' : Money::format($inFile),
-            $why,
+            implode('; ', $reasons),
         ];
     }
 
@@ -174,7 +193,7 @@ class CheckPaidBeforeImport extends Command
      */
     private function report(array $listed, int $read, int $notCompared): void
     {
-        $this->line('Imported loans whose paid-before-import figure is below zero or not what the import file says');
+        $this->line('Imported loans whose paid-before-import figure has a part below zero, a penalty part, or a total not what the import file says');
 
         if ($listed === []) {
             $this->line('  None.');

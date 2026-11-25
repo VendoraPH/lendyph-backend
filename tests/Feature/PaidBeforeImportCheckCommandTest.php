@@ -6,8 +6,11 @@ use App\Models\Branch;
 use App\Models\CsvImportRow;
 use App\Models\Loan;
 use App\Models\LoanProduct;
+use App\Models\Repayment;
+use App\Services\Accounting\Money;
 use App\Services\CsvImport\CsvImportProcessor;
 use App\Services\CsvImport\CsvImportRowRedactor;
+use App\Services\RepaymentService;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\DB;
@@ -70,7 +73,7 @@ class PaidBeforeImportCheckCommandTest extends TestCase
         $this->assertSame($before, $this->snapshot());
 
         $this->assertMatchesRegularExpression($this->row($loans['L-SHORT'], 'L-SHORT', '₱11,800\.00', '₱23,600\.00', 'Not what the file says'), $output);
-        $this->assertMatchesRegularExpression($this->row($loans['L-NEG'], 'L-NEG', '-₱1,000\.00', '₱23,600\.00', 'Below zero'), $output);
+        $this->assertMatchesRegularExpression($this->row($loans['L-NEG'], 'L-NEG', '-₱1,000\.00', '₱23,600\.00', 'Interest below zero: -₱1,000\.00; Not what the file says'), $output);
         $this->assertStringNotContainsString($loans['L-OK']->application_number, $output);
         $this->assertMatchesRegularExpression('/Imported loans read:\s+3/', $output);
         $this->assertMatchesRegularExpression('/Imported loans to check:\s+2 loans/', $output);
@@ -95,9 +98,51 @@ class PaidBeforeImportCheckCommandTest extends TestCase
 
         // Short of the file, but the file's figures are gone: nothing to compare.
         $this->assertStringNotContainsString($loans['L-SHORT']->application_number, $output);
-        $this->assertMatchesRegularExpression($this->row($loans['L-NEG'], 'L-NEG', '-₱500\.00', 'Not kept', 'Below zero'), $output);
+        $this->assertMatchesRegularExpression($this->row($loans['L-NEG'], 'L-NEG', '-₱500\.00', 'Not kept', 'Interest below zero: -₱500\.00'), $output);
         $this->assertMatchesRegularExpression('/Not compared with the file \(its import row is redacted or gone\):\s+2/', $output);
         $this->assertMatchesRegularExpression('/Imported loans to check:\s+1 loan\b/', $output);
+    }
+
+    public function test_a_part_below_zero_or_any_penalty_part_is_listed_though_the_total_is_positive_and_the_row_redacted(): void
+    {
+        $loans = $this->importLoans(['L-WAIVED', 'L-PENALTY', 'L-OK']);
+
+        // An old waiver erased paid penalty: a payment took the late penalty
+        // charged on period 6, then the periods' paid penalty went.
+        $waived = $loans['L-WAIVED'];
+        app(RepaymentService::class)->applyPenalties($waived->fresh(), now());
+        $this->postJson("/api/loans/{$waived->id}/repayments", [
+            'payment_date' => now()->toDateString(),
+            'amount_paid' => $this->getJson("/api/loans/{$waived->id}/summary")->json('data.payoff_amount'),
+            'method' => 'cash',
+        ])->assertCreated();
+        $penalty = (int) round((float) Repayment::query()->where('loan_id', $waived->id)->value('penalty_applied') * 100);
+        $this->assertGreaterThan(0, $penalty);
+        DB::table('amortization_schedules')->where('loan_id', $waived->id)->update(['penalty_paid' => 0]);
+
+        // Paid penalty no file holds: the importer writes none.
+        DB::table('amortization_schedules')->where('loan_id', $loans['L-PENALTY']->id)->where('period_number', 1)->update(['penalty_paid' => 50]);
+
+        app(CsvImportRowRedactor::class)->redact(CsvImportRow::query()->whereNotNull('loan_id'));
+
+        $output = $this->runCommand();
+
+        $this->assertMatchesRegularExpression($this->row(
+            $waived,
+            'L-WAIVED',
+            preg_quote(Money::format(2360000 - $penalty), '/'),
+            'Not kept',
+            'Penalty below zero: '.preg_quote(Money::format(-$penalty), '/'),
+        ), $output);
+        $this->assertMatchesRegularExpression($this->row(
+            $loans['L-PENALTY'],
+            'L-PENALTY',
+            '₱23,650\.00',
+            'Not kept',
+            'Penalty not zero, though the import writes none: ₱50\.00',
+        ), $output);
+        $this->assertStringNotContainsString($loans['L-OK']->application_number, $output);
+        $this->assertMatchesRegularExpression('/Imported loans to check:\s+2 loans/', $output);
     }
 
     public function test_the_branch_option_keeps_to_the_loans_booked_in_that_branch(): void
