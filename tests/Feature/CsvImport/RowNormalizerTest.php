@@ -219,6 +219,85 @@ class RowNormalizerTest extends TestCase
         $this->assertSame('diminishing', $this->loanRow(['interest_type' => 'Diminishing'])->value('interest_type'));
     }
 
+    public function test_the_filipino_words_for_a_members_gender_read_as_male_and_female(): void
+    {
+        foreach (['Lalaki', 'LALAKI', 'lalake', 'Lalake'] as $word) {
+            $row = $this->customerRow(['gender' => $word]);
+
+            $this->assertSame('male', $row->value('gender'), $word);
+            $this->assertSame([], $row->warningsToArray(), $word);
+        }
+
+        foreach (['Babae', 'BABAE', 'babae'] as $word) {
+            $row = $this->customerRow(['gender' => $word]);
+
+            $this->assertSame('female', $row->value('gender'), $word);
+            $this->assertSame([], $row->warningsToArray(), $word);
+        }
+    }
+
+    /**
+     * A Loan No. is the cooperative's own name for the loan, and the only thing
+     * that tells one imported loan from another (`loans.external_loan_no` is
+     * unique). Cut short, two numbers alike in their first 20 characters become
+     * one, and the second loan is taken for a re-run of the first.
+     */
+    public function test_a_loan_no_longer_than_20_characters_is_refused_and_never_cut_short(): void
+    {
+        $row = $this->loanRow(['loan_no' => 'LN-2023-ABCDEFGHIJKLM']);
+
+        $this->assertSame(21, mb_strlen('LN-2023-ABCDEFGHIJKLM'));
+        $this->assertFalse($row->isValid());
+        $this->assertNull($row->value('loan_no'));
+        $this->assertSame([[
+            'field' => 'loan_no',
+            'code' => 'loan_no_too_long',
+            'message' => 'This Loan No. is longer than the 20 characters a loan number can have. Shorten it in the file: a loan number is never cut short, since it tells one loan from another.',
+        ]], $row->errorsToArray());
+        $this->assertSame([], $row->warningsToArray());
+
+        $twenty = $this->loanRow(['loan_no' => 'LN-2023-ABCDEFGHIJKL']);
+
+        $this->assertTrue($twenty->isValid());
+        $this->assertSame('LN-2023-ABCDEFGHIJKL', $twenty->value('loan_no'));
+        $this->assertSame([], $twenty->warningsToArray());
+
+        $blank = $this->loanRow(['loan_no' => '  ']);
+
+        $this->assertSame(['required'], array_column($blank->errorsToArray(), 'code'));
+    }
+
+    /**
+     * `loans.purpose` is varchar(500). A longer Purpose is cut to fit with a
+     * warning, as it was at 1,000, where anything from 501 to 1,000 characters
+     * reached the database and was refused there.
+     */
+    public function test_a_purpose_longer_than_its_500_character_column_is_cut_to_fit_with_a_warning(): void
+    {
+        $fits = str_repeat('Rice trading capital. ', 30);
+        $fits = mb_substr($fits, 0, 500);
+
+        $kept = $this->loanRow(['purpose' => $fits]);
+        $this->assertTrue($kept->isValid());
+        $this->assertSame($fits, $kept->value('purpose'));
+        $this->assertSame([], $kept->warningsToArray());
+
+        foreach ([501, 1000] as $length) {
+            $purpose = mb_substr(str_repeat('Sari-sari store restocking. ', 40), 0, $length);
+            $row = $this->loanRow(['purpose' => $purpose]);
+
+            $this->assertTrue($row->isValid(), "{$length} characters");
+            $this->assertSame(mb_substr($purpose, 0, 500), $row->value('purpose'), "{$length} characters");
+            $this->assertSame([[
+                'field' => 'purpose',
+                'code' => 'truncated',
+                'message' => "This Purpose is {$length} characters, longer than the 500 a loan's purpose can hold, so only its first 500 were kept.",
+            ]], $row->warningsToArray(), "{$length} characters");
+        }
+
+        $this->assertNull($this->loanRow(['purpose' => ''])->value('purpose'));
+    }
+
     public function test_an_unmappable_nullable_enum_is_blanked_with_a_warning_but_an_unmappable_required_one_fails(): void
     {
         // "maried" is the typo the un-validated workbook produces. Nulling an

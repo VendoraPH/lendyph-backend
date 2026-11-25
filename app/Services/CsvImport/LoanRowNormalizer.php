@@ -41,6 +41,18 @@ class LoanRowNormalizer
      */
     private const MAX_TERM_MONTHS = 120;
 
+    /**
+     * The longest Loan No. this importer takes. A longer one is refused, never
+     * cut: see self::loanNo().
+     */
+    private const LOAN_NO_MAX = 20;
+
+    /**
+     * `loans.purpose` is varchar(500). A longer Purpose is cut to fit, with a
+     * warning: see self::purpose().
+     */
+    private const PURPOSE_MAX = 500;
+
     public function __construct(private readonly ValueNormalizer $values = new ValueNormalizer) {}
 
     public function normalize(CsvRow $row): NormalizedRow
@@ -54,13 +66,13 @@ class LoanRowNormalizer
 
         $values = [
             'account_no' => $this->requiredText($cells['account_no'], 'account_no', 50, $notes),
-            'loan_no' => $this->requiredText($cells['loan_no'], 'loan_no', 20, $notes),
+            'loan_no' => $this->loanNo($cells['loan_no'], $notes),
             'loan_amount' => $this->values->centavos($cells['loan_amount'], 'loan_amount', $notes, required: true),
             'loan_balance' => $this->values->centavos($cells['loan_balance'], 'loan_balance', $notes, required: true),
             'interest_rate' => $this->values->rate($cells['interest_rate'], 'interest_rate', $notes, required: true),
             'interest_amount' => $this->values->centavos($cells['interest_amount'], 'interest_amount', $notes, required: true),
             'interest_balance' => $this->values->centavos($cells['interest_balance'], 'interest_balance', $notes, required: true),
-            'purpose' => $this->values->boundedText($cells['purpose'], 'purpose', 1000, $notes),
+            'purpose' => $this->purpose($cells['purpose'], $notes),
             'loan_product' => $this->values->boundedText($cells['loan_product'], 'loan_product', 255, $notes),
             'term_in_months' => $this->values->integer($cells['term_in_months'], 'term_in_months', $notes, min: 1, max: self::MAX_TERM_MONTHS, required: true),
             'payment_frequency' => $this->values->enum($cells['payment_frequency'], self::frequencyMap(), 'payment_frequency', $notes, required: true, label: 'payment frequency'),
@@ -130,6 +142,51 @@ class LoanRowNormalizer
         }
 
         return $value;
+    }
+
+    /**
+     * The cooperative's own number for the loan, exactly as typed, or a refusal.
+     *
+     * An identifier is never altered. Cut short, two numbers alike in their
+     * first 20 characters became one, and the import pass took the second loan
+     * for a re-run of the first (`already_imported`), so it never landed.
+     */
+    private function loanNo(?string $raw, RowNoteBag $notes): ?string
+    {
+        $value = $this->values->text($raw);
+
+        if ($value === null) {
+            $notes->fail('loan_no', 'required', 'This field is required and the cell is blank.');
+
+            return null;
+        }
+
+        if (mb_strlen($value) > self::LOAN_NO_MAX) {
+            $notes->fail('loan_no', 'loan_no_too_long', 'This Loan No. is longer than the '.self::LOAN_NO_MAX.' characters a loan number can have. Shorten it in the file: a loan number is never cut short, since it tells one loan from another.');
+
+            return null;
+        }
+
+        return $value;
+    }
+
+    /**
+     * The Purpose, cut to the column with a warning when it is longer.
+     *
+     * A description, not an identifier, so the loan still imports. Without the
+     * cut, anything past the column reached the insert and failed the row there.
+     */
+    private function purpose(?string $raw, RowNoteBag $notes): ?string
+    {
+        $value = $this->values->text($raw);
+
+        if ($value === null || mb_strlen($value) <= self::PURPOSE_MAX) {
+            return $value;
+        }
+
+        $notes->warn('purpose', 'truncated', 'This Purpose is '.mb_strlen($value).' characters, longer than the '.self::PURPOSE_MAX.' a loan\'s purpose can hold, so only its first '.self::PURPOSE_MAX.' were kept.');
+
+        return mb_substr($value, 0, self::PURPOSE_MAX);
     }
 
     /**

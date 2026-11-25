@@ -649,6 +649,70 @@ class CsvImportProcessorTest extends TestCase
     }
 
     /**
+     * `loans.purpose` holds 500 characters. A Purpose of 501 to 1,000 used to
+     * pass staging whole and fail at the insert; it now imports, cut to 500.
+     */
+    public function test_a_purpose_of_501_to_1000_characters_imports_cut_to_its_column(): void
+    {
+        $this->seedForImport();
+
+        $product = $this->salaryLoanProduct();
+        $run = $this->makeRun(['product_mapping' => ['Salary Loan' => $product->id]]);
+        $long = mb_substr(str_repeat('Hog raising and feeds. ', 50), 0, 1000);
+
+        $this->makeFile($run, 'customers', [$this->customerRow('A-001')]);
+        $loans = $this->makeFile($run, 'loans', [
+            $this->loanRow('A-001', 'L-501', ['purpose' => mb_substr($long, 0, 501)]),
+            $this->loanRow('A-001', 'L-1000', ['purpose' => $long]),
+        ]);
+
+        $this->runToIdle($run);
+
+        $this->assertSame('completed', $run->fresh()->phase);
+
+        foreach (['L-501', 'L-1000'] as $loanNo) {
+            $this->assertSame(mb_substr($long, 0, 500), Loan::where('external_loan_no', $loanNo)->firstOrFail()->purpose, $loanNo);
+        }
+
+        $rows = CsvImportRow::where('csv_import_file_id', $loans->id)->orderBy('id')->get();
+        $this->assertSame(['imported', 'imported'], $rows->pluck('result')->all());
+        $this->assertSame(['imported_with_warnings', 'imported_with_warnings'], $rows->pluck('result_category')->all());
+    }
+
+    /**
+     * Two Loan Nos alike in their first 20 characters are two loans. Cut to 20,
+     * they read as one number, and the second was taken for a re-run of the
+     * first ("already on file") and never imported. Each is refused instead.
+     */
+    public function test_loan_numbers_alike_in_their_first_20_characters_are_refused_never_merged(): void
+    {
+        $this->seedForImport();
+
+        $product = $this->salaryLoanProduct();
+        $run = $this->makeRun(['product_mapping' => ['Salary Loan' => $product->id]]);
+
+        $this->makeFile($run, 'customers', [$this->customerRow('A-001')]);
+        $loans = $this->makeFile($run, 'loans', [
+            $this->loanRow('A-001', 'LN-2023-000000000001-A'),
+            $this->loanRow('A-001', 'LN-2023-000000000001-B'),
+            $this->loanRow('A-001', 'LN-2023-0000000000002'),
+        ]);
+
+        $this->runToIdle($run);
+
+        $this->assertSame('completed', $run->fresh()->phase);
+        $this->assertSame(0, Loan::whereNotNull('external_loan_no')->count());
+
+        $rows = CsvImportRow::where('csv_import_file_id', $loans->id)->orderBy('id')->get();
+        $this->assertSame(['invalid', 'invalid', 'invalid'], $rows->pluck('status')->all());
+        $this->assertSame(['invalid_row', 'invalid_row', 'invalid_row'], $rows->pluck('result_category')->all());
+
+        foreach ($rows as $row) {
+            $this->assertSame(['loan_no_too_long'], array_column((array) $row->errors, 'code'));
+        }
+    }
+
+    /**
      * An imported member is admitted BY somebody, ON a date — and neither is
      * "now", and neither is nobody.
      *

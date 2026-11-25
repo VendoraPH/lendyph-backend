@@ -27,12 +27,20 @@ use Carbon\Carbon;
  */
 class CustomerRowNormalizer
 {
-    /** @var array<string, string> */
+    /**
+     * Gender as the workbook writes it, Filipino included: Lalaki (also typed
+     * Lalake) is male and Babae female. Matched in any case.
+     *
+     * @var array<string, string>
+     */
     private const GENDER_MAP = [
         'male' => 'male',
         'm' => 'male',
+        'lalaki' => 'male',
+        'lalake' => 'male',
         'female' => 'female',
         'f' => 'female',
+        'babae' => 'female',
     ];
 
     /** @var array<string, string> */
