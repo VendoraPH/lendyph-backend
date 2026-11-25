@@ -296,7 +296,10 @@ class ExpenseReversalTest extends TestCase
      * An entry reversed by hand and then re-reversed before round 5 stands
      * again through the last entry of its chain. The actions reverse that
      * entry, which stands, never the original, which JournalPoster refuses
-     * as already reversed (money review of #392).
+     * as already reversed (money review of #392). The audit row names the
+     * original, the number the Payments dialog shows, and the entry reversed
+     * through it. The reversal is dated today, or on the standing entry's
+     * date when that is later.
      */
     public function test_a_chain_of_hand_reversals_is_reversed_on_the_entry_that_stands(): void
     {
@@ -308,18 +311,34 @@ class ExpenseReversalTest extends TestCase
             ->assertJsonPath('data.can_reverse', true);
 
         $this->reverseExpense($id)->assertOk()->assertJsonPath('data.status', 'reversed');
-        $this->assertSame('reversed', AccountingJournal::query()->findOrFail($standing)->status);
+        $standingEntry = AccountingJournal::query()->findOrFail($standing);
+        $reversal = AccountingJournal::query()->findOrFail($standingEntry->reversed_by_journal_id);
+        $this->assertSame(['reversed', '2026-10-20'], [$standingEntry->status, $reversal->date->toDateString()]);
+        $this->assertSame(
+            'Reversed the expense of ₱1,500.00 to Meralco dated Oct 1, 2026: '.AccountingJournal::query()->findOrFail($expenseJournal)->journal_no
+            .", reversed through its latest standing entry {$standingEntry->journal_no} by {$reversal->journal_no}. Reason: Recorded in error",
+            AuditLog::query()->where('action', 'expense_reversed')->sole()->description,
+        );
 
         $owed = $this->record(200000);
         $payment = $this->pay($owed, 50000, '2026-10-05');
-        $standing = $this->reverseTwiceByHand(AccountingExpensePayment::query()->findOrFail($payment)->journal_id);
+        $paymentJournal = AccountingExpensePayment::query()->findOrFail($payment)->journal_id;
+        // Hand reversals dated after today: the reversal lands on the standing entry's date.
+        $standing = $this->reverseTwiceByHand($paymentJournal, '2026-10-22', '2026-10-23');
         $this->assertSame(50000, $this->getJson("/api/accounting/expenses/{$owed}")->json('data.amount_paid'));
 
         $this->reversePayment($owed, $payment)->assertOk()
             ->assertJsonPath('data.amount_paid', 0)
             ->assertJsonPath('data.payments.0.reversed', true)
             ->assertJsonPath('data.payments.0.can_reverse', false);
-        $this->assertSame('reversed', AccountingJournal::query()->findOrFail($standing)->status);
+        $standingEntry = AccountingJournal::query()->findOrFail($standing);
+        $reversal = AccountingJournal::query()->findOrFail($standingEntry->reversed_by_journal_id);
+        $this->assertSame(['reversed', '2026-10-23'], [$standingEntry->status, $reversal->date->toDateString()]);
+        $this->assertSame(
+            'Reversed the payment of ₱500.00 made on Oct 5, 2026 to Meralco: '.AccountingJournal::query()->findOrFail($paymentJournal)->journal_no
+            .", reversed through its latest standing entry {$standingEntry->journal_no} by {$reversal->journal_no}. Reason: Paid twice",
+            AuditLog::query()->where('action', 'expense_payment_reversed')->sole()->description,
+        );
     }
 
     public function test_both_reversals_are_refused_in_words_in_a_closed_period(): void
@@ -407,12 +426,12 @@ class ExpenseReversalTest extends TestCase
      * Reverses a journal and then its reversal by hand, as the Journals
      * screen could before round 5, and returns the entry that stands.
      */
-    private function reverseTwiceByHand(int $journalId): int
+    private function reverseTwiceByHand(int $journalId, string $first = '2026-10-08', string $second = '2026-10-09'): int
     {
         $poster = app(JournalPoster::class);
-        $first = $poster->reverse(AccountingJournal::query()->findOrFail($journalId), '2026-10-08', 'By hand', $this->admin->id);
+        $reversal = $poster->reverse(AccountingJournal::query()->findOrFail($journalId), $first, 'By hand', $this->admin->id);
 
-        return $poster->reverse($first, '2026-10-09', 'By hand again', $this->admin->id)->id;
+        return $poster->reverse($reversal, $second, 'By hand again', $this->admin->id)->id;
     }
 
     /**

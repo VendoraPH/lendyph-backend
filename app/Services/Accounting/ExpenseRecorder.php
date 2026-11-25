@@ -325,12 +325,11 @@ class ExpenseRecorder
                 // reads by their numbers, and the reason.
                 newValues: ['journal_id' => $journal->id, 'reversed_by_journal_id' => $reversal->id, 'reason' => $reason],
                 description: sprintf(
-                    'Reversed the payment of %s made on %s to %s: %s, reversed by %s. Reason: %s',
+                    'Reversed the payment of %s made on %s to %s: %s. Reason: %s',
                     Money::format((int) $target->amount),
                     self::dateInWords($target->date->toDateString()),
                     $locked->payee,
-                    $journal->journal_no,
-                    $reversal->journal_no,
+                    self::reversedInWords($target->journal_id, $journal, $reversal),
                     $reason,
                 ),
                 userId: $userId,
@@ -391,12 +390,11 @@ class ExpenseRecorder
                 $locked,
                 newValues: ['journal_id' => $journal->id, 'reversed_by_journal_id' => $reversal->id, 'reason' => $reason],
                 description: sprintf(
-                    'Reversed the expense of %s to %s dated %s: %s, reversed by %s. Reason: %s',
+                    'Reversed the expense of %s to %s dated %s: %s. Reason: %s',
                     Money::format((int) $locked->amount),
                     $locked->payee,
                     self::dateInWords($locked->date->toDateString()),
-                    $journal->journal_no,
-                    $reversal->journal_no,
+                    self::reversedInWords($locked->journal_id, $journal, $reversal),
                     $reason,
                 ),
                 userId: $userId,
@@ -571,6 +569,24 @@ class ExpenseRecorder
     private static function reversalDate(AccountingJournal $journal): string
     {
         return max(CarbonImmutable::now()->toDateString(), $journal->date->toDateString());
+    }
+
+    /**
+     * The entries a reversal names, by number: "JE-000012, reversed by
+     * JE-000016", or, when the payment's or expense's own journal stands
+     * through a chain of earlier hand reversals, that journal first (the
+     * number the Payments dialog shows): "JE-000012, reversed through its
+     * latest standing entry JE-000015 by JE-000016".
+     */
+    private static function reversedInWords(int $journalId, AccountingJournal $reversed, AccountingJournal $reversal): string
+    {
+        if ((int) $reversed->id === $journalId) {
+            return "{$reversed->journal_no}, reversed by {$reversal->journal_no}";
+        }
+
+        $own = AccountingJournal::query()->whereKey($journalId)->value('journal_no');
+
+        return "{$own}, reversed through its latest standing entry {$reversed->journal_no} by {$reversal->journal_no}";
     }
 
     /** "Oct 5, 2026". */
