@@ -2,16 +2,20 @@
 
 namespace Tests\Feature;
 
+use App\Models\Branch;
 use App\Models\Loan;
 use App\Models\LoanProduct;
 use App\Models\PortalUser;
+use App\Models\User;
 use App\Services\CsvImport\CsvImportProcessor;
 use App\Services\Linda\LindaAnswerer;
 use App\Services\Linda\LindaIntent;
 use App\Services\Linda\LindaLookupRequest;
 use App\Services\Portal\Pdf\PortalPdf;
 use App\Services\Portal\Pdf\PortalStatements;
+use App\Services\RepaymentService;
 use Illuminate\Routing\Middleware\ThrottleRequests;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Testing\TestResponse;
 use Tests\Feature\Portal\PortalTestHelpers;
 use Tests\TestCase;
@@ -189,27 +193,100 @@ class ImportedLoanDisplayTest extends TestCase
         $this->assertStringContainsString('No payment has been recorded since the import; ₱23,600.00 was paid before it.', $reply->answer);
     }
 
-    public function test_the_loans_search_finds_the_files_loan_no_as_it_finds_the_other_numbers(): void
+    public function test_the_loans_search_finds_the_files_loan_no_as_it_finds_the_other_numbers_in_the_users_branches(): void
     {
-        $loan = $this->importLoan();
+        $loans = $this->importLoans(['L-2019-0042' => [], 'L-2019-0042-FAR' => []]);
+        $far = Branch::factory()->create();
+        DB::table('loans')->where('id', $loans['L-2019-0042-FAR']->id)->update(['branch_id' => $far->id]);
+        DB::table('borrowers')->where('id', $loans['L-2019-0042-FAR']->borrower_id)->update(['branch_id' => $far->id]);
         $this->createReleasedLoan();
 
+        // A loan officer of the Main Branch only (no branches:view_all).
+        $officer = User::factory()->inBranches($this->branch)->create();
+        $officer->assignRole('loan_officer');
+        $mine = $loans['L-2019-0042']->id;
+
         foreach (['L-2019-0042', '2019-0042', 'l-2019'] as $term) {
-            $this->assertSame([$loan->id], $this->searchIds($term), $term);
-            $this->assertSame([$loan->id], $this->searchIds($term, '&view=summary'), "{$term}, summary rows");
+            $this->assertSame([$mine], $this->searchIds($officer, $term), $term);
+            $this->assertSame([$mine], $this->searchIds($officer, $term, '&view=summary'), "{$term}, summary rows");
         }
 
-        // LIKE's own wildcards match only themselves, as on the other numbers.
-        $this->assertSame([], $this->searchIds('L-2019_0042'));
-        $this->assertSame([], $this->searchIds('L-2019%0042'));
+        // Another branch's loan is never found by its file number.
+        $this->assertSame([], $this->searchIds($officer, 'L-2019-0042-FAR'));
+        $this->assertSame([$loans['L-2019-0042-FAR']->id], $this->searchIds($this->admin, 'L-2019-0042-FAR'));
 
-        $this->staffGet("/api/loans/{$loan->id}")->assertOk()->assertJsonPath('data.external_loan_no', 'L-2019-0042');
+        // LIKE's own wildcards match only themselves, as on the other numbers.
+        $this->assertSame([], $this->searchIds($officer, 'L-2019_0042'));
+        $this->assertSame([], $this->searchIds($officer, 'L-2019%0042'));
+
+        $this->staffGet("/api/loans/{$mine}")->assertOk()->assertJsonPath('data.external_loan_no', 'L-2019-0042');
+    }
+
+    public function test_the_part_paid_before_the_import_holds_through_a_waiver_a_balance_adjustment_and_a_restructure(): void
+    {
+        $loan = $this->importLoan();
+
+        // Period 6 fell due after the import's as-of date, so it is charged a
+        // late penalty, which the waiver then forgives.
+        app(RepaymentService::class)->applyPenalties($loan->fresh(), now());
+        $this->assertGreaterThan(0, (float) $loan->amortizationSchedules()->sum('penalty_amount'));
+
+        $this->applyAdjustment($loan, ['adjustment_type' => 'penalty_waiver', 'new_values' => ['waive_all' => true]]);
+        $this->assertPaidBeforeImport($loan, self::PAID_BEFORE_IMPORT, 'after the penalty waiver');
+
+        $this->applyAdjustment($loan, [
+            'adjustment_type' => 'balance_adjustment',
+            'new_values' => ['target_principal_balance' => 39000, 'reason' => 'Agreed settlement'],
+        ]);
+        $this->assertPaidBeforeImport($loan, self::PAID_BEFORE_IMPORT, 'after the balance adjustment');
+
+        $this->applyAdjustment($loan, [
+            'adjustment_type' => 'restructure',
+            'new_values' => ['term' => 12],
+            'description' => 'Reschedule the outstanding balance',
+        ]);
+        $this->assertPaidBeforeImport($loan, self::PAID_BEFORE_IMPORT, 'after the restructure');
+    }
+
+    public function test_the_part_paid_before_the_import_holds_through_an_extension(): void
+    {
+        // Only a loan agreed for one month extends, which the six-month fixture
+        // isn't, so this one-month imported loan carries its own file figure:
+        // ₱10,000.00 lent with ₱6,000.00 left, and ₱300.00 interest still owed.
+        $loan = $this->importLoan('L-2019-0050', [
+            'loan_amount' => '10,000.00',
+            'loan_balance' => '6,000.00',
+            'interest_amount' => '300.00',
+            'interest_balance' => '300.00',
+            'term_in_months' => '1',
+            'date_released' => '2026-06-15',
+            'maturity_date' => '2026-07-15',
+        ]);
+        $this->assertTrue($loan->isOneMonthTerm());
+        $this->assertPaidBeforeImport($loan, 4000.0, 'as imported');
+
+        $this->asStaff()->postJson("/api/loans/{$loan->id}/extend", ['interest_option' => 'defer'])->assertOk();
+
+        $this->assertPaidBeforeImport($loan, 4000.0, 'after the extension');
     }
 
     /**
      * One member and one loan, through the real staging and import pass.
+     *
+     * @param  array<string, string>  $overrides  the loan row's cells
      */
-    private function importLoan(): Loan
+    private function importLoan(string $loanNo = 'L-2019-0042', array $overrides = []): Loan
+    {
+        return $this->importLoans([$loanNo => $overrides])[$loanNo];
+    }
+
+    /**
+     * A member per loan, through the real staging and import pass.
+     *
+     * @param  array<string, array<string, string>>  $loans  each loan row's cells, by the file's Loan No.
+     * @return array<string, Loan> by the file's Loan No.
+     */
+    private function importLoans(array $loans): array
     {
         $product = LoanProduct::factory()->create([
             'name' => 'Salary Loan',
@@ -224,8 +301,17 @@ class ImportedLoanDisplayTest extends TestCase
         ]);
 
         $run = $this->makeRun(['product_mapping' => ['Salary Loan' => $product->id]]);
-        $this->makeFile($run, 'customers', [$this->customerRow('A-001')]);
-        $this->makeFile($run, 'loans', [$this->loanRow('A-001', 'L-2019-0042')]);
+        $customers = [];
+        $rows = [];
+
+        foreach (array_keys($loans) as $index => $loanNo) {
+            $account = sprintf('A-%03d', $index + 1);
+            $customers[] = $this->customerRow($account);
+            $rows[] = $this->loanRow($account, $loanNo, $loans[$loanNo]);
+        }
+
+        $this->makeFile($run, 'customers', $customers);
+        $this->makeFile($run, 'loans', $rows);
 
         $processor = new CsvImportProcessor;
 
@@ -235,7 +321,24 @@ class ImportedLoanDisplayTest extends TestCase
 
         $this->assertSame('completed', $run->fresh()->phase);
 
-        return Loan::where('external_loan_no', 'L-2019-0042')->firstOrFail();
+        return Loan::query()->whereIn('external_loan_no', array_keys($loans))->get()->keyBy('external_loan_no')->all();
+    }
+
+    /** An adjustment requested, approved and applied through the API. */
+    private function applyAdjustment(Loan $loan, array $request): void
+    {
+        $id = $this->asStaff()->postJson("/api/loans/{$loan->id}/adjustments", $request)->assertCreated()->json('data.id');
+        $this->asStaff()->patchJson("/api/loan-adjustments/{$id}/approve", ['remarks' => 'OK'])->assertOk();
+        $this->asStaff()->patchJson("/api/loan-adjustments/{$id}/apply")->assertOk()->assertJsonPath('data.status', 'applied');
+    }
+
+    /** Total Paid's part paid before the import, and Total Paid itself with no payment here. */
+    private function assertPaidBeforeImport(Loan $loan, float $expected, string $when): void
+    {
+        $summary = $this->staffGet("/api/loans/{$loan->id}/summary")->assertOk()->json('data');
+
+        $this->assertSame($expected, (float) $summary['paid_before_import'], $when);
+        $this->assertSame($expected, (float) $summary['total_repaid'], $when);
     }
 
     /** A cash payment recorded by staff through the API, today. */
@@ -265,10 +368,13 @@ class ImportedLoanDisplayTest extends TestCase
         return $this->actingAs($this->admin, 'web');
     }
 
-    /** @return list<int> the ids GET /loans finds for the term */
-    private function searchIds(string $term, string $query = ''): array
+    /** @return list<int> the ids GET /loans finds for the term, as this user */
+    private function searchIds(User $user, string $term, string $query = ''): array
     {
-        return array_column($this->staffGet('/api/loans?search='.urlencode($term).$query)->assertOk()->json('data'), 'id');
+        $this->app['auth']->forgetGuards();
+        $this->defaultHeaders = [];
+
+        return array_column($this->actingAs($user, 'web')->getJson('/api/loans?search='.urlencode($term).$query)->assertOk()->json('data'), 'id');
     }
 
     private function centavos(mixed $pesos): int
