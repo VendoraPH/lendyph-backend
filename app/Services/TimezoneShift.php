@@ -415,6 +415,10 @@ class TimezoneShift
         // Receipt share links (finish run round 2, 2026-11-24), well after the
         // cutover.
         'receipt_share_links' => ['created_at', 'expires_at', 'revoked_at', 'updated_at'],
+        // Prints of the disclosure statement and the promissory note (finish
+        // run round 3, reprint after a change, 2026-11-25), well after the
+        // cutover.
+        'loan_document_prints' => ['printed_at'],
         // The shift's own bookkeeping, written after the cutover by definition.
         'timezone_shifts' => ['completed_at', 'cutover_at', 'started_at'],
     ];

@@ -1706,10 +1706,14 @@ class LoanService
      * and rolls the release back rather than quietly releasing a second loan
      * for the same debt.
      *
+     * Then, for every loan, refuses while a printed disclosure statement or
+     * promissory note is out of date (LoanDocumentPrints).
+     *
      * @param  array<int, int>  $lockedCollateralIds  the collateral rows release() locked
      * @return Loan|null the locked source, or null when this is an ordinary loan
      *
      * @throws HttpResponseException 409 when the loan changed since it was read
+     * @throws ValidationException 422 on `documents` while a printed document is out of date
      */
     private function lockAndGuardReleaseRows(Loan $loan, array $lockedCollateralIds): ?Loan
     {
@@ -1738,13 +1742,22 @@ class LoanService
             throw LoanWriteTransaction::conflict();
         }
 
-        if ($loan->source_loan_id === null) {
-            return null;
+        $source = null;
+
+        if ($loan->source_loan_id !== null) {
+            $source = $locked->get($loan->source_loan_id);
+
+            $this->assertRestructureReleasable($loan, $source);
         }
 
-        $source = $locked->get($loan->source_loan_id);
-
-        $this->assertRestructureReleasable($loan, $source);
+        // The signed papers (finish run round 3, reprint after a change): no
+        // release while a printed disclosure statement or promissory note
+        // states terms the loan no longer has (422 on `documents`). Last, so a
+        // restructure that has to go back for approval says so first; read
+        // under the locks, before anything is written. Named without an import
+        // (a sibling in this namespace), so the status write that
+        // CollateralIntegrityGuardsTest pins by line doesn't move.
+        app(LoanDocumentPrints::class)->assertNoneOutdated($loan);
 
         return $source;
     }
