@@ -20,8 +20,9 @@ use Tests\TestCase;
 /*
  * LO-B2: the landing page, the code step and sessions (origination decisions
  * 1, 2 and 6–9). No SMS provider exists, so the only way past the code step is
- * the staging test-code mode, which serves allow-listed staff numbers only
- * and sends nothing. Codes are 6 digits, 5 minutes, 5 tries, stored hashed.
+ * the staging test-code mode, which serves staff numbers only (allow-listed,
+ * or on an active staff account) and sends nothing. Codes are 6 digits, 5
+ * minutes, 5 tries, stored hashed.
  * Sessions are random, stored hashed, tied to the link and the application,
  * and end after 30 minutes idle or 4 hours.
  */
@@ -148,7 +149,7 @@ it('gives any other number no code in test mode, with the same answer otherwise'
         ->and($data['destination'])->toBe('63918*****22');
 });
 
-it('ignores allow-all-recipients for test codes: only listed numbers get one', function () {
+it('ignores allow-all-recipients for test codes: only staff numbers get one', function () {
     $link = $this->enableIntake();
     config(['reminders.allow_all_recipients' => true]);
 

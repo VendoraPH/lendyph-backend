@@ -21,10 +21,12 @@ use Illuminate\Validation\ValidationException;
  *   driver that reaches someone, or the staging test-code mode on a test
  *   link. Email waits
  *   for a mail driver. With no channel, asking for a code answers 409.
- * - Sending: an allow-listed staff number in test mode sees its code on
- *   screen; otherwise a delivering driver texts it to a number the allow-list
- *   permits. Any other number gets nothing, with the same answer. The code is
- *   never logged and never stored in plain text.
+ * - Sending: in test mode, a staff number on a test link (one on the
+ *   allow-list, or the mobile number on an active staff account: TestCodes)
+ *   sees its code on screen and nothing is sent; otherwise a delivering
+ *   driver texts it to a number the allow-list permits. Any other number gets
+ *   nothing, with the same answer. The code is never logged and never stored
+ *   in plain text.
  * - A deployment hands out at most `daily_cap` codes a Manila day that reach
  *   someone (sent, or shown in test mode), against SMS pumping, and one
  *   mobile asks for at most `daily_cap_per_mobile` (429 either way). The
