@@ -65,8 +65,9 @@ class AmlaOrderTimeDepositTest extends TestCase
         $this->underOrder();
         Carbon::setTestNow(Carbon::parse('2027-02-08 10:00:00', 'Asia/Manila'));
 
-        foreach (['cash', 'bank_transfer', 'gcash'] as $method) {
-            $this->idem("/api/savings/time-deposits/{$this->deposit->id}/settle", ['date' => '2027-02-08', 'action' => 'payout', 'payout_method' => $method])
+        // Non-cash payouts carry their reference (round 5), so the order is what refuses them.
+        foreach (['cash' => null, 'bank_transfer' => 'BDO-1', 'gcash' => 'GC-1'] as $method => $reference) {
+            $this->idem("/api/savings/time-deposits/{$this->deposit->id}/settle", ['date' => '2027-02-08', 'action' => 'payout', 'payout_method' => $method, 'payout_reference' => $reference])
                 ->assertUnprocessable()
                 ->assertJsonPath('errors.payout_method.0', "{$this->deposit->certificate_number} belongs to a member whose funds are under a legal order, so it can only roll over or be paid into the member's own savings until the order is lifted.");
         }

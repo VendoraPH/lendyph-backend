@@ -67,7 +67,7 @@ class ClosingTest extends TestCase
         $this->getJson("/api/savings/accounts/{$this->savings->id}/closing-quote")
             ->assertJsonPath('data.withholding_tax', '1.00')->assertJsonPath('data.payout_amount', '5004.00');
 
-        $this->close(['payout_method' => 'gcash'])->assertCreated()
+        $this->close(['payout_method' => 'gcash', 'payout_reference' => 'GC-CLOSE-1'])->assertCreated()
             ->assertJsonPath('data.status', 'closed')
             ->assertJsonPath('data.balance', '0.00')
             ->assertJsonPath('data.closed_on', '2026-11-11')

@@ -354,6 +354,7 @@ class SavingsAccountController extends Controller
             new OA\Property(property: 'date', type: 'string', format: 'date'),
             new OA\Property(property: 'reason', type: 'string'),
             new OA\Property(property: 'payout_method', type: 'string', enum: OpenSavingsAccountRequest::PAYMENT_METHODS),
+            new OA\Property(property: 'payout_reference', type: 'string', nullable: true, description: 'The payout\'s reference: required unless it is paid in cash (422 in words); kept on the closing row as `external_reference`'),
         ])),
         responses: [
             new OA\Response(response: 201, description: 'The closed account'),

@@ -100,6 +100,7 @@ class TimeDepositPresenter
             'settled_tax' => $deposit->settled_tax,
             'settled_amount' => $deposit->settled_amount,
             'payout_method' => $deposit->payout_method,
+            'payout_reference' => $deposit->payout_reference,
             'settled_by' => SavingsUserRef::from($deposit->settler),
             ...$this->postMaturity($deposit),
             'rolled_over_from_id' => $deposit->rolled_over_from_id,

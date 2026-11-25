@@ -9,17 +9,19 @@ use Illuminate\Validation\Rule;
  * A savings entry paid by bank transfer, GCash or Maya needs the reference of
  * that payment (finish run round 5), as a loan payment or a share capital
  * entry does: a deposit, a withdrawal, an opening deposit (staff's or a
- * member portal request's), a time deposit placement and a member portal
- * payout. A blank one is a 422 in words that name the method and the entry
- * ("Enter the GCash reference for this deposit."), and the screens say the
- * same before sending.
+ * member portal request's), a time deposit placement, a member portal
+ * payout, and a payout at closing, at a time deposit's maturity or on its
+ * pre-termination (`payout_reference`: money leaving, like a withdrawal). A
+ * blank one is a 422 in words that name the method and the entry ("Enter the
+ * GCash reference for this deposit."), and the screens say the same before
+ * sending.
  *
  * Exempt: cash (a counter receipt; a cash time deposit takes its TD number),
- * `savings` (a placement paid from the member's own savings, a move between
- * their savings records), an opening deposit of ₱0.00 (nothing is paid), and
- * every writer that never comes through these requests: auto-credit runs,
- * interest, transfers between accounts, closing and time deposit payouts,
- * and reversals.
+ * `savings` (a placement paid from, or a payout into, the member's own
+ * savings: a move between their savings records), an opening deposit of
+ * ₱0.00 and a full rollover (nothing is paid), and every writer that never
+ * comes through these requests: auto-credit runs, interest, transfers
+ * between accounts, the maturity job's own settlements, and reversals.
  *
  * New records only: it is a request rule, so nothing stored is re-checked,
  * and a withdrawal already waiting for its checker posts as it was asked.

@@ -33,6 +33,8 @@ use Illuminate\Support\Carbon;
  * @property string $funding_method
  * @property string|null $reference the payment reference: a cash placement's TD number (CashReferences), else the one it was given
  * @property string $status
+ * @property string|null $payout_method
+ * @property string|null $payout_reference the reference of a payout by bank transfer, GCash or Maya (required for those), or the one a cash payout was given
  * @property Carbon|null $settled_on
  * @property string|null $settled_interest
  * @property string|null $settled_tax
@@ -77,6 +79,7 @@ class TimeDeposit extends Model
         'settled_tax',
         'settled_amount',
         'payout_method',
+        'payout_reference',
         'settled_by',
         'rolled_over_from_id',
         'created_by',

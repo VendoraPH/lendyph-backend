@@ -9,6 +9,7 @@ use App\Models\SavingsProduct;
 use App\Models\TimeDeposit;
 use App\Services\Accounting\AutomaticPoster;
 use App\Services\Savings\ApprovalGate;
+use App\Services\Savings\DuplicateReference;
 use App\Services\Savings\SavingsLedger;
 use App\Services\Savings\SavingsLocks;
 use App\Services\Savings\TimeDeposits\Placement;
@@ -119,6 +120,7 @@ class TimeDepositReviewFixesTest extends TestCase
         $this->app->bind(Settlement::class, fn ($app) => new DeadlockingSettlement(
             $app->make(Placement::class), $app->make(Quote::class), $app->make(SavingsLedger::class),
             $app->make(SavingsLocks::class), $app->make(ApprovalGate::class), $app->make(AutomaticPoster::class),
+            $app->make(DuplicateReference::class),
         ));
         Log::spy();
 
@@ -245,12 +247,12 @@ class DeadlockingSettlement extends Settlement
 {
     public static ?int $failOn = null;
 
-    public function settle(TimeDeposit $locked, string $date, string $action, ?string $payoutMethod, ?int $userId, ?string $nextInstruction = null, ?string $postMaturityTaxRate = null, ?SavingsAccount $payoutAccount = null): array
+    public function settle(TimeDeposit $locked, string $date, string $action, ?string $payoutMethod, ?int $userId, ?string $nextInstruction = null, ?string $postMaturityTaxRate = null, ?SavingsAccount $payoutAccount = null, ?string $payoutReference = null): array
     {
         if ($locked->id === self::$failOn) {
             throw new QueryException('mysql', 'update `time_deposits` set `status` = ?', [], new PDOException('SQLSTATE[40001]: Serialization failure: 1213 Deadlock found when trying to get lock; try restarting transaction'));
         }
 
-        return parent::settle($locked, $date, $action, $payoutMethod, $userId, $nextInstruction, $postMaturityTaxRate, $payoutAccount);
+        return parent::settle($locked, $date, $action, $payoutMethod, $userId, $nextInstruction, $postMaturityTaxRate, $payoutAccount, $payoutReference);
     }
 }

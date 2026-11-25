@@ -238,6 +238,7 @@ class SavingsTimeDepositController extends Controller
             new OA\Property(property: 'action', type: 'string', enum: TimeDeposit::MATURITY_INSTRUCTIONS),
             new OA\Property(property: 'payout_method', type: 'string', enum: ['cash', 'bank_transfer', 'gcash', 'maya', 'savings']),
             new OA\Property(property: 'payout_account_id', type: 'integer', nullable: true, description: 'With payout_method savings: which of the member\'s savings accounts to pay into (same member, same branch, active); the one named at placement when left out. Ignored for other methods'),
+            new OA\Property(property: 'payout_reference', type: 'string', nullable: true, description: 'The payout\'s reference: required for bank transfer, GCash and Maya (422 in words); ignored for a payout into savings or a full rollover. Kept on the placement'),
             new OA\Property(property: 'next_instruction', type: 'string', enum: TimeDeposit::MATURITY_INSTRUCTIONS, nullable: true, description: 'On a rollover: the new placement\'s instruction; the old one\'s when left out'),
         ])),
         responses: [
@@ -312,6 +313,7 @@ class SavingsTimeDepositController extends Controller
             new OA\Property(property: 'reason', type: 'string'),
             new OA\Property(property: 'payout_method', type: 'string', enum: ['cash', 'bank_transfer', 'gcash', 'maya', 'savings']),
             new OA\Property(property: 'payout_account_id', type: 'integer', nullable: true, description: 'With payout_method savings: which of the member\'s savings accounts to pay into (same member, same branch, active); the one named at placement when left out. Ignored for other methods'),
+            new OA\Property(property: 'payout_reference', type: 'string', nullable: true, description: 'The payout\'s reference: required for bank transfer, GCash and Maya (422 in words); ignored for a payout into savings. Kept on the placement'),
         ])),
         responses: [
             new OA\Response(response: 201, description: 'The pre-terminated placement'),

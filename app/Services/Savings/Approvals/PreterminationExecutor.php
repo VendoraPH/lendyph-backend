@@ -6,6 +6,7 @@ use App\Models\SavingsApproval;
 use App\Models\SavingsTransaction;
 use App\Models\TimeDeposit;
 use App\Models\User;
+use App\Services\Savings\DuplicateReference;
 use App\Services\Savings\SavingsLocks;
 use App\Services\Savings\SavingsMath;
 use App\Services\Savings\TimeDeposits\Quote;
@@ -18,7 +19,9 @@ use Illuminate\Validation\ValidationException;
  * desk's locks it re-checks the placement is still running and that the
  * payout is still the approved amount, then breaks it as the checker. Its
  * own approval is no savings outflow, so no available-balance check is
- * involved.
+ * involved. Its payout reference, held while it waited, is checked again
+ * against what is on record and the requests waiting since before it
+ * (DuplicateReference, finish run round 5).
  */
 class PreterminationExecutor implements ApprovalExecutor
 {
@@ -26,6 +29,7 @@ class PreterminationExecutor implements ApprovalExecutor
         private readonly Settlement $settlement,
         private readonly Quote $quote,
         private readonly SavingsLocks $locks,
+        private readonly DuplicateReference $duplicates,
     ) {}
 
     public function accountIds(SavingsApproval $approval): array
@@ -67,6 +71,8 @@ class PreterminationExecutor implements ApprovalExecutor
             ]]);
         }
 
-        return $this->settlement->preterminate($deposit, (string) $payload['date'], (string) $payload['reason'], (string) $payload['payout_method'], $checker->id)['credit'];
+        $this->duplicates->assertUnused($payload['payout_method'] ?? null, $payload['payout_reference'] ?? null, 'payout_reference', $approval->id);
+
+        return $this->settlement->preterminate($deposit, (string) $payload['date'], (string) $payload['reason'], (string) $payload['payout_method'], $checker->id, payoutReference: $payload['payout_reference'] ?? null)['credit'];
     }
 }
