@@ -119,6 +119,11 @@ use OpenApi\Attributes as OA;
         new OA\Property(property: 'source_loan_id', type: 'integer', nullable: true, description: 'The loan this one was restructured out of'),
         new OA\Property(property: 'is_restructure', type: 'boolean', description: 'True when source_loan_id is set'),
         new OA\Property(property: 'can_send_back_approved', type: 'boolean', description: 'True only for an approved restructure (not released yet) and a caller holding loans:release: the loan page may offer PATCH /api/loans/{id}/send-back-approved.'),
+        new OA\Property(property: 'printed_documents', type: 'array', description: 'GET /loans/{id} only (and POST /loans/{id}/extend, which answers in its shape); absent elsewhere (lists never read it). While the loan is approved, the latest print of each document, the disclosure statement then the promissory note, for the Release dialog\'s reminders to print it again after release when an insurance premium or a co-maker is added there. Any print counts, whatever its terms version or terms: it only says when the paper was printed. Read with `printed_documents_outdated` in one query. Empty when the loan is not approved or nothing was printed.', items: new OA\Items(properties: [
+            new OA\Property(property: 'document', type: 'string', enum: ['disclosure', 'promissory_note']),
+            new OA\Property(property: 'label', type: 'string', example: 'Disclosure Statement', description: '"Disclosure Statement" or "Promissory Note"'),
+            new OA\Property(property: 'printed_at', type: 'string', format: 'date-time', description: 'When the latest print of that document was made'),
+        ], type: 'object')),
         new OA\Property(property: 'printed_documents_outdated', type: 'array', description: 'GET /loans/{id} only (and POST /loans/{id}/extend, which answers in its shape); absent elsewhere (lists never work it out). While the loan is approved, each printed disclosure statement or promissory note whose terms (amounts, rates, term and frequency, penalty terms, dates, deductions and charges, net proceeds and schedule) changed since its latest print, in that order. The release is refused (422 on `documents`) until it is printed again. Empty when nothing is out of date, when the loan is not approved, and for a document never printed or printed before the terms were recorded.', items: new OA\Items(properties: [
             new OA\Property(property: 'document', type: 'string', enum: ['disclosure', 'promissory_note']),
             new OA\Property(property: 'label', type: 'string', example: 'Disclosure Statement', description: '"Disclosure Statement" or "Promissory Note"'),
@@ -173,22 +178,22 @@ class LoanResource extends JsonResource
     private ?array $summaryPeriods = null;
 
     /**
-     * The printed documents out of date, set by withPrintedDocumentsOutdated():
-     * on GET /loans/{id} (and the extend answer, in its shape) only. Null
-     * leaves the key out.
+     * The prints, set by withPrints(): on GET /loans/{id} (and the extend
+     * answer, in its shape) only. Null leaves both keys out.
      *
-     * @var list<array{document: string, label: string, printed_at: mixed}>|null
+     * @var array{printed: list<array{document: string, label: string, printed_at: mixed}>, outdated: list<array{document: string, label: string, printed_at: mixed}>}|null
      */
-    private ?array $printedDocumentsOutdated = null;
+    private ?array $prints = null;
 
     /**
-     * GET /loans/{id}'s `printed_documents_outdated`: LoanDocumentPrints::outdated().
+     * GET /loans/{id}'s `printed_documents` and `printed_documents_outdated`:
+     * LoanDocumentPrints::forLoanPage(), both from one read of the prints.
      *
-     * @param  list<array{document: string, label: string, printed_at: mixed}>  $items
+     * @param  array{printed: list<array{document: string, label: string, printed_at: mixed}>, outdated: list<array{document: string, label: string, printed_at: mixed}>}  $prints
      */
-    public function withPrintedDocumentsOutdated(array $items): static
+    public function withPrints(array $prints): static
     {
-        $this->printedDocumentsOutdated = $items;
+        $this->prints = $prints;
 
         return $this;
     }
@@ -456,13 +461,12 @@ class LoanResource extends JsonResource
             'can_send_back_approved' => $this->isRestructure()
                 && $this->status === 'approved'
                 && (bool) $request->user()?->can('loans:release'),
-            // The signed papers whose terms changed since they were printed
-            // (LoanDocumentPrints), on the single loan only: left out where
-            // the controller didn't work it out, so a list never pays for it.
-            'printed_documents_outdated' => $this->when(
-                $this->printedDocumentsOutdated !== null,
-                fn () => $this->printedDocumentsOutdated,
-            ),
+            // The signed papers (LoanDocumentPrints), on the single loan only:
+            // left out where the controller didn't read them, so a list never
+            // pays for it. When each was last printed, and those whose terms
+            // changed since they were printed.
+            'printed_documents' => $this->when($this->prints !== null, fn () => $this->prints['printed']),
+            'printed_documents_outdated' => $this->when($this->prints !== null, fn () => $this->prints['outdated']),
             'restructured_at' => $this->restructured_at,
             'restructured_balance' => $this->restructured_balance !== null
                 ? (float) $this->restructured_balance

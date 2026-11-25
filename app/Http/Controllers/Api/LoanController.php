@@ -637,7 +637,7 @@ DESC,
     #[OA\Get(
         path: '/api/loans/{id}',
         summary: 'Show loan',
-        description: '`current_approver` names the approval step a `for_review` loan is waiting on: the first `pending` step of `current_steps` in `GET /api/loans/{id}/approval-steps`. Null when the loan is not `for_review`, no step is pending, or the step name is blank. Never an empty string. Same value as the loan\'s row on `GET /api/loans`. `printed_documents_outdated` (here only, never on lists): while the loan is approved, each printed disclosure statement or promissory note whose terms changed since its latest print, with when it was printed; the release is refused until it is printed again. Empty otherwise.',
+        description: '`current_approver` names the approval step a `for_review` loan is waiting on: the first `pending` step of `current_steps` in `GET /api/loans/{id}/approval-steps`. Null when the loan is not `for_review`, no step is pending, or the step name is blank. Never an empty string. Same value as the loan\'s row on `GET /api/loans`. `printed_documents` (here only, never on lists): while the loan is approved, the latest print of the disclosure statement and of the promissory note, any print, with when it was made, for the Release dialog\'s reminders. `printed_documents_outdated` (here only, never on lists): while the loan is approved, each printed disclosure statement or promissory note whose terms changed since its latest print, with when it was printed; the release is refused until it is printed again. Both come from one read of the loan\'s prints and are empty otherwise.',
         tags: ['Loans'],
         security: [['sanctum' => []]],
         parameters: [
@@ -668,8 +668,9 @@ DESC,
         );
 
         // On the single loan only (and extend, which answers in this shape),
-        // never on a list: it builds the printed documents again.
-        return (new LoanResource($loan))->withPrintedDocumentsOutdated($prints->outdated($loan));
+        // never on a list: it reads the prints and builds the printed
+        // documents again.
+        return (new LoanResource($loan))->withPrints($prints->forLoanPage($loan));
     }
 
     #[OA\Put(
@@ -1279,11 +1280,12 @@ DESC,
             'collaterals',
         );
 
-        // The show's `printed_documents_outdated` too, for the same shape: an
-        // extended loan is released, so it is always empty and reads nothing.
+        // The show's `printed_documents` and `printed_documents_outdated` too,
+        // for the same shape: an extended loan is released, so both are always
+        // empty and read nothing.
         return response()->json([
             'message' => 'Loan extended.',
-            'data' => (new LoanResource($loan))->withPrintedDocumentsOutdated($prints->outdated($loan)),
+            'data' => (new LoanResource($loan))->withPrints($prints->forLoanPage($loan)),
         ]);
     }
 
