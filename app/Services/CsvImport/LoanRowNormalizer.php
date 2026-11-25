@@ -35,6 +35,32 @@ class LoanRowNormalizer
     ];
 
     /**
+     * Each interest type in words, as the workbook writes it, for a refusal.
+     *
+     * @var array<string, string>
+     */
+    private const INTEREST_TYPE_WORDS = [
+        'straight' => 'Straight (Fixed)',
+        'diminishing' => 'Diminishing',
+        'upon_maturity' => 'Upon Maturity',
+    ];
+
+    /**
+     * Each App\Enums\LoanFrequency in words, as the workbook writes it: for a
+     * refusal, and for the schedule's own notes (LoanScheduleReconstructor).
+     *
+     * @var array<string, string>
+     */
+    public const FREQUENCY_WORDS = [
+        'daily' => 'Daily',
+        'weekly' => 'Weekly',
+        'bi_weekly' => 'Bi-Weekly',
+        'semi_monthly' => 'Semi-Monthly',
+        'monthly' => 'Monthly',
+        'upon_maturity' => 'Upon Maturity',
+    ];
+
+    /**
      * Longest loan this importer will accept, in months. Ten years covers
      * anything a coop writes and keeps the derived period count inside the
      * unsignedSmallInteger that holds it.
@@ -42,10 +68,18 @@ class LoanRowNormalizer
     private const MAX_TERM_MONTHS = 120;
 
     /**
-     * The longest Loan No. this importer takes. A longer one is refused, never
-     * cut: see self::loanNo().
+     * `borrowers.external_account_no` is varchar(50). A longer Account No. is
+     * refused, never cut: see ValueNormalizer::identifier().
      */
-    private const LOAN_NO_MAX = 20;
+    public const ACCOUNT_NO_MAX = 50;
+
+    public const ACCOUNT_NO_TOO_LONG = 'This Account No. is longer than the 50 characters an account number can have. Shorten it in the file: an account number is never cut short, since it tells one member from another.';
+
+    /**
+     * `loans.external_loan_no` is varchar(50). A longer Loan No. is refused,
+     * never cut: see ValueNormalizer::identifier().
+     */
+    private const LOAN_NO_MAX = 50;
 
     /**
      * `loans.purpose` is varchar(500). A longer Purpose is cut to fit, with a
@@ -65,8 +99,8 @@ class LoanRowNormalizer
         }
 
         $values = [
-            'account_no' => $this->requiredText($cells['account_no'], 'account_no', 50, $notes),
-            'loan_no' => $this->loanNo($cells['loan_no'], $notes),
+            'account_no' => $this->values->identifier($cells['account_no'], 'account_no', self::ACCOUNT_NO_MAX, 'account_no_too_long', self::ACCOUNT_NO_TOO_LONG, $notes),
+            'loan_no' => $this->values->identifier($cells['loan_no'], 'loan_no', self::LOAN_NO_MAX, 'loan_no_too_long', 'This Loan No. is longer than the '.self::LOAN_NO_MAX.' characters a loan number can have. Shorten it in the file: a loan number is never cut short, since it tells one loan from another.', $notes),
             'loan_amount' => $this->values->centavos($cells['loan_amount'], 'loan_amount', $notes, required: true),
             'loan_balance' => $this->values->centavos($cells['loan_balance'], 'loan_balance', $notes, required: true),
             'interest_rate' => $this->values->rate($cells['interest_rate'], 'interest_rate', $notes, required: true),
@@ -75,8 +109,8 @@ class LoanRowNormalizer
             'purpose' => $this->purpose($cells['purpose'], $notes),
             'loan_product' => $this->values->boundedText($cells['loan_product'], 'loan_product', 255, $notes),
             'term_in_months' => $this->values->integer($cells['term_in_months'], 'term_in_months', $notes, min: 1, max: self::MAX_TERM_MONTHS, required: true),
-            'payment_frequency' => $this->values->enum($cells['payment_frequency'], self::frequencyMap(), 'payment_frequency', $notes, required: true, label: 'payment frequency'),
-            'interest_type' => $this->values->enum($cells['interest_type'], self::INTEREST_TYPE_MAP, 'interest_type', $notes, required: true, label: 'interest type'),
+            'payment_frequency' => $this->values->enum($cells['payment_frequency'], self::frequencyMap(), 'payment_frequency', $notes, required: true, label: 'payment frequency', words: self::FREQUENCY_WORDS),
+            'interest_type' => $this->values->enum($cells['interest_type'], self::INTEREST_TYPE_MAP, 'interest_type', $notes, required: true, label: 'interest type', words: self::INTEREST_TYPE_WORDS),
             'date_released' => $this->values->date($cells['date_released'], 'date_released', $notes, required: true),
             'maturity_date' => $this->values->date($cells['maturity_date'], 'maturity_date', $notes, required: true),
             // Fees are deductions taken at release. They do not enter the
@@ -131,43 +165,6 @@ class LoanRowNormalizer
         }
 
         return array_combine($keys, $row->cells);
-    }
-
-    private function requiredText(?string $raw, string $field, int $max, RowNoteBag $notes): ?string
-    {
-        $value = $this->values->boundedText($raw, $field, $max, $notes);
-
-        if ($value === null) {
-            $notes->fail($field, 'required', 'This field is required and the cell is blank.');
-        }
-
-        return $value;
-    }
-
-    /**
-     * The cooperative's own number for the loan, exactly as typed, or a refusal.
-     *
-     * An identifier is never altered. Cut short, two numbers alike in their
-     * first 20 characters became one, and the import pass took the second loan
-     * for a re-run of the first (`already_imported`), so it never landed.
-     */
-    private function loanNo(?string $raw, RowNoteBag $notes): ?string
-    {
-        $value = $this->values->text($raw);
-
-        if ($value === null) {
-            $notes->fail('loan_no', 'required', 'This field is required and the cell is blank.');
-
-            return null;
-        }
-
-        if (mb_strlen($value) > self::LOAN_NO_MAX) {
-            $notes->fail('loan_no', 'loan_no_too_long', 'This Loan No. is longer than the '.self::LOAN_NO_MAX.' characters a loan number can have. Shorten it in the file: a loan number is never cut short, since it tells one loan from another.');
-
-            return null;
-        }
-
-        return $value;
     }
 
     /**

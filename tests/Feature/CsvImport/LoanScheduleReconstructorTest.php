@@ -90,6 +90,28 @@ class LoanScheduleReconstructorTest extends TestCase
         ));
     }
 
+    public function test_an_off_schedule_maturity_names_the_payment_frequency_in_words_never_its_stored_value(): void
+    {
+        // Semi-monthly steps 15 days: the 12th falls on 14 Jul and the 13th on
+        // 29 Jul, so a 15 Jul maturity is off the schedule.
+        $schedule = $this->reconstructor()->reconstruct($this->input([
+            'frequency' => 'semi_monthly',
+            'dateReleased' => '2025-01-15',
+            'maturityDate' => '2025-07-15',
+            'termInMonths' => 6,
+            'balanceCentavos' => 7000007,
+            'interestBalanceCentavos' => 1470015,
+        ]));
+
+        $warning = collect($schedule->warnings)->first(fn ($note) => $note->code === 'maturity_off_schedule');
+
+        $this->assertNotNull($warning);
+        $this->assertSame(
+            'The maturity date 2025-07-15 does not fall exactly on a due date of a loan paid semi-monthly from 2025-01-15 (the nearest is 2025-07-29). The last instalment was dated 2025-07-15 as the file says, and the loan recorded as 13 periods.',
+            $warning->message,
+        );
+    }
+
     public function test_every_frequency_lands_the_last_due_date_exactly_on_the_csv_maturity_date(): void
     {
         $loanService = new LoanService;

@@ -83,6 +83,32 @@ class ValueNormalizer
     }
 
     /**
+     * An identifier (an account or loan number), exactly as typed, or a refusal.
+     *
+     * Never cut to fit its column: two numbers alike up to the cut would become
+     * one, and the second record would be taken for the first. A blank one is
+     * refused as required, and a longer one with the caller's code and words.
+     */
+    public function identifier(?string $raw, string $field, int $max, string $tooLongCode, string $tooLongMessage, RowNoteBag $notes): ?string
+    {
+        $value = $this->text($raw);
+
+        if ($value === null) {
+            $notes->fail($field, 'required', 'This field is required and the cell is blank.');
+
+            return null;
+        }
+
+        if (mb_strlen($value) > $max) {
+            $notes->fail($field, $tooLongCode, $tooLongMessage);
+
+            return null;
+        }
+
+        return $value;
+    }
+
+    /**
      * Trim and cap to a column width, noting the truncation.
      */
     public function boundedText(?string $raw, string $field, int $max, RowNoteBag $notes): ?string
@@ -451,12 +477,17 @@ class ValueNormalizer
      * "Bi-Weekly", "Straight (Fixed)". Keys are matched after folding case and
      * collapsing punctuation, so all four forms land.
      *
+     * A refusal lists the accepted values in `$words` (stored value => words,
+     * as the workbook writes them), never the stored values themselves. A
+     * stored value with no words there reads with its underscores as spaces.
+     *
      * @param  array<string, string>  $map
+     * @param  array<string, string>  $words
      */
-    public function enum(?string $raw, array $map, string $field, RowNoteBag $notes, bool $required = false, ?string $label = null): ?string
+    public function enum(?string $raw, array $map, string $field, RowNoteBag $notes, bool $required = false, ?string $label = null, array $words = []): ?string
     {
         $value = $this->text($raw);
-        $label ??= $field;
+        $label ??= str_replace('_', ' ', $field);
 
         if ($value === null) {
             if ($required) {
@@ -472,10 +503,14 @@ class ValueNormalizer
             return $map[$token];
         }
 
-        $accepted = implode(', ', array_values(array_unique($map)));
+        $accepted = implode(', ', array_map(
+            static fn (string $stored): string => $words[$stored] ?? ucfirst(str_replace('_', ' ', $stored)),
+            array_values(array_unique($map)),
+        ));
+        $article = preg_match('/^[aeiou]/i', $label) === 1 ? 'an' : 'a';
 
         if ($required) {
-            $notes->fail($field, 'enum_invalid', "\"{$value}\" is not a {$label} this system recognises. Accepted values: {$accepted}.");
+            $notes->fail($field, 'enum_invalid', "\"{$value}\" is not {$article} {$label} this system recognises. Accepted values: {$accepted}.");
 
             return null;
         }
@@ -483,7 +518,7 @@ class ValueNormalizer
         // Nullable columns take the same downgrade as contact number and email,
         // and for the same reason: the value cannot be stored, and refusing the
         // whole row over an optional field would orphan the member's loans.
-        $notes->warn($field, 'enum_unmapped', "\"{$value}\" is not a {$label} this system recognises, so it was imported as blank. Accepted values: {$accepted}.");
+        $notes->warn($field, 'enum_unmapped', "\"{$value}\" is not {$article} {$label} this system recognises, so it was imported as blank. Accepted values: {$accepted}.");
 
         return null;
     }

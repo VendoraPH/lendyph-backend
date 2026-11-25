@@ -43,6 +43,23 @@ class CustomerRowNormalizer
         'babae' => 'female',
     ];
 
+    /**
+     * Each gender and civil status in words, as the workbook writes it, for a
+     * value the import blanks.
+     *
+     * @var array<string, string>
+     */
+    private const GENDER_WORDS = ['male' => 'Male', 'female' => 'Female'];
+
+    /** @var array<string, string> */
+    private const CIVIL_STATUS_WORDS = [
+        'single' => 'Single',
+        'married' => 'Married',
+        'widowed' => 'Widowed',
+        'separated' => 'Separated',
+        'divorced' => 'Divorced',
+    ];
+
     /** @var array<string, string> */
     private const CIVIL_STATUS_MAP = [
         'single' => 'single',
@@ -102,14 +119,14 @@ class CustomerRowNormalizer
         }
 
         $values = [
-            'account_no' => $this->requiredText($cells['account_no'], 'account_no', 50, $notes),
+            'account_no' => $this->values->identifier($cells['account_no'], 'account_no', LoanRowNormalizer::ACCOUNT_NO_MAX, 'account_no_too_long', LoanRowNormalizer::ACCOUNT_NO_TOO_LONG, $notes),
             'last_name' => $this->requiredText($cells['last_name'], 'last_name', 255, $notes),
             'first_name' => $this->requiredText($cells['first_name'], 'first_name', 255, $notes),
             'middle_name' => $this->values->boundedText($cells['middle_name'], 'middle_name', 255, $notes),
             'suffix' => $this->values->boundedText($cells['suffix'], 'suffix', 20, $notes),
             'birthdate' => $this->birthdate($cells['birthdate'], $notes),
-            'gender' => $this->values->enum($cells['gender'], self::GENDER_MAP, 'gender', $notes, label: 'gender'),
-            'civil_status' => $this->values->enum($cells['civil_status'], self::CIVIL_STATUS_MAP, 'civil_status', $notes, label: 'civil status'),
+            'gender' => $this->values->enum($cells['gender'], self::GENDER_MAP, 'gender', $notes, label: 'gender', words: self::GENDER_WORDS),
+            'civil_status' => $this->values->enum($cells['civil_status'], self::CIVIL_STATUS_MAP, 'civil_status', $notes, label: 'civil status', words: self::CIVIL_STATUS_WORDS),
             'contact_number' => $this->values->contactNumber($cells['contact_number'], 'contact_number', $notes),
             'email' => $this->values->email($cells['email'], 'email', $notes),
             'street_address' => $this->values->boundedText($cells['street_address'], 'street_address', 255, $notes),

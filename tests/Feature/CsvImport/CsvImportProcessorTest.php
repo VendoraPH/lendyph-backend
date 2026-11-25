@@ -682,34 +682,36 @@ class CsvImportProcessorTest extends TestCase
     /**
      * Two Loan Nos alike in their first 20 characters are two loans. Cut to 20,
      * they read as one number, and the second was taken for a re-run of the
-     * first ("already on file") and never imported. Each is refused instead.
+     * first ("already on file") and never imported. Kept whole, both land; past
+     * the column's 50 a Loan No. is refused, never cut.
      */
-    public function test_loan_numbers_alike_in_their_first_20_characters_are_refused_never_merged(): void
+    public function test_loan_numbers_alike_in_their_first_20_characters_import_as_two_loans(): void
     {
         $this->seedForImport();
 
         $product = $this->salaryLoanProduct();
         $run = $this->makeRun(['product_mapping' => ['Salary Loan' => $product->id]]);
+        $tooLong = 'LN-2023-'.str_repeat('9', 43);
 
         $this->makeFile($run, 'customers', [$this->customerRow('A-001')]);
         $loans = $this->makeFile($run, 'loans', [
             $this->loanRow('A-001', 'LN-2023-000000000001-A'),
             $this->loanRow('A-001', 'LN-2023-000000000001-B'),
-            $this->loanRow('A-001', 'LN-2023-0000000000002'),
+            $this->loanRow('A-001', $tooLong),
         ]);
 
         $this->runToIdle($run);
 
         $this->assertSame('completed', $run->fresh()->phase);
-        $this->assertSame(0, Loan::whereNotNull('external_loan_no')->count());
+        $this->assertSame(
+            ['LN-2023-000000000001-A', 'LN-2023-000000000001-B'],
+            Loan::whereNotNull('external_loan_no')->orderBy('id')->pluck('external_loan_no')->all(),
+        );
 
         $rows = CsvImportRow::where('csv_import_file_id', $loans->id)->orderBy('id')->get();
-        $this->assertSame(['invalid', 'invalid', 'invalid'], $rows->pluck('status')->all());
-        $this->assertSame(['invalid_row', 'invalid_row', 'invalid_row'], $rows->pluck('result_category')->all());
-
-        foreach ($rows as $row) {
-            $this->assertSame(['loan_no_too_long'], array_column((array) $row->errors, 'code'));
-        }
+        $this->assertSame(['imported', 'imported', 'skipped'], $rows->pluck('result')->all());
+        $this->assertSame(51, mb_strlen($tooLong));
+        $this->assertSame(['loan_no_too_long'], array_column((array) $rows[2]->errors, 'code'));
     }
 
     /**

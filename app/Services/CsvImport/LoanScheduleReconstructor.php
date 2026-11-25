@@ -166,7 +166,9 @@ class LoanScheduleReconstructor
             }
 
             if (! $periodDate->eq($maturity)) {
-                $notes->warn('maturity_date', 'maturity_off_schedule', "The maturity date {$input->maturityDate} does not fall exactly on a {$input->frequency} period from {$input->dateReleased} (the nearest is {$periodDate->toDateString()}). The last instalment was dated {$input->maturityDate} as the file says, and the loan recorded as {$k} periods.");
+                // The frequency in words: its stored value (`semi_monthly`) is a key.
+                $paid = mb_strtolower(LoanRowNormalizer::FREQUENCY_WORDS[$input->frequency] ?? str_replace('_', ' ', $input->frequency));
+                $notes->warn('maturity_date', 'maturity_off_schedule', "The maturity date {$input->maturityDate} does not fall exactly on a due date of a loan paid {$paid} from {$input->dateReleased} (the nearest is {$periodDate->toDateString()}). The last instalment was dated {$input->maturityDate} as the file says, and the loan recorded as {$k} periods.");
             }
 
             $this->warnIfTermInMonthsDisagrees($input, $k, $notes);

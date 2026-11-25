@@ -239,32 +239,104 @@ class RowNormalizerTest extends TestCase
     /**
      * A Loan No. is the cooperative's own name for the loan, and the only thing
      * that tells one imported loan from another (`loans.external_loan_no` is
-     * unique). Cut short, two numbers alike in their first 20 characters become
+     * unique, varchar(50)). Cut short, two numbers alike up to the cut become
      * one, and the second loan is taken for a re-run of the first.
      */
-    public function test_a_loan_no_longer_than_20_characters_is_refused_and_never_cut_short(): void
+    public function test_a_loan_no_longer_than_its_50_character_column_is_refused_and_never_cut_short(): void
     {
-        $row = $this->loanRow(['loan_no' => 'LN-2023-ABCDEFGHIJKLM']);
+        $fifty = 'LN-2023-'.str_repeat('7', 42);
+        $this->assertSame(50, mb_strlen($fifty));
 
-        $this->assertSame(21, mb_strlen('LN-2023-ABCDEFGHIJKLM'));
+        $row = $this->loanRow(['loan_no' => $fifty.'7']);
+
         $this->assertFalse($row->isValid());
         $this->assertNull($row->value('loan_no'));
         $this->assertSame([[
             'field' => 'loan_no',
             'code' => 'loan_no_too_long',
-            'message' => 'This Loan No. is longer than the 20 characters a loan number can have. Shorten it in the file: a loan number is never cut short, since it tells one loan from another.',
+            'message' => 'This Loan No. is longer than the 50 characters a loan number can have. Shorten it in the file: a loan number is never cut short, since it tells one loan from another.',
         ]], $row->errorsToArray());
         $this->assertSame([], $row->warningsToArray());
 
-        $twenty = $this->loanRow(['loan_no' => 'LN-2023-ABCDEFGHIJKL']);
+        // Twenty-one characters, cut to 20 before round 4, and 50: both kept whole.
+        foreach (['LN-2023-ABCDEFGHIJKLM', $fifty] as $loanNo) {
+            $kept = $this->loanRow(['loan_no' => $loanNo]);
 
-        $this->assertTrue($twenty->isValid());
-        $this->assertSame('LN-2023-ABCDEFGHIJKL', $twenty->value('loan_no'));
-        $this->assertSame([], $twenty->warningsToArray());
+            $this->assertTrue($kept->isValid(), $loanNo);
+            $this->assertSame($loanNo, $kept->value('loan_no'));
+            $this->assertSame([], $kept->warningsToArray(), $loanNo);
+        }
 
         $blank = $this->loanRow(['loan_no' => '  ']);
 
         $this->assertSame(['required'], array_column($blank->errorsToArray(), 'code'));
+    }
+
+    /**
+     * An Account No. ties a loan to its member (`borrowers.external_account_no`,
+     * varchar(50)), so in both files it is refused past 50, never cut.
+     */
+    public function test_an_account_no_longer_than_its_50_character_column_is_refused_in_both_files_and_never_cut_short(): void
+    {
+        $fifty = 'ACCT-'.str_repeat('4', 45);
+        $this->assertSame(50, mb_strlen($fifty));
+        $refusal = [[
+            'field' => 'account_no',
+            'code' => 'account_no_too_long',
+            'message' => 'This Account No. is longer than the 50 characters an account number can have. Shorten it in the file: an account number is never cut short, since it tells one member from another.',
+        ]];
+
+        foreach (['members' => fn (array $values) => $this->customerRow($values), 'loans' => fn (array $values) => $this->loanRow($values)] as $file => $row) {
+            $long = $row(['account_no' => $fifty.'4']);
+
+            $this->assertFalse($long->isValid(), $file);
+            $this->assertNull($long->value('account_no'), $file);
+            $this->assertSame($refusal, $long->errorsToArray(), $file);
+            $this->assertSame([], $long->warningsToArray(), $file);
+
+            $kept = $row(['account_no' => $fifty]);
+
+            $this->assertTrue($kept->isValid(), $file);
+            $this->assertSame($fifty, $kept->value('account_no'), $file);
+            $this->assertSame([], $kept->warningsToArray(), $file);
+        }
+    }
+
+    /**
+     * A refused or blanked choice names what the import accepts in words, as
+     * the workbook writes them, never as the values the database stores.
+     */
+    public function test_a_choice_the_import_does_not_read_lists_the_accepted_values_in_words(): void
+    {
+        $this->assertSame(
+            '"Quarterly" is not a payment frequency this system recognises. Accepted values: Daily, Weekly, Bi-Weekly, Semi-Monthly, Monthly, Upon Maturity.',
+            $this->loanRow(['payment_frequency' => 'Quarterly'])->errorsToArray()[0]['message'],
+        );
+        $this->assertSame(
+            '"Compound" is not an interest type this system recognises. Accepted values: Straight (Fixed), Diminishing, Upon Maturity.',
+            $this->loanRow(['interest_type' => 'Compound'])->errorsToArray()[0]['message'],
+        );
+        $this->assertSame(
+            '"Other" is not a gender this system recognises, so it was imported as blank. Accepted values: Male, Female.',
+            $this->customerRow(['gender' => 'Other'])->warningsToArray()[0]['message'],
+        );
+        $this->assertSame(
+            '"Live-in" is not a civil status this system recognises, so it was imported as blank. Accepted values: Single, Married, Widowed, Separated, Divorced.',
+            $this->customerRow(['civil_status' => 'Live-in'])->warningsToArray()[0]['message'],
+        );
+    }
+
+    public function test_every_payment_frequency_has_its_words(): void
+    {
+        $this->assertSame(
+            array_map(fn (LoanFrequency $case): string => $case->value, LoanFrequency::cases()),
+            array_keys(LoanRowNormalizer::FREQUENCY_WORDS),
+        );
+        $this->assertSame([], array_diff(array_unique(LoanRowNormalizer::frequencyMap()), array_keys(LoanRowNormalizer::FREQUENCY_WORDS)));
+
+        foreach (LoanRowNormalizer::FREQUENCY_WORDS as $words) {
+            $this->assertStringNotContainsString('_', $words);
+        }
     }
 
     /**
