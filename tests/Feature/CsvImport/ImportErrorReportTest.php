@@ -128,13 +128,14 @@ class ImportErrorReportTest extends TestCase
         $body = $this->getJson("/api/imports/{$this->run->id}/errors?per_page=100")->assertOk()->json();
         $stats = $body['meta']['stats'];
 
-        $this->assertSame(11, $stats['total_issues'], '3 failures + 2 errors + 4 warnings + 1 row carrying both.');
+        $this->assertSame(11, $stats['total_issues'], '3 failures + 2 errors + 4 warnings + 1 refused row carrying a note.');
         $this->assertSame(10, $stats['rows_reported']);
         $this->assertSame(10, $body['meta']['total'], 'meta.total counts reported ROWS.');
         $this->assertCount(11, $body['data'], 'data carries one entry per issue.');
         $this->assertSame(11, $body['meta']['issues_on_page']);
 
-        $this->assertSame(['error' => 6, 'warning' => 5], $stats['by_severity']);
+        // B-11 was refused at the checks, so its note is a skipped line, never a warning.
+        $this->assertSame(['error' => 6, 'skipped' => 1, 'warning' => 4], $stats['by_severity']);
         $this->assertSame(
             $stats['total_issues'],
             array_sum(array_column($stats['by_category'], 'count')),

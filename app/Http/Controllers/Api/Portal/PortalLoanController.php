@@ -37,7 +37,7 @@ class PortalLoanController extends Controller
     #[OA\Get(
         path: '/api/portal/loans/{id}',
         summary: 'One of the member\'s loans',
-        description: 'Signed-in portal token; feature `loans`. The list row plus term, term_unit, frequency, interest_rate (as stored, per interest_rate_frequency, never converted or rounded), interest_rate_frequency, interest_method, outstanding_interest, outstanding_penalty, insurance_owed, total_repaid, principal_paid, interest_paid, penalty_paid. Never payment presets, the payoff figure or the restructurable balance. 404 for another member\'s loan, a co-maker\'s loan or a draft.',
+        description: 'Signed-in portal token; feature `loans`. The list row plus term, term_unit, frequency, interest_rate (as stored, per interest_rate_frequency, never converted or rounded), interest_rate_frequency, interest_method, outstanding_interest, outstanding_penalty, insurance_owed, total_repaid, principal_paid, interest_paid, penalty_paid and paid_before_import (inside total_repaid: what an imported loan\'s file says was paid before the import; "0.00" otherwise). Never payment presets, the payoff figure or the restructurable balance. 404 for another member\'s loan, a co-maker\'s loan or a draft.',
         tags: ['Member Portal'],
         security: [['sanctum' => []]],
         parameters: [new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer'))],

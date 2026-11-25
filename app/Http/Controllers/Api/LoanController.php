@@ -189,7 +189,8 @@ value is a 422.
 (application date), so `date_to=2026-08-27` includes a loan captured at
 23:59 on the 27th. A reversed range simply matches nothing.
 
-`search` matches the application number, the loan account number, the loan
+`search` matches the application number, the loan account number, an imported
+loan's Loan No. from the cooperative's file (`external_loan_no`), the loan
 product's name, and the borrower as `GET /api/borrowers` searches them: code, any
 name part, the whole name as typed ("Juan Dela Cruz"), contact number or email. The
 contact number and email match only for a caller holding `borrowers:view`.
@@ -255,7 +256,7 @@ DESC,
         tags: ['Loans'],
         security: [['sanctum' => []]],
         parameters: [
-            new OA\Parameter(name: 'search', in: 'query', required: false, description: 'Application number, loan account number, loan product name, or the borrower\'s code or name (a part or the whole name). A caller holding `borrowers:view` also matches the borrower\'s contact number and email.', schema: new OA\Schema(type: 'string')),
+            new OA\Parameter(name: 'search', in: 'query', required: false, description: 'Application number, loan account number, an imported loan\'s Loan No. from the file (`external_loan_no`), loan product name, or the borrower\'s code or name (a part or the whole name). A caller holding `borrowers:view` also matches the borrower\'s contact number and email.', schema: new OA\Schema(type: 'string')),
             new OA\Parameter(name: 'status', in: 'query', required: false, description: 'One status, a comma-separated list, or a virtual value: `active`, `collectible` (released, ongoing and defaulted: the loans that take payments), `past_due` or `current` (preferred over spelling statuses out).', schema: new OA\Schema(type: 'string', example: 'active')),
             new OA\Parameter(name: 'branch_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')),
             new OA\Parameter(name: 'borrower_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')),
@@ -336,6 +337,9 @@ DESC,
                 $q->where(function ($query) use ($like, $search, $matchContactDetails) {
                     $query->where('loans.application_number', 'like', $like)
                         ->orWhere('loans.loan_account_number', 'like', $like)
+                        // An imported loan's own number in the cooperative's
+                        // file, matched as the other loan numbers are.
+                        ->orWhere('loans.external_loan_no', 'like', $like)
                         ->orWhereHas('borrower', fn ($bq) => $bq->search($search, $matchContactDetails))
                         ->orWhereHas('loanProduct', fn ($pq) => $pq->where('name', 'like', $like));
                 });

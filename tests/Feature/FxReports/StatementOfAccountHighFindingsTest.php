@@ -80,7 +80,7 @@ class StatementOfAccountHighFindingsTest extends TestCase
         $this->pay($loan, 11800);
         $this->applyBalanceAdjustment($loan, -600);
 
-        $this->assertEquals(['debit' => 70800, 'credit' => 12400, 'overpayment_applied' => 0], $this->statement($loan)['transaction_totals']);
+        $this->assertEquals(['debit' => 70800, 'credit' => 12400, 'overpayment_applied' => 0, 'amount_paid' => 11800], $this->statement($loan)['transaction_totals']);
     }
 
     public function test_the_schedule_carries_a_note_only_once_an_adjustment_restated_it(): void

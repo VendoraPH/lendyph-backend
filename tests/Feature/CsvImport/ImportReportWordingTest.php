@@ -45,10 +45,11 @@ class ImportReportWordingTest extends TestCase
         $this->assertSame('invalid_row', $row->result_category);
         $this->assertSame(self::NOT_IMPORTED, $row->result_message);
 
-        $warning = $this->issue($row, $file, 'invalid_row');
-        $this->assertSame(ErrorReportBuilder::SEVERITY_WARNING, $warning['severity']);
-        $this->assertSame(self::NOT_IMPORTED, $warning['message']);
-        $this->assertStringNotContainsStringIgnoringCase('staging', $warning['message']);
+        // Counted as skipped, never as a warning: the row was not imported.
+        $skipped = $this->issue($row, $file, 'invalid_row');
+        $this->assertSame(ErrorReportBuilder::SEVERITY_SKIPPED, $skipped['severity']);
+        $this->assertSame(self::NOT_IMPORTED, $skipped['message']);
+        $this->assertStringNotContainsStringIgnoringCase('staging', $skipped['message']);
     }
 
     public function test_a_rejected_row_whose_notes_are_gone_still_reads_in_words(): void

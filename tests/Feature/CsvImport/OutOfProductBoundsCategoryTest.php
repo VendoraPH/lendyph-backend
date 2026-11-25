@@ -137,7 +137,9 @@ class OutOfProductBoundsCategoryTest extends TestCase
         $stats = $this->stats();
 
         $this->assertSame(1, $stats['total_issues']);
-        $this->assertSame(1, $stats['by_severity']['warning']);
+        // A row that was not imported is counted as skipped, never as a warning.
+        $this->assertSame(1, $stats['by_severity']['skipped']);
+        $this->assertSame(0, $stats['by_severity']['warning']);
     }
 
     public function test_the_reviewable_list_survives_redaction(): void

@@ -67,7 +67,7 @@ final class NormalizedRow
      * would trade readability for nothing. Position is load-bearing in exactly
      * one place, and that place is a list.
      *
-     * @return array{shape: string, row: int, values: list<string|null>, warnings: list<array{field: string, code: string, message: string}>, errors: list<array{field: string, code: string, message: string}>}
+     * @return array{shape: string, row: int, values: list<string|null>, warnings: list<array{field: string, code: string, message: string, message_if_not_imported?: string}>, errors: list<array{field: string, code: string, message: string}>}
      */
     public function toPayload(): array
     {
@@ -173,13 +173,14 @@ final class NormalizedRow
                 (string) ($note['field'] ?? ''),
                 (string) ($note['code'] ?? ''),
                 (string) ($note['message'] ?? ''),
+                isset($note['message_if_not_imported']) ? (string) $note['message_if_not_imported'] : null,
             ),
             array_filter($notes, 'is_array'),
         ));
     }
 
     /**
-     * @return list<array{field: string, code: string, message: string}>
+     * @return list<array{field: string, code: string, message: string, message_if_not_imported?: string}>
      */
     public function warningsToArray(): array
     {

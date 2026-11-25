@@ -129,7 +129,12 @@ class ValueNormalizer
             return $value;
         }
 
-        $notes->warn($field, 'truncated', "\"{$value}\" is longer than {$max} characters and was shortened to fit.");
+        $notes->warn(
+            $field,
+            'truncated',
+            "\"{$value}\" is longer than {$max} characters and was shortened to fit.",
+            "\"{$value}\" is longer than {$max} characters, so it would be shortened to fit.",
+        );
 
         return mb_substr($value, 0, $max);
     }
@@ -332,7 +337,12 @@ class ValueNormalizer
         if ($serial !== null) {
             $converted = Carbon::create(1899, 12, 30)->addDays($serial)->toDateString();
 
-            $notes->warn($field, 'excel_serial_date', "\"{$value}\" is an Excel serial date number and was read as {$converted}. Confirm it against the source workbook.");
+            $notes->warn(
+                $field,
+                'excel_serial_date',
+                "\"{$value}\" is an Excel serial date number and was read as {$converted}. Confirm it against the source workbook.",
+                "\"{$value}\" is an Excel serial date number and would be read as {$converted}. Confirm it against the source workbook.",
+            );
 
             return $converted;
         }
@@ -383,7 +393,12 @@ class ValueNormalizer
             return;
         }
 
-        $notes->warn($field, 'ambiguous_date', "\"{$value}\" could be read as {$chosen} (month first, which is what was used) or as {$alternative} (day first). Check it against the source workbook.");
+        $notes->warn(
+            $field,
+            'ambiguous_date',
+            "\"{$value}\" could be read as {$chosen} (month first, which is what was used) or as {$alternative} (day first). Check it against the source workbook.",
+            "\"{$value}\" could be read as {$chosen} (month first, which is what would be used) or as {$alternative} (day first). Check it against the source workbook.",
+        );
     }
 
     private function excelSerial(string $value): ?int
@@ -423,7 +438,12 @@ class ValueNormalizer
         ));
 
         if ($parts === []) {
-            $notes->warn($field, 'contact_number_unusable', "\"{$original}\" is not a usable contact number and was left blank.");
+            $notes->warn(
+                $field,
+                'contact_number_unusable',
+                "\"{$original}\" is not a usable contact number and was left blank.",
+                "\"{$original}\" is not a usable contact number, so it would be left blank.",
+            );
 
             return null;
         }
@@ -451,7 +471,12 @@ class ValueNormalizer
          */
         if (count($parts) > 1 && $digits !== '') {
             $dropped = implode(', ', array_slice($parts, 1));
-            $notes->warn($field, 'contact_number_multiple', "\"{$original}\" holds more than one number. The first was kept and \"{$dropped}\" dropped — the field stores only 20 characters, which is less than two mobile numbers.");
+            $notes->warn(
+                $field,
+                'contact_number_multiple',
+                "\"{$original}\" holds more than one number. The first was kept and \"{$dropped}\" dropped — the field stores only 20 characters, which is less than two mobile numbers.",
+                "\"{$original}\" holds more than one number. The first would be kept and \"{$dropped}\" dropped — the field stores only 20 characters, which is less than two mobile numbers.",
+            );
         }
 
         if ($normalized !== '' && preg_match(self::CONTACT_NUMBER_REGEX, $normalized) === 1) {
@@ -465,7 +490,12 @@ class ValueNormalizer
             return $this->boundedText($candidate, $field, 20, $notes);
         }
 
-        $notes->warn($field, 'contact_number_invalid', "\"{$original}\" is not a contact number this system accepts, so it was imported as blank. A member carrying a value the member form rejects can never be saved again — fix it in the app after the import.");
+        $notes->warn(
+            $field,
+            'contact_number_invalid',
+            "\"{$original}\" is not a contact number this system accepts, so it was imported as blank. A member carrying a value the member form rejects can never be saved again — fix it in the app after the import.",
+            "\"{$original}\" is not a contact number this system accepts, so it would be imported as blank. Correct it in the file to keep it.",
+        );
 
         return null;
     }
@@ -488,7 +518,12 @@ class ValueNormalizer
         $failed = Validator::make(['email' => $value], ['email' => ['email', 'max:255']])->fails();
 
         if ($failed) {
-            $notes->warn($field, 'email_invalid', "\"{$value}\" is not an email address this system accepts, so it was imported as blank. A member carrying a value the member form rejects can never be saved again — fix it in the app after the import.");
+            $notes->warn(
+                $field,
+                'email_invalid',
+                "\"{$value}\" is not an email address this system accepts, so it was imported as blank. A member carrying a value the member form rejects can never be saved again — fix it in the app after the import.",
+                "\"{$value}\" is not an email address this system accepts, so it would be imported as blank. Correct it in the file to keep it.",
+            );
 
             return null;
         }
@@ -545,7 +580,12 @@ class ValueNormalizer
         // Nullable columns take the same downgrade as contact number and email,
         // and for the same reason: the value cannot be stored, and refusing the
         // whole row over an optional field would orphan the member's loans.
-        $notes->warn($field, 'enum_unmapped', "\"{$value}\" is not {$article} {$label} this system recognises, so it was imported as blank. Accepted values: {$accepted}.");
+        $notes->warn(
+            $field,
+            'enum_unmapped',
+            "\"{$value}\" is not {$article} {$label} this system recognises, so it was imported as blank. Accepted values: {$accepted}.",
+            "\"{$value}\" is not {$article} {$label} this system recognises, so it would be imported as blank. Accepted values: {$accepted}.",
+        );
 
         return null;
     }

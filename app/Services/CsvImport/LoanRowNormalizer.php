@@ -186,7 +186,8 @@ class LoanRowNormalizer
             return $value;
         }
 
-        $notes->warn('purpose', 'truncated', 'This Purpose is '.mb_strlen($value).' characters, longer than the '.self::PURPOSE_MAX.' a loan\'s purpose can hold, so only its first '.self::PURPOSE_MAX.' were kept.');
+        $tooLong = 'This Purpose is '.mb_strlen($value).' characters, longer than the '.self::PURPOSE_MAX.' a loan\'s purpose can hold, so only its first '.self::PURPOSE_MAX;
+        $notes->warn('purpose', 'truncated', $tooLong.' were kept.', $tooLong.' would be kept.');
 
         return mb_substr($value, 0, self::PURPOSE_MAX);
     }

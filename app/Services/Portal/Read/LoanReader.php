@@ -84,6 +84,9 @@ final class LoanReader
             'principal_paid' => Pesos::of($summary['principal_paid']),
             'interest_paid' => Pesos::of($summary['interest_paid']),
             'penalty_paid' => Pesos::of($summary['penalty_paid']),
+            // Inside `total_repaid`: what an imported loan's file says was
+            // paid before the import ("0.00" on any other loan).
+            'paid_before_import' => Pesos::of($summary['paid_before_import']),
         ];
     }
 

@@ -213,7 +213,8 @@ final class LoanLedgerService
 
     /**
      * On a loan migrated in from an existing book, what its periods were paid
-     * before the import, which no repayment here records.
+     * before the import, which no repayment here records: PaidBeforeImport,
+     * the figure Total Paid adds on every screen.
      *
      * @param  EloquentCollection<int, AmortizationSchedule>  $schedules
      * @param  EloquentCollection<int, Repayment>  $repayments
@@ -221,16 +222,11 @@ final class LoanLedgerService
      */
     private function importedEvents(Loan $loan, EloquentCollection $schedules, EloquentCollection $repayments): array
     {
-        if (! $loan->isImported()) {
-            return [];
-        }
-
-        $posted = $repayments->where('status', 'posted');
+        $paid = PaidBeforeImport::forLoan($loan, $schedules, $repayments);
         $effect = [];
 
         foreach (['principal', 'interest', 'penalty'] as $column) {
-            $effect[$column] = $posted->sum(fn (Repayment $r): int => $this->centavos($r->{"{$column}_applied"}))
-                - $schedules->sum(fn (AmortizationSchedule $s): int => $this->centavos($s->{"{$column}_paid"}));
+            $effect[$column] = -$paid[$column];
         }
 
         if ($effect === ['principal' => 0, 'interest' => 0, 'penalty' => 0]) {
