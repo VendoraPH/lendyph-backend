@@ -98,7 +98,9 @@ class OutOfProductBoundsCategoryTest extends TestCase
 
         $csv = $this->get("/api/imports/{$this->run->id}/errors.csv")->assertOk()->streamedContent();
 
-        $this->assertStringContainsString(ErrorReportBuilder::CATEGORY_OUT_OF_PRODUCT_BOUNDS, $csv);
+        // The download reads the category in words, as the screen does.
+        $this->assertStringContainsString("Outside the loan product's limits", $csv);
+        $this->assertStringNotContainsString(ErrorReportBuilder::CATEGORY_OUT_OF_PRODUCT_BOUNDS, $csv);
         $this->assertStringContainsString('is above the product maximum', $csv);
     }
 

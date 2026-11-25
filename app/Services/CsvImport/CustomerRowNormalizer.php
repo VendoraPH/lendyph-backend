@@ -27,12 +27,37 @@ use Carbon\Carbon;
  */
 class CustomerRowNormalizer
 {
-    /** @var array<string, string> */
+    /**
+     * Gender as the workbook writes it, Filipino included: Lalaki (also typed
+     * Lalake) is male and Babae female. Matched in any case.
+     *
+     * @var array<string, string>
+     */
     private const GENDER_MAP = [
         'male' => 'male',
         'm' => 'male',
+        'lalaki' => 'male',
+        'lalake' => 'male',
         'female' => 'female',
         'f' => 'female',
+        'babae' => 'female',
+    ];
+
+    /**
+     * Each gender and civil status in words, as the workbook writes it, for a
+     * value the import blanks.
+     *
+     * @var array<string, string>
+     */
+    private const GENDER_WORDS = ['male' => 'Male', 'female' => 'Female'];
+
+    /** @var array<string, string> */
+    private const CIVIL_STATUS_WORDS = [
+        'single' => 'Single',
+        'married' => 'Married',
+        'widowed' => 'Widowed',
+        'separated' => 'Separated',
+        'divorced' => 'Divorced',
     ];
 
     /** @var array<string, string> */
@@ -83,8 +108,11 @@ class CustomerRowNormalizer
      * @param  bool  $mayImportMembership  Whether the run may carry the
      *                                     membership columns (CsvImportStager decides it per run).
      *                                     Without it, a row that fills one is refused.
+     * @param  array<string, string>  $dateOrders  The date order the Check step settled
+     *                                             per date column, `dmy` or `mdy`
+     *                                             (CsvImportRun::dateOrdersFor()).
      */
-    public function normalize(CsvRow $row, bool $mayImportMembership = false): NormalizedRow
+    public function normalize(CsvRow $row, bool $mayImportMembership = false, array $dateOrders = []): NormalizedRow
     {
         $notes = new RowNoteBag;
         $cells = $this->cellsByKey($row, $notes);
@@ -94,14 +122,14 @@ class CustomerRowNormalizer
         }
 
         $values = [
-            'account_no' => $this->requiredText($cells['account_no'], 'account_no', 50, $notes),
+            'account_no' => $this->values->identifier($cells['account_no'], 'account_no', LoanRowNormalizer::ACCOUNT_NO_MAX, 'account_no_too_long', LoanRowNormalizer::ACCOUNT_NO_TOO_LONG, $notes),
             'last_name' => $this->requiredText($cells['last_name'], 'last_name', 255, $notes),
             'first_name' => $this->requiredText($cells['first_name'], 'first_name', 255, $notes),
             'middle_name' => $this->values->boundedText($cells['middle_name'], 'middle_name', 255, $notes),
             'suffix' => $this->values->boundedText($cells['suffix'], 'suffix', 20, $notes),
-            'birthdate' => $this->birthdate($cells['birthdate'], $notes),
-            'gender' => $this->values->enum($cells['gender'], self::GENDER_MAP, 'gender', $notes, label: 'gender'),
-            'civil_status' => $this->values->enum($cells['civil_status'], self::CIVIL_STATUS_MAP, 'civil_status', $notes, label: 'civil status'),
+            'birthdate' => $this->birthdate($cells['birthdate'], $notes, $dateOrders['birthdate'] ?? null),
+            'gender' => $this->values->enum($cells['gender'], self::GENDER_MAP, 'gender', $notes, label: 'gender', words: self::GENDER_WORDS),
+            'civil_status' => $this->values->enum($cells['civil_status'], self::CIVIL_STATUS_MAP, 'civil_status', $notes, label: 'civil status', words: self::CIVIL_STATUS_WORDS),
             'contact_number' => $this->values->contactNumber($cells['contact_number'], 'contact_number', $notes),
             'email' => $this->values->email($cells['email'], 'email', $notes),
             'street_address' => $this->values->boundedText($cells['street_address'], 'street_address', 255, $notes),
@@ -121,10 +149,10 @@ class CustomerRowNormalizer
             'spouse_occupation' => $this->values->boundedText($cells['spouse_occupation'], 'spouse_occupation', 255, $notes),
         ];
 
-        $values['date_hired'] = $this->dateHired($cells['date_hired'], $values['birthdate'], $notes);
+        $values['date_hired'] = $this->dateHired($cells['date_hired'], $values['birthdate'], $notes, $dateOrders['date_hired'] ?? null);
 
         if ($mayImportMembership) {
-            $values['membership_date'] = $this->membershipDate($cells['membership_date'], $notes);
+            $values['membership_date'] = $this->membershipDate($cells['membership_date'], $notes, $dateOrders['membership_date'] ?? null);
             $values['member_type'] = $this->memberType($cells['member_type'], $notes);
             $values['membership_number'] = $this->membershipNumber($cells['membership_number'], $notes);
         } else {
@@ -168,9 +196,9 @@ class CustomerRowNormalizer
      * the member's birthdate. A birthdate the import blanked (in the future,
      * or before 1900) leaves that last check out.
      */
-    private function dateHired(?string $raw, ?string $birthdate, RowNoteBag $notes): ?string
+    private function dateHired(?string $raw, ?string $birthdate, RowNoteBag $notes, ?string $order): ?string
     {
-        $value = $this->values->date($raw, 'date_hired', $notes);
+        $value = $this->values->date($raw, 'date_hired', $notes, order: $order);
 
         if ($value === null) {
             return null;
@@ -203,9 +231,9 @@ class CustomerRowNormalizer
      * imported member is a member (`active`), so the date always has a member
      * to belong to.
      */
-    private function membershipDate(?string $raw, RowNoteBag $notes): ?string
+    private function membershipDate(?string $raw, RowNoteBag $notes, ?string $order): ?string
     {
-        $value = $this->values->date($raw, 'membership_date', $notes);
+        $value = $this->values->date($raw, 'membership_date', $notes, order: $order);
 
         if ($value !== null && $value > Carbon::today()->toDateString()) {
             $notes->fail('membership_date', 'membership_date_future', "\"{$value}\" is after today, and a membership date can't be in the future.");
@@ -364,9 +392,9 @@ class CustomerRowNormalizer
      * A birthdate in the FUTURE is different again: it is not a fact anybody
      * could hold, so it is a typo, and it is nulled.
      */
-    private function birthdate(?string $raw, RowNoteBag $notes): ?string
+    private function birthdate(?string $raw, RowNoteBag $notes, ?string $order): ?string
     {
-        $value = $this->values->date($raw, 'birthdate', $notes);
+        $value = $this->values->date($raw, 'birthdate', $notes, order: $order);
 
         if ($value === null) {
             return null;

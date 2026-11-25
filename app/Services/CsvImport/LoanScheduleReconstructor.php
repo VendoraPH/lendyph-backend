@@ -166,7 +166,9 @@ class LoanScheduleReconstructor
             }
 
             if (! $periodDate->eq($maturity)) {
-                $notes->warn('maturity_date', 'maturity_off_schedule', "The maturity date {$input->maturityDate} does not fall exactly on a {$input->frequency} period from {$input->dateReleased} (the nearest is {$periodDate->toDateString()}). The last instalment was dated {$input->maturityDate} as the file says, and the loan recorded as {$k} periods.");
+                // The frequency in words: its stored value (`semi_monthly`) is a key.
+                $paid = mb_strtolower(LoanRowNormalizer::FREQUENCY_WORDS[$input->frequency] ?? str_replace('_', ' ', $input->frequency));
+                $notes->warn('maturity_date', 'maturity_off_schedule', "The maturity date {$input->maturityDate} does not fall exactly on a due date of a loan paid {$paid} from {$input->dateReleased} (the nearest is {$periodDate->toDateString()}). The last instalment was dated {$input->maturityDate} as the file says, and the loan recorded as {$k} periods.");
             }
 
             $this->warnIfTermInMonthsDisagrees($input, $k, $notes);
@@ -450,7 +452,7 @@ class LoanScheduleReconstructor
             }
 
             $notes->fail($field, 'invariant_violation', sprintf(
-                'The rebuilt schedule does not reconcile: %s comes to %s but %s is %s. The row was not imported.',
+                'The rebuilt schedule does not reconcile: %s comes to ₱%s but %s is ₱%s. The row was not imported.',
                 $whatWeBuilt,
                 number_format($actual / 100, 2),
                 $whatTheFileSays,

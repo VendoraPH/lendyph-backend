@@ -219,6 +219,171 @@ class RowNormalizerTest extends TestCase
         $this->assertSame('diminishing', $this->loanRow(['interest_type' => 'Diminishing'])->value('interest_type'));
     }
 
+    public function test_the_filipino_words_for_a_members_gender_read_as_male_and_female(): void
+    {
+        foreach (['Lalaki', 'LALAKI', 'lalake', 'Lalake'] as $word) {
+            $row = $this->customerRow(['gender' => $word]);
+
+            $this->assertSame('male', $row->value('gender'), $word);
+            $this->assertSame([], $row->warningsToArray(), $word);
+        }
+
+        foreach (['Babae', 'BABAE', 'babae'] as $word) {
+            $row = $this->customerRow(['gender' => $word]);
+
+            $this->assertSame('female', $row->value('gender'), $word);
+            $this->assertSame([], $row->warningsToArray(), $word);
+        }
+    }
+
+    /**
+     * A Loan No. is the cooperative's own name for the loan, and the only thing
+     * that tells one imported loan from another (`loans.external_loan_no` is
+     * unique, varchar(50)). Cut short, two numbers alike up to the cut become
+     * one, and the second loan is taken for a re-run of the first.
+     */
+    public function test_a_loan_no_longer_than_its_50_character_column_is_refused_and_never_cut_short(): void
+    {
+        $fifty = 'LN-2023-'.str_repeat('7', 42);
+        $this->assertSame(50, mb_strlen($fifty));
+
+        $row = $this->loanRow(['loan_no' => $fifty.'7']);
+
+        $this->assertFalse($row->isValid());
+        $this->assertNull($row->value('loan_no'));
+        $this->assertSame([[
+            'field' => 'loan_no',
+            'code' => 'loan_no_too_long',
+            'message' => 'This Loan No. is longer than the 50 characters a loan number can have. Shorten it in the file: a loan number is never cut short, since it tells one loan from another.',
+        ]], $row->errorsToArray());
+        $this->assertSame([], $row->warningsToArray());
+
+        // Twenty-one characters, cut to 20 before round 4, and 50: both kept whole.
+        foreach (['LN-2023-ABCDEFGHIJKLM', $fifty] as $loanNo) {
+            $kept = $this->loanRow(['loan_no' => $loanNo]);
+
+            $this->assertTrue($kept->isValid(), $loanNo);
+            $this->assertSame($loanNo, $kept->value('loan_no'));
+            $this->assertSame([], $kept->warningsToArray(), $loanNo);
+        }
+
+        $blank = $this->loanRow(['loan_no' => '  ']);
+
+        $this->assertSame(['required'], array_column($blank->errorsToArray(), 'code'));
+
+        // Characters, not bytes: fifty Ñ (100 bytes) fit, fifty-one don't.
+        $this->assertSame(str_repeat('Ñ', 50), $this->loanRow(['loan_no' => str_repeat('Ñ', 50)])->value('loan_no'));
+        $this->assertSame(['loan_no_too_long'], array_column($this->loanRow(['loan_no' => str_repeat('Ñ', 51)])->errorsToArray(), 'code'));
+    }
+
+    /**
+     * An Account No. ties a loan to its member (`borrowers.external_account_no`,
+     * varchar(50)), so in both files it is refused past 50, never cut.
+     */
+    public function test_an_account_no_longer_than_its_50_character_column_is_refused_in_both_files_and_never_cut_short(): void
+    {
+        $fifty = 'ACCT-'.str_repeat('4', 45);
+        $this->assertSame(50, mb_strlen($fifty));
+        $refusal = [[
+            'field' => 'account_no',
+            'code' => 'account_no_too_long',
+            'message' => 'This Account No. is longer than the 50 characters an account number can have. Shorten it in the file: an account number is never cut short, since it tells one member from another.',
+        ]];
+
+        foreach (['members' => fn (array $values) => $this->customerRow($values), 'loans' => fn (array $values) => $this->loanRow($values)] as $file => $row) {
+            $long = $row(['account_no' => $fifty.'4']);
+
+            $this->assertFalse($long->isValid(), $file);
+            $this->assertNull($long->value('account_no'), $file);
+            $this->assertSame($refusal, $long->errorsToArray(), $file);
+            $this->assertSame([], $long->warningsToArray(), $file);
+
+            $kept = $row(['account_no' => $fifty]);
+
+            $this->assertTrue($kept->isValid(), $file);
+            $this->assertSame($fifty, $kept->value('account_no'), $file);
+            $this->assertSame([], $kept->warningsToArray(), $file);
+
+            // Characters, not bytes: fifty Ñ (100 bytes) fit, fifty-one don't.
+            $this->assertSame(str_repeat('Ñ', 50), $row(['account_no' => str_repeat('Ñ', 50)])->value('account_no'), $file);
+            $this->assertSame($refusal, $row(['account_no' => str_repeat('Ñ', 51)])->errorsToArray(), $file);
+        }
+    }
+
+    /**
+     * A refused or blanked choice names what the import accepts in words, as
+     * the workbook writes them, never as the values the database stores.
+     */
+    public function test_a_choice_the_import_does_not_read_lists_the_accepted_values_in_words(): void
+    {
+        $this->assertSame(
+            '"Quarterly" is not a payment frequency this system recognises. Accepted values: Daily, Weekly, Bi-Weekly, Semi-Monthly, Monthly, Upon Maturity.',
+            $this->loanRow(['payment_frequency' => 'Quarterly'])->errorsToArray()[0]['message'],
+        );
+        $this->assertSame(
+            '"Compound" is not an interest type this system recognises. Accepted values: Straight (Fixed), Diminishing, Upon Maturity.',
+            $this->loanRow(['interest_type' => 'Compound'])->errorsToArray()[0]['message'],
+        );
+        $this->assertSame(
+            '"Other" is not a gender this system recognises, so it was imported as blank. Accepted values: Male, Female.',
+            $this->customerRow(['gender' => 'Other'])->warningsToArray()[0]['message'],
+        );
+        $this->assertSame(
+            '"Live-in" is not a civil status this system recognises, so it was imported as blank. Accepted values: Single, Married, Widowed, Separated, Divorced.',
+            $this->customerRow(['civil_status' => 'Live-in'])->warningsToArray()[0]['message'],
+        );
+    }
+
+    public function test_every_payment_frequency_has_its_words(): void
+    {
+        $this->assertSame(
+            array_map(fn (LoanFrequency $case): string => $case->value, LoanFrequency::cases()),
+            array_keys(LoanRowNormalizer::FREQUENCY_WORDS),
+        );
+        $this->assertSame([], array_diff(array_unique(LoanRowNormalizer::frequencyMap()), array_keys(LoanRowNormalizer::FREQUENCY_WORDS)));
+
+        foreach (LoanRowNormalizer::FREQUENCY_WORDS as $words) {
+            $this->assertStringNotContainsString('_', $words);
+        }
+    }
+
+    /**
+     * `loans.purpose` is varchar(500). A longer Purpose is cut to fit with a
+     * warning, as it was at 1,000, where anything from 501 to 1,000 characters
+     * reached the database and was refused there.
+     */
+    public function test_a_purpose_longer_than_its_500_character_column_is_cut_to_fit_with_a_warning(): void
+    {
+        $fits = str_repeat('Rice trading capital. ', 30);
+        $fits = mb_substr($fits, 0, 500);
+
+        $kept = $this->loanRow(['purpose' => $fits]);
+        $this->assertTrue($kept->isValid());
+        $this->assertSame($fits, $kept->value('purpose'));
+        $this->assertSame([], $kept->warningsToArray());
+
+        foreach ([501, 1000] as $length) {
+            $purpose = mb_substr(str_repeat('Sari-sari store restocking. ', 40), 0, $length);
+            $row = $this->loanRow(['purpose' => $purpose]);
+
+            $this->assertTrue($row->isValid(), "{$length} characters");
+            $this->assertSame(mb_substr($purpose, 0, 500), $row->value('purpose'), "{$length} characters");
+            $this->assertSame([[
+                'field' => 'purpose',
+                'code' => 'truncated',
+                'message' => "This Purpose is {$length} characters, longer than the 500 a loan's purpose can hold, so only its first 500 were kept.",
+            ]], $row->warningsToArray(), "{$length} characters");
+        }
+
+        $this->assertNull($this->loanRow(['purpose' => ''])->value('purpose'));
+
+        // Characters, not bytes: 500 ñ (1,000 bytes) fit, and 501 keep the first 500.
+        $this->assertSame(str_repeat('ñ', 500), $this->loanRow(['purpose' => str_repeat('ñ', 500)])->value('purpose'));
+        $cut = $this->loanRow(['purpose' => str_repeat('ñ', 501)]);
+        $this->assertSame(str_repeat('ñ', 500), $cut->value('purpose'));
+        $this->assertStringStartsWith('This Purpose is 501 characters', $cut->warningsToArray()[0]['message']);
+    }
+
     public function test_an_unmappable_nullable_enum_is_blanked_with_a_warning_but_an_unmappable_required_one_fails(): void
     {
         // "maried" is the typo the un-validated workbook produces. Nulling an

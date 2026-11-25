@@ -75,6 +75,12 @@ use Throwable;
 class CsvImportProcessor
 {
     /**
+     * How many characters of a Loan No. an import kept before round 4, when a
+     * longer one was cut to fit (see self::loanStoredCutShort()).
+     */
+    private const LOAN_NO_CUT_BEFORE_ROUND_4 = 20;
+
+    /**
      * Rows per transaction. Big enough that the sequence lock is taken once per
      * fifty members rather than once per member; small enough that a rollback
      * costs a second of work and that the lock is not held long enough to make a
@@ -961,6 +967,12 @@ class CsvImportProcessor
             );
         }
 
+        $storedCutShort = $this->loanStoredCutShort($row, $normalized, $loanNo, $accountNo);
+
+        if ($storedCutShort !== null) {
+            return $storedCutShort;
+        }
+
         $borrower = Borrower::query()->where('external_account_no', $accountNo)->sharedLock()->first();
 
         if ($borrower === null) {
@@ -1536,5 +1548,90 @@ class CsvImportProcessor
         $run->forceFill([
             'notes' => array_replace((array) ($run->notes ?? []), $additions),
         ])->save();
+    }
+
+    /**
+     * A loan an earlier import stored under the first 20 characters of its
+     * Loan No.: before round 4 a Loan No. of 21 to 50 characters was cut to 20
+     * (`loans.external_loan_no`), and an import since names it in full, so the
+     * exact lookup misses it. Only a loan whose own import row noted that cut
+     * is looked for (self::wasCutWhenImported()): a genuine 20-character Loan
+     * No. stands for itself. Found by those 20 characters:
+     *  - the same member, date released and loan amount: the same loan, already
+     *    imported, with the outcome of any already-imported row; but only once
+     *    a run, so a second row of the run matching it is refused;
+     *  - anything else: a different loan whose number was cut to the same 20
+     *    characters. Refused in words, never created, so the two can't be
+     *    mixed up.
+     * Null when the Loan No. is 20 characters or fewer, or no loan was stored
+     * cut under its first 20.
+     */
+    private function loanStoredCutShort(CsvImportRow $row, NormalizedRow $normalized, string $loanNo, string $accountNo): ?RowOutcome
+    {
+        if (mb_strlen($loanNo) <= self::LOAN_NO_CUT_BEFORE_ROUND_4) {
+            return null;
+        }
+
+        $cut = mb_substr($loanNo, 0, self::LOAN_NO_CUT_BEFORE_ROUND_4);
+        $stored = Loan::query()->where('external_loan_no', $cut)->first();
+
+        if ($stored === null || ! $this->wasCutWhenImported($stored)) {
+            return null;
+        }
+
+        $member = Borrower::query()->where('external_account_no', $accountNo)->first();
+        $sameLoan = $member !== null
+            && $stored->borrower_id === $member->id
+            && $stored->start_date?->toDateString() === $normalized->value('date_released')
+            && (string) $stored->principal_amount === $this->pesos((int) $this->money($normalized, 'loan_amount'));
+
+        if (! $sameLoan) {
+            return RowOutcome::failed(
+                'loan_no_shortened_earlier',
+                "An earlier import filed loan {$stored->application_number} under {$cut}, this Loan No.'s first 20 characters, and its member, date released or loan amount differ from this row's. The row wasn't imported, so the two aren't mixed up: check it against {$stored->application_number}.",
+                borrowerId: $member?->id,
+            );
+        }
+
+        // Rows are stamped as they are decided, inside the chunk's transaction,
+        // so an earlier row's claim on this loan is already on file.
+        $claimed = CsvImportRow::query()
+            ->where('csv_import_file_id', $row->csv_import_file_id)
+            ->where('loan_id', $stored->id)
+            ->where('id', '<', $row->id)
+            ->orderBy('id')
+            ->first(['id', 'line_number']);
+
+        if ($claimed !== null) {
+            return RowOutcome::failed(
+                'loan_no_shortened_earlier',
+                "Loan {$loanNo} matches loan {$stored->application_number}, which an earlier import filed under {$cut}, but line {$claimed->line_number} of this file already matched that loan. The row wasn't imported, so one loan isn't matched twice: check which of the two rows is that loan.",
+                borrowerId: $member->id,
+            );
+        }
+
+        return RowOutcome::alreadyImported(
+            $stored->borrower_id,
+            "Loan {$loanNo} is already on file as {$stored->application_number}: an earlier import filed it under its first 20 characters, {$cut}. The row was skipped.",
+            loanId: $stored->id,
+        );
+    }
+
+    /**
+     * Whether a loan's Loan No. was cut short when it was imported: the row that
+     * imported it noted the cut on its Loan No. (code `truncated`). Redaction
+     * keeps a row's loan and each note's field and code, so the mark outlives
+     * the row's data.
+     */
+    private function wasCutWhenImported(Loan $loan): bool
+    {
+        return CsvImportRow::query()
+            ->where('loan_id', $loan->id)
+            ->where('result', 'imported')
+            ->get(['normalized'])
+            ->contains(static fn (CsvImportRow $importRow): bool => collect((array) ($importRow->normalized['warnings'] ?? []))
+                ->contains(static fn (mixed $note): bool => is_array($note)
+                    && ($note['field'] ?? null) === 'loan_no'
+                    && ($note['code'] ?? null) === 'truncated'));
     }
 }

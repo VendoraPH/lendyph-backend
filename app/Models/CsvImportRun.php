@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Services\CsvImport\CsvImportSchema;
 use App\Services\CsvImport\CsvImportUploadService;
 use Carbon\CarbonInterface;
 use Illuminate\Database\Eloquent\Model;
@@ -29,6 +30,7 @@ class CsvImportRun extends Model
         'as_of_date',
         'phase',
         'product_mapping',
+        'date_orders',
         'cursor_row_id',
         'initiated_by',
         'initiated_ip',
@@ -44,12 +46,57 @@ class CsvImportRun extends Model
         return [
             'as_of_date' => 'date',
             'product_mapping' => 'array',
+            'date_orders' => 'array',
             'cursor_row_id' => 'integer',
             'started_at' => 'datetime',
             'finished_at' => 'datetime',
             'rows_redacted_at' => 'datetime',
             'notes' => 'array',
         ];
+    }
+
+    /**
+     * The date order the Check step settled for each of a file's date columns:
+     * `dmy` (day-first) or `mdy` (month-first) by column key. A column that
+     * needed no order, and every column of a run started before orders were
+     * kept, is absent, and reads as it always has (ValueNormalizer::date()).
+     *
+     * @return array<string, string>
+     */
+    public function dateOrdersFor(string $kind): array
+    {
+        $orders = (array) (($this->date_orders ?? [])[$kind] ?? []);
+
+        return array_filter($orders, static fn (mixed $order): bool => in_array($order, ['dmy', 'mdy'], true));
+    }
+
+    /**
+     * The reading each ordered date column gets, in words, for the run's
+     * payload and the downloaded report: `Date Released: day first`. A column
+     * that needed no order reads as written, so it has no line.
+     *
+     * @return list<array{file: string, column: string, label: string, order: string, words: string}>
+     */
+    public function dateOrderLines(): array
+    {
+        $lines = [];
+
+        foreach (['customers', 'loans'] as $kind) {
+            $columns = array_column(CsvImportSchema::columns(CsvImportSchema::shapeOf($kind)), 'label', 'key');
+
+            foreach ($this->dateOrdersFor($kind) as $column => $order) {
+                $label = $columns[$column] ?? str_replace('_', ' ', $column);
+                $lines[] = [
+                    'file' => $kind,
+                    'column' => $column,
+                    'label' => $label,
+                    'order' => $order,
+                    'words' => $label.': '.($order === 'dmy' ? 'day first' : 'month first'),
+                ];
+            }
+        }
+
+        return $lines;
     }
 
     public function branch(): BelongsTo

@@ -5,6 +5,7 @@ namespace App\Http\Requests\CsvImport;
 use App\Rules\BranchTakesNew;
 use App\Services\BranchAccess;
 use App\Services\Branches\BranchWriteGuard;
+use App\Services\CsvImport\CsvImportSchema;
 use App\Services\CsvImport\CsvImportUploadService;
 use Closure;
 use Illuminate\Foundation\Http\FormRequest;
@@ -130,6 +131,15 @@ class StoreCsvImportRunRequest extends FormRequest
             'files.*.filename' => ['required', 'string', 'max:255'],
             'files.*.size_bytes' => ['required', 'integer', 'min:1', 'max:'.$maxBytes],
             'files.*.sha256' => ['required', 'string', 'regex:/^[0-9a-f]{64}$/'],
+
+            // The date order the Check step settled for each date column of the
+            // members and loans files: day-first, month-first, or null where
+            // the column needed none (finish run round 4). The share capital
+            // file's dates are written year-month-day, so it carries none.
+            'date_orders' => ['sometimes', 'nullable', 'array:customers,loans'],
+            'date_orders.customers' => ['sometimes', 'array:'.implode(',', CsvImportSchema::dateKeys(CsvImportSchema::CUSTOMERS))],
+            'date_orders.loans' => ['sometimes', 'array:'.implode(',', CsvImportSchema::dateKeys(CsvImportSchema::LOANS))],
+            'date_orders.*.*' => ['nullable', 'in:dmy,mdy'],
         ];
     }
 
@@ -147,6 +157,7 @@ class StoreCsvImportRunRequest extends FormRequest
             'files.*.size_bytes.max' => "That file is larger than the {$maxMb} MB import limit.",
             'files.*.sha256.regex' => 'Each file needs a SHA-256 digest as 64 hexadecimal characters.',
             'as_of_date.before_or_equal' => 'The as-of date is the date the extract was taken; it cannot be in the future.',
+            'date_orders.*.*.in' => 'A date column is read day-first or month-first.',
         ];
     }
 }

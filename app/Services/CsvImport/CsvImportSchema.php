@@ -246,6 +246,20 @@ final class CsvImportSchema
     }
 
     /**
+     * The keys of a shape's date columns, which a run may carry a date order
+     * for (CsvImportRun::dateOrdersFor()).
+     *
+     * @return list<string>
+     */
+    public static function dateKeys(string $shape): array
+    {
+        return array_values(array_column(array_filter(
+            self::columns($shape),
+            static fn (array $column): bool => $column['type'] === self::TYPE_DATE,
+        ), 'key'));
+    }
+
+    /**
      * @return list<string>
      */
     public static function labels(string $shape): array

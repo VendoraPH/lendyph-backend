@@ -336,6 +336,19 @@ class ErrorReportBuilder
 
         $lastRowId = null;
 
+        // Which reading each ordered date column got: a chosen order reads a
+        // day/month/year cell with no "reads two ways" warning, so the report
+        // says it, file by file, before the issues.
+        foreach ($run->dateOrderLines() as $line) {
+            $file = collect($files)->firstWhere('kind', $line['file']);
+
+            if ($file === null || (($filters['kind'] ?? null) !== null && $filters['kind'] !== $line['file'])) {
+                continue;
+            }
+
+            yield [(string) $file->original_filename, '', '', '', 'note', 'Date reading', $line['label'], $line['words'], ''];
+        }
+
         try {
             yield from $this->emit($rows, $files, $severity, $lastRowId);
         } catch (Throwable $e) {
@@ -394,7 +407,7 @@ class ErrorReportBuilder
                 'last_row_id' => $lastRowId,
             ]);
 
-            yield ['', '', '', '', self::SEVERITY_ERROR, 'export_failed', '', 'This report stopped early and is incomplete. Please download it again.', ''];
+            yield ['', '', '', '', self::SEVERITY_ERROR, IssueCategoryWords::for('export_failed'), '', 'This report stopped early and is incomplete. Please download it again.', ''];
         }
     }
 
@@ -422,7 +435,8 @@ class ErrorReportBuilder
                     $issue['account_no'],
                     $issue['loan_no'],
                     $issue['severity'],
-                    $issue['category'],
+                    // Words, as the screen shows them; the code is for grouping.
+                    IssueCategoryWords::for($issue['category']),
                     $issue['field_label'],
                     /**
                      * Message before Original Value, and BOTH reach
