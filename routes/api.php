@@ -731,8 +731,10 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
          * Recording an expense posts its journal in the same transaction, which
          * is why there is no separate "post" verb here and why `PUT` accepts
          * only the descriptive fields — the figures ARE the posted entry, and a
-         * posted entry is immutable. Correcting one means reversing the journal
-         * and recording it again.
+         * posted entry is immutable. Correcting one means reversing the expense
+         * (its payments first) and recording it again. Reverse payment needs
+         * `expenses:pay` and `journals:reverse`; Reverse expense,
+         * `expenses:update` and `journals:reverse`.
          *
          * `/pay` is a separate permission from `update` on purpose: settling a
          * payable takes money out of a cash account, and that is the step
@@ -749,6 +751,13 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
         Route::get('/expenses/{expense}', [AccountingExpenseController::class, 'show'])->whereNumber('expense');
         Route::put('/expenses/{expense}', [AccountingExpenseController::class, 'update'])->whereNumber('expense');
         Route::post('/expenses/{expense}/pay', [AccountingExpenseController::class, 'pay'])->whereNumber('expense');
+        // Reversals from Expenses & Payables (finish run round 5), never by
+        // hand on the Journals screen (ExpenseJournalGuard). A payment
+        // resolves only among its own expense's payments.
+        Route::post('/expenses/{expense}/reverse', [AccountingExpenseController::class, 'reverse'])->whereNumber('expense');
+        Route::post('/expenses/{expense}/payments/{payment}/reverse', [AccountingExpenseController::class, 'reversePayment'])
+            ->whereNumber(['expense', 'payment'])
+            ->scopeBindings();
 
         /*
          * Reconciliation, all on `accounting:reconcile` — the same permission

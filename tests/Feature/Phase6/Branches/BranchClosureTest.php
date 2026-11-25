@@ -17,6 +17,7 @@ use App\Models\SavingsAccount;
 use App\Models\SavingsApproval;
 use App\Models\TimeDeposit;
 use App\Models\User;
+use App\Services\Accounting\JournalPoster;
 use App\Services\AuditLogService;
 use App\Services\BranchAccess;
 use Carbon\Carbon;
@@ -243,8 +244,14 @@ class BranchClosureTest extends TestCase
             ->assertUnprocessable()
             ->assertJsonPath('errors.branch.0', "This branch can't be closed yet: 2 unpaid payables.");
 
-        $unpaid->forceFill(['amount_paid' => 1500050, 'settlement_status' => 'paid'])->save();
-        $partly->forceFill(['amount_paid' => 1500050, 'settlement_status' => 'paid'])->save();
+        // Settled in full: what is settled counts the payments (finish run
+        // round 5). With no journal, as the factory's own, so the branch's
+        // cash stays at nothing for the closure.
+        foreach ([$unpaid, $partly] as $expense) {
+            $expense->payments()->create([
+                'date' => now()->toDateString(), 'amount' => $expense->amount - $expense->amount_paid, 'payment_account_id' => $this->account('1010'),
+            ]);
+        }
         $this->requestClosure();
     }
 
@@ -290,7 +297,9 @@ class BranchClosureTest extends TestCase
     /**
      * An accrual whose journal was reversed by hand on the Journals screen
      * keeps its unpaid status, but nothing is owed in the books, so it doesn't
-     * hold the closure (re-review of #369).
+     * hold the closure (re-review of #369). That screen refuses expense
+     * entries since finish run round 5, so these are hand reversals made
+     * before, through JournalPoster as it posted them.
      */
     public function test_an_accrual_whose_journal_was_reversed_does_not_hold_the_closure(): void
     {
@@ -302,7 +311,7 @@ class BranchClosureTest extends TestCase
         $expense = AccountingExpense::query()->findOrFail($id);
         $this->assertSame('unpaid', $expense->settlement_status);
 
-        $this->postJson("/api/accounting/journals/{$expense->journal_id}/reverse")->assertCreated();
+        app(JournalPoster::class)->reverse(AccountingJournal::query()->findOrFail($expense->journal_id), now()->toDateString(), null, $this->admin->id);
 
         $item = collect($this->getJson("/api/branches/{$this->quiet->id}/closure")->assertOk()->json('data.checklist'))->firstWhere('key', 'unpaid_payables');
         $this->assertSame(['key' => 'unpaid_payables', 'label' => 'Unpaid payables', 'count' => 0, 'amount' => null, 'clear' => true], $item);
@@ -311,7 +320,7 @@ class BranchClosureTest extends TestCase
         // Reversing the reversal puts the payable back in the books, so the
         // closure waits for it again (finish run round 4).
         $reversal = AccountingJournal::query()->findOrFail($expense->journal_id)->reversed_by_journal_id;
-        $this->postJson("/api/accounting/journals/{$reversal}/reverse")->assertCreated();
+        app(JournalPoster::class)->reverse(AccountingJournal::query()->findOrFail($reversal), now()->toDateString(), null, $this->admin->id);
 
         $item = collect($this->getJson("/api/branches/{$this->quiet->id}/closure")->assertOk()->json('data.checklist'))->firstWhere('key', 'unpaid_payables');
         $this->assertSame(['key' => 'unpaid_payables', 'label' => 'Unpaid payables', 'count' => 1, 'amount' => null, 'clear' => false], $item);

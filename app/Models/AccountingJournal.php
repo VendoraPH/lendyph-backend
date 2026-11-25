@@ -4,6 +4,7 @@ namespace App\Models;
 
 use App\Exceptions\PostedJournalIsImmutableException;
 use App\Http\Resources\JournalEntryResource;
+use App\Services\Accounting\ExpenseJournalGuard;
 use App\Services\BranchAccess;
 use App\Services\Branches\InterbranchTransferJournalGuard;
 use App\Services\Savings\SavingsJournalGuard;
@@ -515,8 +516,9 @@ class AccountingJournal extends Model
                 'branch:id,name',
                 'creator:id,first_name,last_name',
                 'poster:id,first_name,last_name',
-                // `source` and the postable tell SavingsJournalGuard whether a
-                // reversal undid a savings entry, with no query per row.
+                // `source` and the postable tell SavingsJournalGuard and
+                // ExpenseJournalGuard whether a reversal undid a savings or an
+                // expense entry, with no query per row.
                 'reverses:id,journal_no,source,postable_type,postable_id',
             ])
             // Runs on the page `paginate()` produces — `paginate()` goes
@@ -527,6 +529,7 @@ class AccountingJournal extends Model
                 self::attachPostables($journals);
                 SavingsJournalGuard::preload($journals);
                 InterbranchTransferJournalGuard::preload($journals);
+                ExpenseJournalGuard::preload($journals);
 
                 return $journals;
             });

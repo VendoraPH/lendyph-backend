@@ -11,6 +11,7 @@ use App\Http\Requests\Accounting\UpdateJournalRequest;
 use App\Http\Requests\Concerns\DateInputMessages;
 use App\Http\Resources\JournalEntryResource;
 use App\Models\AccountingJournal;
+use App\Services\Accounting\ExpenseJournalGuard;
 use App\Services\Accounting\JournalPoster;
 use App\Services\Accounting\JournalPreview;
 use App\Services\Accounting\YearEndCloser;
@@ -360,7 +361,7 @@ class AccountingJournalController extends Controller
     #[OA\Post(
         path: '/api/accounting/journals/{id}/reverse',
         summary: 'Reverse a posted entry',
-        description: "Writes a MIRROR entry — every debit becomes a credit against the same account — built from the original's stored lines, and posts it. The original is not edited beyond `status` and `reversed_by_journal_id`, so both halves stay on the record and the pair nets to zero on every statement. Returns the REVERSAL, not the original. Refused with 422 on a draft, on an entry already reversed, on a year-end `closing` entry or the reversal of one (reopen the year instead), and on an entry Savings posted (`savings`, `savings_interest`, `time_deposit`, `time_deposit_settlement`) or the reversal of one: deposits, withdrawals and interest runs are reversed from Savings; time deposit placements and settlements, account-closing payouts and the interest credited at closing can't be reversed (record a correcting journal entry). A GCash Cash In or Cash Out (`cash_in`, `cash_out`) is refused too: GCash has no reversal, so a correcting journal entry fixes one.",
+        description: "Writes a MIRROR entry — every debit becomes a credit against the same account — built from the original's stored lines, and posts it. The original is not edited beyond `status` and `reversed_by_journal_id`, so both halves stay on the record and the pair nets to zero on every statement. Returns the REVERSAL, not the original. Refused with 422 on a draft, on an entry already reversed, on a year-end `closing` entry or the reversal of one (reopen the year instead), and on an entry Savings posted (`savings`, `savings_interest`, `time_deposit`, `time_deposit_settlement`) or the reversal of one: deposits, withdrawals and interest runs are reversed from Savings; time deposit placements and settlements, account-closing payouts and the interest credited at closing can't be reversed (record a correcting journal entry). A GCash Cash In or Cash Out (`cash_in`, `cash_out`) is refused too: GCash has no reversal, so a correcting journal entry fixes one. So is an expense's journal or an expense payment's, or the reversal of one: they are reversed from Expenses & Payables (`POST /accounting/expenses/{id}/reverse`, `POST /accounting/expenses/{id}/payments/{payment}/reverse`); hand reversals made before stay as they are.",
         tags: ['Accounting'],
         security: [['sanctum' => []]],
         parameters: [
@@ -392,6 +393,9 @@ class AccountingJournalController extends Controller
         // A GCash Cash In or Cash Out mirrors its transaction, whose charge the
         // GCash income report counts, and GCash has no reversal (GCashJournalGuard).
         GCashJournalGuard::assertReversibleFromJournals($journal);
+        // An expense's or a payment's entry, or the reversal of one, is
+        // reversed from Expenses & Payables or not at all (ExpenseJournalGuard).
+        ExpenseJournalGuard::assertReversibleFromJournals($journal);
 
         $reversal = $this->inItsBranch($journal, fn (): AccountingJournal => $this->poster->reverse(
             $journal,
@@ -438,7 +442,8 @@ class AccountingJournalController extends Controller
             'creator:id,first_name,last_name',
             'poster:id,first_name,last_name',
             // `source` and the postable tell the resource whether a reversal
-            // undid a savings entry (SavingsJournalGuard).
+            // undid a savings or an expense entry (SavingsJournalGuard,
+            // ExpenseJournalGuard).
             'reverses:id,journal_no,source,postable_type,postable_id',
         ]);
 

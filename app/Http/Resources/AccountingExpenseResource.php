@@ -21,15 +21,35 @@ use Illuminate\Http\Resources\Json\JsonResource;
  *    this emits them as such. The page's "Outstanding" figure is the list's
  *    `meta.totals.amount_due`, summed on the server over every matching
  *    expense; the screen adds nothing up.
- * 2. **`status` is derived, not stored.** The column holds only the settlement
- *    state; `overdue` is a function of `due_date` against today, and
- *    `reversed` of the journal's status. See AccountingExpense::status().
- *    The controller eager-loads AccountingExpense::STATUS_RELATIONS for it.
+ * 2. **`status` and `amount_paid` are derived, not stored.** `amount_paid` is
+ *    what has been paid and still stands (AccountingExpense::paidAmount()):
+ *    a payment whose journal stands reversed doesn't count. `overdue` is a
+ *    function of `due_date` against today, and `reversed` of the journal's
+ *    status. See AccountingExpense::status(). The controller eager-loads
+ *    AccountingExpense::STATUS_RELATIONS for them.
+ *
+ * ## Which actions are open, from the server's own rules (finish run round 5)
+ *
+ * - `can_edit`: false once the expense stands reversed (the edit answers 422).
+ * - `can_reverse`: Reverse expense can be taken now: the expense has a journal
+ *   that stands, and none of its payments stands.
+ * - `reverse_blocked_reason`: while payments stand, why Reverse expense is
+ *   refused, in words ("Reverse its payments first: …"), for a disabled
+ *   button; null otherwise. With `can_reverse` false and no reason, the
+ *   action doesn't apply (already reversed, or no journal) and is hidden.
+ * - each payment's `can_reverse` (AccountingExpensePaymentResource).
+ *
+ * Whether the user may take each one is the screen's to check from the
+ * permissions, and the server's to enforce.
  */
 class AccountingExpenseResource extends JsonResource
 {
     public function toArray(Request $request): array
     {
+        $reversed = $this->isReversed();
+        $reversible = $this->journal_id !== null && ! $reversed;
+        $blockedReason = $reversible ? $this->reverseBlockedReason() : null;
+
         return [
             'id' => $this->id,
             // `date:Y-m-d` casts, so these are already "2026-09-18" rather than
@@ -46,7 +66,9 @@ class AccountingExpenseResource extends JsonResource
             ),
             // CENTAVOS, as integers.
             'amount' => (int) $this->amount,
-            'amount_paid' => (int) $this->amount_paid,
+            // What has been paid and still stands (AccountingExpense::
+            // paidAmount()), never the stored column.
+            'amount_paid' => $this->paidAmount(),
             // What is still owed (AccountingExpense::amountDue()), so the
             // screen never subtracts: 0 while the journal stands reversed.
             'amount_due' => $this->amountDue(),
@@ -57,6 +79,11 @@ class AccountingExpenseResource extends JsonResource
             'due_date' => $this->due_date?->toDateString(),
             // One of unpaid | partially_paid | paid | overdue | reversed.
             'status' => $this->status(),
+            'can_edit' => ! $reversed,
+            'can_reverse' => $reversible && $blockedReason === null,
+            'reverse_blocked_reason' => $blockedReason,
+            // Every payment, reversed ones included, by date.
+            'payments' => AccountingExpensePaymentResource::collection($this->paymentsInOrder()),
             'journal_id' => $this->journal_id,
             'created_at' => $this->created_at,
             'updated_at' => $this->updated_at,
