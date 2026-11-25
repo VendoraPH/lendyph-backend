@@ -29,7 +29,10 @@ use Throwable;
  *    A question it misses that names a record or a person, or asks to look
  *    one up, is a lookup (LindaLookup::parse()): the server answers it from
  *    the record in the user's branches (LindaAnswerer::lookup()), logged as
- *    source `lookup`, and the model never sees it. A "name" that is one of
+ *    source `lookup`, and the model never sees it. Before the parser, a
+ *    question holding an imported loan's own Loan No. from the cooperative's
+ *    file is a loan lookup too (LindaLoanNumbers), and a failure reading the
+ *    loans answers data_unavailable, never the model. A "name" that is one of
  *    the user's own branches or a loan product is no lookup ("collections
  *    from Main"); the rest of the question is read again without it.
  *    A "How do I…" or "Where is…" question whose every word names a page in
@@ -119,6 +122,16 @@ final class LindaAssistant
             $log->source = LindaQuestion::SOURCE_MATCHER;
 
             return $this->answered($log, $started, $user, LindaIntent::HowTo, null, null, $question);
+        }
+
+        // An imported loan's own number from the cooperative's file, which
+        // only the database knows: a loan lookup, kept on the server.
+        $loanNo = $this->loanNoCheck($log, $started, $question);
+
+        if ($loanNo !== null) {
+            $log->source = LindaQuestion::SOURCE_LOOKUP;
+
+            return $this->lookedUp($log, $started, $user, new LindaLookupRequest(LindaLookupRequest::LOAN, LindaIntent::LoanDetails, loanNo: $loanNo));
         }
 
         $lookup = $this->lookupIn($user, $question, $history);
@@ -248,6 +261,27 @@ final class LindaAssistant
         $rest = $words === [] ? null : preg_replace($pattern, ' ', $question, 1, $count);
 
         return $rest === null || $count !== 1 ? null : $rest;
+    }
+
+    /**
+     * The Loan No. check (LindaLoanNumbers, finish run round 6). Like the
+     * full-name check, a failure reading the question or the loans never lets
+     * it through to the model: it logs a digest only, writes the question row
+     * with data_unavailable and answers 503.
+     *
+     * @throws LindaHttpError data_unavailable
+     */
+    private function loanNoCheck(LindaQuestion $log, int $started, #[\SensitiveParameter] string $question): ?string
+    {
+        try {
+            return LindaLoanNumbers::find($question);
+        } catch (Throwable $e) {
+            Log::warning('Linda Loan No. check failed.', ErrorDigest::context($e));
+            $log->fill(['source' => LindaQuestion::SOURCE_LOOKUP, 'outcome' => self::OUTCOME_ERROR, 'error_code' => LindaHttpError::DATA_UNAVAILABLE]);
+            $this->write($log, $started);
+
+            throw LindaHttpError::dataUnavailable();
+        }
     }
 
     /**

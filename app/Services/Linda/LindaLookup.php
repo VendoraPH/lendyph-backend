@@ -382,8 +382,11 @@ final class LindaLookup
     /**
      * NFKC, with invisible format characters (zero-width spaces, soft
      * hyphens) dropped, every Unicode dash read as "-" and every space as " ".
+     * The Loan No. check (LindaLoanNumbers) reads a question the same way.
+     *
+     * @throws UnexpectedValueException
      */
-    private static function normalise(#[\SensitiveParameter] string $question): string
+    public static function normalise(#[\SensitiveParameter] string $question): string
     {
         $normal = Normalizer::normalize($question, Normalizer::FORM_KC);
 

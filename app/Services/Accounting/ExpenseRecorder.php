@@ -56,7 +56,11 @@ class ExpenseRecorder
 {
     use ResolvesPostingAccounts;
 
-    public function __construct(private JournalPoster $poster) {}
+    public function __construct(
+        private JournalPoster $poster,
+        private PeriodGuard $periods,
+        private ReconciliationMatchRelease $reconciliations,
+    ) {}
 
     /**
      * Records a cost and posts its journal in the same transaction.
@@ -288,7 +292,11 @@ class ExpenseRecorder
      * Under the locks paying takes, in the same order, so a payment and a
      * reversal on one expense, or two reversals, never interleave. Refused
      * (422 in words) when the payment already stands reversed or has no
-     * journal.
+     * journal, or when its reversal would post in a closed month (the message
+     * names that date). A bank reconciliation statement line matched to the
+     * entry is freed, or the reversal refused while that reconciliation reads
+     * Reconciled (ReconciliationMatchRelease, which takes its locks after
+     * these and before JournalPoster's, finish run round 6).
      */
     public function reversePayment(AccountingExpense $expense, AccountingExpensePayment $payment, string $reason, ?int $userId = null): AccountingExpense
     {
@@ -313,8 +321,11 @@ class ExpenseRecorder
             }
 
             $journal = AccountingJournal::query()->findOrFail($chains[$target->journal_id]['last']);
-            $reversal = $this->poster->reverse($journal, self::reversalDate($journal), $reason, $userId);
+            $matched = $this->reconciliations->hold($journal, 'payment', 'payment');
+            $date = $this->openReversalDate($journal, 'payment');
+            $reversal = $this->poster->reverse($journal, $date, $reason, $userId);
             $chains[$target->journal_id]['reversed'] = true;
+            $this->reconciliations->release($matched, $journal, $reversal, "a payment of the expense to {$locked->payee}", $userId);
 
             $this->storePaid($locked, self::standingTotal($payments, $chains));
 
@@ -351,7 +362,9 @@ class ExpenseRecorder
      * exists, and Accounts Payable below zero. Also refused when it already
      * stands reversed or has no journal. Under the locks paying takes. An
      * expense whose journal was reversed and re-reversed by hand before is
-     * reversed on the last entry of that chain, the one that stands.
+     * reversed on the last entry of that chain, the one that stands. The
+     * closed-month refusal and a matched bank reconciliation statement line
+     * are handled as for a payment (finish run round 6).
      */
     public function reverse(AccountingExpense $expense, string $reason, ?int $userId = null): AccountingExpense
     {
@@ -383,7 +396,10 @@ class ExpenseRecorder
             }
 
             $journal = AccountingJournal::query()->findOrFail($chains[$locked->journal_id]['last']);
-            $reversal = $this->poster->reverse($journal, self::reversalDate($journal), $reason, $userId);
+            $matched = $this->reconciliations->hold($journal, 'expense', 'expense');
+            $date = $this->openReversalDate($journal, 'expense');
+            $reversal = $this->poster->reverse($journal, $date, $reason, $userId);
+            $this->reconciliations->release($matched, $journal, $reversal, "the expense to {$locked->payee}", $userId);
 
             AuditLogService::log(
                 'expense_reversed',
@@ -558,6 +574,33 @@ class ExpenseRecorder
             default => 'unpaid',
         };
         $locked->save();
+    }
+
+    /**
+     * The date the reversal will post on (self::reversalDate()), refused in
+     * words when it falls in a closed month (finish run round 6). The dialog
+     * has no date field, so the refusal says which date that is and why,
+     * under `$field`. JournalPoster checks the same date again under the same
+     * shared lock on the period row.
+     *
+     * @throws ValidationException
+     */
+    private function openReversalDate(AccountingJournal $journal, string $field): string
+    {
+        $date = self::reversalDate($journal);
+        $period = $this->periods->closedPeriodCovering($date);
+
+        if ($period === null) {
+            return $date;
+        }
+
+        $when = $date === CarbonImmutable::now()->toDateString()
+            ? 'today, '.self::dateInWords($date).', which is'
+            : 'on '.self::dateInWords($date).", the date of {$journal->journal_no}, since a reversal is never dated before the entry it reverses. That is";
+
+        throw ValidationException::withMessages([
+            $field => ["The reversal would post {$when} in a closed month ({$period->name}). Reopen the month on the Period Closing screen first."],
+        ]);
     }
 
     /**
