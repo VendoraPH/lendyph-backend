@@ -146,12 +146,12 @@ class LoanApprovalEditService
             ...(isset($input['collaterals']) ? ['collaterals' => $input['collaterals']] : []),
         ], $user);
 
-        // formPreview() reads the term in the product's unit, against the
-        // product's range. The loan's own term is kept even once its product
-        // counts another unit or has narrowed its range, as saving keeps it, so
-        // it still gets its maturity and schedule. A changed term gets them only
-        // where formPreview() found the term in the range, and never once the
-        // product counts another unit, since saving refuses that change.
+        // formPreview() reads an edited loan's term in the loan's own unit. The
+        // loan's own term always gets a maturity and schedule there, as saving
+        // keeps it; a changed term gets them only inside the product's range,
+        // and never once the product counts another unit, since saving refuses
+        // that change. Here both are worked out again from the loan's own terms
+        // with the edit's figures (projected()).
         $termKept = $values['term'] === (int) $loan->term;
         $unitMoved = $loan->term_unit !== $loan->loanProduct()->firstOrFail()->term_unit;
 

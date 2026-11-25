@@ -2742,10 +2742,12 @@ class LoanService
      * maturity and no schedule. This also bounds the work a single preview can
      * ask for.
      *
-     * An edited loan matures by its own term unit (previewTerms()). Once its
-     * product counts terms in another unit, the product's range can't be read
-     * against the loan's term, so only the loan's own term, the one its edit
-     * keeps, has a maturity.
+     * An edited loan matures by its own term unit (previewTerms()), and its own
+     * term, the one its edit keeps, always has a maturity, even once its
+     * product has narrowed its range or counts terms in another unit, as the
+     * Chair's edit reads it (LoanApprovalEditService::preview()). Another term
+     * has one only inside the product's range, while the product still counts
+     * the loan's unit.
      *
      * @param  array<string, mixed>  $input
      */
@@ -2757,12 +2759,13 @@ class LoanService
 
         $term = (int) $input['term'];
         $termUnit = $edited?->term_unit ?? $product->term_unit;
+        $termKept = $edited !== null && $term === (int) $edited->term;
 
-        if ($termUnit !== $product->term_unit) {
-            if ($term !== (int) $edited?->term) {
+        if (! $termKept) {
+            if ($termUnit !== $product->term_unit) {
                 return null;
             }
-        } else {
+
             try {
                 $this->assertTermWithinProductRange($term, $product);
             } catch (ValidationException) {
@@ -2843,9 +2846,9 @@ class LoanService
                 'term' => $input['term'] ?? null,
                 'term_unit' => $terms['term_unit'],
                 // The rate a written formula's Interest Rate reads: the form's,
-                // else the product's, per the rate period the saved loan
-                // carries, as createLoan() and an edit store them.
-                'interest_rate' => $input['interest_rate'] ?? $product->interest_rate,
+                // else the one the saved loan keeps (an edited loan's own, a new
+                // loan's product's), per the rate period it carries.
+                'interest_rate' => $input['interest_rate'] ?? $edited?->interest_rate ?? $product->interest_rate,
                 'interest_rate_frequency' => $terms['interest_rate_frequency'],
                 'start_date' => $input['start_date'] ?? null,
                 'maturity_date' => $maturity?->toDateString(),

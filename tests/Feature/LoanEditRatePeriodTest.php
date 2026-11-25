@@ -3,6 +3,7 @@
 namespace Tests\Feature;
 
 use App\Models\Borrower;
+use App\Models\Fee;
 use App\Models\Loan;
 use App\Models\LoanProduct;
 use App\Services\LoanService;
@@ -110,6 +111,7 @@ class LoanEditRatePeriodTest extends TestCase
             'to a rate per year' => [['interest_rate_frequency' => 'annual', 'interest_rate' => 36, 'min_interest_rate' => 18]],
             'to another interest method' => [['interest_method' => 'diminishing']],
             'to a term in days' => [['term_unit' => 'days', 'term' => 180, 'min_term' => 90, 'max_term' => 360]],
+            'to a narrower term range' => [['term' => 12, 'min_term' => 9, 'max_term' => 12]],
         ];
     }
 
@@ -117,7 +119,7 @@ class LoanEditRatePeriodTest extends TestCase
      * @param  array<string, mixed>  $move
      */
     #[DataProvider('productMoves')]
-    public function test_after_its_product_moves_the_edit_preview_equals_the_schedule_the_save_keeps(array $move): void
+    public function test_after_its_product_moves_the_edit_preview_equals_what_the_save_keeps(array $move): void
     {
         $loan = $this->draftLoan();
         $loan->loanProduct->update($move);
@@ -138,6 +140,21 @@ class LoanEditRatePeriodTest extends TestCase
         $this->assertEquals(7500, $preview['amortization']['totals']['interest_due']);
         $this->assertSame('straight', $preview['amortization']['interest_method']);
         $this->assertSame($loan->fresh()->maturity_date->toDateString(), $preview['maturity_date']);
+
+        // A written fee that reads the rate, previewed with the rate left
+        // blank, as the edit page sends it: it reads the loan's own 2.5% a
+        // month, the rate its edit keeps, never the product's.
+        $this->rateFee($loan->loanProduct);
+        $fee = $this->postJson('/api/loans/preview', Arr::except($this->editPreview($loan->fresh(), []), 'interest_rate'))
+            ->assertOk()
+            ->json('data.deductions.configured_fees.0');
+        $charged = collect($this->getJson("/api/loans/{$loan->id}/deductions-preview")->assertOk()->json('data.deductions'))->firstWhere('name', 'Rate Fee');
+
+        // 2.5% of ₱50,000.00, over 10.
+        $this->assertEquals(125, $fee['amount']);
+        $this->assertEquals($charged['amount'], $fee['amount']);
+        $this->assertSame('2.5000', $fee['formula_inputs']['interest_rate']);
+        $this->assertSame('monthly', $fee['formula_inputs']['interest_rate_frequency']);
     }
 
     public function test_an_unchanged_products_edit_preview_is_unchanged(): void
@@ -200,6 +217,19 @@ class LoanEditRatePeriodTest extends TestCase
             'start_date' => '2026-12-01',
             ...$overrides,
         ];
+    }
+
+    /** A catalog fee written as a formula that reads the loan's rate. */
+    private function rateFee(LoanProduct $product): void
+    {
+        Fee::create([
+            'name' => 'Rate Fee',
+            'type' => 'formula',
+            'value' => 0,
+            'per_month' => false,
+            'formula_expression' => 'Loan Amount × Interest Rate% ÷ 10',
+            'applicable_product_ids' => [$product->id],
+        ]);
     }
 
     /**
