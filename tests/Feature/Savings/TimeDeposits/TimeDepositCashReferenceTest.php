@@ -64,7 +64,8 @@ class TimeDepositCashReferenceTest extends TestCase
             $this->assertSame($reference, TimeDeposit::query()->findOrFail($data['id'])->reference);
         }
 
-        $this->place(['payment_method' => 'gcash'])->assertCreated()->assertJsonPath('data.reference', null);
+        // A non-cash placement never falls back to a number: without its reference it is refused (round 5).
+        $this->place(['payment_method' => 'gcash'])->assertUnprocessable()->assertJsonPath('errors.reference.0', 'Enter the GCash reference for this time deposit.');
         $this->assertSame(0, DB::table('cash_reference_sequences')->count());
     }
 

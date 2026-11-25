@@ -2,6 +2,7 @@
 
 namespace App\Http\Requests\Savings\Account;
 
+use App\Http\Requests\Savings\SavingsReference;
 use App\Http\Requests\Savings\SavingsRules;
 use App\Models\SavingsAccount;
 use App\Rules\MemberBranchTakesNew;
@@ -13,10 +14,13 @@ use Illuminate\Validation\Rule;
 /**
  * `POST /savings/accounts` (savings:create): open an account for a member in
  * the caller's branches. The member's standing, the product and the minimum
- * opening deposit are checked by AccountOpener, in words. The opening details
- * (gap round S1) are optional: an account officer (an active staff member in
- * the caller's branches), the source of funds (a key; `other` with the
- * member's own words) and a beneficiary {name, relationship, contact_number}.
+ * opening deposit are checked by AccountOpener, in words. An opening deposit
+ * paid by any method but cash needs its reference (SavingsReference, finish
+ * run round 5); an opening of ₱0.00 pays nothing and needs none. The opening
+ * details (gap round S1) are optional: an account officer (an active staff
+ * member in the caller's branches), the source of funds (a key; `other` with
+ * the member's own words) and a beneficiary {name, relationship,
+ * contact_number}.
  */
 class OpenSavingsAccountRequest extends FormRequest
 {
@@ -38,7 +42,7 @@ class OpenSavingsAccountRequest extends FormRequest
             'opened_at' => $this->businessDate(),
             'initial_deposit' => ['required', ...SavingsRules::money('opening deposit')],
             'payment_method' => ['nullable', 'string', Rule::in(self::PAYMENT_METHODS)],
-            'reference' => ['nullable', 'string', 'max:64'],
+            'reference' => SavingsReference::rules($this->input('payment_method'), 64, SavingsReference::pays($this->input('initial_deposit'))),
             'remarks' => ['nullable', 'string', 'max:500'],
             // Opening details (gap round S1), all optional.
             'account_officer_id' => ['nullable', 'integer', app(BranchAccess::class)->constrainUserExists(Rule::exists('users', 'id')->where('status', 'active'), $this->user())],
@@ -66,6 +70,7 @@ class OpenSavingsAccountRequest extends FormRequest
             'initial_deposit.required' => 'Enter the opening deposit (0 when the product needs none).',
             'payment_method.in' => 'The opening deposit is paid in cash, by bank transfer, GCash or Maya.',
             'payment_method.string' => 'The opening deposit is paid in cash, by bank transfer, GCash or Maya.',
+            'reference.required' => SavingsReference::message($this->input('payment_method'), SavingsReference::OPENING_DEPOSIT),
             'reference.max' => 'The reference can be at most 64 characters.',
             'reference.string' => 'The reference must be text.',
             'remarks.max' => 'The remarks can be at most 500 characters.',

@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api\PortalAdmin;
 
 use App\Http\Controllers\Controller;
 use App\Http\Requests\Savings\Account\OpenSavingsAccountRequest;
+use App\Http\Requests\Savings\SavingsReference;
 use App\Models\PortalRequest;
 use App\Services\BranchAccess;
 use App\Services\GeneratedNumberWrite;
@@ -25,7 +26,9 @@ use OpenApi\Attributes as OA;
  * `borrowers:update` (profile), `savings:transact` (withdrawal; the savings
  * tiers apply) or `savings:create` (new account). The order is: the queue
  * permission (403), the request (404), the type permission (403), then the
- * body (422).
+ * body (422). Approving a payout or an opening deposit paid by bank
+ * transfer, GCash or Maya needs its reference (SavingsReference, finish run
+ * round 5).
  */
 class PortalRequestQueueController extends Controller
 {
@@ -113,7 +116,7 @@ class PortalRequestQueueController extends Controller
         path: '/api/portal-admin/requests/{request}/decision',
         summary: 'Decide a member portal request',
         description: 'member_portal:requests plus the type\'s permission. `decision`: under_review, need_info (message required), reject (message required; a withdrawal\'s hold is released) or approve. '
-            .'Approve needs an `Idempotency-Key` header: a withdrawal (payout{date, method, reference}) releases its hold and posts through the savings teller: 201 completed up to tier 1, 202 approved above it (the savings approvals queue decides; maker ≠ checker); a new account (deposit{date, method, reference}) opens it with the deposit received: 201; a profile change writes the member: 200. A stale status is 409.',
+            .'Approve needs an `Idempotency-Key` header: a withdrawal (payout{date, method, reference}) releases its hold and posts through the savings teller: 201 completed up to tier 1, 202 approved above it (the savings approvals queue decides; maker ≠ checker); a new account (deposit{date, method, reference}) opens it with the deposit received: 201; a profile change writes the member: 200. The reference is required unless the method is cash (or, for a new account, nothing is deposited): 422 on `payout.reference` or `deposit.reference`. A stale status is 409.',
         tags: ['Member Portal (staff)'],
         security: [['sanctum' => []]],
         parameters: [
@@ -143,7 +146,7 @@ class PortalRequestQueueController extends Controller
         $found = $this->queue->find($staff, $request);
         $this->authorize(StaffQueue::TYPE_PERMISSIONS[$found->type] ?? 'member_portal:settings');
 
-        $input = $http->validate($this->rules($found, (string) $http->input('decision')), $this->messages());
+        $input = $http->validate($this->rules($found, $http), $this->messages($http));
 
         if ($input['decision'] !== 'approve') {
             $decided = GeneratedNumberWrite::run(fn (): PortalRequest => DB::transaction(
@@ -161,8 +164,9 @@ class PortalRequestQueueController extends Controller
     }
 
     /** @return array<string, mixed> */
-    private function rules(PortalRequest $request, string $decision): array
+    private function rules(PortalRequest $request, Request $http): array
     {
+        $decision = (string) $http->input('decision');
         $approving = $decision === 'approve';
         $businessDate = ['date_format:Y-m-d', 'before_or_equal:'.now()->toDateString(), 'after_or_equal:'.now()->subDay()->toDateString()];
         $rules = [
@@ -175,7 +179,7 @@ class PortalRequestQueueController extends Controller
                 'payout' => ['required', 'array'],
                 'payout.date' => ['required', ...$businessDate],
                 'payout.method' => ['required', 'string', Rule::in(OpenSavingsAccountRequest::PAYMENT_METHODS)],
-                'payout.reference' => ['nullable', 'string', 'max:64'],
+                'payout.reference' => SavingsReference::rules($http->input('payout.method'), 64),
             ];
         }
 
@@ -184,7 +188,7 @@ class PortalRequestQueueController extends Controller
                 'deposit' => ['required', 'array'],
                 'deposit.date' => ['required', ...$businessDate],
                 'deposit.method' => [Rule::requiredIf((float) $request->amount > 0), 'nullable', 'string', Rule::in(OpenSavingsAccountRequest::PAYMENT_METHODS)],
-                'deposit.reference' => ['nullable', 'string', 'max:64'],
+                'deposit.reference' => SavingsReference::rules($http->input('deposit.method'), 64, SavingsReference::pays($request->amount)),
             ];
         }
 
@@ -192,7 +196,7 @@ class PortalRequestQueueController extends Controller
     }
 
     /** @return array<string, string> */
-    private function messages(): array
+    private function messages(Request $http): array
     {
         return [
             'decision.required' => 'Choose under review, need more information, approve or reject.',
@@ -205,12 +209,18 @@ class PortalRequestQueueController extends Controller
             'payout.date.after_or_equal' => 'The payout date can be today or yesterday only.',
             'payout.method.required' => 'Choose how the money was paid out: cash, bank transfer, GCash or Maya.',
             'payout.method.in' => 'Choose how the money was paid out: cash, bank transfer, GCash or Maya.',
+            'payout.reference.required' => SavingsReference::message($http->input('payout.method'), SavingsReference::PAYOUT),
+            'payout.reference.string' => 'The reference must be text.',
+            'payout.reference.max' => 'The reference can be at most 64 characters.',
             'deposit.required' => 'Enter the opening deposit received: the date, method and reference.',
             'deposit.date.required' => 'Enter the date the deposit was received.',
             'deposit.date.before_or_equal' => 'The deposit date can\'t be after today.',
             'deposit.date.after_or_equal' => 'The deposit date can be today or yesterday only.',
             'deposit.method.required' => 'Choose how the opening deposit was paid.',
             'deposit.method.in' => 'Choose how the opening deposit was paid: cash, bank transfer, GCash or Maya.',
+            'deposit.reference.required' => SavingsReference::message($http->input('deposit.method'), SavingsReference::OPENING_DEPOSIT),
+            'deposit.reference.string' => 'The reference must be text.',
+            'deposit.reference.max' => 'The reference can be at most 64 characters.',
         ];
     }
 }

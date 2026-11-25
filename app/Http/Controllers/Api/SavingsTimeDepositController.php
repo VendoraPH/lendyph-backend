@@ -200,7 +200,7 @@ class SavingsTimeDepositController extends Controller
             new OA\Property(property: 'placement_date', type: 'string', format: 'date'),
             new OA\Property(property: 'maturity_instruction', type: 'string', enum: TimeDeposit::MATURITY_INSTRUCTIONS),
             new OA\Property(property: 'payment_method', type: 'string', enum: ['cash', 'bank_transfer', 'gcash', 'maya', 'savings']),
-            new OA\Property(property: 'reference', type: 'string', nullable: true, description: 'The payment reference. Ignored for cash, which gets its TD number.'),
+            new OA\Property(property: 'reference', type: 'string', nullable: true, description: 'The payment reference: required for bank transfer, GCash and Maya (422 in words), optional from savings, ignored for cash, which gets its TD number.'),
             new OA\Property(property: 'funding_account_id', type: 'integer', nullable: true),
             new OA\Property(property: 'payout_account_id', type: 'integer', nullable: true),
         ])),

@@ -120,7 +120,7 @@ class SavingsAccountController extends Controller
             new OA\Property(property: 'opened_at', type: 'string', format: 'date'),
             new OA\Property(property: 'initial_deposit', type: 'string', example: '500.00'),
             new OA\Property(property: 'payment_method', type: 'string', enum: OpenSavingsAccountRequest::PAYMENT_METHODS),
-            new OA\Property(property: 'reference', type: 'string', nullable: true),
+            new OA\Property(property: 'reference', type: 'string', nullable: true, description: 'The opening deposit\'s payment reference: required unless it is paid in cash or is ₱0.00 (422 in words)'),
         ])),
         responses: [
             new OA\Response(response: 201, description: 'The account'),
@@ -214,7 +214,7 @@ class SavingsAccountController extends Controller
             new OA\Property(property: 'amount', type: 'string', example: '1000.00'),
             new OA\Property(property: 'date', type: 'string', format: 'date', description: 'Today or yesterday (Manila)'),
             new OA\Property(property: 'payment_method', type: 'string', enum: OpenSavingsAccountRequest::PAYMENT_METHODS),
-            new OA\Property(property: 'reference', type: 'string', nullable: true),
+            new OA\Property(property: 'reference', type: 'string', nullable: true, description: 'The payment reference: required unless the method is cash (422 in words)'),
             new OA\Property(property: 'remarks', type: 'string', nullable: true),
         ])),
         responses: [
@@ -250,7 +250,7 @@ class SavingsAccountController extends Controller
             new OA\Property(property: 'amount', type: 'string', example: '1000.00'),
             new OA\Property(property: 'date', type: 'string', format: 'date', description: 'Today or yesterday (Manila)'),
             new OA\Property(property: 'payment_method', type: 'string', enum: OpenSavingsAccountRequest::PAYMENT_METHODS),
-            new OA\Property(property: 'reference', type: 'string', nullable: true),
+            new OA\Property(property: 'reference', type: 'string', nullable: true, description: 'The payment reference: required unless the method is cash (422 in words)'),
             new OA\Property(property: 'remarks', type: 'string', nullable: true),
         ])),
         responses: [

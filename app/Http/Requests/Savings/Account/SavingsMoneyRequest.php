@@ -2,6 +2,7 @@
 
 namespace App\Http\Requests\Savings\Account;
 
+use App\Http\Requests\Savings\SavingsReference;
 use App\Http\Requests\Savings\SavingsRules;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Rule;
@@ -9,7 +10,8 @@ use Illuminate\Validation\Rule;
 /**
  * `POST /savings/accounts/{account}/deposits` and `…/withdrawals`
  * (savings:transact): an amount above ₱0.00, today or yesterday, and how the
- * money moved over the counter.
+ * money moved over the counter, with its reference unless it moved in cash
+ * (SavingsReference, finish run round 5).
  */
 class SavingsMoneyRequest extends FormRequest
 {
@@ -27,7 +29,7 @@ class SavingsMoneyRequest extends FormRequest
             'amount' => ['required', ...SavingsRules::money('amount'), 'gt:0'],
             'date' => $this->businessDate(),
             'payment_method' => ['required', 'string', Rule::in(OpenSavingsAccountRequest::PAYMENT_METHODS)],
-            'reference' => ['nullable', 'string', 'max:64'],
+            'reference' => SavingsReference::rules($this->input('payment_method'), 64),
             'remarks' => ['nullable', 'string', 'max:500'],
         ];
     }
@@ -43,10 +45,17 @@ class SavingsMoneyRequest extends FormRequest
             'payment_method.required' => 'Choose how the money was paid: cash, bank transfer, GCash or Maya.',
             'payment_method.string' => 'Choose how the money was paid: cash, bank transfer, GCash or Maya.',
             'payment_method.in' => 'Choose how the money was paid: cash, bank transfer, GCash or Maya.',
+            'reference.required' => SavingsReference::message($this->input('payment_method'), $this->entry()),
             'reference.max' => 'The reference can be at most 64 characters.',
             'reference.string' => 'The reference must be text.',
             'remarks.max' => 'The remarks can be at most 500 characters.',
             'remarks.string' => 'The remarks must be text.',
         ];
+    }
+
+    /** The entry the reference is for, in words: this route's deposit or withdrawal. */
+    private function entry(): string
+    {
+        return $this->route()?->getActionMethod() === 'withdraw' ? SavingsReference::WITHDRAWAL : SavingsReference::DEPOSIT;
     }
 }
