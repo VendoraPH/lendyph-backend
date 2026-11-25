@@ -647,7 +647,10 @@ describe('an applicant who is already a member', function () {
         $this->actingAs($staff)->postJson(lo4HandOffUrl($application->id), ['version' => $application->version, 'force_new_member' => true])->assertOk();
         $created = Borrower::query()->findOrFail($application->fresh()->borrower_id);
 
-        $other = lo4Ready($this);
+        // Another person: both applicants' surnames end in random letters, so with the same
+        // birthdate the fuzzy duplicate check (same birthdate, name within 2 edits) could match
+        // the first applicant's member by chance and refuse this hand-off.
+        $other = lo4Ready($this, ['personal' => ['date_of_birth' => '1987-08-21']]);
         $this->actingAs($staff)->postJson(lo4HandOffUrl($other->id), ['version' => $other->version])->assertOk();
 
         expect($created->id)->not->toBe($existing->id)
