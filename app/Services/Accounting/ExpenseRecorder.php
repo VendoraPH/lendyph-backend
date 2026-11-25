@@ -183,13 +183,13 @@ class ExpenseRecorder
             BranchRowLock::lock(['branch' => $expense->branch_id]);
 
             $locked = $this->lockTheExpense($expense);
-            $payments = $this->lockThePayments($locked);
-            $reversed = $this->lockTheJournals($locked, $payments);
+            $payments = $this->paymentsOf($locked);
+            $chains = $this->lockTheJournals($locked, $payments);
 
             // A reversed expense owes nothing: its payable was undone in the
             // books, so a payment would pay out cash against nothing (finish
             // run round 4). Refused before anything is written.
-            if ($locked->journal_id !== null && $reversed[$locked->journal_id]) {
+            if (self::standsReversed($chains, $locked->journal_id)) {
                 throw ValidationException::withMessages([
                     'expense' => ["This expense was reversed, so it can't be paid. Record it again if it's still owed."],
                 ]);
@@ -205,7 +205,7 @@ class ExpenseRecorder
                 ]);
             }
 
-            $paid = self::standingTotal($payments, $reversed);
+            $paid = self::standingTotal($payments, $chains);
             $outstanding = $locked->amount - $paid;
 
             if ($outstanding <= 0) {
@@ -281,6 +281,10 @@ class ExpenseRecorder
      * can be reversed too: that puts back the cash it paid against a payable
      * that no longer exists.
      *
+     * A payment whose journal was reversed and re-reversed by hand before
+     * stands through the last entry of that chain, so that entry is the one
+     * reversed: JournalPoster refuses the original, already reversed.
+     *
      * Under the locks paying takes, in the same order, so a payment and a
      * reversal on one expense, or two reversals, never interleave. Refused
      * (422 in words) when the payment already stands reversed or has no
@@ -292,8 +296,8 @@ class ExpenseRecorder
             BranchRowLock::lock(['branch' => $expense->branch_id]);
 
             $locked = $this->lockTheExpense($expense);
-            $payments = $this->lockThePayments($locked);
-            $reversed = $this->lockTheJournals($locked, $payments);
+            $payments = $this->paymentsOf($locked);
+            $chains = $this->lockTheJournals($locked, $payments);
             $target = $payments->firstWhere('id', $payment->id) ?? $payment;
 
             if ($target->journal_id === null) {
@@ -302,17 +306,17 @@ class ExpenseRecorder
                 ]);
             }
 
-            if ($reversed[$target->journal_id] ?? false) {
+            if (self::standsReversed($chains, $target->journal_id)) {
                 throw ValidationException::withMessages([
                     'payment' => ['This payment was already reversed.'],
                 ]);
             }
 
-            $journal = AccountingJournal::query()->findOrFail($target->journal_id);
+            $journal = AccountingJournal::query()->findOrFail($chains[$target->journal_id]['last']);
             $reversal = $this->poster->reverse($journal, self::reversalDate($journal), $reason, $userId);
-            $reversed[$target->journal_id] = true;
+            $chains[$target->journal_id]['reversed'] = true;
 
-            $this->storePaid($locked, self::standingTotal($payments, $reversed));
+            $this->storePaid($locked, self::standingTotal($payments, $chains));
 
             AuditLogService::log(
                 'expense_payment_reversed',
@@ -346,7 +350,9 @@ class ExpenseRecorder
      * Refused (422 in words) while any of its payments stands: reversing the
      * accrual alone would leave the payment against a payable that no longer
      * exists, and Accounts Payable below zero. Also refused when it already
-     * stands reversed or has no journal. Under the locks paying takes.
+     * stands reversed or has no journal. Under the locks paying takes. An
+     * expense whose journal was reversed and re-reversed by hand before is
+     * reversed on the last entry of that chain, the one that stands.
      */
     public function reverse(AccountingExpense $expense, string $reason, ?int $userId = null): AccountingExpense
     {
@@ -354,8 +360,8 @@ class ExpenseRecorder
             BranchRowLock::lock(['branch' => $expense->branch_id]);
 
             $locked = $this->lockTheExpense($expense);
-            $payments = $this->lockThePayments($locked);
-            $reversed = $this->lockTheJournals($locked, $payments);
+            $payments = $this->paymentsOf($locked);
+            $chains = $this->lockTheJournals($locked, $payments);
 
             if ($locked->journal_id === null) {
                 throw ValidationException::withMessages([
@@ -363,13 +369,13 @@ class ExpenseRecorder
                 ]);
             }
 
-            if ($reversed[$locked->journal_id]) {
+            if (self::standsReversed($chains, $locked->journal_id)) {
                 throw ValidationException::withMessages([
                     'expense' => ['This expense was already reversed.'],
                 ]);
             }
 
-            $standing = self::standing($payments, $reversed);
+            $standing = self::standing($payments, $chains);
 
             if ($standing->isNotEmpty()) {
                 throw ValidationException::withMessages([
@@ -377,7 +383,7 @@ class ExpenseRecorder
                 ]);
             }
 
-            $journal = AccountingJournal::query()->findOrFail($locked->journal_id);
+            $journal = AccountingJournal::query()->findOrFail($chains[$locked->journal_id]['last']);
             $reversal = $this->poster->reverse($journal, self::reversalDate($journal), $reason, $userId);
 
             AuditLogService::log(
@@ -413,9 +419,9 @@ class ExpenseRecorder
     {
         return DB::transaction(function () use ($expense, $data): AccountingExpense {
             $locked = $this->lockTheExpense($expense);
-            $reversed = $this->lockTheJournals($locked, new Collection);
+            $chains = $this->lockTheJournals($locked, new Collection);
 
-            if ($locked->journal_id !== null && $reversed[$locked->journal_id]) {
+            if (self::standsReversed($chains, $locked->journal_id)) {
                 throw ValidationException::withMessages([
                     'expense' => ["This expense was reversed, so it can't be edited. Record it again if it's still owed."],
                 ]);
@@ -433,25 +439,32 @@ class ExpenseRecorder
     }
 
     /**
-     * The expense's payments, read FOR UPDATE after the expense row: every
-     * one committed before this write, in id order.
+     * The expense's payments, in id order, read with no row lock once the
+     * expense row is locked. Every write of a payment (paying) holds that lock
+     * first, so none can be added meanwhile, and this is the transaction's
+     * first plain read, so it sees every payment committed before the lock.
+     * A locking read here would lock the payments' index range: with no
+     * payment yet that is a gap, which two expenses can share, and two first
+     * payments at the same moment then deadlocked on each other's gap lock
+     * (money review of #392). Their journals stay locked
+     * (self::lockTheJournals()).
      *
      * @return Collection<int, AccountingExpensePayment>
      */
-    private function lockThePayments(AccountingExpense $locked): Collection
+    private function paymentsOf(AccountingExpense $locked): Collection
     {
         return AccountingExpensePayment::query()
             ->where('accounting_expense_id', $locked->id)
             ->orderBy('id')
-            ->lockForUpdate()
             ->get(['id', 'accounting_expense_id', 'date', 'amount', 'journal_id']);
     }
 
     /**
-     * Which of the expense's journal and its payments' journals stand
-     * reversed (AccountingJournal::endsReversed()), read under FOR UPDATE
-     * locks on each journal and every entry that reversed it, one level of
-     * the chains at a time in id order.
+     * For the expense's journal and each of its payments' journals: whether
+     * it stands reversed (AccountingJournal::endsReversed()), and the last
+     * entry of its chain of reversals, which is the entry that stands. Read
+     * under FOR UPDATE locks on each journal and every entry that reversed
+     * it, one level of the chains at a time in id order.
      *
      * Those are the rows JournalPoster::reverse() locks. A reversal never
      * touches the expense row, so the expense row lock alone wouldn't stop a
@@ -463,7 +476,7 @@ class ExpenseRecorder
      * JournalPoster::reverse() takes no allowance lock behind these.
      *
      * @param  Collection<int, AccountingExpensePayment>  $payments
-     * @return array<int, bool> journal id => stands reversed
+     * @return array<int, array{reversed: bool, last: int}> by journal id
      */
     private function lockTheJournals(AccountingExpense $locked, Collection $payments): array
     {
@@ -471,55 +484,66 @@ class ExpenseRecorder
             [$locked->journal_id, ...$payments->pluck('journal_id')->all()],
             static fn (mixed $id): bool => $id !== null,
         )));
-        $reversed = array_fill_keys($ids, false);
-        $links = array_combine($ids, $ids);
+        $chains = array_map(static fn (int $id): array => ['reversed' => false, 'last' => $id], array_combine($ids, $ids));
+        $following = array_combine($ids, $ids);
 
-        for ($reversals = 0; $links !== [] && $reversals < AccountingJournal::MAX_REVERSALS; $reversals++) {
+        for ($reversals = 0; $following !== [] && $reversals < AccountingJournal::MAX_REVERSALS; $reversals++) {
             $rows = AccountingJournal::query()
-                ->whereIn('id', array_values(array_unique($links)))
+                ->whereIn('id', array_values(array_unique($following)))
                 ->orderBy('id')
                 ->lockForUpdate()
                 ->get(['id', 'status', 'reversed_by_journal_id'])
                 ->keyBy('id');
 
-            foreach ($links as $journalId => $linkId) {
+            foreach ($following as $journalId => $linkId) {
                 $row = $rows->get($linkId);
 
                 if ($row === null || $row->status !== 'reversed' || $row->reversed_by_journal_id === null) {
-                    unset($links[$journalId]);
+                    unset($following[$journalId]);
 
                     continue;
                 }
 
-                $reversed[$journalId] = ! $reversed[$journalId];
-                $links[$journalId] = (int) $row->reversed_by_journal_id;
+                $chains[$journalId]['reversed'] = ! $chains[$journalId]['reversed'];
+                $chains[$journalId]['last'] = $following[$journalId] = (int) $row->reversed_by_journal_id;
             }
         }
 
-        return $reversed;
+        return $chains;
+    }
+
+    /**
+     * Whether a journal stands reversed, from self::lockTheJournals(). An
+     * expense with no journal isn't reversed.
+     *
+     * @param  array<int, array{reversed: bool, last: int}>  $chains
+     */
+    private static function standsReversed(array $chains, ?int $journalId): bool
+    {
+        return $journalId !== null && ($chains[$journalId]['reversed'] ?? false);
     }
 
     /**
      * The payments whose journal stands (one with no journal does).
      *
      * @param  Collection<int, AccountingExpensePayment>  $payments
-     * @param  array<int, bool>  $reversed
+     * @param  array<int, array{reversed: bool, last: int}>  $chains
      * @return Collection<int, AccountingExpensePayment>
      */
-    private static function standing(Collection $payments, array $reversed): Collection
+    private static function standing(Collection $payments, array $chains): Collection
     {
-        return $payments->reject(static fn (AccountingExpensePayment $payment): bool => $payment->journal_id !== null && ($reversed[$payment->journal_id] ?? false))->values();
+        return $payments->reject(static fn (AccountingExpensePayment $payment): bool => self::standsReversed($chains, $payment->journal_id))->values();
     }
 
     /**
      * What the standing payments paid, in centavos.
      *
      * @param  Collection<int, AccountingExpensePayment>  $payments
-     * @param  array<int, bool>  $reversed
+     * @param  array<int, array{reversed: bool, last: int}>  $chains
      */
-    private static function standingTotal(Collection $payments, array $reversed): int
+    private static function standingTotal(Collection $payments, array $chains): int
     {
-        return (int) self::standing($payments, $reversed)->sum('amount');
+        return (int) self::standing($payments, $chains)->sum('amount');
     }
 
     /**

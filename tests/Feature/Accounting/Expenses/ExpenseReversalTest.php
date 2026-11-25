@@ -5,8 +5,12 @@ namespace Tests\Feature\Accounting\Expenses;
 use App\Models\AccountingExpense;
 use App\Models\AccountingExpensePayment;
 use App\Models\AccountingJournal;
+use App\Models\AccountingPeriod;
 use App\Models\AuditLog;
+use App\Models\Branch;
+use App\Models\BranchClosure;
 use App\Models\User;
+use App\Services\Accounting\JournalPoster;
 use Carbon\CarbonImmutable;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Testing\TestResponse;
@@ -286,6 +290,129 @@ class ExpenseReversalTest extends TestCase
         ksort($actual);
 
         $this->assertSame($expected, $actual);
+    }
+
+    /**
+     * An entry reversed by hand and then re-reversed before round 5 stands
+     * again through the last entry of its chain. The actions reverse that
+     * entry, which stands, never the original, which JournalPoster refuses
+     * as already reversed (money review of #392).
+     */
+    public function test_a_chain_of_hand_reversals_is_reversed_on_the_entry_that_stands(): void
+    {
+        $id = $this->record(150000);
+        $expenseJournal = AccountingExpense::query()->findOrFail($id)->journal_id;
+        $standing = $this->reverseTwiceByHand($expenseJournal);
+        $this->getJson("/api/accounting/expenses/{$id}")->assertOk()
+            ->assertJsonPath('data.status', 'unpaid')
+            ->assertJsonPath('data.can_reverse', true);
+
+        $this->reverseExpense($id)->assertOk()->assertJsonPath('data.status', 'reversed');
+        $this->assertSame('reversed', AccountingJournal::query()->findOrFail($standing)->status);
+
+        $owed = $this->record(200000);
+        $payment = $this->pay($owed, 50000, '2026-10-05');
+        $standing = $this->reverseTwiceByHand(AccountingExpensePayment::query()->findOrFail($payment)->journal_id);
+        $this->assertSame(50000, $this->getJson("/api/accounting/expenses/{$owed}")->json('data.amount_paid'));
+
+        $this->reversePayment($owed, $payment)->assertOk()
+            ->assertJsonPath('data.amount_paid', 0)
+            ->assertJsonPath('data.payments.0.reversed', true)
+            ->assertJsonPath('data.payments.0.can_reverse', false);
+        $this->assertSame('reversed', AccountingJournal::query()->findOrFail($standing)->status);
+    }
+
+    public function test_both_reversals_are_refused_in_words_in_a_closed_period(): void
+    {
+        $owed = $this->record(1000000);
+        $payment = $this->pay($owed, 400000, '2026-10-05');
+        $unpaid = $this->record(300000);
+        $this->getJson('/api/accounting/periods?per_page=100')->assertOk();
+        $this->postJson('/api/accounting/periods/'.AccountingPeriod::query()->where('code', '2026-10')->sole()->id.'/close')->assertOk();
+        $journals = AccountingJournal::query()->count();
+
+        foreach ([$this->reversePayment($owed, $payment), $this->reverseExpense($unpaid)] as $refused) {
+            $message = $refused->assertUnprocessable()->json('errors.date.0');
+            $this->assertStringContainsString('is dated Oct 20, 2026, which falls in October 2026 — a period that was closed', $message);
+        }
+
+        $this->assertSame($journals, AccountingJournal::query()->count());
+    }
+
+    public function test_another_branchs_expense_is_not_found_on_either_route(): void
+    {
+        $far = Branch::factory()->create(['name' => 'Far Branch', 'code' => 'FAR']);
+        $id = $this->record(1000000, ['branch_id' => $far->id]);
+        $payment = $this->pay($id, 400000, '2026-10-05');
+
+        $this->actingAs($this->userWith(['expenses:pay', 'expenses:update', 'journals:reverse']));
+
+        $this->reversePayment($id, $payment)->assertNotFound();
+        $this->reverseExpense($id)->assertNotFound();
+        $this->assertSame('posted', AccountingJournal::query()->findOrFail(AccountingExpensePayment::query()->findOrFail($payment)->journal_id)->status);
+    }
+
+    public function test_a_closing_branch_refuses_both_reversals_in_words(): void
+    {
+        $far = Branch::factory()->create(['name' => 'Far Branch', 'code' => 'FAR']);
+        $owed = $this->record(1000000, ['branch_id' => $far->id]);
+        $payment = $this->pay($owed, 400000, '2026-10-05');
+        $unpaid = $this->record(300000, ['branch_id' => $far->id]);
+        $far->update(['status' => Branch::STATUS_SUSPENDED]);
+        BranchClosure::create([
+            'branch_id' => $far->id, 'status' => BranchClosure::STATUS_PENDING, 'effective_on' => now()->toDateString(),
+            'reason' => 'Merged into Main', 'requested_by' => $this->admin->id,
+        ]);
+        $journals = AccountingJournal::query()->count();
+
+        foreach ([$this->reversePayment($owed, $payment), $this->reverseExpense($unpaid)] as $refused) {
+            $refused->assertUnprocessable()
+                ->assertJsonPath('errors.branch.0', 'Branch "Far Branch" (FAR) is waiting to close, so nothing new can be added there.');
+        }
+
+        $this->assertSame($journals, AccountingJournal::query()->count());
+    }
+
+    /**
+     * Paying and both reversals read the payments with no row lock, after the
+     * expense row lock every payment writer takes first: a locking read of the
+     * payments' index range takes gap locks, and two first payments on
+     * expenses in one gap deadlocked (money review of #392). The journals stay
+     * locked.
+     */
+    public function test_the_payments_are_read_without_a_row_lock_and_the_journals_with_one(): void
+    {
+        $id = $this->record(1000000);
+        $other = $this->record(300000);
+
+        DB::enableQueryLog();
+        $payment = $this->pay($id, 400000, '2026-10-05');
+        $this->reversePayment($id, $payment)->assertOk();
+        $this->reverseExpense($id)->assertOk();
+        $this->reverseExpense($other)->assertOk();
+        $queries = array_column(DB::getQueryLog(), 'query');
+        DB::disableQueryLog();
+
+        $locking = static fn (string $table): array => array_values(array_filter(
+            $queries,
+            static fn (string $sql): bool => str_contains($sql, "from `{$table}`") && preg_match('/for update|lock in share mode|for share/i', $sql) === 1,
+        ));
+
+        $this->assertSame([], $locking('accounting_expense_payments'));
+        $this->assertNotSame([], $locking('accounting_journals'));
+        $this->assertNotSame([], $locking('accounting_expenses'));
+    }
+
+    /**
+     * Reverses a journal and then its reversal by hand, as the Journals
+     * screen could before round 5, and returns the entry that stands.
+     */
+    private function reverseTwiceByHand(int $journalId): int
+    {
+        $poster = app(JournalPoster::class);
+        $first = $poster->reverse(AccountingJournal::query()->findOrFail($journalId), '2026-10-08', 'By hand', $this->admin->id);
+
+        return $poster->reverse($first, '2026-10-09', 'By hand again', $this->admin->id)->id;
     }
 
     /**
