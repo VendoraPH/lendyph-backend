@@ -15,6 +15,7 @@ use App\Models\User;
 use App\Services\Accounting\AutomaticPoster;
 use App\Services\Accounting\Money;
 use App\Services\Penalties\PenaltyTerms;
+use Brick\Math\BigDecimal;
 use Carbon\Carbon;
 use Illuminate\Auth\Access\AuthorizationException;
 use Illuminate\Database\Eloquent\Collection as EloquentCollection;
@@ -234,11 +235,12 @@ class LoanService
     }
 
     /**
-     * A loan's rate must sit inside its product's range: `min_interest_rate`
+     * A new loan's rate must sit inside its product's range: `min_interest_rate`
      * (or the product rate when no minimum is set) up to `interest_rate`.
      *
-     * Shared by createLoan() and updateLoan(), so an edit cannot move a rate
-     * somewhere creating the loan would have refused.
+     * createLoanRecord()'s check, for a create and a restructure's new loan,
+     * which both take the product's rate period. An edit holds a changed rate
+     * to the same range in the loan's own period instead (LoanRateRange).
      */
     private function assertInterestRateWithinProductRange(float $interestRate, LoanProduct $product): void
     {
@@ -723,17 +725,20 @@ class LoanService
 
         // Only when the edit moves the rate or the product: a draft whose rate
         // is left alone stays editable even if its product's range has since
-        // narrowed. Checked before guardRestructurePrincipalEdit(), which
-        // writes an audit row, so a refused rate leaves nothing behind.
+        // narrowed, or its product now quotes rates per another period. In the
+        // loan's own period, by the Chair's rule, compared exactly. Checked
+        // before guardRestructurePrincipalEdit(), which writes an audit row, so
+        // a refused rate leaves nothing behind.
         $rateChanges = isset($validated['interest_rate'])
-            && (float) $validated['interest_rate'] !== (float) $loan->interest_rate;
+            && BigDecimal::of((string) $validated['interest_rate'])->compareTo((string) $loan->interest_rate) !== 0;
         $productChanges = isset($validated['loan_product_id'])
             && (int) $validated['loan_product_id'] !== (int) $loan->loan_product_id;
 
         if ($rateChanges || $productChanges) {
-            $this->assertInterestRateWithinProductRange(
-                (float) ($validated['interest_rate'] ?? $loan->interest_rate),
+            LoanRateRange::assertChangeable(
+                $loan,
                 $productChanges ? LoanProduct::findOrFail($validated['loan_product_id']) : $loan->loanProduct,
+                (string) ($validated['interest_rate'] ?? $loan->interest_rate),
             );
         }
 

@@ -935,7 +935,7 @@ it('has no path writing an active loan status outside the ones that are accounte
         // active set. The automatic accounting posting sits immediately BEFORE
         // that assertion, so the assertion is still the transaction's last
         // statement — which is what this entry is really asserting.
-        'app/Services/LoanService.php:1543 — \'status\' => \'released\',',
+        'app/Services/LoanService.php:1548 — \'status\' => \'released\',',
         // voidRepayment(): completed → defaulted (a voided recovery, :1027) or
         // ongoing/released (:1029). Both guarded before the status write, off a
         // lock taken at the top of the transaction. The journal reversal is written before this

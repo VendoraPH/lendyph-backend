@@ -155,7 +155,7 @@ final class BorrowerRegistration
             return null;
         }
 
-        Borrower::query()->orderByDesc('id')->lockForUpdate()->first(['id']);
+        self::lockForDuplicateCheck();
 
         if ($key !== null && Borrower::where('registration_uuid', $key)->exists()) {
             return null;
@@ -178,5 +178,22 @@ final class BorrowerRegistration
         ])->validate();
 
         return null;
+    }
+
+    /**
+     * The lock a member's duplicate check runs under: the newest member's row,
+     * FOR UPDATE. Two writes that take it check one after the other, each once
+     * the other has committed. checkDuplicateUnderLock() takes it for a staff
+     * create, a public registration and the online hand-off's member, and
+     * approving a registration takes it before its email check
+     * (RegistrationApproval), so that check waits for a member still being
+     * created and sees them.
+     *
+     * A locking read: it comes before the transaction's first plain read, or
+     * that read would fix a snapshot from before the other write committed.
+     */
+    public static function lockForDuplicateCheck(): void
+    {
+        Borrower::query()->orderByDesc('id')->lockForUpdate()->first(['id']);
     }
 }
