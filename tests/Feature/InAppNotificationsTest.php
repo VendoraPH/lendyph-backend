@@ -367,7 +367,8 @@ class InAppNotificationsTest extends TestCase
     public function test_applying_an_in_place_restructure_tells_its_officer(): void
     {
         $officer = $this->staff('loan_officer');
-        $loan = $this->createReleasedLoan();
+        // A restructure's new rate sits in its product's range (2% to 3%).
+        $loan = $this->createReleasedLoan(['product' => ['min_interest_rate' => 2]]);
         $loan->update(['account_officer_id' => $officer->id]);
 
         $adjustmentId = $this->postJson("/api/loans/{$loan->id}/adjustments", [

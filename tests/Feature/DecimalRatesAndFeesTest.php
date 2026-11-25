@@ -364,7 +364,8 @@ class DecimalRatesAndFeesTest extends TestCase
 
     public function test_a_restructure_adjustment_keeps_a_fractional_rate_and_refuses_a_fifth_place(): void
     {
-        $loan = $this->createReleasedLoan();
+        // A restructure's new rate sits in its product's range (2% to 3%).
+        $loan = $this->createReleasedLoan(['product' => ['min_interest_rate' => 2]]);
 
         $this->postJson("/api/loans/{$loan->id}/adjustments", [
             'adjustment_type' => 'restructure',

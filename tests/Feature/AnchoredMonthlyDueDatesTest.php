@@ -501,7 +501,8 @@ class AnchoredMonthlyDueDatesTest extends TestCase
 
     public function test_a_restructure_after_a_paid_february_row_keeps_the_31st(): void
     {
-        $loan = $this->releasedLoanWithFirstInstalmentPaid(['start_date' => '2026-01-31']);
+        // A restructure's new rate sits in its product's range (2% to 3%).
+        $loan = $this->releasedLoanWithFirstInstalmentPaid(['start_date' => '2026-01-31', 'product' => ['min_interest_rate' => 2]]);
 
         $this->applyAdjustment($loan, [
             'adjustment_type' => 'restructure',
