@@ -3,6 +3,7 @@
 namespace Tests\Feature\Accounting\Expenses;
 
 use App\Models\AccountingExpense;
+use App\Models\AccountingExpensePayment;
 use App\Models\AccountingJournal;
 use Carbon\CarbonImmutable;
 use Tests\TestCase;
@@ -106,6 +107,51 @@ class ReversedExpenseTest extends TestCase
         );
     }
 
+    public function test_a_payment_on_a_reversed_expense_is_refused_and_records_nothing(): void
+    {
+        $id = $this->record(150000);
+        $this->reverse($id);
+        $journals = AccountingJournal::query()->count();
+
+        $this->postJson("/api/accounting/expenses/{$id}/pay", [
+            'date' => '2026-10-05', 'amount' => 10000, 'account_id' => $this->account('1010'),
+        ])->assertUnprocessable()
+            ->assertJsonPath('errors.expense.0', "This expense was reversed, so it can't be paid. Record it again if it's still owed.");
+
+        $this->assertSame(0, AccountingExpensePayment::query()->where('accounting_expense_id', $id)->count());
+        $this->assertSame($journals, AccountingJournal::query()->count());
+        $stored = AccountingExpense::query()->findOrFail($id);
+        $this->assertSame([0, 'unpaid'], [$stored->amount_paid, $stored->settlement_status]);
+    }
+
+    /**
+     * Reversing the reversal puts the cost back in the books, so the expense
+     * counts again, can be paid again, and a further reversal reverses it
+     * again: it reads Reversed while its chain of reversals ends on one.
+     */
+    public function test_an_expense_whose_reversal_was_reversed_counts_again(): void
+    {
+        $this->record(20000);
+        $id = $this->record(150000, ['due_date' => '2026-10-10']);
+        $this->reverse($id);
+        $this->assertSame('reversed', $this->row($id)['status']);
+
+        $reversal = $this->reverseTheLatestReversal($id);
+
+        $row = $this->row($id);
+        $this->assertSame(['overdue', 150000], [$row['status'], $row['amount_due']]);
+        $meta = $this->getJson('/api/accounting/expenses')->assertOk()->json('meta');
+        $this->assertSame(['count' => 2, 'amount' => 170000, 'amount_paid' => 0, 'amount_due' => 170000], $meta['totals']);
+        $this->assertSame(['unpaid' => 1, 'partially_paid' => 0, 'paid' => 0, 'overdue' => 1, 'reversed' => 0], $meta['stats']);
+        $this->assertSame([$id], array_column($this->getJson('/api/accounting/expenses?status=overdue')->json('data'), 'id'));
+
+        $this->pay($id, 10000);
+
+        $this->postJson("/api/accounting/journals/{$reversal}/reverse", ['reason' => 'Entered in error'])->assertCreated();
+        $this->assertSame(['reversed', 0], [$this->row($id)['status'], $this->row($id)['amount_due']]);
+        $this->assertSame(1, $this->getJson('/api/accounting/expenses')->json('meta.totals.count'));
+    }
+
     /**
      * `status()` and its SQL twin `scopeWithStatus()` agree row for row: every
      * expense is in exactly one status's rows, and it's the status it reads.
@@ -121,6 +167,9 @@ class ReversedExpenseTest extends TestCase
         $this->record(30000, ['payment_account_id' => $this->account('1010')]);
         $this->reverse($this->record(10000));
         $this->reverse($this->record(150000, ['due_date' => '2026-10-10']));
+        $reinstated = $this->record(5000);
+        $this->reverse($reinstated);
+        $this->reverseTheLatestReversal($reinstated);
         AccountingExpense::factory()->create(['branch_id' => $this->branch->id]);
 
         $statuses = [];
@@ -135,7 +184,7 @@ class ReversedExpenseTest extends TestCase
         }
 
         sort($statuses);
-        $this->assertSame(['overdue', 'paid', 'partially_paid', 'reversed', 'reversed', 'unpaid', 'unpaid'], $statuses);
+        $this->assertSame(['overdue', 'paid', 'partially_paid', 'reversed', 'reversed', 'unpaid', 'unpaid', 'unpaid'], $statuses);
     }
 
     /**
@@ -162,6 +211,21 @@ class ReversedExpenseTest extends TestCase
 
         $this->postJson("/api/accounting/journals/{$journalId}/reverse", ['reason' => 'Entered in error'])->assertCreated();
         $this->assertSame('reversed', AccountingJournal::query()->findOrFail($journalId)->status);
+    }
+
+    /**
+     * Reverses the last entry in the expense journal's chain of reversals (the
+     * reversal, or the reversal's reversal), and returns the new entry's id.
+     */
+    private function reverseTheLatestReversal(int $expenseId): int
+    {
+        $journal = AccountingJournal::query()->findOrFail(AccountingExpense::query()->findOrFail($expenseId)->journal_id);
+
+        while ($journal->reversed_by_journal_id !== null) {
+            $journal = AccountingJournal::query()->findOrFail($journal->reversed_by_journal_id);
+        }
+
+        return $this->postJson("/api/accounting/journals/{$journal->id}/reverse", ['reason' => 'Reversed in error'])->assertCreated()->json('data.id');
     }
 
     private function pay(int $expenseId, int $amount): void

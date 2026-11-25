@@ -32,7 +32,7 @@ class AccountingExpenseController extends Controller
     #[OA\Get(
         path: '/api/accounting/expenses',
         summary: 'List expenses and payables',
-        description: 'One page of expenses, newest first. Returns the raw Laravel paginator envelope ({data, links, meta}). `per_page` is clamped at 100 and defaults to 15. Each row carries `amount_due` (amount less amount paid; 0 once its journal was reversed). An expense whose journal was reversed on the Journals screen reads `reversed`: it is listed, but counts in no total and in no other status. `meta.totals` cover every matching expense that counts, the `status` filter included, not the page; under `status=reversed` they are all 0. `meta.stats` counts expenses per status with every filter except `status`, each expense in exactly one; `overdue` is by today in Manila. Amounts are integer CENTAVOS.',
+        description: 'One page of expenses, newest first. Returns the raw Laravel paginator envelope ({data, links, meta}). `per_page` is clamped at 100 and defaults to 15. Each row carries `amount_due` (amount less amount paid; 0 once its journal was reversed). An expense whose journal was reversed on the Journals screen reads `reversed` (until that reversal is itself reversed): it is listed, but counts in no total and in no other status. `meta.totals` cover every matching expense that counts, the `status` filter included, not the page; under `status=reversed` they are all 0. `meta.stats` counts expenses per status with every filter except `status`, each expense in exactly one; `overdue` is by today in Manila. Amounts are integer CENTAVOS.',
         tags: ['Accounting'],
         security: [['sanctum' => []]],
         parameters: [
@@ -110,8 +110,8 @@ class AccountingExpenseController extends Controller
         $expenses = $matching()
             // One query for the whole page instead of one per row. The table
             // renders `expense_account_name` on every line.
-            // The journal's status decides `reversed` (AccountingExpense::isReversed()).
-            ->with(['expenseAccount:id,code,name', 'journal:id,status'])
+            // The journal and its reversals decide `reversed` (AccountingExpense::isReversed()).
+            ->with(['expenseAccount:id,code,name', ...AccountingExpense::STATUS_RELATIONS])
             // A TOTAL order, not just `date desc`. See
             // AccountingExpense::scopeNewestFirst() — a partial order lets a
             // paged list serve one row twice and another not at all.
@@ -206,7 +206,7 @@ class AccountingExpenseController extends Controller
     #[OA\Post(
         path: '/api/accounting/expenses/{id}/pay',
         summary: 'Settle an accrued expense',
-        description: 'Posts `payable_payment` — Dr Accounts Payable, Cr the money account — and advances `amount_paid`. NO expense line: the cost was recognised on accrual and debiting it again would report the same spending twice. Partial payments are allowed and each one is its own journal. Refuses an expense that was paid on the spot (there is no payable to settle), one already settled, and any amount above what is outstanding.',
+        description: 'Posts `payable_payment` — Dr Accounts Payable, Cr the money account — and advances `amount_paid`. NO expense line: the cost was recognised on accrual and debiting it again would report the same spending twice. Partial payments are allowed and each one is its own journal. Refuses an expense that was paid on the spot (there is no payable to settle), one already settled, one whose journal stands reversed (its payable was undone), and any amount above what is outstanding.',
         tags: ['Accounting'],
         security: [['sanctum' => []]],
         parameters: [new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer'))],
@@ -224,7 +224,7 @@ class AccountingExpenseController extends Controller
         responses: [
             new OA\Response(response: 200, description: 'Payment recorded, journal posted'),
             new OA\Response(response: 403, description: 'Missing expenses:pay'),
-            new OA\Response(response: 422, description: 'Nothing outstanding, overpayment, or an unmapped posting account'),
+            new OA\Response(response: 422, description: 'Nothing outstanding, a reversed expense, overpayment, or an unmapped posting account'),
         ],
     )]
     public function pay(PayExpenseRequest $request, AccountingExpense $expense): JsonResponse
@@ -241,7 +241,7 @@ class AccountingExpenseController extends Controller
      */
     private function respond(AccountingExpense $expense, int $status = 200): JsonResponse
     {
-        $expense->load(['expenseAccount:id,code,name', 'journal:id,status']);
+        $expense->load(['expenseAccount:id,code,name', ...AccountingExpense::STATUS_RELATIONS]);
 
         return (new AccountingExpenseResource($expense))->response()->setStatusCode($status);
     }

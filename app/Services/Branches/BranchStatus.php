@@ -461,8 +461,9 @@ class BranchStatus
      * closure waits for them (finish run round 2, review of #369). One whose
      * journal was reversed by hand on the Journals screen keeps its unpaid
      * settlement column but owes nothing in the books, so it doesn't count;
-     * one with no journal does. The Expenses list's rule
-     * (AccountingExpense::scopeCounted(), finish run round 4).
+     * one with no journal, or whose reversal was itself reversed, does. The
+     * Expenses list's rule (AccountingExpense::scopeCounted(), finish run
+     * round 4).
      */
     private function unpaidPayables(int $branchId): int
     {

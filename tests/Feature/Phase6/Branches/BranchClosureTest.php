@@ -3,6 +3,7 @@
 namespace Tests\Feature\Phase6\Branches;
 
 use App\Models\AccountingExpense;
+use App\Models\AccountingJournal;
 use App\Models\AuditLog;
 use App\Models\Borrower;
 use App\Models\Branch;
@@ -306,6 +307,14 @@ class BranchClosureTest extends TestCase
         $item = collect($this->getJson("/api/branches/{$this->quiet->id}/closure")->assertOk()->json('data.checklist'))->firstWhere('key', 'unpaid_payables');
         $this->assertSame(['key' => 'unpaid_payables', 'label' => 'Unpaid payables', 'count' => 0, 'amount' => null, 'clear' => true], $item);
         $this->assertSame('unpaid', $expense->refresh()->settlement_status);
+
+        // Reversing the reversal puts the payable back in the books, so the
+        // closure waits for it again (finish run round 4).
+        $reversal = AccountingJournal::query()->findOrFail($expense->journal_id)->reversed_by_journal_id;
+        $this->postJson("/api/accounting/journals/{$reversal}/reverse")->assertCreated();
+
+        $item = collect($this->getJson("/api/branches/{$this->quiet->id}/closure")->assertOk()->json('data.checklist'))->firstWhere('key', 'unpaid_payables');
+        $this->assertSame(['key' => 'unpaid_payables', 'label' => 'Unpaid payables', 'count' => 1, 'amount' => null, 'clear' => false], $item);
     }
 
     public function test_a_quiet_branch_has_a_clear_checklist(): void

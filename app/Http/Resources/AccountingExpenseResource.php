@@ -24,7 +24,7 @@ use Illuminate\Http\Resources\Json\JsonResource;
  * 2. **`status` is derived, not stored.** The column holds only the settlement
  *    state; `overdue` is a function of `due_date` against today, and
  *    `reversed` of the journal's status. See AccountingExpense::status().
- *    The controller eager-loads `journal:id,status` for it.
+ *    The controller eager-loads AccountingExpense::STATUS_RELATIONS for it.
  */
 class AccountingExpenseResource extends JsonResource
 {
@@ -48,7 +48,7 @@ class AccountingExpenseResource extends JsonResource
             'amount' => (int) $this->amount,
             'amount_paid' => (int) $this->amount_paid,
             // What is still owed (AccountingExpense::amountDue()), so the
-            // screen never subtracts: 0 once the journal was reversed.
+            // screen never subtracts: 0 while the journal stands reversed.
             'amount_due' => $this->amountDue(),
             'payment_account_id' => $this->payment_account_id,
             'branch_id' => $this->branch_id,
