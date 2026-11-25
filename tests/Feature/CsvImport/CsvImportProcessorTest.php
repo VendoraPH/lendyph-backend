@@ -680,6 +680,54 @@ class CsvImportProcessorTest extends TestCase
     }
 
     /**
+     * Before round 4 a Loan No. of 21 to 50 characters was stored as its first
+     * 20. Re-importing the same export names the loan in full, so the exact
+     * lookup misses the stored one: it must still be found, by its first 20,
+     * and never created a second time with its balance. A different loan whose
+     * number shares those 20 characters is refused, never created.
+     */
+    public function test_a_loan_stored_under_its_cut_number_is_already_imported_when_named_in_full(): void
+    {
+        $this->seedForImport();
+
+        $product = $this->salaryLoanProduct();
+
+        // The earlier import, as it stored the loan: its first 20 characters.
+        $earlier = $this->makeRun(['product_mapping' => ['Salary Loan' => $product->id]]);
+        $this->makeFile($earlier, 'customers', [$this->customerRow('A-001')]);
+        $this->makeFile($earlier, 'loans', [$this->loanRow('A-001', 'LN-2023-000000000001')]);
+        $this->runToIdle($earlier);
+
+        $stored = Loan::where('external_loan_no', 'LN-2023-000000000001')->firstOrFail();
+
+        // The same export again, the loan named in full, beside a different
+        // loan whose number shares the same first 20 characters.
+        $again = $this->makeRun(['product_mapping' => ['Salary Loan' => $product->id]]);
+        $this->makeFile($again, 'customers', [$this->customerRow('A-001')]);
+        $loans = $this->makeFile($again, 'loans', [
+            $this->loanRow('A-001', 'LN-2023-000000000001-A'),
+            $this->loanRow('A-001', 'LN-2023-000000000001-B', ['loan_amount' => '50,000.00']),
+        ]);
+        $this->runToIdle($again);
+
+        $this->assertSame('completed', $again->fresh()->phase);
+        $this->assertSame([$stored->id], Loan::whereNotNull('external_loan_no')->pluck('id')->all(), 'Nothing is created a second time.');
+
+        $rows = CsvImportRow::where('csv_import_file_id', $loans->id)->orderBy('id')->get();
+        $this->assertSame(['already_imported', 'failed'], $rows->pluck('result')->all());
+        $this->assertSame($stored->id, $rows[0]->loan_id);
+        $this->assertSame(
+            "Loan LN-2023-000000000001-A is already on file as {$stored->application_number}: an earlier import filed it under its first 20 characters, LN-2023-000000000001. The row was skipped.",
+            $rows[0]->result_message,
+        );
+        $this->assertSame('loan_no_shortened_earlier', $rows[1]->result_category);
+        $this->assertSame(
+            "An earlier import filed loan {$stored->application_number} under LN-2023-000000000001, this Loan No.'s first 20 characters, and its member, date released or loan amount differ from this row's. The row wasn't imported, so the two aren't mixed up: check it against {$stored->application_number}.",
+            $rows[1]->result_message,
+        );
+    }
+
+    /**
      * Two Loan Nos alike in their first 20 characters are two loans. Cut to 20,
      * they read as one number, and the second was taken for a re-run of the
      * first ("already on file") and never imported. Kept whole, both land; past

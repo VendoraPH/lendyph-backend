@@ -118,6 +118,37 @@ class ImportDateOrderTest extends TestCase
         $this->assertNotContains('ambiguous_date', array_column($member->warningsToArray(), 'code'));
     }
 
+    public function test_a_maturity_date_reads_in_its_own_order_or_as_before_with_none(): void
+    {
+        $loanOf = fn (array $orders) => (new LoanRowNormalizer)->normalize(new CsvRow(1, 1, $this->cells(CsvImportSchema::LOANS, $this->loanRow('A-001', 'L-1', [
+            'date_released' => '03/01/2026',
+            'maturity_date' => '07/03/2026',
+        ]))), $orders);
+
+        // Day-first release, month-first maturity: 3 January to 3 July.
+        $both = $loanOf(['date_released' => 'dmy', 'maturity_date' => 'mdy']);
+        $this->assertSame(['2026-01-03', '2026-07-03'], [$both->value('date_released'), $both->value('maturity_date')]);
+        $this->assertNotContains('ambiguous_date', array_column($both->warningsToArray(), 'code'));
+
+        // No order for the maturity date: read month-first as before, and it says
+        // the date reads two ways.
+        $none = $loanOf(['date_released' => 'dmy']);
+        $this->assertSame(['2026-01-03', '2026-07-03'], [$none->value('date_released'), $none->value('maturity_date')]);
+        $this->assertSame(['ambiguous_date'], array_column($none->warningsToArray(), 'code'));
+        $this->assertSame('maturity_date', $none->warningsToArray()[0]['field']);
+    }
+
+    public function test_a_membership_date_reads_in_its_own_order(): void
+    {
+        $member = (new CustomerRowNormalizer)->normalize(new CsvRow(1, 1, $this->cells(CsvImportSchema::CUSTOMERS, $this->customerRow('A-001', [
+            'membership_date' => '03/04/2020',
+        ]))), mayImportMembership: true, dateOrders: ['membership_date' => 'dmy']);
+
+        $this->assertTrue($member->isValid());
+        $this->assertSame('2020-04-03', $member->value('membership_date'));
+        $this->assertNotContains('ambiguous_date', array_column($member->warningsToArray(), 'code'));
+    }
+
     private function runToIdle(CsvImportRun $run): void
     {
         $processor = new CsvImportProcessor;

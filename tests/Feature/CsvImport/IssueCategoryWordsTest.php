@@ -42,7 +42,7 @@ class IssueCategoryWordsTest extends TestCase
         'member_withdrawn', 'not_a_member', 'reference_number_too_long', 'share_capital_needs_permission',
         'transaction_date_future', 'transaction_date_implausible', 'transaction_type_invalid',
         'transaction_type_required', 'withdrawal_exceeds_balance',
-        'loan_no_too_long', 'export_failed',
+        'loan_no_too_long', 'loan_no_shortened_earlier', 'export_failed',
     ];
 
     public function test_every_code_the_report_carries_has_its_words(): void

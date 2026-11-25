@@ -98,6 +98,7 @@ final class IssueCategoryWords
         // account number or member ID included).
         'loan_no_too_long' => 'Loan number too long',
         'account_no_too_long' => 'Account number too long',
+        'loan_no_shortened_earlier' => 'Loan number shortened by an earlier import',
 
         // A share capital entry
         'reference_number_too_long' => 'Reference number too long',

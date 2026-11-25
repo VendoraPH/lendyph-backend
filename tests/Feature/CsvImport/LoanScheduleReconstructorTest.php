@@ -6,6 +6,7 @@ use App\Models\AmortizationSchedule;
 use App\Services\CsvImport\LoanReconstructionInput;
 use App\Services\CsvImport\LoanScheduleReconstructor;
 use App\Services\CsvImport\ReconstructedSchedule;
+use App\Services\CsvImport\RowNoteBag;
 use App\Services\LoanService;
 use App\Services\LoanTermSchedule;
 use Carbon\Carbon;
@@ -109,6 +110,22 @@ class LoanScheduleReconstructorTest extends TestCase
         $this->assertSame(
             'The maturity date 2025-07-15 does not fall exactly on a due date of a loan paid semi-monthly from 2025-01-15 (the nearest is 2025-07-29). The last instalment was dated 2025-07-15 as the file says, and the loan recorded as 13 periods.',
             $warning->message,
+        );
+    }
+
+    public function test_a_schedule_that_does_not_reconcile_names_both_figures_in_pesos(): void
+    {
+        $schedule = $this->reconstructor()->reconstruct($this->input());
+        $this->assertTrue($schedule->isValid());
+
+        // The same schedule held to a loan amount one centavo larger.
+        $notes = new RowNoteBag;
+        (new \ReflectionMethod(LoanScheduleReconstructor::class, 'invariantsHold'))
+            ->invoke($this->reconstructor(), $schedule, $this->input(['principalCentavos' => 7000008]), $notes);
+
+        $this->assertSame(
+            ['The rebuilt schedule does not reconcile: scheduled principal comes to ₱70,000.07 but the loan amount is ₱70,000.08. The row was not imported.'],
+            array_map(fn ($note) => $note->message, $notes->errors()),
         );
     }
 

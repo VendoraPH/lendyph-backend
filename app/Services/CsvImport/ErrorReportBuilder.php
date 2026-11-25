@@ -336,6 +336,19 @@ class ErrorReportBuilder
 
         $lastRowId = null;
 
+        // Which reading each ordered date column got: a chosen order reads a
+        // day/month/year cell with no "reads two ways" warning, so the report
+        // says it, file by file, before the issues.
+        foreach ($run->dateOrderLines() as $line) {
+            $file = collect($files)->firstWhere('kind', $line['file']);
+
+            if ($file === null || (($filters['kind'] ?? null) !== null && $filters['kind'] !== $line['file'])) {
+                continue;
+            }
+
+            yield [(string) $file->original_filename, '', '', '', 'note', 'Date reading', $line['label'], $line['words'], ''];
+        }
+
         try {
             yield from $this->emit($rows, $files, $severity, $lastRowId);
         } catch (Throwable $e) {

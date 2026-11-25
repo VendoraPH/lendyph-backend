@@ -87,6 +87,28 @@ class CsvImportUploadService
     public const CLOSED_PHASES = ['completed', 'failed', 'cancelled'];
 
     /**
+     * Where an open run is, in words, for the refusal of a second run: the
+     * phase itself is a key.
+     *
+     * @var array<string, string>
+     */
+    private const PHASE_WORDS = [
+        'uploading' => 'its files are still uploading',
+        'assembled' => 'its files are uploaded and waiting to be checked',
+        'staging' => 'its files are being checked',
+        'awaiting_mapping' => 'it is waiting for its loan products to be mapped',
+        'importing_customers' => 'it is importing members',
+        'importing_loans' => 'it is importing loans',
+        'importing_share_capital' => 'it is importing share capital',
+    ];
+
+    /** An open run's phase in words. */
+    public static function phaseWords(string $phase): string
+    {
+        return self::PHASE_WORDS[$phase] ?? 'it is '.str_replace('_', ' ', $phase);
+    }
+
+    /**
      * Terminal phases whose files are released the moment the phase changes.
      *
      * A SUBSET of CLOSED_PHASES, and the difference is `failed`.
@@ -337,7 +359,7 @@ class CsvImportUploadService
 
             if ($open !== null) {
                 throw new HttpResponseException(response()->json([
-                    'message' => "Import run #{$open->id} is still in progress (phase: {$open->phase}). Finish or cancel it before starting another.",
+                    'message' => "Import #{$open->id} is still in progress: ".self::phaseWords($open->phase).'. Finish or cancel it before starting another.',
                     'run_id' => $open->id,
                     'phase' => $open->phase,
                     'cancellable' => in_array($open->phase, self::CANCELLABLE_PHASES, true),
@@ -1403,6 +1425,8 @@ class CsvImportUploadService
                 // the phase list — the thing that breaks the moment a phase is
                 // added, as `cancelled` just was.
                 'is_closed' => in_array($run->phase, self::CLOSED_PHASES, true),
+                // The reading each ordered date column gets, in words.
+                'date_orders' => $run->dateOrderLines(),
                 'initiated_by' => $run->initiated_by,
                 'created_at' => $run->created_at?->toIso8601String(),
             ],

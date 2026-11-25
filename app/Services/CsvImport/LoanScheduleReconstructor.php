@@ -452,7 +452,7 @@ class LoanScheduleReconstructor
             }
 
             $notes->fail($field, 'invariant_violation', sprintf(
-                'The rebuilt schedule does not reconcile: %s comes to %s but %s is %s. The row was not imported.',
+                'The rebuilt schedule does not reconcile: %s comes to ₱%s but %s is ₱%s. The row was not imported.',
                 $whatWeBuilt,
                 number_format($actual / 100, 2),
                 $whatTheFileSays,

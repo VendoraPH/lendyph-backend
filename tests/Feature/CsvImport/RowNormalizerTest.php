@@ -270,6 +270,10 @@ class RowNormalizerTest extends TestCase
         $blank = $this->loanRow(['loan_no' => '  ']);
 
         $this->assertSame(['required'], array_column($blank->errorsToArray(), 'code'));
+
+        // Characters, not bytes: fifty Ñ (100 bytes) fit, fifty-one don't.
+        $this->assertSame(str_repeat('Ñ', 50), $this->loanRow(['loan_no' => str_repeat('Ñ', 50)])->value('loan_no'));
+        $this->assertSame(['loan_no_too_long'], array_column($this->loanRow(['loan_no' => str_repeat('Ñ', 51)])->errorsToArray(), 'code'));
     }
 
     /**
@@ -299,6 +303,10 @@ class RowNormalizerTest extends TestCase
             $this->assertTrue($kept->isValid(), $file);
             $this->assertSame($fifty, $kept->value('account_no'), $file);
             $this->assertSame([], $kept->warningsToArray(), $file);
+
+            // Characters, not bytes: fifty Ñ (100 bytes) fit, fifty-one don't.
+            $this->assertSame(str_repeat('Ñ', 50), $row(['account_no' => str_repeat('Ñ', 50)])->value('account_no'), $file);
+            $this->assertSame($refusal, $row(['account_no' => str_repeat('Ñ', 51)])->errorsToArray(), $file);
         }
     }
 
@@ -368,6 +376,12 @@ class RowNormalizerTest extends TestCase
         }
 
         $this->assertNull($this->loanRow(['purpose' => ''])->value('purpose'));
+
+        // Characters, not bytes: 500 ñ (1,000 bytes) fit, and 501 keep the first 500.
+        $this->assertSame(str_repeat('ñ', 500), $this->loanRow(['purpose' => str_repeat('ñ', 500)])->value('purpose'));
+        $cut = $this->loanRow(['purpose' => str_repeat('ñ', 501)]);
+        $this->assertSame(str_repeat('ñ', 500), $cut->value('purpose'));
+        $this->assertStringStartsWith('This Purpose is 501 characters', $cut->warningsToArray()[0]['message']);
     }
 
     public function test_an_unmappable_nullable_enum_is_blanked_with_a_warning_but_an_unmappable_required_one_fails(): void

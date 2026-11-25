@@ -75,6 +75,12 @@ use Throwable;
 class CsvImportProcessor
 {
     /**
+     * How many characters of a Loan No. an import kept before round 4, when a
+     * longer one was cut to fit (see self::loanStoredCutShort()).
+     */
+    private const LOAN_NO_CUT_BEFORE_ROUND_4 = 20;
+
+    /**
      * Rows per transaction. Big enough that the sequence lock is taken once per
      * fifty members rather than once per member; small enough that a rollback
      * costs a second of work and that the lock is not held long enough to make a
@@ -961,6 +967,12 @@ class CsvImportProcessor
             );
         }
 
+        $storedCutShort = $this->loanStoredCutShort($normalized, $loanNo, $accountNo);
+
+        if ($storedCutShort !== null) {
+            return $storedCutShort;
+        }
+
         $borrower = Borrower::query()->where('external_account_no', $accountNo)->sharedLock()->first();
 
         if ($borrower === null) {
@@ -1536,5 +1548,52 @@ class CsvImportProcessor
         $run->forceFill([
             'notes' => array_replace((array) ($run->notes ?? []), $additions),
         ])->save();
+    }
+
+    /**
+     * A loan an earlier import stored under the first 20 characters of its
+     * Loan No.: before round 4 a Loan No. of 21 to 50 characters was cut to 20
+     * (`loans.external_loan_no`), and an import since names it in full, so the
+     * exact lookup misses it. Found by those 20 characters:
+     *  - the same member, date released and loan amount: the same loan, already
+     *    imported, with the outcome of any already-imported row;
+     *  - anything else: a different loan whose number was cut to the same 20
+     *    characters. Refused in words, never created, so the two can't be
+     *    mixed up.
+     * Null when the Loan No. is 20 characters or fewer, or no loan was stored
+     * under its first 20.
+     */
+    private function loanStoredCutShort(NormalizedRow $normalized, string $loanNo, string $accountNo): ?RowOutcome
+    {
+        if (mb_strlen($loanNo) <= self::LOAN_NO_CUT_BEFORE_ROUND_4) {
+            return null;
+        }
+
+        $cut = mb_substr($loanNo, 0, self::LOAN_NO_CUT_BEFORE_ROUND_4);
+        $stored = Loan::query()->where('external_loan_no', $cut)->first();
+
+        if ($stored === null) {
+            return null;
+        }
+
+        $member = Borrower::query()->where('external_account_no', $accountNo)->first();
+        $sameLoan = $member !== null
+            && $stored->borrower_id === $member->id
+            && $stored->start_date?->toDateString() === $normalized->value('date_released')
+            && (string) $stored->principal_amount === $this->pesos((int) $this->money($normalized, 'loan_amount'));
+
+        if ($sameLoan) {
+            return RowOutcome::alreadyImported(
+                $stored->borrower_id,
+                "Loan {$loanNo} is already on file as {$stored->application_number}: an earlier import filed it under its first 20 characters, {$cut}. The row was skipped.",
+                loanId: $stored->id,
+            );
+        }
+
+        return RowOutcome::failed(
+            'loan_no_shortened_earlier',
+            "An earlier import filed loan {$stored->application_number} under {$cut}, this Loan No.'s first 20 characters, and its member, date released or loan amount differ from this row's. The row wasn't imported, so the two aren't mixed up: check it against {$stored->application_number}.",
+            borrowerId: $member?->id,
+        );
     }
 }

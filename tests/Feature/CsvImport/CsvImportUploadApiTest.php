@@ -248,12 +248,20 @@ class CsvImportUploadApiTest extends TestCase
             'loans' => ['date_released' => 'dmy', 'maturity_date' => 'mdy'],
         ];
 
-        $runId = $this->postJson('/api/imports', $this->openRunPayload('a', 'b', ['date_orders' => $orders]))
-            ->assertCreated()
-            ->json('run.id');
+        $created = $this->postJson('/api/imports', $this->openRunPayload('a', 'b', ['date_orders' => $orders]))
+            ->assertCreated();
+        $runId = $created->json('run.id');
 
         // assertEquals: a JSON column keeps the keys, not their order.
         $this->assertEquals($orders, CsvImportRun::findOrFail($runId)->date_orders);
+
+        // The run says which reading each date column gets, in words. A column
+        // that needed no order reads as written, so it has no line.
+        $this->assertSame([
+            ['file' => 'customers', 'column' => 'birthdate', 'label' => 'Birthdate', 'order' => 'dmy', 'words' => 'Birthdate: day first'],
+            ['file' => 'loans', 'column' => 'date_released', 'label' => 'Date Released', 'order' => 'dmy', 'words' => 'Date Released: day first'],
+            ['file' => 'loans', 'column' => 'maturity_date', 'label' => 'Maturity Date', 'order' => 'mdy', 'words' => 'Maturity Date: month first'],
+        ], $created->json('run.date_orders'));
     }
 
     public function test_a_date_order_is_day_first_or_month_first_on_a_date_column_of_its_own_file(): void
@@ -296,9 +304,23 @@ class CsvImportUploadApiTest extends TestCase
         $this->postJson('/api/imports', $this->openRunPayload('c', 'd'))
             ->assertStatus(409)
             ->assertJsonPath('run_id', $first)
-            ->assertJsonPath('phase', 'uploading');
+            ->assertJsonPath('phase', 'uploading')
+            // In words: the phase is a key.
+            ->assertJsonPath('message', "Import #{$first} is still in progress: its files are still uploading. Finish or cancel it before starting another.");
 
         $this->assertSame(1, CsvImportRun::count());
+    }
+
+    public function test_every_open_phase_reads_in_words_when_a_new_run_is_refused(): void
+    {
+        foreach (CsvImportUploadService::OPEN_PHASES as $phase) {
+            $words = CsvImportUploadService::phaseWords($phase);
+
+            $this->assertDoesNotMatchRegularExpression('/_/', $words, $phase);
+            $this->assertNotSame($phase, $words, $phase);
+        }
+
+        $this->assertSame('it is waiting for its loan products to be mapped', CsvImportUploadService::phaseWords('awaiting_mapping'));
     }
 
     public function test_a_completed_run_warns_but_does_not_block_a_new_one(): void
