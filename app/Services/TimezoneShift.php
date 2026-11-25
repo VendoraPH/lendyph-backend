@@ -419,6 +419,10 @@ class TimezoneShift
         // run round 3, reprint after a change, 2026-11-25), well after the
         // cutover.
         'loan_document_prints' => ['printed_at'],
+        // When an approved adjustment was cancelled (finish run round 6,
+        // 2026-11-25), a column added well after the cutover to a table the
+        // shift covers, as `documents.portal_shared_at` is.
+        'loan_adjustments' => ['cancelled_at'],
         // The shift's own bookkeeping, written after the cutover by definition.
         'timezone_shifts' => ['completed_at', 'cutover_at', 'started_at'],
     ];

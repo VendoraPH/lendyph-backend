@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\LoanAdjustment\ApproveLoanAdjustmentRequest;
 use App\Http\Requests\LoanAdjustment\BalanceAdjustmentPreviewRequest;
+use App\Http\Requests\LoanAdjustment\CancelLoanAdjustmentRequest;
 use App\Http\Requests\LoanAdjustment\StoreLoanAdjustmentRequest;
 use App\Http\Resources\LoanAdjustmentResource;
 use App\Models\Loan;
@@ -47,7 +48,7 @@ class LoanAdjustmentController extends Controller
         ])['per_page'] ?? 15);
 
         $adjustments = $loan->adjustments()
-            ->with('adjustedByUser', 'approvedByUser')
+            ->with('adjustedByUser', 'approvedByUser', 'cancelledByUser')
             ->latest()
             // Tiebreak on the key so adjustments sharing a `created_at` keep
             // one order across pages. See DeterministicPaginationTest.
@@ -150,7 +151,7 @@ class LoanAdjustmentController extends Controller
     {
         $this->authorize('loan_adjustments:view');
 
-        $loanAdjustment->load('loan', 'adjustedByUser', 'approvedByUser');
+        $loanAdjustment->load('loan', 'adjustedByUser', 'approvedByUser', 'cancelledByUser');
 
         return new LoanAdjustmentResource($loanAdjustment);
     }
@@ -244,6 +245,45 @@ class LoanAdjustmentController extends Controller
 
         return response()->json([
             'message' => 'Adjustment applied successfully.',
+            'data' => new LoanAdjustmentResource($adjustment),
+        ]);
+    }
+
+    #[OA\Patch(
+        path: '/api/loan-adjustments/{loanAdjustment}/cancel',
+        summary: 'Cancel an approved adjustment that is not applied yet',
+        description: 'Needs loan_adjustments:approve and the loan\'s branch (another branch\'s adjustment answers 404). Only an `approved` adjustment: a pending one is rejected instead, and an applied, rejected or cancelled one is refused in words (422 on `status`). Takes the locks approve, reject and apply take (the loan, then the adjustment) and re-reads the status under them. Changes nothing on the loan; the adjustment reads `cancelled`, with `cancelled_by_user`, `cancelled_at` and `cancellation_reason`, and one `adjustment_cancelled` audit row is written.',
+        tags: ['Loan Adjustments'],
+        security: [['sanctum' => []]],
+        parameters: [
+            new OA\Parameter(name: 'loanAdjustment', in: 'path', required: true, schema: new OA\Schema(type: 'integer')),
+        ],
+        requestBody: new OA\RequestBody(
+            required: true,
+            content: new OA\JsonContent(
+                required: ['reason'],
+                properties: [new OA\Property(property: 'reason', type: 'string', minLength: 5, maxLength: 500, description: 'Trimmed')],
+            ),
+        ),
+        responses: [
+            new OA\Response(response: 200, description: 'Adjustment cancelled'),
+            new OA\Response(response: 403, description: 'Missing loan_adjustments:approve'),
+            new OA\Response(response: 404, description: 'Not found, or another branch\'s'),
+            new OA\Response(response: 409, description: 'The adjustment was applied or cancelled by another request since it was read, or the write deadlocked; nothing was written. Reload and try again'),
+            new OA\Response(response: 422, description: 'A missing or wrong-length `reason`, or the adjustment is not approved (on `status`, in words)'),
+        ],
+    )]
+    public function cancel(CancelLoanAdjustmentRequest $request, LoanAdjustment $loanAdjustment): JsonResponse
+    {
+        $adjustment = $this->adjustmentService->cancelAdjustment(
+            $loanAdjustment,
+            $request->user(),
+            $request->reason(),
+        );
+        $adjustment->load('adjustedByUser', 'approvedByUser', 'cancelledByUser');
+
+        return response()->json([
+            'message' => 'Adjustment cancelled.',
             'data' => new LoanAdjustmentResource($adjustment),
         ]);
     }
