@@ -9,6 +9,7 @@ use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Support\Str;
 
 /**
@@ -44,6 +45,9 @@ class OriginationLink extends Model
         self::STATUS_DISABLED => 'Turned off',
         self::STATUS_EXPIRED => 'Expired',
     ];
+
+    /** Changing `is_test` on a link that has applications (finish run round 5): see canChangeTest(). */
+    public const TEST_LOCKED = 'This link already has applications, so it can\'t be changed to or from a test link. Make a new link instead.';
 
     protected $fillable = [
         'name', 'token', 'branch_id', 'active', 'is_test', 'expires_at', 'display_name', 'contact_phone', 'contact_email',
@@ -109,5 +113,28 @@ class OriginationLink extends Model
     public function loanProducts(): BelongsToMany
     {
         return $this->belongsToMany(LoanProduct::class, 'origination_link_products', 'link_id', 'loan_product_id')->orderBy('loan_products.id');
+    }
+
+    /** @return HasMany<OriginationApplication, $this> */
+    public function applications(): HasMany
+    {
+        return $this->hasMany(OriginationApplication::class, 'link_id');
+    }
+
+    /**
+     * Whether the link may still be switched between a test link and a real
+     * one: only while no application was made on it (finish run round 5).
+     * Each application keeps the kind of link it was started on (its own
+     * `is_test`), which the dashboard leaves test ones out by and Track
+     * matches links by. Reads `applications_exists` when the query loaded it
+     * (withExists('applications')).
+     */
+    public function canChangeTest(): bool
+    {
+        if (array_key_exists('applications_exists', $this->attributes)) {
+            return ! $this->getAttribute('applications_exists');
+        }
+
+        return ! $this->applications()->exists();
     }
 }

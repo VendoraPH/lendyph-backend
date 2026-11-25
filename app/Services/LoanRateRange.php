@@ -11,7 +11,8 @@ use Illuminate\Validation\ValidationException;
 /**
  * The rule a loan's changed interest rate is held to, shared by the ordinary
  * edit (LoanService::updateLoan()) and the Chair's edit during approval
- * (LoanApprovalEditService) (finish run round 4).
+ * (LoanApprovalEditService) (finish run round 4), and by an in-place
+ * restructure's new rate (LoanAdjustmentService, finish run round 5).
  *
  * A loan keeps the period its rate is quoted per (`interest_rate_frequency`),
  * copied from its product when the loan was made. The product may quote its
@@ -33,14 +34,15 @@ final class LoanRateRange
      * when it has none) and its rate.
      *
      * @param  string  $when  where the change is refused, ending the sentence ("during approval"), or nothing
+     * @param  string  $field  the field the refusal is reported on: the request's own key for the rate
      *
-     * @throws ValidationException on `interest_rate`
+     * @throws ValidationException on `$field`
      */
-    public static function assertChangeable(Loan $loan, LoanProduct $product, string $rate, string $when = ''): void
+    public static function assertChangeable(Loan $loan, LoanProduct $product, string $rate, string $when = '', string $field = 'interest_rate'): void
     {
         if ($loan->interest_rate_frequency !== $product->interest_rate_frequency) {
             throw ValidationException::withMessages([
-                'interest_rate' => ['This loan\'s rate is quoted '.self::period($loan->interest_rate_frequency)
+                $field => ['This loan\'s rate is quoted '.self::period($loan->interest_rate_frequency)
                     .', but its product now quotes rates '.self::period($product->interest_rate_frequency)
                     .', so the rate can\'t be changed'.($when === '' ? '' : ' '.$when).'.'],
             ]);
@@ -52,7 +54,7 @@ final class LoanRateRange
 
         if ($value->isLessThan($minimum) || $value->isGreaterThan($maximum)) {
             throw ValidationException::withMessages([
-                'interest_rate' => ['The interest rate must be between '.self::percent((string) $minimum).' and '.self::percent((string) $maximum).' '
+                $field => ['The interest rate must be between '.self::percent((string) $minimum).' and '.self::percent((string) $maximum).' '
                     .self::period($product->interest_rate_frequency).' for this product.'],
             ]);
         }

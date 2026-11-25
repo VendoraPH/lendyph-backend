@@ -12,6 +12,7 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Validation\ValidationException;
 use OpenApi\Attributes as OA;
 
 /**
@@ -39,7 +40,7 @@ class OriginationLinkController extends Controller
     {
         abort_unless(OriginationAccess::canRead($request->user()), 403, OriginationAccess::READ_REFUSAL);
 
-        $links = OriginationLink::query()->visibleTo($request->user())->with(['branch', 'loanProducts'])->orderByDesc('id')->get();
+        $links = OriginationLink::query()->visibleTo($request->user())->with(['branch', 'loanProducts'])->withExists('applications')->orderByDesc('id')->get();
 
         return response()->json(['success' => true, 'data' => OriginationLinkResource::collection($links)]);
     }
@@ -60,7 +61,7 @@ class OriginationLinkController extends Controller
     {
         abort_unless(OriginationAccess::canRead($request->user()), 403, OriginationAccess::READ_REFUSAL);
 
-        return response()->json(['success' => true, 'data' => new OriginationLinkResource($link->load(['branch', 'loanProducts']))]);
+        return response()->json(['success' => true, 'data' => new OriginationLinkResource($link->load(['branch', 'loanProducts'])->loadExists('applications'))]);
     }
 
     #[OA\Post(
@@ -102,7 +103,7 @@ class OriginationLinkController extends Controller
     #[OA\Patch(
         path: '/api/loan-origination/links/{link}',
         summary: 'Change a public application link',
-        description: 'Any of name, active, is_test, branch_id, loan_product_ids, expires_at, display_name, contact_phone and contact_email. The token and counters never change. Audited.',
+        description: 'Any of name, active, is_test, branch_id, loan_product_ids, expires_at, display_name, contact_phone and contact_email. The token and counters never change. `is_test` can\'t change once the link has applications (`can_change_test` false); sending its current value is fine. Audited.',
         tags: ['Loan Origination'],
         security: [['sanctum' => []]],
         parameters: [new OA\Parameter(name: 'link', in: 'path', required: true, schema: new OA\Schema(type: 'integer'))],
@@ -110,7 +111,7 @@ class OriginationLinkController extends Controller
             new OA\Response(response: 200, description: 'The changed link'),
             new OA\Response(response: 403, description: 'Missing loan_origination:settings'),
             new OA\Response(response: 404, description: 'No such link, or another branch\'s'),
-            new OA\Response(response: 422, description: 'As on create, in words'),
+            new OA\Response(response: 422, description: 'As on create, in words; or a changed is_test on a link that has applications (on `is_test`)'),
         ],
     )]
     public function update(UpdateOriginationLinkRequest $request, OriginationLink $link): JsonResponse
@@ -118,15 +119,23 @@ class OriginationLinkController extends Controller
         $data = $request->validated();
 
         DB::transaction(function () use ($data, $request, $link): void {
-            $link->fill(Arr::only($data, self::FIELDS));
+            // Locked and read again first, so the Test setting is judged on
+            // what is committed: an application started a moment ago, under
+            // its own lock on this row, counts.
+            $locked = OriginationLink::query()->whereKey($link->id)->lockForUpdate()->firstOrFail();
+            $locked->fill(Arr::only($data, self::FIELDS));
 
-            if ($link->isDirty()) {
-                $link->updated_by = $request->user()->id;
-                $link->save();
+            if ($locked->isDirty('is_test') && ! $locked->canChangeTest()) {
+                throw ValidationException::withMessages(['is_test' => [OriginationLink::TEST_LOCKED]]);
+            }
+
+            if ($locked->isDirty()) {
+                $locked->updated_by = $request->user()->id;
+                $locked->save();
             }
 
             if (array_key_exists('loan_product_ids', $data)) {
-                $link->loanProducts()->sync($data['loan_product_ids'] ?? []);
+                $locked->loanProducts()->sync($data['loan_product_ids'] ?? []);
             }
         });
 

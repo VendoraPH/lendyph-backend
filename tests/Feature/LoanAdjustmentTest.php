@@ -175,7 +175,8 @@ class LoanAdjustmentTest extends TestCase
 
     public function test_an_applied_restructure_adjustment_leaves_the_loan_collectible(): void
     {
-        $loan = $this->createReleasedLoan();
+        // A restructure's new rate sits in its product's range (2% to 3%).
+        $loan = $this->createReleasedLoan(['product' => ['min_interest_rate' => 2]]);
 
         $createResponse = $this->postJson("/api/loans/{$loan->id}/adjustments", [
             'adjustment_type' => 'restructure',

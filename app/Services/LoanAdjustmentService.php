@@ -12,6 +12,7 @@ use App\Models\LoanLedgerEntry;
 use App\Models\Repayment;
 use App\Models\User;
 use App\Services\Accounting\AutomaticPoster;
+use Brick\Math\BigDecimal;
 use Carbon\Carbon;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\Exceptions\HttpResponseException;
@@ -21,6 +22,12 @@ use Illuminate\Validation\ValidationException;
 
 class LoanAdjustmentService
 {
+    /** A restructure's new rate above 100%, in a loan edit's words (UpdateLoanRequest's `max:100`). */
+    public const RATE_OVER_MAXIMUM = 'The interest rate field must not be greater than 100.';
+
+    /** A stored restructure whose rate isn't a number, in the request's words. */
+    public const RATE_NOT_A_NUMBER = 'The interest rate field must be a number.';
+
     public function __construct(
         private LoanService $loanService,
         private RepaymentService $repaymentService,
@@ -42,6 +49,10 @@ class LoanAdjustmentService
             throw ValidationException::withMessages([
                 'adjustment_type' => 'A single-payment loan with a days term has no instalments to reschedule. Restructure it into a new loan instead.',
             ]);
+        }
+
+        if ($validated['adjustment_type'] === 'restructure') {
+            $this->assertRestructureRate($loan, $validated['new_values']);
         }
 
         // Stated as a target: the server works the amount out, and records
@@ -202,6 +213,10 @@ class LoanAdjustmentService
         return LoanWriteTransaction::run(function () use ($adjustment, $approver, $remarks): LoanAdjustment {
             $loan = $this->lockAdjustmentRows($adjustment, 'pending');
             $this->assertTargetPrincipalUnchanged($adjustment, $loan);
+
+            if ($adjustment->adjustment_type === 'restructure') {
+                $this->assertRestructureRate($loan, $adjustment->ownNewValues());
+            }
 
             $adjustment->update([
                 'status' => 'approved',
@@ -1149,9 +1164,56 @@ class LoanAdjustmentService
         return $loan;
     }
 
+    /**
+     * An in-place restructure's new rate (finish run round 5), held to the
+     * rule a loan edit's changed rate is: at most 100%, as every rate is, and
+     * inside its product's range in the loan's own rate period
+     * (LoanRateRange), in the same words. A rate equal to the loan's, or none,
+     * changes nothing and is not checked.
+     *
+     * Checked when the restructure is requested, approved and applied, each
+     * time against the loan and its product as they are then, so a product
+     * changed in between refuses it, and so does a request stored before this
+     * rule (150% was accepted). A refused approval leaves the request pending,
+     * to be rejected; a refused apply leaves it approved and the loan as it
+     * was, and staff request a new restructure.
+     *
+     * @param  array<string, mixed>  $newValues  the restructure's own new values
+     *
+     * @throws ValidationException on `new_values.interest_rate`
+     */
+    private function assertRestructureRate(Loan $loan, array $newValues): void
+    {
+        $rate = $newValues['interest_rate'] ?? null;
+
+        if ($rate === null) {
+            return;
+        }
+
+        if (! is_numeric($rate)) {
+            throw ValidationException::withMessages(['new_values.interest_rate' => [self::RATE_NOT_A_NUMBER]]);
+        }
+
+        $value = BigDecimal::of((string) $rate);
+
+        if ($value->isEqualTo((string) $loan->interest_rate)) {
+            return;
+        }
+
+        if ($value->isGreaterThan(100)) {
+            throw ValidationException::withMessages(['new_values.interest_rate' => [self::RATE_OVER_MAXIMUM]]);
+        }
+
+        LoanRateRange::assertChangeable($loan, $loan->loanProduct, (string) $value, field: 'new_values.interest_rate');
+    }
+
     private function applyRestructure(LoanAdjustment $adjustment, Loan $loan): void
     {
         $newValues = $adjustment->ownNewValues();
+
+        // Before anything is written: the product may have changed since the
+        // restructure was approved, or it was approved before the rate rule.
+        $this->assertRestructureRate($loan, $newValues);
 
         // Compute outstanding from unpaid schedules
         $unpaidSchedules = $loan->amortizationSchedules()

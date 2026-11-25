@@ -4,6 +4,7 @@ namespace App\Http\Requests\LoanAdjustment;
 
 use App\Models\LoanAdjustment;
 use App\Rules\NotAFormerMember;
+use App\Services\LoanAdjustmentService;
 use Illuminate\Contracts\Validation\Validator;
 use Illuminate\Foundation\Http\FormRequest;
 
@@ -42,7 +43,10 @@ class StoreLoanAdjustmentRequest extends FormRequest
             'new_values' => ['required', 'array'],
 
             // Restructure — any one of the three is enough; enforced in after().
-            'new_values.interest_rate' => ['nullable', 'numeric', 'min:0', 'decimal:0,4'],
+            // The rate is capped as every rate is; a new rate must also sit in
+            // the product's range in the loan's own period, which
+            // LoanAdjustmentService checks against the loan (finish run round 5).
+            'new_values.interest_rate' => ['nullable', 'numeric', 'min:0', 'max:100', 'decimal:0,4'],
             'new_values.term' => ['nullable', 'integer', 'min:1'],
             'new_values.frequency' => ['nullable', 'in:daily,weekly,bi_weekly,semi_monthly,monthly'],
 
@@ -65,6 +69,25 @@ class StoreLoanAdjustmentRequest extends FormRequest
 
             'remarks' => ['nullable', 'string', 'max:1000'],
         ];
+    }
+
+    /**
+     * The rate's refusals read as a loan edit's do ("The interest rate field
+     * must not be greater than 100."), never with the `new_values.` key.
+     *
+     * @return array<string, string>
+     */
+    public function attributes(): array
+    {
+        return ['new_values.interest_rate' => 'interest rate'];
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    public function messages(): array
+    {
+        return ['new_values.interest_rate.max' => LoanAdjustmentService::RATE_OVER_MAXIMUM];
     }
 
     /**
