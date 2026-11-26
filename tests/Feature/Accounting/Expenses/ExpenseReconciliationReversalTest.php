@@ -16,12 +16,15 @@ use Tests\Traits\PostsJournals;
 use Tests\Traits\SetupLendyPH;
 
 /**
- * Reversing an expense, or its payment, whose entry a bank reconciliation's
- * statement line is matched to (finish run round 6). While the reconciliation
- * is open (it doesn't read Reconciled), the reversal frees the line, unmatched
- * again, with an audit row in words on the reconciliation. A reconciliation
- * that reads Reconciled refuses the reversal in words, and nothing is posted,
- * until it's reopened by unmatching the line.
+ * Reversing an expense recorded from a bank reconciliation statement line
+ * (ReconciliationActions::recordAsExpense(), finish run round 6). While that
+ * reconciliation is open (it doesn't read Reconciled), the reversal frees the
+ * line it was recorded from, unmatched again, with an audit row in words on
+ * the reconciliation. One that reads Reconciled refuses the reversal in words,
+ * and nothing is posted, until it's reopened by unmatching the line. Any other
+ * match (a payment or an expense paired on the worksheet) is untouched, and
+ * its reversal works as before: the reversal is a new entry for its own
+ * statement line.
  */
 class ExpenseReconciliationReversalTest extends TestCase
 {
@@ -41,6 +44,7 @@ class ExpenseReconciliationReversalTest extends TestCase
         $expense = $this->expenseFrom($reconciliation, $line);
         $other = $this->secondLine($reconciliation);
         $this->assertNotNull($line->refresh()->matched_journal_line_id);
+        $this->assertSame($line->id, $expense->reconciliation_line_id, 'the expense keeps the line it was recorded from');
 
         $this->reverseExpense($expense->id)->assertOk()->assertJsonPath('data.status', 'reversed');
 
@@ -55,7 +59,7 @@ class ExpenseReconciliationReversalTest extends TestCase
         $this->assertSame(['statement_line_id' => $line->id, 'matched_journal_line_id' => $this->bankLineOf($journal->id)], $row->old_values);
         $this->assertSame(['statement_line_id' => $line->id, 'matched_journal_line_id' => null], $row->new_values);
         $this->assertSame(
-            "Statement line of Sep 12, 2026 for ₱150.00 out unmatched: its entry {$journal->journal_no} was reversed by {$reversal->journal_no} when the expense to BDO was reversed on Expenses & Payables.",
+            "Statement line of Sep 12, 2026 for ₱150.00 out unmatched: its entry {$journal->journal_no} was reversed by {$reversal->journal_no} when the expense to BDO recorded from it was reversed on Expenses & Payables.",
             $row->description,
         );
 
@@ -89,53 +93,63 @@ class ExpenseReconciliationReversalTest extends TestCase
         $this->reverseExpense($expense->id)->assertOk()->assertJsonPath('data.status', 'reversed');
     }
 
-    public function test_reversing_a_payment_matched_to_a_statement_line_frees_the_line_while_the_reconciliation_is_open(): void
+    public function test_a_payment_matched_on_the_worksheet_is_reversed_as_before_and_its_match_is_untouched(): void
     {
         $id = $this->owed(15000);
         $payment = $this->pay($id, 15000, '2026-09-12');
-        [$reconciliation, $line] = $this->reconciliation(statementBalance: 0);
-        $paymentJournal = AccountingExpensePayment::query()->findOrFail($payment)->journal_id;
-        $this->match($reconciliation, $line, $this->bankLineOf($paymentJournal));
+        // Reconciled: the match is right, and the reversal is a new entry for
+        // its own statement line.
+        [$reconciliation, $line] = $this->reconciliation(statementBalance: -15000);
+        $bankLine = $this->bankLineOf(AccountingExpensePayment::query()->findOrFail($payment)->journal_id);
+        $this->match($reconciliation, $line, $bankLine);
 
         $this->reversePayment($id, $payment)->assertOk()->assertJsonPath('data.amount_paid', 0);
 
-        $this->assertNull($line->refresh()->matched_journal_line_id);
-        $journal = AccountingJournal::query()->findOrFail($paymentJournal);
-        $this->assertStringContainsString(
-            "its entry {$journal->journal_no} was reversed by ".AccountingJournal::query()->findOrFail($journal->reversed_by_journal_id)->journal_no
-            .' when a payment of the expense to Meralco was reversed on Expenses & Payables.',
-            AuditLog::query()->where('auditable_type', AccountingReconciliation::class)->latest('id')->firstOrFail()->description,
-        );
-    }
-
-    public function test_a_reconciliation_that_reads_reconciled_refuses_the_payment_reversal_in_words(): void
-    {
-        $id = $this->owed(15000);
-        $payment = $this->pay($id, 15000, '2026-09-12');
-        [$reconciliation, $line] = $this->reconciliation(statementBalance: -15000);
-        $this->match($reconciliation, $line, $this->bankLineOf(AccountingExpensePayment::query()->findOrFail($payment)->journal_id));
-        $journals = AccountingJournal::query()->count();
-
-        $this->reversePayment($id, $payment)->assertUnprocessable()->assertJsonPath(
-            'errors.payment.0',
-            'This payment is matched on the September 2026 reconciliation of 1040 Bank Accounts (All branches), which reads Reconciled. '
-            .'Reopen that reconciliation first by unmatching its statement line there, then reverse again.',
-        );
-
-        $this->assertSame($journals, AccountingJournal::query()->count());
-        $this->assertNotNull($line->refresh()->matched_journal_line_id);
-    }
-
-    public function test_an_expense_no_statement_line_is_matched_to_reverses_as_before_and_audits_no_reconciliation(): void
-    {
-        $id = $this->owed(15000);
-        $payment = $this->pay($id, 15000, '2026-09-12');
-        $this->reconciliation(statementBalance: 0);
-
-        $this->reversePayment($id, $payment)->assertOk();
-        $this->reverseExpense($id)->assertOk();
-
+        $this->assertSame($bankLine, $line->refresh()->matched_journal_line_id);
         $this->assertSame(0, AuditLog::query()->where('auditable_type', AccountingReconciliation::class)->where('action', 'updated')->count());
+    }
+
+    public function test_an_expense_paid_at_once_and_matched_on_the_worksheet_is_reversed_as_before(): void
+    {
+        $id = $this->postJson('/api/accounting/expenses', [
+            'date' => '2026-09-12',
+            'payee' => 'BDO',
+            'expense_account_id' => $this->account('5070'),
+            'amount' => 15000,
+            'payment_account_id' => $this->account('1040'),
+        ])->assertCreated()->json('data.id');
+        $this->assertNull(AccountingExpense::query()->findOrFail($id)->reconciliation_line_id);
+        [$reconciliation, $line] = $this->reconciliation(statementBalance: -15000);
+        $bankLine = $this->bankLineOf(AccountingExpense::query()->findOrFail($id)->journal_id);
+        $this->match($reconciliation, $line, $bankLine);
+
+        $this->reverseExpense($id)->assertOk()->assertJsonPath('data.status', 'reversed');
+
+        $this->assertSame($bankLine, $line->refresh()->matched_journal_line_id);
+        $this->assertSame(0, AuditLog::query()->where('auditable_type', AccountingReconciliation::class)->where('action', 'updated')->count());
+    }
+
+    public function test_an_expense_whose_line_was_matched_elsewhere_since_leaves_that_match_alone(): void
+    {
+        [$reconciliation, $line] = $this->reconciliation(statementBalance: -15000);
+        $expense = $this->expenseFrom($reconciliation, $line);
+        // The line was unmatched on the worksheet and paired with another entry.
+        $other = $this->postJson('/api/accounting/expenses', [
+            'date' => '2026-09-12',
+            'payee' => 'BDO',
+            'expense_account_id' => $this->account('5070'),
+            'amount' => 15000,
+            'payment_account_id' => $this->account('1040'),
+        ])->assertCreated()->json('data.id');
+        $otherLine = $this->bankLineOf(AccountingExpense::query()->findOrFail($other)->journal_id);
+        $this->postJson("/api/accounting/reconciliations/{$reconciliation->id}/match", [
+            'matches' => [['line_id' => $line->id, 'journal_line_id' => null]],
+        ])->assertOk();
+        $this->match($reconciliation, $line, $otherLine);
+
+        $this->reverseExpense($expense->id)->assertOk();
+
+        $this->assertSame($otherLine, $line->refresh()->matched_journal_line_id);
     }
 
     /**

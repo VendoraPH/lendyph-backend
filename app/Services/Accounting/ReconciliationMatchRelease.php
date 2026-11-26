@@ -2,33 +2,35 @@
 
 namespace App\Services\Accounting;
 
+use App\Models\AccountingExpense;
 use App\Models\AccountingJournal;
 use App\Models\AccountingJournalLine;
 use App\Models\AccountingReconciliation;
 use App\Models\AccountingReconciliationLine;
 use App\Services\AuditLogService;
 use Carbon\CarbonImmutable;
-use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Validation\ValidationException;
 
 /**
- * The bank reconciliation side of reversing an expense or one of its payments
- * from Expenses & Payables (finish run round 6). A statement line can be
- * matched to the entry being reversed: the expense's own journal when it was
- * recorded from the line (ReconciliationActions::recordAsExpense(), paid at
- * once from the reconciled account) or a payment's journal matched on the
- * worksheet. Once the entry is reversed, that line would stay matched to an
- * entry that no longer stands.
+ * The bank reconciliation side of reversing an expense recorded from a
+ * statement line (ReconciliationActions::recordAsExpense(), finish run round
+ * 6). That expense keeps the line it came from (`reconciliation_line_id`),
+ * and the line stays matched to the expense's own entry, which the reversal
+ * undoes.
  *
  * A reconciliation has no stored state: it reads Reconciled while its
  * difference is ₱0.00 and every statement line is matched
- * (ReconciliationMatcher::present()'s `is_reconciled`); otherwise it is open.
- * Reopening one is unmatching a line on its worksheet.
+ * (ReconciliationMatcher::present()); otherwise it is open. Reopening one is
+ * unmatching a line on its worksheet.
  *
- * - **Open:** the reversal frees the line (unmatched again), with an audit row
- *   in words on the reconciliation, as the reconciliation actions write.
+ * - **Open:** the reversal frees that line (unmatched again), with an audit
+ *   row in words on the reconciliation, as the reconciliation actions write.
  * - **Reads Reconciled:** the reversal is refused in words until it's
  *   reopened, and nothing is posted.
+ *
+ * Only that line. Any other match, a payment or an expense paired on the
+ * worksheet, or the line paired with another entry since, is left alone: the
+ * reversal is a new entry for its own statement line.
  *
  * ## Locks
  *
@@ -36,100 +38,102 @@ use Illuminate\Validation\ValidationException;
  * locks (the branch row FOR SHARE, the expense row, then the journals and
  * every entry that reversed them, FOR UPDATE) and before JournalPoster's (the
  * period row FOR SHARE, the journal number). It locks every statement line of
- * each reconciliation holding a match to the entry, FOR UPDATE, in one read in
- * reconciliation and id order, the order the worksheet's match takes its
- * lines in, so a match, an unmatch or a reconciliation action on the same
- * worksheet waits behind the reversal, or the reversal behind it, and whether
- * it reads Reconciled can't change before the commit. A collision MySQL still
- * breaks with a deadlock answers 409 (BranchRowLock::transaction()).
+ * the line's reconciliation, FOR UPDATE, in one read in id order, the order
+ * the worksheet's match takes its lines in, so a match, an unmatch or a
+ * reconciliation action on that worksheet waits behind the reversal, or the
+ * reversal behind it. The line, its match and whether every line is matched
+ * are then read from the locked rows, never from the snapshot the reversal
+ * read before. Only the line's reconciliation id is read before the lock; a
+ * line never moves to another reconciliation. A collision MySQL still breaks
+ * with a deadlock answers 409 (BranchRowLock::transaction()).
  */
 final class ReconciliationMatchRelease
 {
     public function __construct(private ReconciliationMatcher $matcher) {}
 
     /**
-     * The statement lines matched to `$journal`'s lines, locked, or a refusal
-     * when one sits on a reconciliation that reads Reconciled.
-     *
-     * @param  string  $field  the refusal's error key
-     * @param  string  $subject  "expense" or "payment", for the refusal
-     * @return Collection<int, AccountingReconciliationLine>
+     * The statement line `$expense` was recorded from, locked, when it is
+     * still matched to the expense's own entry or to `$journal` (the entry
+     * the reversal undoes); null when there is none. Refused while its
+     * reconciliation reads Reconciled.
      *
      * @throws ValidationException
      */
-    public function hold(AccountingJournal $journal, string $field, string $subject): Collection
+    public function hold(AccountingExpense $expense, AccountingJournal $journal): ?AccountingReconciliationLine
     {
-        $journalLineIds = AccountingJournalLine::query()->where('accounting_journal_id', $journal->id)->pluck('id')->all();
+        $lineId = $expense->reconciliation_line_id;
 
-        if ($journalLineIds === []) {
-            return new Collection;
+        if ($lineId === null) {
+            return null;
         }
 
-        $reconciliationIds = AccountingReconciliationLine::query()
-            ->whereIn('matched_journal_line_id', $journalLineIds)
-            ->pluck('accounting_reconciliation_id')
-            ->unique()
-            ->values()
-            ->all();
+        $reconciliationId = AccountingReconciliationLine::query()->whereKey($lineId)->value('accounting_reconciliation_id');
 
-        if ($reconciliationIds === []) {
-            return new Collection;
+        if ($reconciliationId === null) {
+            return null;
         }
 
-        $matched = AccountingReconciliationLine::query()
-            ->whereIn('accounting_reconciliation_id', $reconciliationIds)
-            ->orderBy('accounting_reconciliation_id')
+        $lines = AccountingReconciliationLine::query()
+            ->where('accounting_reconciliation_id', $reconciliationId)
             ->orderBy('id')
             ->lockForUpdate()
-            ->get()
-            ->filter(static fn (AccountingReconciliationLine $line): bool => in_array($line->matched_journal_line_id, $journalLineIds, true))
-            ->values();
-
-        $reconciliations = AccountingReconciliation::query()
-            ->whereKey($matched->pluck('accounting_reconciliation_id')->unique()->all())
-            ->orderBy('id')
             ->get();
+        $line = $lines->firstWhere('id', $lineId);
 
-        foreach ($reconciliations as $reconciliation) {
-            if ($this->matcher->present($reconciliation)['is_reconciled']) {
-                throw ValidationException::withMessages([$field => [self::reconciledInWords($reconciliation, $subject)]]);
-            }
+        if ($line === null || $line->matched_journal_line_id === null) {
+            return null;
         }
 
-        return $matched;
+        $entries = array_values(array_unique(array_filter([$expense->journal_id, $journal->id])));
+        $matchedHere = AccountingJournalLine::query()
+            ->whereKey($line->matched_journal_line_id)
+            ->whereIn('accounting_journal_id', $entries)
+            ->exists();
+
+        if (! $matchedHere) {
+            return null;
+        }
+
+        $reconciliation = AccountingReconciliation::query()->findOrFail($reconciliationId);
+        $everyLineMatched = $lines->every(static fn (AccountingReconciliationLine $row): bool => $row->matched_journal_line_id !== null);
+
+        if ($everyLineMatched && $this->matcher->present($reconciliation)['difference'] === 0) {
+            throw ValidationException::withMessages(['expense' => [self::reconciledInWords($reconciliation)]]);
+        }
+
+        return $line;
     }
 
     /**
-     * Frees the held lines once `$reversed` is reversed by `$reversal`, each
-     * with an audit row in words on its reconciliation.
-     *
-     * @param  Collection<int, AccountingReconciliationLine>  $lines  from self::hold()
-     * @param  string  $what  what was reversed, in words: "the expense to BDO"
+     * Frees the held line once `$reversed` is reversed by `$reversal`, with an
+     * audit row in words on its reconciliation.
      */
-    public function release(Collection $lines, AccountingJournal $reversed, AccountingJournal $reversal, string $what, ?int $userId): void
+    public function release(?AccountingReconciliationLine $line, AccountingJournal $reversed, AccountingJournal $reversal, string $payee, ?int $userId): void
     {
-        foreach ($lines as $line) {
-            $was = $line->matched_journal_line_id;
-            $line->matched_journal_line_id = null;
-            $line->save();
-
-            AuditLogService::log(
-                'updated',
-                AccountingReconciliation::query()->findOrFail($line->accounting_reconciliation_id),
-                ['statement_line_id' => $line->id, 'matched_journal_line_id' => $was],
-                ['statement_line_id' => $line->id, 'matched_journal_line_id' => null],
-                sprintf(
-                    'Statement line of %s for %s %s unmatched: its entry %s was reversed by %s when %s was reversed on Expenses & Payables.',
-                    $line->date->format('M j, Y'),
-                    Money::format(abs($line->amount)),
-                    $line->amount < 0 ? 'out' : 'in',
-                    $reversed->journal_no,
-                    $reversal->journal_no,
-                    $what,
-                ),
-                $userId,
-            );
+        if ($line === null) {
+            return;
         }
+
+        $was = $line->matched_journal_line_id;
+        $line->matched_journal_line_id = null;
+        $line->save();
+
+        AuditLogService::log(
+            'updated',
+            AccountingReconciliation::query()->findOrFail($line->accounting_reconciliation_id),
+            ['statement_line_id' => $line->id, 'matched_journal_line_id' => $was],
+            ['statement_line_id' => $line->id, 'matched_journal_line_id' => null],
+            sprintf(
+                'Statement line of %s for %s %s unmatched: its entry %s was reversed by %s when the expense to %s recorded from it was reversed on Expenses & Payables.',
+                $line->date->format('M j, Y'),
+                Money::format(abs($line->amount)),
+                $line->amount < 0 ? 'out' : 'in',
+                $reversed->journal_no,
+                $reversal->journal_no,
+                $payee,
+            ),
+            $userId,
+        );
     }
 
     /**
@@ -138,7 +142,7 @@ final class ReconciliationMatchRelease
      * reconciliation first by unmatching its statement line there, then
      * reverse again."
      */
-    private static function reconciledInWords(AccountingReconciliation $reconciliation, string $subject): string
+    private static function reconciledInWords(AccountingReconciliation $reconciliation): string
     {
         $reconciliation->loadMissing(['account:id,code,name', 'branch:id,name']);
         $period = trim((string) $reconciliation->period);
@@ -151,7 +155,7 @@ final class ReconciliationMatchRelease
         $account = trim($reconciliation->account?->code.' '.$reconciliation->account?->name);
         $branch = $reconciliation->branch_id === null ? ReconciliationMatcher::ALL_BRANCHES : (string) $reconciliation->branch?->name;
 
-        return "This {$subject} is matched on the {$period} reconciliation of {$account} ({$branch}), which reads Reconciled. "
+        return "This expense is matched on the {$period} reconciliation of {$account} ({$branch}), which reads Reconciled. "
             .'Reopen that reconciliation first by unmatching its statement line there, then reverse again.';
     }
 }

@@ -91,6 +91,9 @@ class AccountingExpense extends Model
         'due_date',
         'settlement_status',
         'journal_id',
+        // The bank reconciliation statement line it was recorded from
+        // (ReconciliationActions::recordAsExpense()); null otherwise.
+        'reconciliation_line_id',
         'created_by',
     ];
 
@@ -112,6 +115,7 @@ class AccountingExpense extends Model
             'expense_account_id' => 'integer',
             'payment_account_id' => 'integer',
             'branch_id' => 'integer',
+            'reconciliation_line_id' => 'integer',
             'journal_id' => 'integer',
             'created_by' => 'integer',
         ];

@@ -29,6 +29,11 @@ class LindaLoanNumbersTest extends LindaTestCase
             'after loan #' => ['loan #42', ['42', '#42']],
             'after utang' => ['Pila ang utang 7?', ['7']],
             'with spaces' => ['Status of BC 2019 07', ['BC 2019 07', '2019 07']],
+            'a possessive' => ["What is BC 2019 07's status?", ['BC 2019 07']],
+            'a curly possessive' => ['What is L-2019-0042’s balance?', ['L-2019-0042']],
+            'slash-joined' => ['Compare L-1/L-2', ['L-1', 'L-2']],
+            'comma and semicolon joined' => ['L-1,L-2;L-3 please', ['L-1', 'L-2', 'L-3']],
+            'a Loan No. holding a slash, whole' => ['Status of L/2019/42', ['L/2019/42']],
         ];
     }
 
@@ -51,11 +56,14 @@ class LindaLoanNumbersTest extends LindaTestCase
             'a year' => ['Collections in 2026', '2026'],
             'a word' => ['Collections this month', 'Collections'],
             'a short number in a phrase' => ['How about the last 3 months', '3'],
+            'the app\'s own loan number' => ['Status of LN-0042', 'LN-0042'],
+            'the app\'s own number with a space' => ['Status of PN 42', 'PN 42'],
+            'a receipt number' => ['Find RCP-000123', 'RCP-000123'],
         ];
     }
 
     #[DataProvider('neverChecked')]
-    public function test_counts_years_and_words_are_never_checked(string $question, string $value): void
+    public function test_counts_years_words_and_the_apps_own_numbers_are_never_checked(string $question, string $value): void
     {
         $this->assertNotContains($value, LindaLoanNumbers::candidates($question), $question);
     }

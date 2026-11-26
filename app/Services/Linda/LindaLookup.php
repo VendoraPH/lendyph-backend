@@ -306,6 +306,19 @@ final class LindaLookup
     /** The fewest digits a phone number has. */
     private const PHONE_DIGITS_MIN = 7;
 
+    /**
+     * Whether a value is, as a whole, one of the app's own record numbers
+     * ("LN-0042", "PN 42", "RCP-000123"), which the parser reads. The Loan No.
+     * check (LindaLoanNumbers) leaves these to it, so a file's Loan No. written
+     * like one never shadows the app's own number.
+     */
+    public static function isKnownCode(#[\SensitiveParameter] string $value): bool
+    {
+        $pattern = '/^(?:'.self::KNOWN_PREFIXES.')(?:-(?:'.self::KNOWN_PREFIXES.'))?(?:[ \t]*+[-#][ \t]*+|[ \t]++)\d++(?:-\d++)*+$/iu';
+
+        return preg_match($pattern, $value) === 1;
+    }
+
     public static function parse(#[\SensitiveParameter] string $question): ?LindaLookupRequest
     {
         if (trim($question) === '') {

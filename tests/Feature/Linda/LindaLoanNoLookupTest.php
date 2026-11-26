@@ -62,6 +62,8 @@ class LindaLoanNoLookupTest extends LindaAnswersTestCase
             'a short code' => ['How about D-1?', 'D-1'],
             'a bare number after loan' => ['Status of loan 42', '42'],
             'with spaces' => ['Status of BC 2019 07', 'BC 2019 07'],
+            'a possessive, with spaces' => ["What is BC 2019 07's status?", 'BC 2019 07'],
+            'slash-joined' => ['How about L-2019-0042/L-2019-0043?', 'L-2019-0042'],
         ];
     }
 
@@ -84,6 +86,19 @@ class LindaLoanNoLookupTest extends LindaAnswersTestCase
         $this->assertSame([$this->loan->id], $row->loan_ids);
         $this->assertSame([$this->juan->id], $row->member_ids);
         $this->assertNull($row->model);
+    }
+
+    public function test_the_apps_own_loan_number_wins_over_a_file_loan_no_written_like_it(): void
+    {
+        $this->loan->forceFill(['external_loan_no' => 'LN-0042'])->save();
+        $own = $this->releaseTo($this->member($this->branch, 'Maria', 'Santos'), 30000);
+        $own->forceFill(['loan_account_number' => 'LN-000042'])->save();
+
+        $response = $this->actingAs($this->asker)->postJson(self::URL, ['message' => 'Status of LN-0042'])->assertOk();
+
+        $this->assertSame([], $this->fake->requests);
+        $this->assertStringStartsWith('LN-000042 for ', (string) $response->json('data.answer'));
+        $this->assertSame([$own->id], LindaQuestion::query()->latest('id')->firstOrFail()->loan_ids);
     }
 
     public function test_another_branchs_loan_no_reads_as_not_found_and_stays_on_the_server(): void
