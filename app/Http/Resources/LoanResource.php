@@ -8,6 +8,7 @@ use App\Models\Loan;
 use App\Models\LoanProduct;
 use App\Services\BranchAccess;
 use App\Services\CollateralSecurity;
+use App\Services\ImportedPaymentsCutoff;
 use App\Services\LoanLedgerService;
 use App\Services\LoanService;
 use App\Services\Penalties\PenaltyTerms;
@@ -30,6 +31,7 @@ use OpenApi\Attributes as OA;
         new OA\Property(property: 'application_number', type: 'string'),
         new OA\Property(property: 'loan_account_number', type: 'string', nullable: true),
         new OA\Property(property: 'external_loan_no', type: 'string', nullable: true, description: "The cooperative's own reference for a loan migrated in by the CSV importer. Kept separate from `loan_account_number`, which is a generated LN- sequence."),
+        new OA\Property(property: 'payments_counted_until', type: 'string', format: 'date', nullable: true, description: "An imported loan's as-of date: its file already counts payments up to this day, so a payment dated on or before it is refused (422 on `payment_date`). Null on a loan that wasn't imported with one."),
         new OA\Property(property: 'is_imported', type: 'boolean', description: 'True when this loan was migrated in from an existing book rather than originated here, so its amortization schedule is reconstructed and its pre-import arrears are not penalised.'),
         new OA\Property(property: 'interest_rate', type: 'number'),
         new OA\Property(property: 'interest_rate_frequency', type: 'string', enum: ['daily', 'weekly', 'bi_weekly', 'semi_monthly', 'monthly', 'annual']),
@@ -412,6 +414,10 @@ class LoanResource extends JsonResource
             'rejected_at' => $this->rejected_at,
             'released_at' => $this->released_at,
             'release_date' => $this->released_at?->toDateString(),
+            // An imported loan's as-of date: its file already counts payments
+            // up to this day, so a payment on it or before is refused
+            // (ImportedPaymentsCutoff). Null on every other loan.
+            'payments_counted_until' => ImportedPaymentsCutoff::until($this->resource),
             'release_method' => $this->release_method,
             'release_reference' => $this->release_reference,
             'insurance_premium_percentage' => $this->insurance_premium_pct !== null
@@ -611,6 +617,10 @@ class LoanResource extends JsonResource
             'is_restructure' => $this->isRestructure(),
             'released_at' => $this->released_at,
             'release_date' => $this->released_at?->toDateString(),
+            // An imported loan's as-of date: its file already counts payments
+            // up to this day, so a payment on it or before is refused
+            // (ImportedPaymentsCutoff). Null on every other loan.
+            'payments_counted_until' => ImportedPaymentsCutoff::until($this->resource),
             'created_at' => $this->created_at,
             'next_due_date' => $figures['next_due_date'],
             'next_due_amount' => $figures['current_due'],

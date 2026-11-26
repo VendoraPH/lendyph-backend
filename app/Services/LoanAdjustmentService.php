@@ -257,6 +257,79 @@ class LoanAdjustmentService
     }
 
     /**
+     * Cancel an approved adjustment that isn't applied yet (finish run round
+     * 6), with the reason staff give.
+     *
+     * Only `approved`: a pending one is rejected instead, and an applied,
+     * rejected or cancelled one is refused in words (422 on `status`). Under
+     * the lock an approve, reject and apply take, the loan and then this
+     * adjustment (lockAdjustmentRows()), the status is re-read: one applied or
+     * cancelled by another request since this one read it is a 409, as is a
+     * deadlock or a lock wait timeout, and nothing is written.
+     *
+     * An approved adjustment changes nothing on the loan until it is applied,
+     * so a cancel moves no money and touches no period: it only closes the
+     * request, which can then never be applied. Its stored figures stay as the
+     * record of what was approved. One audit row says so in words; the
+     * model's own "updated" row is not written as well.
+     *
+     * This is the outermost transaction: LoanAdjustmentController::cancel()
+     * and the test helpers are the only callers.
+     */
+    public function cancelAdjustment(LoanAdjustment $adjustment, User $user, string $reason): LoanAdjustment
+    {
+        $this->guardCancellable($adjustment);
+
+        return LoanWriteTransaction::run(function () use ($adjustment, $user, $reason): LoanAdjustment {
+            $loan = $this->lockAdjustmentRows($adjustment, 'approved');
+
+            AuditLogService::withoutModelAuditing(fn () => $adjustment->update([
+                'status' => 'cancelled',
+                'cancelled_by' => $user->id,
+                'cancelled_at' => now(),
+                'cancellation_reason' => $reason,
+            ]));
+
+            AuditLogService::log(
+                'adjustment_cancelled',
+                $adjustment,
+                ['status' => 'approved'],
+                ['status' => 'cancelled', 'cancellation_reason' => $reason],
+                sprintf(
+                    '%s %s on loan %s was cancelled before it was applied. Reason: %s',
+                    $adjustment->typeInWords(),
+                    $adjustment->adjustment_number,
+                    $loan->loan_account_number ?? $loan->external_loan_no ?? $loan->application_number,
+                    $reason,
+                ),
+            );
+
+            return $adjustment;
+        });
+    }
+
+    /**
+     * Refuse, in words, a cancel of anything but an approved adjustment.
+     *
+     * @throws ValidationException on `status`
+     */
+    private function guardCancellable(LoanAdjustment $adjustment): void
+    {
+        $refusal = match ($adjustment->status) {
+            'approved' => null,
+            'pending' => 'This adjustment is still waiting for approval. Reject it instead of cancelling it.',
+            'rejected' => 'This adjustment was rejected, so there is nothing to cancel.',
+            'applied' => 'This adjustment has already been applied to the loan, so it can no longer be cancelled.',
+            'cancelled' => 'This adjustment has already been cancelled.',
+            default => 'Only an approved adjustment that is not applied yet can be cancelled.',
+        };
+
+        if ($refusal !== null) {
+            throw ValidationException::withMessages(['status' => $refusal]);
+        }
+    }
+
+    /**
      * Roll an upon-maturity loan forward by one frequency cycle.
      *
      * Carries unpaid principal + unpaid interest from the open amortization
@@ -342,6 +415,11 @@ class LoanAdjustmentService
             $interestRepayment = null;
 
             if ($interestOption === 'pay' && $collectAmount > 0) {
+                // Today's payment, refused on an imported loan whose file
+                // already counts today (ImportedPaymentsCutoff), on the
+                // field that chose to pay.
+                ImportedPaymentsCutoff::assertAllowed($loan, now(), 'interest_option');
+
                 $interestRepayment = $this->repaymentService->recordRepaymentOnLockedLoan(
                     $loan,
                     $collectAmount,
@@ -493,6 +571,8 @@ class LoanAdjustmentService
             $collectAmount = $quoted['amount'];
 
             if ($interestOption === 'pay' && $collectAmount > 0) {
+                ImportedPaymentsCutoff::assertAllowed($loan, $asOf, 'interest_option');
+
                 $repayment = $this->repaymentService->recordRepaymentOnLockedLoan(
                     $loan,
                     $collectAmount,
@@ -1139,7 +1219,7 @@ class LoanAdjustmentService
     /**
      * Lock the adjustment's loan row, then the adjustment's own, and refuse
      * with a 409 unless the adjustment is still in `$expectedStatus`: pending
-     * for an approve or a reject, approved for an apply.
+     * for an approve or a reject, approved for an apply or a cancel.
      *
      * Two locking reads, in the order every loan write takes
      * (LoanWriteTransaction), and the first statements of the transaction. The

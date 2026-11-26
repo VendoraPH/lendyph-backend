@@ -370,6 +370,7 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
     Route::patch('/loan-adjustments/{loanAdjustment}/approve', [LoanAdjustmentController::class, 'approve']);
     Route::patch('/loan-adjustments/{loanAdjustment}/reject', [LoanAdjustmentController::class, 'reject']);
     Route::patch('/loan-adjustments/{loanAdjustment}/apply', [LoanAdjustmentController::class, 'apply']);
+    Route::patch('/loan-adjustments/{loanAdjustment}/cancel', [LoanAdjustmentController::class, 'cancel']);
 
     // Reports
     Route::prefix('reports')->group(function () {

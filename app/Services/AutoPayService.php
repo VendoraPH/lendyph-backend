@@ -88,6 +88,14 @@ class AutoPayService
                 continue;
             }
 
+            // The run pays today: an imported loan whose file already counts
+            // today is never charged (ImportedPaymentsCutoff).
+            if (ImportedPaymentsCutoff::refuses($loan, $asOf->toDateString())) {
+                $skips[] = $this->skip($loan, ImportedPaymentsCutoff::message($loan));
+
+                continue;
+            }
+
             if ($this->hasEarlierArrears($loan, $from)) {
                 $skips[] = $this->skip($loan, self::SKIP_EARLIER_ARREARS);
 
@@ -226,6 +234,8 @@ class AutoPayService
      *   landing after the first read is never charged again.
      * - A loan with an open period before the window is skipped: the payment
      *   would land on periods staff did not select.
+     * - An imported loan whose file already counts payments up to the run
+     *   date is skipped, with that reason (ImportedPaymentsCutoff).
      * - Each skipped loan is listed in `skips` with the reason, each failed
      *   one in `failures`.
      * - Per-loan failures are isolated; the run continues and reports skipped/failed.
@@ -252,6 +262,7 @@ class AutoPayService
             }
 
             $reason = match (true) {
+                ImportedPaymentsCutoff::refuses($loan, $this->runDate()->toDateString()) => ImportedPaymentsCutoff::message($loan),
                 $this->hasEarlierArrears($loan, $from) => self::SKIP_EARLIER_ARREARS,
                 $this->unselectedPartPaidComesFirst($allSchedules, $includeScheduleIds) => self::SKIP_UNSELECTED_PART_PAID_FIRST,
                 $this->filterIncludedSchedules($allSchedules, $includeScheduleIds)->isEmpty() => self::SKIP_PART_PAID_UNSELECTED,

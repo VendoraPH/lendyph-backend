@@ -42,6 +42,18 @@ class LoanAdjustment extends Model
         'approved_by',
         'approved_at',
         'applied_at',
+        'cancelled_by',
+        'cancelled_at',
+        'cancellation_reason',
+    ];
+
+    /** Each requested type in words, for audit rows and refusals. */
+    public const TYPE_WORDS = [
+        'restructure' => 'Restructure',
+        'penalty_waiver' => 'Penalty waiver',
+        'balance_adjustment' => 'Balance adjustment',
+        'term_extension' => 'Term extension',
+        'extension' => 'Extension',
     ];
 
     protected function casts(): array
@@ -51,6 +63,7 @@ class LoanAdjustment extends Model
             'new_values' => 'array',
             'approved_at' => 'datetime',
             'applied_at' => 'datetime',
+            'cancelled_at' => 'datetime',
         ];
     }
 
@@ -102,6 +115,17 @@ class LoanAdjustment extends Model
     public function approvedByUser(): BelongsTo
     {
         return $this->belongsTo(User::class, 'approved_by');
+    }
+
+    public function cancelledByUser(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'cancelled_by');
+    }
+
+    /** This adjustment's type in words ("Balance adjustment"). */
+    public function typeInWords(): string
+    {
+        return self::TYPE_WORDS[$this->adjustment_type] ?? 'Loan adjustment';
     }
 
     /**

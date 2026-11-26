@@ -11,6 +11,7 @@ use App\Models\Loan;
 use App\Models\Repayment;
 use App\Services\BranchAccess;
 use App\Services\Branches\BranchWriteGuard;
+use App\Services\ImportedPaymentsCutoff;
 use App\Services\LikePattern;
 use App\Services\RepaymentService;
 use Illuminate\Http\JsonResponse;
@@ -294,7 +295,7 @@ class RepaymentController extends Controller
         responses: [
             new OA\Response(response: 201, description: 'Repayment recorded'),
             new OA\Response(response: 409, description: 'The loan was closed (completed, restructured or voided) since it was read, or the write deadlocked; nothing was recorded. Reload and try again'),
-            new OA\Response(response: 422, description: 'Validation error (including an `amount_paid` with more than two decimals, or a `payment_date` before the loan\'s release date, read in the app timezone), or the loan is not released, ongoing or defaulted (on `loan`)'),
+            new OA\Response(response: 422, description: 'Validation error (including an `amount_paid` with more than two decimals, a `payment_date` before the loan\'s release date, read in the app timezone, or, on an imported loan, on or before the day its file counts payments up to, `payments_counted_until`), or the loan is not released, ongoing or defaulted (on `loan`)'),
         ],
     )]
     public function store(StoreRepaymentRequest $request, Loan $loan): JsonResponse
@@ -458,7 +459,7 @@ class RepaymentController extends Controller
                 ]),
             ])),
             new OA\Response(response: 409, description: 'The loan was closed (completed, restructured or voided) since it was read. Reload and try again'),
-            new OA\Response(response: 422, description: 'Validation error, including an `amount_paid` with more than two decimals or a `payment_date` before the loan\'s release date (read in the app timezone)'),
+            new OA\Response(response: 422, description: 'Validation error, including an `amount_paid` with more than two decimals, a `payment_date` before the loan\'s release date (read in the app timezone), or, on an imported loan, on or before `payments_counted_until`'),
             new OA\Response(response: 404, description: 'Loan not found'),
         ],
     )]
@@ -468,7 +469,7 @@ class RepaymentController extends Controller
 
         $validated = request()->validate([
             'amount_paid' => ['required', 'numeric', 'decimal:0,2', 'min:0.01'],
-            'payment_date' => ['required', 'date', 'date_format:Y-m-d', StoreRepaymentRequest::notBeforeRelease($loan)],
+            'payment_date' => ['required', 'date', 'date_format:Y-m-d', StoreRepaymentRequest::notBeforeRelease($loan), ImportedPaymentsCutoff::rule($loan)],
         ], DateInputMessages::calendar(['payment_date' => 'payment date']));
 
         $preview = $this->repaymentService->previewAllocation(
