@@ -15,6 +15,7 @@ uses(TestCase::class, MenuVisibilityTestHelpers::class);
  */
 
 beforeEach(function () {
+    config(['cache.default' => 'database']);
     $this->setUpOverrideHash();
     $this->admin = $this->staffWithRole('admin');
     $this->token = $this->tokenFor($this->admin);

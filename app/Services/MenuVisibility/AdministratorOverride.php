@@ -24,14 +24,25 @@ use SensitiveParameter;
  *   (15) on the access token it came in on: one sign-in only. Signing out
  *   deletes the token and cascades the override away; a refresh carries it to
  *   the new token with the same expiry (carry()).
- * - Every try, right, wrong or locked out, writes one audit row, never with
- *   the password. Tries are counted before the check (OverrideLockout).
+ * - Every try, right, wrong, locked out or refused while the override can't
+ *   be used, and every Lock, writes one audit row, never with the password.
+ *   Tries are counted before the check (OverrideLockout), in a cache that
+ *   keeps them between requests, or the override stays closed.
  */
 final class AdministratorOverride
 {
     public const AUDIT_GRANTED = 'menu_visibility_override_granted';
 
     public const AUDIT_REFUSED = 'menu_visibility_override_refused';
+
+    public const AUDIT_ENDED = 'menu_visibility_override_ended';
+
+    /** Why a try was refused, in the audit row's words. */
+    public const NOT_SET_UP = 'not set up on this server';
+
+    public const NO_SHARED_CACHE = 'no shared cache on this server to count tries';
+
+    public const LOCKED_OUT = 'too many tries';
 
     public const DEFAULT_MINUTES = 15;
 
@@ -83,12 +94,15 @@ final class AdministratorOverride
         return $expiresAt;
     }
 
-    /** Audit a try refused unchecked because the override is locked out (OverrideLockout). */
-    public function refuseLocked(User $user): void
+    /**
+     * Audit a try refused before its password was checked: the override isn't
+     * set up, the cache can't count tries, or it is locked out.
+     */
+    public function refuse(User $user, string $why): void
     {
         AuditLogService::log(
             self::AUDIT_REFUSED,
-            description: 'Administrator override for Menu Visibility refused: too many tries',
+            description: 'Administrator override for Menu Visibility refused: '.$why,
             userId: $user->id,
         );
     }
@@ -109,11 +123,19 @@ final class AdministratorOverride
         return MenuVisibilityOverride::query()->open()->where('personal_access_token_id', $token->getKey())->first();
     }
 
-    /** End the override on this token (Lock). */
-    public function end(mixed $token): void
+    /** End the override on this token (Lock), audited when one was open. */
+    public function end(User $user, mixed $token): void
     {
-        if ($token instanceof PersonalAccessToken && $token->getKey() !== null) {
-            MenuVisibilityOverride::query()->where('personal_access_token_id', $token->getKey())->delete();
+        if (! $token instanceof PersonalAccessToken || $token->getKey() === null) {
+            return;
+        }
+
+        $open = $this->openOn($token) !== null;
+
+        MenuVisibilityOverride::query()->where('personal_access_token_id', $token->getKey())->delete();
+
+        if ($open) {
+            AuditLogService::log(self::AUDIT_ENDED, description: 'Administrator override for Menu Visibility ended', userId: $user->id);
         }
     }
 

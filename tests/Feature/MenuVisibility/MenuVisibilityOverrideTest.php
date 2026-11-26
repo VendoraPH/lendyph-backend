@@ -21,6 +21,9 @@ uses(TestCase::class, MenuVisibilityTestHelpers::class);
  */
 
 beforeEach(function () {
+    // The deployments' own store: tries are counted in the database, never in
+    // one process's memory (the suite's default `array` store).
+    config(['cache.default' => 'database']);
     $this->setUpOverrideHash();
 });
 
@@ -48,7 +51,9 @@ it('answers 503 while no hash is set up, and fails closed on a malformed one', f
         ->assertStatus(503)
         ->assertExactJson(['message' => "The administrator override isn't set up on this server yet."]);
 
-    expect(MenuVisibilityOverride::query()->exists())->toBeFalse();
+    expect(MenuVisibilityOverride::query()->exists())->toBeFalse()
+        ->and(AuditLog::query()->where('action', 'menu_visibility_override_refused')->sole()->description)
+        ->toBe('Administrator override for Menu Visibility refused: not set up on this server');
 })->with([
     'none' => [null],
     'empty' => [''],
@@ -162,13 +167,22 @@ it('ends the override when the user signs out', function () {
         ->assertJsonPath('code', 'override_required');
 });
 
-it('ends the override on Lock', function () {
-    $token = $this->tokenFor($this->superAdmin());
+it('ends the override on Lock, audited', function () {
+    $admin = $this->staffWithRole('admin');
+    $token = $this->tokenFor($admin);
     $this->openOverride($token)->assertOk();
 
     $this->asToken($token, 'DELETE', '/api/menu-visibility/override')->assertNoContent();
 
     $this->asToken($token, 'GET', '/api/menu-visibility')->assertForbidden()->assertJsonPath('code', 'override_required');
+
+    $row = AuditLog::query()->where('action', 'menu_visibility_override_ended')->sole();
+    expect([$row->user_id, $row->description])->toBe([$admin->id, 'Administrator override for Menu Visibility ended'])
+        ->and(auditRowsWithout(self::OVERRIDE_PASSWORD))->toBeTrue();
+
+    // Lock with nothing open ends nothing, and writes nothing.
+    $this->asToken($token, 'DELETE', '/api/menu-visibility/override')->assertNoContent();
+    expect(AuditLog::query()->where('action', 'menu_visibility_override_ended')->count())->toBe(1);
 });
 
 it('refuses Lock without the permission', function () {
@@ -387,4 +401,31 @@ it('refuses a try, unchecked, while it can\'t take its turn to be counted', func
 
     expect($seen->checks)->toBe(0)
         ->and(MenuVisibilityOverride::query()->exists())->toBeFalse();
+});
+
+it('stays closed, unchecked and audited, while the cache can\'t count tries between requests', function (string $driver) {
+    config(['cache.stores.this_process' => ['driver' => $driver], 'cache.default' => 'this_process']);
+    $seen = countPasswordChecks();
+
+    $this->openOverride($this->tokenFor($this->superAdmin()))
+        ->assertStatus(503)
+        ->assertExactJson(['message' => "The administrator override needs a shared cache on this server (array or null caches can't count tries)."]);
+
+    expect($seen->checks)->toBe(0)
+        ->and(MenuVisibilityOverride::query()->exists())->toBeFalse()
+        ->and(AuditLog::query()->where('action', 'menu_visibility_override_refused')->sole()->description)
+        ->toBe('Administrator override for Menu Visibility refused: no shared cache on this server to count tries')
+        ->and(auditRowsWithout(self::OVERRIDE_PASSWORD))->toBeTrue();
+})->with(['array', 'null']);
+
+it('counts tries in the database store, which a fresh store instance still reads', function () {
+    $token = $this->tokenFor($this->superAdmin());
+
+    foreach (range(1, 5) as $try) {
+        $this->asToken($token, 'POST', '/api/menu-visibility/override', ['password' => "wrong {$try}"])->assertStatus(422);
+        // Nothing in this process's memory carries over to the next request.
+        Cache::forgetDriver('database');
+    }
+
+    $this->openOverride($token)->assertStatus(429);
 });

@@ -25,6 +25,8 @@ class MenuVisibilityController extends Controller
 
     public const WRONG_PASSWORD = "That password isn't right.";
 
+    public const NO_SHARED_CACHE = "The administrator override needs a shared cache on this server (array or null caches can't count tries).";
+
     public function __construct(
         private readonly MenuVisibility $visibility,
         private readonly AdministratorOverride $override,
@@ -96,18 +98,29 @@ class MenuVisibilityController extends Controller
             new OA\Response(response: 403, description: 'No permission'),
             new OA\Response(response: 422, description: 'A wrong password'),
             new OA\Response(response: 429, description: 'Too many wrong tries'),
-            new OA\Response(response: 503, description: 'No override password is set up on this server'),
+            new OA\Response(response: 503, description: 'No override password is set up on this server, or its cache can\'t count tries (array or null)'),
         ],
     )]
     public function grantOverride(Request $request): JsonResponse
     {
         UpdateMenuVisibilityRequest::ensureCanManage($request);
+        $user = $request->user();
 
         if (! $this->override->isSetUp()) {
+            $this->override->refuse($user, AdministratorOverride::NOT_SET_UP);
+
             return response()->json(['message' => self::NOT_SET_UP], 503);
         }
 
-        $token = $request->user()->currentAccessToken();
+        // A store that forgets between requests can't count tries, so the
+        // lockout would let every try through: the override stays closed.
+        if (! $this->lockout->canCount()) {
+            $this->override->refuse($user, AdministratorOverride::NO_SHARED_CACHE);
+
+            return response()->json(['message' => self::NO_SHARED_CACHE], 503);
+        }
+
+        $token = $user->currentAccessToken();
 
         if (! $token instanceof PersonalAccessToken) {
             return response()->json([
@@ -118,12 +131,11 @@ class MenuVisibilityController extends Controller
 
         // Counted before the password is checked, so tries sent at once can't
         // get past the lockout together.
-        $user = $request->user();
         $ip = (string) $request->ip();
         $wait = $this->lockout->take($user, $ip);
 
         if ($wait !== null) {
-            $this->override->refuseLocked($user);
+            $this->override->refuse($user, AdministratorOverride::LOCKED_OUT);
 
             return response()->json([
                 'message' => OverrideLockout::lockedMessage($wait),
@@ -156,7 +168,7 @@ class MenuVisibilityController extends Controller
     {
         UpdateMenuVisibilityRequest::ensureCanManage($request);
 
-        $this->override->end($request->user()->currentAccessToken());
+        $this->override->end($request->user(), $request->user()->currentAccessToken());
 
         return response()->noContent();
     }

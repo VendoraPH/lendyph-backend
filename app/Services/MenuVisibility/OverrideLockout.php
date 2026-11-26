@@ -41,8 +41,24 @@ final class OverrideLockout
     /** What a try refused for want of a turn is told to wait. */
     private const BUSY_WAIT_SECONDS = 60;
 
+    /** Stores that keep nothing between requests, so they can't count tries. */
+    private const NOT_SHARED = ['array', 'null'];
+
     /** When this request's try was counted (milliseconds), for giveBack(). */
     private ?int $countedAt = null;
+
+    /**
+     * Whether the deployment's default cache store keeps the counts between
+     * requests. An `array` or `null` store forgets them, which would let every
+     * try through, so the override stays closed then (it fails closed).
+     */
+    public function canCount(): bool
+    {
+        $store = config('cache.default');
+        $driver = is_string($store) ? config('cache.stores.'.$store.'.driver') : null;
+
+        return is_string($driver) && ! in_array($driver, self::NOT_SHARED, true);
+    }
 
     /**
      * Count this try on both keys. Null when it may go on to the password
