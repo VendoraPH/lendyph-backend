@@ -271,6 +271,9 @@ class TimezoneShift
         'savings_auto_credit_postings' => ['created_at'],
         'savings_auto_credit_runs' => ['created_at'],
         'savings_auto_credit_skips' => ['created_at'],
+        // Share capital auto-credit's skipped list (finish run round 7), added
+        // 2026-11-26, well after the cutover, for the same reason.
+        'auto_credit_run_skips' => ['created_at'],
         // Added 2026-11-11 with CDA Reports (Phase 3), well after the
         // cutover, for the same reason. Their business dates are DATEs.
         'cda_document_versions' => ['created_at'],
