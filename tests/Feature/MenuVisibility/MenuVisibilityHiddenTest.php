@@ -1,5 +1,6 @@
 <?php
 
+use App\Models\AuditLog;
 use App\Models\MenuVisibilitySwitch;
 use App\Services\MenuVisibility\MenuVisibility;
 use Illuminate\Support\Facades\Cache;
@@ -85,4 +86,18 @@ it('saves one at a time: a save waits for the one in progress, then refuses in w
     $this->hideModules(['gcash']);
     expect(app(MenuVisibility::class)->hidden())->toBe(['gcash'])
         ->and(Cache::get(MenuVisibility::CACHE_KEY))->toBe(['gcash']);
+});
+
+it('writes the list on every save, so saving the same list again mends a stale cache', function () {
+    $this->hideModules(['gcash']);
+    $rows = AuditLog::query()->where('action', MenuVisibility::AUDIT_CHANGED)->count();
+
+    // A cache write that failed after its commit left an older list behind.
+    Cache::forever(MenuVisibility::CACHE_KEY, []);
+    expect(app(MenuVisibility::class)->hidden())->toBe([]);
+
+    $this->hideModules(['gcash']);
+
+    expect(app(MenuVisibility::class)->hidden())->toBe(['gcash'])
+        ->and(AuditLog::query()->where('action', MenuVisibility::AUDIT_CHANGED)->count())->toBe($rows);
 });

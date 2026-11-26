@@ -245,3 +245,16 @@ it('keeps a route open for another menu only while that menu is shown', function
     'Accounting hidden, the executive dashboard shown' => [['accounting'], ['GET', '/api/accounting/dashboard', 'staff'], true],
     'Accounting and the executive dashboard hidden' => [['accounting', 'executive_dashboard'], ['GET', '/api/accounting/dashboard', 'staff'], false],
 ]);
+
+it('blocks the CDA chain when either the query or the body names it', function (string $method, string $uri, array $body) {
+    $this->hideModules(['cda']);
+
+    expect(isTheHiddenAnswer($this->callAs([$method, $uri, 'staff', $body])))->toBeTrue();
+})->with([
+    'read: query cda, body normal' => ['GET', '/api/settings/approval-workflow?type=cda', ['type' => 'normal']],
+    'reset: query cda, body normal' => ['DELETE', '/api/settings/approval-workflow?type=cda', ['type' => 'normal']],
+    'save: query cda, body normal' => ['PUT', '/api/settings/approval-workflow?type=cda', ['type' => 'normal', 'steps' => []]],
+    'read: query normal, body cda' => ['GET', '/api/settings/approval-workflow?type=normal', ['type' => 'cda']],
+    'reset: query normal, body cda' => ['DELETE', '/api/settings/approval-workflow?type=normal', ['type' => 'cda']],
+    'save: query normal, body cda' => ['PUT', '/api/settings/approval-workflow?type=normal', ['type' => 'cda', 'steps' => []]],
+]);

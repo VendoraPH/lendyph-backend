@@ -24,9 +24,10 @@ use Illuminate\Support\Facades\DB;
  *   (Cache::add), so it never overwrites a newer one;
  * - saves run one at a time, under one lock (SAVE_LOCK), and each writes the
  *   entry from the committed switches before it lets the next one in
- *   (Cache::forever). So a save takes effect at once, two saves can't leave
- *   the older list cached, and a request that read the switches before a
- *   commit can't put the old list back.
+ *   (Cache::forever), even when it changed nothing. So a save takes effect at
+ *   once, two saves can't leave the older list cached, a request that read the
+ *   switches before a commit can't put the old list back, and saving again
+ *   mends an entry a failed write left behind.
  */
 final class MenuVisibility
 {
@@ -88,7 +89,17 @@ final class MenuVisibility
             return false;
         }
 
-        return MenuModules::blockingModule($request->method(), $route->uri(), $this->hidden(), $request->input()) !== null;
+        $hidden = $this->hidden();
+
+        // The query and the body each on their own: a JSON body overrides the
+        // query in input(), and a controller may read either one.
+        foreach ([$request->query->all(), $request->isJson() ? $request->json()->all() : $request->request->all()] as $input) {
+            if (MenuModules::blockingModule($request->method(), $route->uri(), $hidden, $input) !== null) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**
@@ -165,9 +176,10 @@ final class MenuVisibility
             return true;
         }, attempts: 3);
 
-        if ($changed) {
-            Cache::forever(self::CACHE_KEY, MenuModules::effective($this->switchedOff()));
-        }
+        // Every save writes the list from the committed switches, a save that
+        // changed nothing included, so saving again mends a cache an earlier
+        // write failed to update.
+        Cache::forever(self::CACHE_KEY, MenuModules::effective($this->switchedOff()));
 
         return $changed;
     }

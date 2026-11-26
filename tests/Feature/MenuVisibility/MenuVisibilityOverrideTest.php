@@ -5,6 +5,7 @@ use App\Models\MenuVisibilityOverride;
 use App\Services\MenuVisibility\OverrideLockout;
 use Illuminate\Contracts\Debug\ExceptionHandler;
 use Illuminate\Hashing\BcryptHasher;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Hash;
 use Laravel\Sanctum\PersonalAccessToken;
 use Tests\Feature\MenuVisibility\MenuVisibilityTestHelpers;
@@ -346,4 +347,44 @@ it('gives a right password its try back', function () {
     $this->openOverride($token)->assertOk();
     $this->asToken($token, 'POST', '/api/menu-visibility/override', ['password' => 'wrong 5'])->assertStatus(422);
     $this->asToken($token, 'POST', '/api/menu-visibility/override', ['password' => 'wrong 6'])->assertStatus(429);
+});
+
+it('never lets more than 5 tries reach the check in any 15 minutes, across a window\'s edge', function () {
+    $this->freezeSecond();
+    $token = $this->tokenFor($this->superAdmin());
+    $wrong = fn (int $try) => $this->asToken($token, 'POST', '/api/menu-visibility/override', ['password' => "wrong {$try}"]);
+
+    $wrong(1)->assertStatus(422);
+    $this->travel(14)->minutes();
+    foreach (range(2, 5) as $try) {
+        $wrong($try)->assertStatus(422);
+    }
+
+    // The first try has left the 15 minutes; the other four haven't.
+    $this->travel(61)->seconds();
+    $wrong(6)->assertStatus(422);
+    $wrong(7)->assertStatus(429)->assertJsonPath('message', 'Too many tries. Try again in 14 minutes.');
+
+    // Still five in the last 15 minutes until the four at minute 14 leave.
+    $this->travel(13)->minutes();
+    $wrong(8)->assertStatus(429);
+    $this->travel(1)->minutes();
+    $wrong(9)->assertStatus(422);
+});
+
+it('refuses a try, unchecked, while it can\'t take its turn to be counted', function () {
+    $seen = countPasswordChecks();
+    $held = Cache::lock(OverrideLockout::LOCK, 30);
+    expect($held->get())->toBeTrue();
+
+    try {
+        $this->openOverride($this->tokenFor($this->superAdmin()))
+            ->assertStatus(429)
+            ->assertJsonPath('message', 'Too many tries. Try again in 1 minute.');
+    } finally {
+        $held->release();
+    }
+
+    expect($seen->checks)->toBe(0)
+        ->and(MenuVisibilityOverride::query()->exists())->toBeFalse();
 });
