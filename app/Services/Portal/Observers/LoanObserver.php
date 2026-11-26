@@ -23,7 +23,7 @@ class LoanObserver
             $loan->borrower_id === null ? null : (int) $loan->borrower_id,
             PortalNotices::CATEGORY_LOANS,
             'Loan released',
-            sprintf('Your loan %s of %s was released.', $loan->loan_account_number ?? '', MoneyNotices::peso($loan->principal_amount)),
+            sprintf('Your loan %s of %s was released.', (string) $loan->displayNumber(), MoneyNotices::peso($loan->principal_amount)),
             '/member/loans/'.$loan->id,
         );
     }

@@ -102,8 +102,8 @@ final class DocumentReader
         $links = [];
 
         if ($this->settings->featureOn('loans')) {
-            foreach ($this->loans->query()->orderByDesc('released_at')->orderByDesc('id')->get(['id', 'loan_account_number']) as $loan) {
-                $links[] = ['kind' => 'loan_statement', 'id' => $loan->id, 'title' => 'Statement of Account', 'reference' => $loan->loan_account_number];
+            foreach ($this->loans->query()->orderByDesc('released_at')->orderByDesc('id')->get(['id', ...Loan::DISPLAY_NUMBER_COLUMNS]) as $loan) {
+                $links[] = ['kind' => 'loan_statement', 'id' => $loan->id, 'title' => 'Statement of Account', 'reference' => $loan->displayNumber()];
             }
         }
 

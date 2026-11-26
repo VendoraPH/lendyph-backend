@@ -125,7 +125,7 @@ it('reports the active loan holding a collateral on the index', function (string
 
     expect($row['id'])->toBe($this->collateral->id)
         ->and($row['active_loans'])->toBe([
-            ['id' => $loan->id, 'loan_account_number' => $loan->loan_account_number],
+            ['id' => $loan->id, 'loan_account_number' => $loan->loan_account_number, 'display_number' => $loan->displayNumber()],
         ]);
 })->with(Loan::PLEDGING_STATUSES);
 
@@ -161,7 +161,7 @@ it('counts only the active holders when a collateral has active and inactive one
     pledgeDirectly(loanInStatus($this->loanDefaults, 'draft'), $this->collateral);
 
     expect($this->getJson('/api/collaterals')->assertOk()->json('data.0.active_loans'))
-        ->toBe([['id' => $active->id, 'loan_account_number' => $active->loan_account_number]]);
+        ->toBe([['id' => $active->id, 'loan_account_number' => $active->loan_account_number, 'display_number' => $active->displayNumber()]]);
 });
 
 // ── active_loans: which routes carry it ──────────────────────────────────
@@ -171,7 +171,7 @@ it('carries active_loans on the single collateral route', function () {
     pledgeDirectly($loan, $this->collateral);
 
     expect($this->getJson("/api/collaterals/{$this->collateral->id}")->assertOk()->json('data.active_loans'))
-        ->toBe([['id' => $loan->id, 'loan_account_number' => $loan->loan_account_number]]);
+        ->toBe([['id' => $loan->id, 'loan_account_number' => $loan->loan_account_number, 'display_number' => $loan->displayNumber()]]);
 });
 
 it('carries active_loans on a loan collateral list, including the loan being viewed', function () {
@@ -181,7 +181,7 @@ it('carries active_loans on a loan collateral list, including the loan being vie
     // The field answers "who holds this", not "who ELSE holds this" — a client
     // wanting other holders filters this loan out itself.
     expect($this->getJson("/api/loans/{$loan->id}/collaterals")->assertOk()->json('data.0.active_loans'))
-        ->toBe([['id' => $loan->id, 'loan_account_number' => $loan->loan_account_number]]);
+        ->toBe([['id' => $loan->id, 'loan_account_number' => $loan->loan_account_number, 'display_number' => $loan->displayNumber()]]);
 });
 
 it('carries active_loans on create, update and attach responses', function () {
@@ -213,7 +213,7 @@ it('carries active_loans on create, update and attach responses', function () {
     pledgeDirectly($loan, Collateral::findOrFail($id));
 
     expect($this->putJson("/api/collaterals/{$id}", ['detail_value' => 'TCT-1'])->assertOk()->json('data.active_loans'))
-        ->toBe([['id' => $loan->id, 'loan_account_number' => $loan->loan_account_number]]);
+        ->toBe([['id' => $loan->id, 'loan_account_number' => $loan->loan_account_number, 'display_number' => $loan->displayNumber()]]);
 });
 
 // ── cost ─────────────────────────────────────────────────────────────────
@@ -450,7 +450,7 @@ it('carries the source loan collateral onto the restructured loan', function () 
 
     // The new loan is a draft, so the lock state still names only the source.
     expect($this->getJson("/api/collaterals/{$collateral->id}")->assertOk()->json('data.active_loans'))
-        ->toBe([['id' => $source->id, 'loan_account_number' => $source->loan_account_number]]);
+        ->toBe([['id' => $source->id, 'loan_account_number' => $source->loan_account_number, 'display_number' => $source->displayNumber()]]);
 });
 
 it('carries the original snapshot value forward instead of re-appraising it', function () {
@@ -492,7 +492,7 @@ it('reports the restructured loan and not the source once the new loan is releas
         ->firstWhere('id', $collateral->id);
 
     expect($row['active_loans'])
-        ->toBe([['id' => $newLoan->id, 'loan_account_number' => $newLoan->fresh()->loan_account_number]]);
+        ->toBe([['id' => $newLoan->id, 'loan_account_number' => $newLoan->fresh()->loan_account_number, 'display_number' => $newLoan->fresh()->displayNumber()]]);
 });
 
 it('never lets the collateral be taken by another loan at any point in the restructure lifecycle', function () {
