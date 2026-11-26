@@ -258,10 +258,14 @@ class SavingsReportController extends Controller
     #[OA\Get(path: '/api/reports/savings/transactions/export', summary: 'Export Savings Transactions as CSV', tags: ['Savings Reports'], security: [['sanctum' => []]], parameters: [new OA\Parameter(name: 'date_from', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')), new OA\Parameter(name: 'date_to', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')), new OA\Parameter(name: 'branch_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer'))], responses: [new OA\Response(response: 200, description: 'CSV file'), new OA\Response(response: 403, description: 'Missing reports:export or savings:view')])]
     public function exportTransactions(SavingsExportRequest $request): StreamedResponse
     {
-        return $this->csv('savings-transactions.csv', ['Date', 'Value Date', 'Reference', 'Account #', 'Member', 'Branch', 'Type', 'Method', 'In', 'Out', 'Balance'], $this->reports->transactionsQuery($request->filters()), function (SavingsTransaction $row): array {
+        // The SVT- number, then the reference typed for the money (bank, GCash or
+        // Maya), a dash when none, as the Savings Transactions list shows them
+        // (finish run round 7).
+        return $this->csv('savings-transactions.csv', ['Date', 'Value Date', 'Number', 'Reference', 'Account #', 'Member', 'Branch', 'Type', 'Method', 'In', 'Out', 'Balance'], $this->reports->transactionsQuery($request->filters()), function (SavingsTransaction $row): array {
             $r = $this->reports->transactionRow($row);
+            $typed = trim((string) ($r['external_reference'] ?? ''));
 
-            return [$r['date'], $r['value_date'], $r['reference'], $r['account_number'], $r['borrower_name'], $r['branch_name'], self::inWords(self::TRANSACTION_TYPE_WORDS, $r['type']), self::inWords(self::METHOD_WORDS, $r['method']), $r['credit'], $r['debit'], $r['balance_after']];
+            return [$r['date'], $r['value_date'], $r['reference'], $typed === '' ? '—' : $typed, $r['account_number'], $r['borrower_name'], $r['branch_name'], self::inWords(self::TRANSACTION_TYPE_WORDS, $r['type']), self::inWords(self::METHOD_WORDS, $r['method']), $r['credit'], $r['debit'], $r['balance_after']];
         });
     }
 

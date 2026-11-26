@@ -42,6 +42,9 @@ final class SavingsProductMessages
             'portal_account_requests.boolean' => 'Say yes or no to new-account requests from the member portal.',
             'portal_account_requests.declined_if' => 'Only a regular savings product can be requested from the member portal.',
             'portal_account_requests.declined' => 'Only a regular savings product can be requested from the member portal.',
+            'portal_withdrawal_requests.boolean' => 'Say yes or no to withdrawal requests from the member portal.',
+            'portal_withdrawal_requests.declined_if' => 'Only a regular savings product takes withdrawal requests from the member portal.',
+            'portal_withdrawal_requests.declined' => 'Only a regular savings product takes withdrawal requests from the member portal.',
         ];
     }
 }

@@ -28,7 +28,12 @@ class WithoutBooksTest extends TestCase
 
         $member = Borrower::factory()->create(['branch_id' => $this->branch->id]);
         $other = Borrower::factory()->create(['branch_id' => $this->branch->id]);
-        $member->shareCapitalPledge->update(['amount' => 500, 'auto_credit' => true]);
+        // A pledge set to auto-credit takes no entry by hand (finish run round
+        // 7), and one credited by hand this month is skipped by the run, so
+        // the run credits a third member's pledge.
+        $member->shareCapitalPledge->update(['amount' => 500]);
+        $auto = Borrower::factory()->create(['branch_id' => $this->branch->id]);
+        $auto->shareCapitalPledge->update(['amount' => 500, 'auto_credit' => true]);
 
         $this->postJson("/api/pledges/{$member->shareCapitalPledge->id}/entries", [
             'amount' => 100, 'type' => 'credit', 'date' => '2026-11-04', 'method' => 'gcash', 'reference_number' => 'GC-1',

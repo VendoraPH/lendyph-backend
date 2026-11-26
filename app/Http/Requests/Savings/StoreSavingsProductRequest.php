@@ -41,6 +41,8 @@ class StoreSavingsProductRequest extends FormRequest
             'is_active' => ['sometimes', 'boolean'],
             // Only a regular product can be requested from the member portal (finish run round 6).
             'portal_account_requests' => ['sometimes', 'boolean', 'declined_if:kind,'.SavingsProduct::KIND_TIME_DEPOSIT],
+            // Whether the member portal takes withdrawal requests from its accounts (finish run round 7).
+            'portal_withdrawal_requests' => ['sometimes', 'boolean', 'declined_if:kind,'.SavingsProduct::KIND_TIME_DEPOSIT],
             ...SavingsProductRuleFields::rules(null, $this->user()),
         ];
     }

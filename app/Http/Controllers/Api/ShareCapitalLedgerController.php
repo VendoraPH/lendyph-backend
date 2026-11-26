@@ -167,7 +167,7 @@ class ShareCapitalLedgerController extends Controller
         responses: [
             new OA\Response(response: 201, description: 'Ledger entry created, and posted Dr the method\'s account / Cr 3060 Share Capital for a credit, the reverse for a debit, when the organisation keeps books. A cash entry carries its `reference_number` CSH-[super admin id]-[year]-[0001]: the primary super admin\'s user id (the lowest-id active super_admin) padded to 4 digits, the entry date\'s year in Manila, and the next number of that series from 0001.'),
             new OA\Response(response: 409, description: 'Kept colliding with other saves taking the next reference. Nothing was saved; submit again.'),
-            new OA\Response(response: 422, description: 'Validation error. `borrower_id` must belong to a member — a borrower whose registration is still `pending` or was `rejected` is refused here, exactly as on `/pledges/{pledge}/entries`. Also on `borrower_id`: the member\'s branch is closed or waiting to close. On `reference_number`: a cash entry while no super admin is active.'),
+            new OA\Response(response: 422, description: 'Validation error. `borrower_id` must belong to a member — a borrower whose registration is still `pending` or was `rejected` is refused here, exactly as on `/pledges/{pledge}/entries`. Also on `borrower_id`: the member\'s branch is closed or waiting to close, or the member\'s pledge is set to auto-credit, so the auto-credit run credits it (credit or debit, nothing saved). On `reference_number`: a cash entry while no super admin is active.'),
         ],
     )]
     public function store(StoreShareCapitalLedgerRequest $request, ShareCapitalService $shareCapital): JsonResponse

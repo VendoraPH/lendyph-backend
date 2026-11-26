@@ -97,8 +97,10 @@ class AutoCreditJournalTest extends TestCase
     /** The second member's credit takes a reference already held: the run answers 409 and posts nothing. */
     public function test_a_run_that_fails_on_its_second_member_leaves_no_row_and_no_journal(): void
     {
-        ShareCapitalLedger::factory()->create(['borrower_id' => $this->first->id, 'date' => '2026-11-09', 'reference' => 'SC-20261109-000003', 'credit' => 1, 'debit' => 0]);
-        ShareCapitalLedger::factory()->create(['borrower_id' => $this->first->id, 'date' => '2026-11-09', 'reference' => 'SC-20261109-000001', 'credit' => 1, 'debit' => 0]);
+        // Debits, so the first member isn't credited by hand this month, which the
+        // run would skip (finish run round 7).
+        ShareCapitalLedger::factory()->create(['borrower_id' => $this->first->id, 'date' => '2026-11-09', 'reference' => 'SC-20261109-000003', 'credit' => 0, 'debit' => 1]);
+        ShareCapitalLedger::factory()->create(['borrower_id' => $this->first->id, 'date' => '2026-11-09', 'reference' => 'SC-20261109-000001', 'credit' => 0, 'debit' => 1]);
 
         $this->postJson('/api/auto-credit/process')
             ->assertStatus(409)->assertExactJson(['message' => GeneratedNumberWrite::SHARE_CAPITAL_CONFLICT]);

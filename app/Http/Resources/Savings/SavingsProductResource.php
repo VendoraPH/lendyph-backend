@@ -54,6 +54,8 @@ class SavingsProductResource extends JsonResource
             'eligible_branch_ids' => $this->eligible_branch_ids === null ? null : array_map('intval', $this->eligible_branch_ids),
             // Finish run round 6: offered for new-account requests in the member portal.
             'portal_account_requests' => (bool) ($this->portal_account_requests ?? false),
+            // Finish run round 7: the member portal takes withdrawal requests from its accounts (the column's default is on).
+            'portal_withdrawal_requests' => (bool) ($this->portal_withdrawal_requests ?? true),
             'current_rates' => app(RateBook::class)->current($this->resource, now()->toDateString()),
             'account_count' => $holdings,
             'can_delete' => ! $inUse,

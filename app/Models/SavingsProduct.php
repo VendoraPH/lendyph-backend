@@ -79,6 +79,9 @@ class SavingsProduct extends Model
         'eligible_branch_ids',
         // Whether the member portal offers it for new-account requests (OpeningRequests::openProducts()).
         'portal_account_requests',
+        // Whether the member portal takes withdrawal requests from its accounts
+        // (PortalRequestController::options(), WithdrawalRequests); on by default.
+        'portal_withdrawal_requests',
         'created_by',
         'updated_by',
     ];
@@ -105,6 +108,7 @@ class SavingsProduct extends Model
             'eligible_member_types' => 'array',
             'eligible_branch_ids' => 'array',
             'portal_account_requests' => 'boolean',
+            'portal_withdrawal_requests' => 'boolean',
             'created_by' => 'integer',
             'updated_by' => 'integer',
         ];

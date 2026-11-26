@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Http\Requests\ShareCapital\ProcessAutoCreditRequest;
+use App\Models\AutoCreditRunSkip;
 use App\Services\ShareCapitalService;
 use Illuminate\Http\JsonResponse;
 use OpenApi\Attributes as OA;
@@ -45,7 +46,7 @@ class AutoCreditController extends Controller
             ),
         ),
         responses: [
-            new OA\Response(response: 201, description: 'Auto-credit processed, and each member\'s credit posted Dr the method\'s account / Cr 3060 Share Capital when the organisation keeps books'),
+            new OA\Response(response: 201, description: 'Auto-credit processed, and each member\'s credit posted Dr the method\'s account / Cr 3060 Share Capital when the organisation keeps books. A pledge whose member was already credited by hand this month (Manila) is skipped: `data.skipped` lists each with its reason, and `data.skipped_count` counts them.'),
             new OA\Response(response: 422, description: 'A method outside the list, or a reference over 100 characters'),
             new OA\Response(response: 409, description: 'Collided with another save taking the next reference. Not tried again, so overlapping runs cannot credit a pledge twice. Nothing was posted; check the last run before running again.'),
             new OA\Response(response: 403, description: 'Forbidden'),
@@ -71,6 +72,14 @@ class AutoCreditController extends Controller
                 'processed_count' => $run->member_count,
                 'processed_at' => $run->processed_at?->toDateTimeString(),
                 'status' => $run->status,
+                // Pledges already credited by hand this month (finish run round 7).
+                'skipped_count' => (int) $run->skipped_count,
+                'skipped' => $run->skips->map(fn (AutoCreditRunSkip $skip): array => [
+                    'pledge_id' => $skip->pledge_id,
+                    'borrower_name' => $skip->borrower?->full_name,
+                    'amount' => (float) $skip->amount,
+                    'reason' => $skip->reason,
+                ])->values()->all(),
             ],
         ], 201);
     }
