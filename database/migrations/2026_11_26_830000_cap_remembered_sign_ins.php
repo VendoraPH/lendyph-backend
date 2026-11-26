@@ -13,10 +13,12 @@ use Symfony\Component\Console\Output\ConsoleOutput;
  *
  * Every staff token (`tokenable_type` App\Models\User) whose `expires_at` is
  * beyond now plus AUTH_TOKEN_TIMEOUT minutes, or null (never), is capped at
- * that limit. Nothing is revoked: a remembered sign-in in use keeps working
- * until the cap, and the app renews it as it renews any session. Member portal
+ * that limit. Nothing is revoked, but nothing is renewed either: a browser
+ * that ticked "Remember me" ran no idle timer and no renewal, so it is signed
+ * out when the cap is reached and signs in again. Member portal
  * tokens are never touched (their own 60-minute rule). One audit row, a system
- * change, counts what was shortened; when nothing was, nothing is written, so
+ * change, counts what was shortened, remembered sign-ins and sign-ins with no
+ * end apart; when nothing was, nothing is written, so
  * a second run changes nothing and writes nothing (a token capped by the first
  * run expires no later than now plus the session length).
  *
@@ -36,10 +38,11 @@ return new class extends Migration
         $shortened = DB::transaction(function () use ($minutes): int {
             $limit = now()->addMinutes($minutes);
 
-            $count = DB::table('personal_access_tokens')
-                ->where('tokenable_type', self::STAFF_TOKENABLE)
-                ->where(fn ($query) => $query->whereNull('expires_at')->orWhere('expires_at', '>', $limit))
-                ->update(['expires_at' => $limit, 'updated_at' => now()]);
+            $staff = fn () => DB::table('personal_access_tokens')->where('tokenable_type', self::STAFF_TOKENABLE);
+
+            $remembered = $staff()->where('expires_at', '>', $limit)->update(['expires_at' => $limit, 'updated_at' => now()]);
+            $neverExpiring = $staff()->whereNull('expires_at')->update(['expires_at' => $limit, 'updated_at' => now()]);
+            $count = $remembered + $neverExpiring;
 
             if ($count > 0) {
                 DB::table('audit_logs')->insert([
@@ -48,13 +51,15 @@ return new class extends Migration
                     'auditable_type' => null,
                     'auditable_id' => null,
                     'old_values' => null,
-                    'new_values' => json_encode(['shortened' => $count, 'session_minutes' => $minutes]),
+                    'new_values' => json_encode(['remembered' => $remembered, 'never_expiring' => $neverExpiring, 'session_minutes' => $minutes]),
                     'ip_address' => null,
                     'user_agent' => null,
                     'description' => sprintf(
-                        'System change: %d remembered sign-%s shortened to the normal session length (%d minutes).',
-                        $count,
-                        $count === 1 ? 'in' : 'ins',
+                        'System change: %s shortened to the normal session length (%d minutes).',
+                        implode(' and ', array_filter([
+                            $remembered > 0 ? sprintf('%d remembered sign-%s', $remembered, $remembered === 1 ? 'in' : 'ins') : null,
+                            $neverExpiring > 0 ? sprintf('%d sign-%s with no end', $neverExpiring, $neverExpiring === 1 ? 'in' : 'ins') : null,
+                        ])),
                         $minutes,
                     ),
                     'created_at' => now(),

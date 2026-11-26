@@ -43,6 +43,9 @@ class LindaLoanNumbersTest extends LindaTestCase
             'glued, any case' => ['LOAN NO.bc-07', ['bc-07']],
             'glued bare number' => ['loan no.42', ['42']],
             'glued to utang' => ['utang#XY-Z', ['XY-Z']],
+            'glued, with spaces, no digit before the digits' => ['Loan No.BC 2019 07', ['BC 2019 07', 'BC 2019']],
+            'with spaces, no digit, after loan' => ['Status of loan ABC XYZ', ['ABC XYZ']],
+            'three words, no digit, glued' => ['loan#AB CD EF please', ['AB CD EF']],
         ];
     }
 
@@ -72,6 +75,7 @@ class LindaLoanNumbersTest extends LindaTestCase
             'no digit, glued to another word' => ['Status#ABC-XYZ', 'ABC-XYZ'],
             'a loan word itself' => ['loan no. ABCD', 'no'],
             'the app\'s own number glued to loan' => ['loan#LN-0042', 'LN-0042'],
+            'words with no digit, no loan word' => ['Status of ABC XYZ', 'ABC XYZ'],
         ];
     }
 

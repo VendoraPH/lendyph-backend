@@ -33,13 +33,16 @@ use UnexpectedValueException;
  *   "loan no. 42", "utang 42"), so a count or a year ("top 10", "2026") is
  *   never taken for a loan;
  * - a value glued to a loan word by ".", "#" or ":" ("Loan No.BC-07",
- *   "loan#ABC-XYZ", "Loan No:BC-07"; round 7) counts as right after it.
+ *   "loan#ABC-XYZ", "Loan No:BC-07"; round 7) counts as right after it, and
+ *   so does a run of two or three words that starts right after a loan word
+ *   or with a glued value ("loan ABC XYZ", "Loan No.BC 2019 07").
  *
  * The values go through one query on the column's unique index; its
  * collation (utf8mb4_unicode_ci) ignores case. Every loan of the deployment
  * counts, whatever the caller's branches, so a Loan No. never reaches the
- * model; the answer itself keeps the caller's branch scope. The longest
- * match wins. A value that matches nothing leaves the question to the rules
+ * model; the answer itself keeps the caller's branch scope. A match holding a
+ * digit wins, then the longest (so "loan summary for loan BC-07" finds BC-07,
+ * not a Loan No. "SUMMARY"). A value that matches nothing leaves the question to the rules
  * before this one.
  *
  * find() throws when the question or the database can't be read, and the
@@ -77,6 +80,7 @@ final class LindaLoanNumbers
 
         $found = Loan::query()
             ->whereIn('external_loan_no', $candidates)
+            ->orderByRaw("external_loan_no REGEXP '[0-9]' DESC")
             ->orderByRaw('CHAR_LENGTH(external_loan_no) DESC')
             ->value('external_loan_no');
 
@@ -125,17 +129,26 @@ final class LindaLoanNumbers
                 $previous = $before === '' ? $previous : $before;
             }
 
+            $afterLoanWord = in_array($previous, self::LOAN_WORDS, true);
             $value = self::cleaned($part);
-            $candidates[$value] = ($candidates[$value] ?? false) || self::checks($value, in_array($previous, self::LOAN_WORDS, true));
+            $candidates[$value] = ($candidates[$value] ?? false) || self::checks($value, $afterLoanWord);
 
+            // A run right after a loan word counts as after it ("loan ABC XYZ").
+            for ($words = 2; $words <= self::MAX_WORDS && $at + $words <= $count; $words++) {
+                $run = self::cleaned(implode(' ', array_slice($parts, $at, $words)));
+                $candidates[$run] = ($candidates[$run] ?? false) || self::checks($run, $afterLoanWord);
+            }
+
+            // A value glued to a loan word, alone and with the parts after it
+            // ("Loan No.BC 2019 07" checks "BC", "BC 2019" and "BC 2019 07").
             $glued = self::gluedToLoanWord($part);
             if ($glued !== null) {
                 $candidates[$glued] = ($candidates[$glued] ?? false) || self::checks($glued, true);
-            }
 
-            for ($words = 2; $words <= self::MAX_WORDS && $at + $words <= $count; $words++) {
-                $run = self::cleaned(implode(' ', array_slice($parts, $at, $words)));
-                $candidates[$run] = ($candidates[$run] ?? false) || self::checks($run, false);
+                for ($words = 2; $words <= self::MAX_WORDS && $at + $words <= $count; $words++) {
+                    $run = self::cleaned($glued.' '.implode(' ', array_slice($parts, $at + 1, $words - 1)));
+                    $candidates[$run] = ($candidates[$run] ?? false) || self::checks($run, true);
+                }
             }
         }
 

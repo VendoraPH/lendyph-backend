@@ -62,8 +62,23 @@ class RememberedSignInsCapMigrationTest extends TestCase
         $this->assertCount(1, $rows);
         $this->assertNull($rows[0]->user_id);
         $this->assertNull($rows[0]->auditable_type);
-        $this->assertSame(['shortened' => 2, 'session_minutes' => 30], $rows[0]->new_values);
-        $this->assertSame('System change: 2 remembered sign-ins shortened to the normal session length (30 minutes).', $rows[0]->description);
+        $this->assertSame(['remembered' => 1, 'never_expiring' => 1, 'session_minutes' => 30], $rows[0]->new_values);
+        $this->assertSame('System change: 1 remembered sign-in and 1 sign-in with no end shortened to the normal session length (30 minutes).', $rows[0]->description);
+    }
+
+    public function test_the_row_counts_each_kind_in_words(): void
+    {
+        $this->travelTo(Carbon::parse('2026-11-26 09:00:00'));
+        $user = User::where('username', 'super_admin')->firstOrFail();
+        foreach (range(1, 3) as $ignored) {
+            $this->staffToken($user, now()->addDays(29));
+        }
+
+        $this->migration()->up();
+
+        $row = AuditLog::where('action', self::ACTION)->firstOrFail();
+        $this->assertSame(['remembered' => 3, 'never_expiring' => 0, 'session_minutes' => 30], $row->new_values);
+        $this->assertSame('System change: 3 remembered sign-ins shortened to the normal session length (30 minutes).', $row->description);
     }
 
     public function test_a_second_run_changes_nothing_and_writes_no_row(): void

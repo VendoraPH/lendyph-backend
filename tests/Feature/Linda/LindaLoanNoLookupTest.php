@@ -70,6 +70,8 @@ class LindaLoanNoLookupTest extends LindaAnswersTestCase
             'glued to loan #' => ['How about loan#ABC-XYZ?', 'ABC-XYZ'],
             'glued to loan no:' => ['Loan No:BC-07', 'BC-07'],
             'glued, no digit, tl' => ['Kumusta ang utang#ABC-XYZ?', 'ABC-XYZ'],
+            'glued, with spaces' => ['Loan No.BC 2019 07', 'BC 2019 07'],
+            'with spaces, no digit' => ['Status of loan ABC XYZ', 'ABC XYZ'],
         ];
     }
 
@@ -171,6 +173,20 @@ class LindaLoanNoLookupTest extends LindaAnswersTestCase
         $this->assertNotSame('loan_details', $response->json('data.intent'));
         $this->assertStringNotContainsString('(Loan No. ABC-XYZ)', (string) $response->json('data.answer'));
         $this->assertEmpty(LindaQuestion::query()->latest('id')->firstOrFail()->loan_ids);
+    }
+
+    /** A Loan No. holding a digit outranks a longer one without (round 7 review). */
+    public function test_a_loan_no_with_a_digit_wins_over_a_longer_one_without(): void
+    {
+        $this->loan->forceFill(['external_loan_no' => 'BC-07'])->save();
+        $other = $this->releaseTo($this->member($this->branch, 'Maria', 'Santos'), 30000);
+        $other->forceFill(['external_loan_no' => 'SUMMARY'])->save();
+
+        $response = $this->actingAs($this->asker)->postJson(self::URL, ['message' => 'loan summary for loan BC-07'])->assertOk();
+
+        $this->assertSame([], $this->fake->requests);
+        $this->assertStringContainsString('(Loan No. BC-07)', (string) $response->json('data.answer'));
+        $this->assertSame([$this->loan->id], LindaQuestion::query()->latest('id')->firstOrFail()->loan_ids);
     }
 
     public function test_a_later_question_sends_the_model_no_loan_no(): void
