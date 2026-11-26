@@ -68,6 +68,45 @@ class ExpenseReconciliationReversalTest extends TestCase
             ->assertJsonPath('data.matched_count', 0);
     }
 
+    public function test_the_freed_line_is_never_offered_the_mistaken_entry_or_its_reversal_again(): void
+    {
+        [$reconciliation, $line] = $this->reconciliation(statementBalance: 0);
+        $expense = $this->expenseFrom($reconciliation, $line);
+        $journal = AccountingJournal::query()->findOrFail($expense->journal_id);
+
+        $this->reverseExpense($expense->id)->assertOk();
+        $reversal = AccountingJournal::query()->findOrFail($journal->fresh()->reversed_by_journal_id);
+
+        // The expense was a mistake: the entry and its reversal net to nothing
+        // on the bank, so neither is the line's counterpart.
+        $rows = collect($this->getJson("/api/accounting/reconciliations/{$reconciliation->id}")->assertOk()->json('data.lines'));
+        $this->assertSame('unmatched', $rows->firstWhere('statement_line_id', $line->id)['match']);
+        $this->assertSame(0, $rows->where('match', 'possible')->count());
+        $this->assertSame(
+            [],
+            $rows->whereIn('journal_no', [$journal->journal_no, $reversal->journal_no])->where('match', '!=', 'unmatched')->values()->all(),
+        );
+
+        $this->postJson("/api/accounting/reconciliations/{$reconciliation->id}/match", ['accept_suggestions' => true])->assertOk();
+        $this->assertNull($line->refresh()->matched_journal_line_id, 'accept all leaves it unmatched');
+    }
+
+    public function test_an_ordinary_reversed_payment_is_still_suggested_as_before(): void
+    {
+        $id = $this->owed(15000);
+        $payment = $this->pay($id, 15000, '2026-09-12');
+        $this->reversePayment($id, $payment)->assertOk();
+        [$reconciliation, $line] = $this->reconciliation(statementBalance: 0);
+        $bankLine = $this->bankLineOf(AccountingExpensePayment::query()->findOrFail($payment)->journal_id);
+
+        $rows = collect($this->getJson("/api/accounting/reconciliations/{$reconciliation->id}")->assertOk()->json('data.lines'));
+        $suggested = $rows->firstWhere('statement_line_id', $line->id);
+        $this->assertSame(['possible', $bankLine], [$suggested['match'], $suggested['journal_line_id']]);
+
+        $this->postJson("/api/accounting/reconciliations/{$reconciliation->id}/match", ['accept_suggestions' => true])->assertOk();
+        $this->assertSame($bankLine, $line->refresh()->matched_journal_line_id);
+    }
+
     public function test_a_reconciliation_that_reads_reconciled_refuses_the_expense_reversal_in_words(): void
     {
         [$reconciliation, $line] = $this->reconciliation(statementBalance: -15000);
