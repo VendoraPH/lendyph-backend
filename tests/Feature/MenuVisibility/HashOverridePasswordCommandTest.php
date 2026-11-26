@@ -50,7 +50,7 @@ it('refuses a password bcrypt can\'t hold whole, or too short to protect anythin
         ->doesntExpectOutputToContain('$2y$')
         ->assertFailed();
 })->with([
-    'blank' => ['', 'Use at least 8 characters.'],
-    'short' => ['seven7!', 'Use at least 8 characters.'],
+    'blank' => ['', 'Use at least 12 characters.'],
+    'short' => ['Elevenchar1', 'Use at least 12 characters.'],
     'over 72 bytes' => [str_repeat('long password ', 6), 'Use at most 72 bytes: bcrypt ignores the rest.'],
 ]);

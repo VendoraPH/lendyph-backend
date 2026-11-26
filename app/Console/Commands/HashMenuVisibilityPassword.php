@@ -22,7 +22,7 @@ class HashMenuVisibilityPassword extends Command
     /** The bcrypt cost, never lower, whatever BCRYPT_ROUNDS the machine running this sets. */
     public const ROUNDS = 12;
 
-    public const MIN_CHARACTERS = 8;
+    public const MIN_CHARACTERS = 12;
 
     /** bcrypt reads no further: a longer password would match on its first 72 bytes alone. */
     public const MAX_BYTES = 72;

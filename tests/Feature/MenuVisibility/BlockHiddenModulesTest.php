@@ -139,8 +139,8 @@ it('hides a menu\'s submenus\' API with it', function () {
         ->and(isTheHiddenAnswer($this->callAs(['GET', '/api/loan-origination/settings', 'staff'])))->toBeFalse();
 });
 
-it('keeps open what another visible menu needs, with every module hidden', function (array $call) {
-    $this->hideModules(MenuModules::keys());
+it('keeps open what another visible menu needs, with every module hidden', function (array $call, array $shown = []) {
+    $this->hideModules(array_values(array_diff(MenuModules::keys(), $shown)));
 
     expect(isTheHiddenAnswer($this->callAs($call)))->toBeFalse("{$call[0]} {$call[1]} was blocked.");
 })->with([
@@ -148,8 +148,8 @@ it('keeps open what another visible menu needs, with every module hidden', funct
     'health' => [['GET', '/api/health', 'none']],
     'notifications' => [['GET', '/api/notifications/unread-count', 'staff']],
     'Menu Visibility itself' => [['GET', '/api/menu-visibility/hidden', 'staff']],
-    'AMLA orders list a member\'s savings accounts' => [['GET', '/api/savings/accounts', 'staff']],
-    'the executive dashboard\'s financial section' => [['GET', '/api/accounting/dashboard', 'staff']],
+    'AMLA orders list a member\'s savings accounts' => [['GET', '/api/savings/accounts', 'staff'], ['amla']],
+    'the executive dashboard\'s financial section' => [['GET', '/api/accounting/dashboard', 'staff'], ['executive_dashboard']],
     'Settings → Branches\' transfer counts' => [['GET', '/api/branch-counts', 'staff']],
     'members' => [['GET', '/api/borrowers', 'staff']],
     'loans' => [['GET', '/api/loans', 'staff']],
@@ -212,3 +212,36 @@ it('never revives an idle sign-in: the session still expires on a hidden module\
 
     expect(PersonalAccessToken::query()->whereKey($token->accessToken->id)->exists())->toBeFalse();
 });
+
+it('answers 404 for the CDA review chain while CDA is hidden, and leaves the loan chains as they are', function () {
+    $cdaChain = [['id' => 'manager', 'name' => 'Manager review', 'role' => 'manager']];
+    $calls = [
+        'read the CDA chain' => ['GET', '/api/settings/approval-workflow?type=cda', 'staff'],
+        'save the CDA chain' => ['PUT', '/api/settings/approval-workflow', 'staff', ['type' => 'cda', 'steps' => $cdaChain]],
+        'reset the CDA chain' => ['DELETE', '/api/settings/approval-workflow?type=cda', 'staff'],
+    ];
+
+    $this->hideModules(['cda']);
+
+    foreach ($calls as $what => $call) {
+        expect(isTheHiddenAnswer($this->callAs($call)))->toBeTrue("{$what} answered with CDA hidden.");
+    }
+
+    $this->callAs(['GET', '/api/settings/approval-workflow?type=normal', 'staff'])->assertOk()->assertJsonPath('data.type', 'normal');
+    $this->callAs(['GET', '/api/settings/approval-workflow', 'staff'])->assertOk()->assertJsonPath('data.type', 'policy_exception');
+    $this->callAs(['DELETE', '/api/settings/approval-workflow?type=normal', 'staff'])->assertOk();
+
+    $this->hideModules([]);
+    $this->callAs($calls['read the CDA chain'])->assertOk()->assertJsonPath('data.type', 'cda');
+});
+
+it('keeps a route open for another menu only while that menu is shown', function (array $hidden, array $call, bool $open) {
+    $this->hideModules($hidden);
+
+    expect(isTheHiddenAnswer($this->callAs($call)))->toBe(! $open);
+})->with([
+    'Savings hidden, AMLA shown' => [['savings'], ['GET', '/api/savings/accounts', 'staff'], true],
+    'Savings and AMLA hidden' => [['savings', 'amla'], ['GET', '/api/savings/accounts', 'staff'], false],
+    'Accounting hidden, the executive dashboard shown' => [['accounting'], ['GET', '/api/accounting/dashboard', 'staff'], true],
+    'Accounting and the executive dashboard hidden' => [['accounting', 'executive_dashboard'], ['GET', '/api/accounting/dashboard', 'staff'], false],
+]);

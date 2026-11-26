@@ -3,6 +3,7 @@
 use App\Models\MenuVisibilitySwitch;
 use App\Services\MenuVisibility\MenuVisibility;
 use Illuminate\Support\Facades\Cache;
+use Symfony\Component\HttpKernel\Exception\HttpException;
 use Tests\Feature\MenuVisibility\MenuVisibilityTestHelpers;
 use Tests\TestCase;
 
@@ -63,4 +64,25 @@ it('blocks a hidden module at once after the save', function () {
 
     $this->hideModules([]);
     $this->getJson('/api/gcash/tiers')->assertOk();
+});
+
+it('saves one at a time: a save waits for the one in progress, then refuses in words', function () {
+    $held = Cache::lock(MenuVisibility::SAVE_LOCK, 30);
+    expect($held->get())->toBeTrue();
+
+    try {
+        $this->hideModules(['gcash']);
+        $this->fail('The save went ahead while another held the lock.');
+    } catch (HttpException $refused) {
+        expect($refused->getStatusCode())->toBe(409)
+            ->and($refused->getMessage())->toBe('Another change to Menu Visibility is being saved. Try again in a moment.');
+    } finally {
+        $held->release();
+    }
+
+    expect(MenuVisibilitySwitch::query()->exists())->toBeFalse();
+
+    $this->hideModules(['gcash']);
+    expect(app(MenuVisibility::class)->hidden())->toBe(['gcash'])
+        ->and(Cache::get(MenuVisibility::CACHE_KEY))->toBe(['gcash']);
 });

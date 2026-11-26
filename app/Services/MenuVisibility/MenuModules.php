@@ -12,8 +12,10 @@ namespace App\Services\MenuVisibility;
  * matched against the matched route's URI, segment by segment, never as a
  * substring: `savings` covers `/savings` and everything under it, never
  * `/savingsx` or `/reports/savings`. A `*` stands for any one segment (a
- * route parameter), and a leading method (`PATCH loans/x/auto-pay`) limits the
- * entry to that method.
+ * route parameter), a leading method (`PATCH loans/x/auto-pay`) limits the
+ * entry to that method, and a trailing `?field=value` to requests whose input
+ * (query or body) holds exactly that value, for a route several modules share
+ * by a parameter (Settings → Approval Workflow's `type=cda`).
  *
  * What counts as a module's own API:
  * - the routes its menu pages and its Settings pages call;
@@ -23,9 +25,9 @@ namespace App\Services\MenuVisibility;
  *   and documents): they are that module's functions, so they go with it, and
  *   the screens hide those parts with it.
  *
- * A route another visible menu needs for its own work stays open while the
- * module is hidden (`open`, method and full path, with the page that needs it).
- * That is also why the core menus (Members, Loans, Payments, Share Capital,
+ * A route another menu needs for its own work stays open while the module is
+ * hidden (`open`: method and full path, the module that needs it and its
+ * page), but only while that other module is shown. That is also why the core menus (Members, Loans, Payments, Share Capital,
  * Collateral, Reports, Documents) block little or nothing: every screen reads
  * members, loans, payments, share capital balances and collaterals, and the
  * dashboards and printables read the reports. Background jobs are unchanged.
@@ -41,7 +43,7 @@ final class MenuModules
     public const ALWAYS_OPEN = ['auth', 'health', 'notifications', 'menu-visibility'];
 
     /**
-     * @var array<string, array{label: string, parent: string|null, blocks: list<string>, open?: array<string, string>}>
+     * @var array<string, array{label: string, parent: string|null, blocks: list<string>, open?: array<string, array{for: string, page: string}>}>
      */
     private const MODULES = [
         'dashboard' => [
@@ -110,7 +112,7 @@ final class MenuModules
             'parent' => null,
             'blocks' => ['savings', 'reports/savings', 'portal/savings', 'portal/time-deposits'],
             'open' => [
-                'GET savings/accounts' => 'AMLA Compliance → Orders Register: recording an order lists the member\'s savings accounts to hold.',
+                'GET savings/accounts' => ['for' => 'amla', 'page' => 'AMLA Compliance → Orders Register: recording an order lists the member\'s savings accounts to hold.'],
             ],
         ],
         'collateral' => [
@@ -132,7 +134,7 @@ final class MenuModules
         'cda' => [
             'label' => 'CDA Compliance',
             'parent' => null,
-            'blocks' => ['cda'],
+            'blocks' => ['cda', 'settings/approval-workflow?type=cda'],
         ],
         'member_portal' => [
             'label' => 'Member Portal',
@@ -149,7 +151,7 @@ final class MenuModules
             'parent' => null,
             'blocks' => ['accounting', 'interbranch-transfers'],
             'open' => [
-                'GET accounting/dashboard' => 'Executive Dashboard: its Financial Performance section reads the books\' figures.',
+                'GET accounting/dashboard' => ['for' => 'executive_dashboard', 'page' => 'Executive Dashboard: its Financial Performance section reads the books\' figures.'],
             ],
         ],
         'users' => [
@@ -216,10 +218,11 @@ final class MenuModules
     }
 
     /**
-     * The routes this module keeps open while hidden, each with the page of
-     * another menu that needs it.
+     * The routes this module keeps open while hidden, each with the module
+     * that needs it and that module's page; open only while that module is
+     * shown.
      *
-     * @return array<string, string>
+     * @return array<string, array{for: string, page: string}>
      */
     public static function keptOpen(string $key): array
     {
@@ -251,12 +254,13 @@ final class MenuModules
     /**
      * The hidden module whose own API this route is, or null when the route
      * stays open: no hidden module blocks it, or the module that does keeps it
-     * open for another menu.
+     * open for another menu that is shown.
      *
      * @param  string  $uri  the matched route's URI, as Route::uri() gives it ("api/savings/accounts/{account}")
      * @param  list<string>  $hidden  the effective hidden list (self::effective())
+     * @param  array<string, mixed>  $input  the request's input (query and body), for `?field=value` entries
      */
-    public static function blockingModule(string $method, string $uri, array $hidden): ?string
+    public static function blockingModule(string $method, string $uri, array $hidden, array $input = []): ?string
     {
         $segments = self::segmentsOf($uri);
 
@@ -265,15 +269,16 @@ final class MenuModules
         }
 
         foreach ($hidden as $key) {
-            $blocked = array_any(self::blocks($key), fn (string $entry) => self::entryMatches($entry, $method, $segments));
+            $blocked = array_any(self::blocks($key), fn (string $entry) => self::entryMatches($entry, $method, $segments, input: $input));
 
             if (! $blocked) {
                 continue;
             }
 
             $keptOpen = array_any(
-                array_keys(self::keptOpen($key)),
-                fn (string $entry) => self::entryMatches($entry, $method, $segments, exact: true),
+                self::keptOpen($key),
+                fn (array $open, string $entry) => ! in_array($open['for'], $hidden, true)
+                    && self::entryMatches($entry, $method, $segments, exact: true),
             );
 
             if (! $keptOpen) {
@@ -285,19 +290,31 @@ final class MenuModules
     }
 
     /**
-     * Whether an entry (`[METHOD ]segment/segment`) covers a route: its method
-     * (HEAD counts as GET) and each of its segments equal to the route's at the
-     * same place, `*` standing for any one. A prefix unless `$exact`.
+     * Whether an entry (`[METHOD ]segment/segment[?field=value]`) covers a
+     * route: its method (HEAD counts as GET) and each of its segments equal to
+     * the route's at the same place, `*` standing for any one. A prefix unless
+     * `$exact`. A `?field=value` must hold in `$input`; with no input given
+     * (null), the path alone decides, as the registry's own checks want.
      *
      * @param  list<string>  $segments  the route's own segments, after `api/` (self::segmentsOf())
+     * @param  array<string, mixed>|null  $input
      */
-    public static function entryMatches(string $entry, string $method, array $segments, bool $exact = false): bool
+    public static function entryMatches(string $entry, string $method, array $segments, bool $exact = false, ?array $input = null): bool
     {
         [$entryMethod, $path] = str_contains($entry, ' ') ? explode(' ', $entry, 2) : [null, $entry];
+        [$path, $condition] = str_contains($path, '?') ? explode('?', $path, 2) : [$path, null];
         $requestMethod = strtoupper($method) === 'HEAD' ? 'GET' : strtoupper($method);
 
         if ($entryMethod !== null && $entryMethod !== $requestMethod) {
             return false;
+        }
+
+        if ($condition !== null && $input !== null) {
+            [$field, $value] = explode('=', $condition, 2);
+
+            if (! array_key_exists($field, $input) || $input[$field] !== $value) {
+                return false;
+            }
         }
 
         $wanted = explode('/', $path);
@@ -345,7 +362,7 @@ final class MenuModules
         foreach (self::MODULES as $module) {
             foreach ($module['blocks'] as $entry) {
                 $path = str_contains($entry, ' ') ? explode(' ', $entry, 2)[1] : $entry;
-                $first[explode('/', $path)[0]] = true;
+                $first[explode('/', explode('?', $path, 2)[0])[0]] = true;
             }
         }
 

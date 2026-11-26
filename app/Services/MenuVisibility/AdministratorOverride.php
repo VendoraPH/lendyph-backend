@@ -24,9 +24,8 @@ use SensitiveParameter;
  *   (15) on the access token it came in on: one sign-in only. Signing out
  *   deletes the token and cascades the override away; a refresh carries it to
  *   the new token with the same expiry (carry()).
- * - Every try, right or wrong, writes one audit row, never with the password.
- *   Wrong tries are counted by the `menu-visibility-override` limiter
- *   (App\Providers\MenuVisibilityServiceProvider).
+ * - Every try, right, wrong or locked out, writes one audit row, never with
+ *   the password. Tries are counted before the check (OverrideLockout).
  */
 final class AdministratorOverride
 {
@@ -82,6 +81,16 @@ final class AdministratorOverride
         );
 
         return $expiresAt;
+    }
+
+    /** Audit a try refused unchecked because the override is locked out (OverrideLockout). */
+    public function refuseLocked(User $user): void
+    {
+        AuditLogService::log(
+            self::AUDIT_REFUSED,
+            description: 'Administrator override for Menu Visibility refused: too many tries',
+            userId: $user->id,
+        );
     }
 
     /** When the override open on this token ends, or null when none is open (or there is no token). */

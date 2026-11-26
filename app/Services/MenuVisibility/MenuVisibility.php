@@ -5,6 +5,7 @@ namespace App\Services\MenuVisibility;
 use App\Models\MenuVisibilitySwitch;
 use App\Models\User;
 use App\Services\AuditLogService;
+use Illuminate\Contracts\Cache\LockTimeoutException;
 use Illuminate\Database\QueryException;
 use Illuminate\Http\Request;
 use Illuminate\Routing\Route;
@@ -21,15 +22,24 @@ use Illuminate\Support\Facades\DB;
  * the deployment's own default store, with no expiry:
  * - a request that finds no entry reads the switches and only adds the entry
  *   (Cache::add), so it never overwrites a newer one;
- * - a save writes the entry from the committed switches once its transaction
- *   commits (Cache::forever), so it takes effect at once, and a request that
- *   read the switches before the commit can't put the old list back.
+ * - saves run one at a time, under one lock (SAVE_LOCK), and each writes the
+ *   entry from the committed switches before it lets the next one in
+ *   (Cache::forever). So a save takes effect at once, two saves can't leave
+ *   the older list cached, and a request that read the switches before a
+ *   commit can't put the old list back.
  */
 final class MenuVisibility
 {
     public const CACHE_KEY = 'menu-visibility:hidden';
 
     public const AUDIT_CHANGED = 'menu_visibility_changed';
+
+    public const SAVE_LOCK = 'menu-visibility:save';
+
+    /** How long a save waits for the one in progress before it answers 409. */
+    public const SAVE_WAIT_SECONDS = 3;
+
+    public const BUSY = 'Another change to Menu Visibility is being saved. Try again in a moment.';
 
     /** @return list<string> the hidden modules, submenus of a hidden menu included, in the side menu's order */
     public function hidden(): array
@@ -78,7 +88,7 @@ final class MenuVisibility
             return false;
         }
 
-        return MenuModules::blockingModule($request->method(), $route->uri(), $this->hidden()) !== null;
+        return MenuModules::blockingModule($request->method(), $route->uri(), $this->hidden(), $request->input()) !== null;
     }
 
     /**
@@ -112,6 +122,16 @@ final class MenuVisibility
     {
         $wanted = array_values(array_intersect(MenuModules::keys(), $hidden));
 
+        try {
+            return Cache::lock(self::SAVE_LOCK, 30)->block(self::SAVE_WAIT_SECONDS, fn (): bool => $this->saveHoldingTheLock($wanted, $by));
+        } catch (LockTimeoutException) {
+            abort(409, self::BUSY);
+        }
+    }
+
+    /** @param  list<string>  $wanted */
+    private function saveHoldingTheLock(array $wanted, User $by): bool
+    {
         $changed = DB::transaction(function () use ($wanted, $by): bool {
             $rows = MenuVisibilitySwitch::query()->lockForUpdate()->get()->keyBy('module_key');
             $before = array_values(array_filter(MenuModules::keys(), fn (string $key) => (bool) $rows->get($key)?->hidden));

@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Http\Requests\MenuVisibility\UpdateMenuVisibilityRequest;
 use App\Services\MenuVisibility\AdministratorOverride;
 use App\Services\MenuVisibility\MenuVisibility;
+use App\Services\MenuVisibility\OverrideLockout;
 use Carbon\CarbonInterface;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -27,6 +28,7 @@ class MenuVisibilityController extends Controller
     public function __construct(
         private readonly MenuVisibility $visibility,
         private readonly AdministratorOverride $override,
+        private readonly OverrideLockout $lockout,
     ) {}
 
     #[OA\Get(
@@ -83,7 +85,7 @@ class MenuVisibilityController extends Controller
     #[OA\Post(
         path: '/api/menu-visibility/override',
         summary: 'Open the administrator override',
-        description: 'Needs menu_visibility:manage. Checks the password against the bcrypt hash this server holds and opens Menu Visibility for 15 minutes on this sign-in only. Every try is audited, never with the password. 5 wrong tries in 15 minutes, per user and per address, answer 429.',
+        description: 'Needs menu_visibility:manage. Checks the password against the bcrypt hash this server holds and opens Menu Visibility for 15 minutes on this sign-in only. Every try is audited, never with the password. Each try is counted, per user and per address, before its password is checked; past 5 in 15 minutes the try answers 429 unchecked. A right password gives its try back.',
         tags: ['Menu Visibility'],
         security: [['sanctum' => []]],
         requestBody: new OA\RequestBody(required: true, content: new OA\JsonContent(required: ['password'], properties: [
@@ -114,7 +116,22 @@ class MenuVisibilityController extends Controller
             ], 400);
         }
 
-        $expiresAt = $this->override->attempt($request->user(), $token, $request->input('password'));
+        // Counted before the password is checked, so tries sent at once can't
+        // get past the lockout together.
+        $user = $request->user();
+        $ip = (string) $request->ip();
+        $wait = $this->lockout->take($user, $ip);
+
+        if ($wait !== null) {
+            $this->override->refuseLocked($user);
+
+            return response()->json([
+                'message' => OverrideLockout::lockedMessage($wait),
+                'retry_after' => $wait,
+            ], 429, ['Retry-After' => (string) $wait]);
+        }
+
+        $expiresAt = $this->override->attempt($user, $token, $request->input('password'));
 
         if ($expiresAt === null) {
             return response()->json([
@@ -122,6 +139,8 @@ class MenuVisibilityController extends Controller
                 'errors' => ['password' => [self::WRONG_PASSWORD]],
             ], 422);
         }
+
+        $this->lockout->giveBack($user, $ip);
 
         return response()->json(['data' => ['expires_at' => $expiresAt->toIso8601String()]]);
     }

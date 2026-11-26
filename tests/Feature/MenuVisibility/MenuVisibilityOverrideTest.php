@@ -2,7 +2,9 @@
 
 use App\Models\AuditLog;
 use App\Models\MenuVisibilityOverride;
+use App\Services\MenuVisibility\OverrideLockout;
 use Illuminate\Contracts\Debug\ExceptionHandler;
+use Illuminate\Hashing\BcryptHasher;
 use Illuminate\Support\Facades\Hash;
 use Laravel\Sanctum\PersonalAccessToken;
 use Tests\Feature\MenuVisibility\MenuVisibilityTestHelpers;
@@ -223,7 +225,10 @@ it('locks the override after 5 wrong tries for 15 minutes, the right password in
         ->assertStatus(429)
         ->assertJsonPath('message', 'Too many tries. Try again in 15 minutes.');
 
-    expect(AuditLog::query()->where('action', 'menu_visibility_override_refused')->count())->toBe(5)
+    $refused = AuditLog::query()->where('action', 'menu_visibility_override_refused')->orderBy('id')->pluck('description')->all();
+
+    expect($refused)->toHaveCount(6)
+        ->and(end($refused))->toBe('Administrator override for Menu Visibility refused: too many tries')
         ->and(AuditLog::query()->where('action', 'menu_visibility_override_granted')->exists())->toBeFalse();
 
     $this->travel(16)->minutes();
@@ -261,4 +266,84 @@ it('keeps the password field out of flashed input', function () {
     $dontFlash = (new ReflectionProperty($handler, 'dontFlash'))->getValue($handler);
 
     expect($dontFlash)->toContain('password');
+});
+
+/**
+ * Swap the bcrypt driver for one that counts its checks and runs `$during`
+ * inside the first, as other tries would arrive while one is being checked.
+ */
+function countPasswordChecks(?Closure $during = null): stdClass
+{
+    $seen = new stdClass;
+    $seen->checks = 0;
+
+    Hash::forgetDrivers();
+    Hash::extend('bcrypt', fn () => new class($seen, $during) extends BcryptHasher
+    {
+        public function __construct(private stdClass $seen, private ?Closure $during)
+        {
+            parent::__construct(['rounds' => 4]);
+        }
+
+        public function check(#[SensitiveParameter] $value, $hashedValue, array $options = []): bool
+        {
+            if (++$this->seen->checks === 1 && $this->during !== null) {
+                ($this->during)();
+            }
+
+            return parent::check($value, $hashedValue, $options);
+        }
+    });
+
+    return $seen;
+}
+
+it('lets at most 5 tries reach the password check, however many are sent at once', function () {
+    $admin = $this->staffWithRole('admin');
+    $lockout = app(OverrideLockout::class);
+    $admittedMeanwhile = 0;
+
+    // 19 more tries arrive while the first one's password is being checked.
+    $seen = countPasswordChecks(function () use ($lockout, $admin, &$admittedMeanwhile) {
+        foreach (range(1, 19) as $try) {
+            $admittedMeanwhile += $lockout->take($admin, '127.0.0.1') === null ? 1 : 0;
+        }
+    });
+
+    $this->asToken($this->tokenFor($admin), 'POST', '/api/menu-visibility/override', ['password' => 'wrong'])->assertStatus(422);
+
+    expect($admittedMeanwhile)->toBe(4)
+        ->and($seen->checks)->toBe(1);
+
+    $this->openOverride($this->tokenFor($admin))->assertStatus(429);
+    expect($seen->checks)->toBe(1);
+});
+
+it('counts each try before its password is checked, so a sixth is refused unchecked and audited', function () {
+    $seen = countPasswordChecks();
+    $token = $this->tokenFor($this->superAdmin());
+
+    foreach (range(1, 5) as $try) {
+        $this->asToken($token, 'POST', '/api/menu-visibility/override', ['password' => "wrong {$try}"])->assertStatus(422);
+    }
+
+    $this->asToken($token, 'POST', '/api/menu-visibility/override', ['password' => 'wrong 6'])
+        ->assertStatus(429)
+        ->assertHeader('Retry-After')
+        ->assertJsonPath('message', 'Too many tries. Try again in 15 minutes.');
+
+    expect($seen->checks)->toBe(5)
+        ->and(AuditLog::query()->where('description', 'Administrator override for Menu Visibility refused: too many tries')->count())->toBe(1);
+});
+
+it('gives a right password its try back', function () {
+    $token = $this->tokenFor($this->superAdmin());
+
+    foreach (range(1, 4) as $try) {
+        $this->asToken($token, 'POST', '/api/menu-visibility/override', ['password' => "wrong {$try}"])->assertStatus(422);
+    }
+
+    $this->openOverride($token)->assertOk();
+    $this->asToken($token, 'POST', '/api/menu-visibility/override', ['password' => 'wrong 5'])->assertStatus(422);
+    $this->asToken($token, 'POST', '/api/menu-visibility/override', ['password' => 'wrong 6'])->assertStatus(429);
 });

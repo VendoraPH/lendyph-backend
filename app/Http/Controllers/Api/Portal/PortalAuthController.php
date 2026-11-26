@@ -204,7 +204,7 @@ class PortalAuthController extends Controller
                 'expires_at' => $token instanceof PersonalAccessToken ? $token->expires_at : null,
                 'idle_minutes' => $this->settings->current()->idle_minutes,
             ],
-            'features' => $this->settings->features(),
+            'features' => $this->settings->memberFeatures(),
         ]]);
     }
 

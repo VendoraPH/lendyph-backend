@@ -889,13 +889,12 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
      * Menu Visibility (finish run round 6): the hidden modules for every
      * signed-in user's screens, and Settings → Menu Visibility behind
      * `menu_visibility:manage` and the administrator override (a bcrypt hash
-     * on the server, 15 minutes per sign-in). The override's own limiter
-     * counts only wrong passwords (MenuVisibilityServiceProvider). Never
-     * blocked by a hidden module (MenuModules::ALWAYS_OPEN).
+     * on the server, 15 minutes per sign-in). The override counts each try
+     * before its password is checked (OverrideLockout). Never blocked by a
+     * hidden module (MenuModules::ALWAYS_OPEN).
      */
     Route::get('/menu-visibility/hidden', [MenuVisibilityController::class, 'hidden']);
-    Route::post('/menu-visibility/override', [MenuVisibilityController::class, 'grantOverride'])
-        ->middleware('throttle:menu-visibility-override');
+    Route::post('/menu-visibility/override', [MenuVisibilityController::class, 'grantOverride']);
     Route::delete('/menu-visibility/override', [MenuVisibilityController::class, 'endOverride']);
     Route::get('/menu-visibility', [MenuVisibilityController::class, 'show']);
     Route::put('/menu-visibility', [MenuVisibilityController::class, 'update']);

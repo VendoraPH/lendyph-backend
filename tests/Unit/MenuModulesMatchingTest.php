@@ -43,6 +43,7 @@ it('finds the hidden module that blocks a route, unless it keeps that route open
     expect(MenuModules::blockingModule('GET', 'api/gcash/tiers', ['gcash']))->toBe('gcash')
         ->and(MenuModules::blockingModule('GET', 'api/gcash/tiers', ['linda']))->toBeNull()
         ->and(MenuModules::blockingModule('GET', 'api/savings/accounts', ['savings']))->toBeNull()
+        ->and(MenuModules::blockingModule('GET', 'api/savings/accounts', ['savings', 'amla']))->toBe('savings')
         ->and(MenuModules::blockingModule('POST', 'api/savings/accounts', ['savings']))->toBe('savings')
         ->and(MenuModules::blockingModule('GET', 'api/accounting/dashboard', ['accounting']))->toBeNull()
         ->and(MenuModules::blockingModule('GET', 'api/accounting/dashboard/extra', ['accounting']))->toBe('accounting')
@@ -66,4 +67,17 @@ it('reads a missing switches table as nothing hidden, and nothing else', functio
     'no such column' => ['42S22', false],
     'a deadlock' => ['40001', false],
     'connection refused' => ['HY000', false],
+]);
+
+it('matches a query-qualified entry only on that value', function (array $input, bool $matches) {
+    $segments = MenuModules::segmentsOf('api/settings/approval-workflow');
+
+    expect(MenuModules::entryMatches('settings/approval-workflow?type=cda', 'GET', $segments, input: $input))->toBe($matches)
+        ->and(MenuModules::entryMatches('settings/approval-workflow?type=cda', 'GET', $segments))->toBeTrue();
+})->with([
+    'the CDA chain' => [['type' => 'cda'], true],
+    'a loan chain' => [['type' => 'normal'], false],
+    'no type' => [[], false],
+    'another case' => [['type' => 'CDA'], false],
+    'not text' => [['type' => ['cda']], false],
 ]);

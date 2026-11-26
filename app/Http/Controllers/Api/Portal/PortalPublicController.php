@@ -46,7 +46,7 @@ class PortalPublicController extends Controller
             'session_minutes' => $settings->session_minutes,
             'idle_minutes' => $settings->idle_minutes,
             'terms' => $terms === null ? null : ['version' => $terms->version, 'title' => $terms->title],
-            'features' => $this->settings->features($settings),
+            'features' => $this->settings->memberFeatures($settings),
             'dashboard_cards' => array_values($settings->dashboard_cards ?? []),
         ]]);
     }
