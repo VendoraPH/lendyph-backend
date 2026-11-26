@@ -112,6 +112,9 @@ class ReconciliationActions
                 'branch_id' => $reconciliation->branch_id,
                 'reference' => $line->external_reference,
                 'description' => $data['description'] ?? $line->description,
+                // The line it was recorded from: reversing the expense frees it
+                // (ReconciliationMatchRelease).
+                'reconciliation_line_id' => $line->id,
             ], $userId);
 
             return [$expense->id, (int) $expense->journal_id];

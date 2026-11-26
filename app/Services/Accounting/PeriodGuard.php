@@ -77,6 +77,21 @@ class PeriodGuard
     }
 
     /**
+     * The closed period covering a date, read under the same shared lock as
+     * assertOpen(), or null when the date can be posted on. For a caller that
+     * words its own refusal (an expense reversal names the date it would
+     * post on).
+     *
+     * @param  string  $date  A calendar date, `Y-m-d`.
+     */
+    public function closedPeriodCovering(string $date): ?AccountingPeriod
+    {
+        $period = $this->periodFor($date);
+
+        return $period !== null && $period->isClosed() ? $period : null;
+    }
+
+    /**
      * The period covering a date, read under a shared lock.
      *
      * The `Schema::hasTable` check is not defensive clutter — it is what lets

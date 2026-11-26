@@ -350,10 +350,30 @@ class ExpenseReversalTest extends TestCase
         $this->postJson('/api/accounting/periods/'.AccountingPeriod::query()->where('code', '2026-10')->sole()->id.'/close')->assertOk();
         $journals = AccountingJournal::query()->count();
 
-        foreach ([$this->reversePayment($owed, $payment), $this->reverseExpense($unpaid)] as $refused) {
-            $message = $refused->assertUnprocessable()->json('errors.date.0');
-            $this->assertStringContainsString('is dated Oct 20, 2026, which falls in October 2026 — a period that was closed', $message);
-        }
+        // The dialog has no date field, so the refusal names the date the
+        // reversal would post on, and why (finish run round 6).
+        $words = 'The reversal would post today, Oct 20, 2026, which is in a closed month (October 2026). Reopen the month on the Period Closing screen first.';
+        $this->reversePayment($owed, $payment)->assertUnprocessable()->assertJsonPath('errors.payment.0', $words);
+        $this->reverseExpense($unpaid)->assertUnprocessable()->assertJsonPath('errors.expense.0', $words);
+
+        $this->assertSame($journals, AccountingJournal::query()->count());
+    }
+
+    public function test_a_reversal_that_would_post_on_its_entrys_later_date_names_that_date_when_the_month_is_closed(): void
+    {
+        $owed = $this->record(1000000);
+        $payment = $this->pay($owed, 400000, '2026-10-05');
+        $standing = $this->reverseTwiceByHand(AccountingExpensePayment::query()->findOrFail($payment)->journal_id, '2026-10-22', '2026-10-23');
+        $this->getJson('/api/accounting/periods?per_page=100')->assertOk();
+        $this->postJson('/api/accounting/periods/'.AccountingPeriod::query()->where('code', '2026-10')->sole()->id.'/close')->assertOk();
+        $journals = AccountingJournal::query()->count();
+        $number = AccountingJournal::query()->findOrFail($standing)->journal_no;
+
+        $this->reversePayment($owed, $payment)->assertUnprocessable()->assertJsonPath(
+            'errors.payment.0',
+            "The reversal would post on Oct 23, 2026, the date of {$number}, since a reversal is never dated before the entry it reverses. "
+            .'That is in a closed month (October 2026). Reopen the month on the Period Closing screen first.',
+        );
 
         $this->assertSame($journals, AccountingJournal::query()->count());
     }

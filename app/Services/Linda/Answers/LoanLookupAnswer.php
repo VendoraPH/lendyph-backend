@@ -15,7 +15,8 @@ use App\Services\RepaymentService;
 
 /**
  * "What's the status of LN-000042?": one loan, by its loan account number
- * (LN-) or application number (LA-), with the loan page's own figures
+ * (LN-) or application number (LA-), or an imported loan by its file's Loan
+ * No. (named beside its LN- number), with the loan page's own figures
  * (RepaymentService::getLoanSummary()): Outstanding, Principal Balance, Past
  * Due (after grace), the next due date and amount, plus its status in words
  * (Loan::displayStatus()), product, principal and its latest posted payment
@@ -52,15 +53,18 @@ final class LoanLookupAnswer extends LookupAnswer
 
     public function find(User $user, LindaLookupRequest $request): LindaReply
     {
-        $number = mb_strtoupper(trim((string) $request->code));
-        $loan = $this->finder->loanByNumber($user, $number);
+        $number = $request->loanNo ?? mb_strtoupper(trim((string) $request->code));
+        $loan = $request->loanNo !== null
+            ? $this->finder->loanByLoanNo($user, $request->loanNo)
+            : $this->finder->loanByNumber($user, $number);
 
         if ($loan === null) {
             return $this->reply(W::noLoanNumbered($number), 'not_found');
         }
 
         $loan->loadMissing('borrower', 'loanProduct:id,name');
-        $shown = (string) ($loan->loan_account_number ?? $loan->application_number);
+        $shown = (string) ($loan->loan_account_number ?? $loan->application_number)
+            .($loan->external_loan_no === null ? '' : ' (Loan No. '.$loan->external_loan_no.')');
         $status = W::loanStatus($loan->displayStatus());
         $product = (string) ($loan->loanProduct?->name ?? '');
         $intro = $shown.' for '.self::memberLabel($loan->borrower).' is a '

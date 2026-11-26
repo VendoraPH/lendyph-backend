@@ -135,7 +135,8 @@ final class LindaAnswerer
     /**
      * A lookup, answered from the record it names, in the user's own
      * branches, never by the model. By its number when it has one: a member
-     * (BRW-), a loan (LN-, LA-) or a receipt (RCP-); else by the member's
+     * (BRW-), a loan (LN-, LA-, or an imported loan's Loan No. from the
+     * cooperative's file) or a receipt (RCP-); else by the member's
      * name. A member named in a loan lookup is answered with the member and
      * their loans; one named in a receipt lookup, with their latest payments;
      * one in a lookup about reminders, with their latest reminders. A number
@@ -144,6 +145,10 @@ final class LindaAnswerer
      */
     public function lookup(User $user, LindaLookupRequest $request): LindaReply
     {
+        if ($request->loanNo !== null) {
+            return $this->byLoanNo($user, $request);
+        }
+
         $code = $request->code === null ? '' : mb_strtoupper(trim($request->code));
         $name = $request->name === null ? '' : trim($request->name);
         $prefix = $code === '' ? null : (preg_match('/^\pL+/u', $code, $letters) === 1 ? $letters[0] : $code);
@@ -175,6 +180,25 @@ final class LindaAnswerer
         }
 
         return $answer->find($user, new LindaLookupRequest($request->kind, $request->intent, $code === '' ? null : $code, $name === '' ? null : $name, $request->reminders));
+    }
+
+    /**
+     * An imported loan by its file's Loan No. (LindaLoanNumbers), with the
+     * loan lookup's own permission and branch scope.
+     */
+    private function byLoanNo(User $user, LindaLookupRequest $request): LindaReply
+    {
+        $answer = app(LoanLookupAnswer::class);
+
+        if (! $answer->allows($user)) {
+            return $answer->denied();
+        }
+
+        if (app(BranchAccess::class)->for($user) === []) {
+            return new LindaReply($answer->intent()->value, LindaWording::noBranchAssigned(), 'denied', answerFunction: $answer->name());
+        }
+
+        return $answer->find($user, $request);
     }
 
     /** What Linda can answer, with the five suggested questions. */
