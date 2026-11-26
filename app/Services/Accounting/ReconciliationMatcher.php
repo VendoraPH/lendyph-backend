@@ -235,7 +235,10 @@ class ReconciliationMatcher
      * its void can both be on the statement, and each must be listed,
      * suggested, matchable and seen by the duplicate check like any other
      * line. No row is ever left off the worksheet. A reversed pair nets to
-     * ₱0.00, and books-only rows don't block Reconciled.
+     * ₱0.00, and books-only rows don't block Reconciled. One exception to
+     * suggesting: an expense recorded from a statement line and then
+     * reversed was a mistake, so neither its entry nor its reversal is ever
+     * suggested (`undone_mistake`); a real reversed movement still is.
      *
      * - Inside the period: every posted or reversed line. One a statement
      *   line of ANOTHER reconciliation has claimed stays on the worksheet (it
@@ -265,7 +268,7 @@ class ReconciliationMatcher
 
                 return $line + [
                     'outside_period' => ! $inPeriod,
-                    'suggestable' => ! $claimedElsewhere,
+                    'suggestable' => ! $claimedElsewhere && ! $line['undone_mistake'],
                 ];
             })
             ->filter()
@@ -769,7 +772,15 @@ class ReconciliationMatcher
             // Which reconciliation, if any, has claimed the line. The UNIQUE
             // index on `matched_journal_line_id` keeps this to one row.
             ->leftJoin('accounting_reconciliation_lines as r', 'r.matched_journal_line_id', '=', 'l.id')
-            ->select([
+            // An expense recorded from a statement line (`reconciliation_line_id`),
+            // on its own entry or on that entry's reversal: see toLedgerLine()'s
+            // `undone_mistake`. EXISTS, not a join: nothing makes
+            // accounting_expenses.journal_id unique, and a join would repeat
+            // the line for each such row.
+            ->selectRaw("CASE WHEN (j.status = 'reversed' AND EXISTS (SELECT 1 FROM accounting_expenses fx WHERE fx.journal_id = j.id AND fx.reconciliation_line_id IS NOT NULL))
+                OR (j.reverses_journal_id IS NOT NULL AND EXISTS (SELECT 1 FROM accounting_expenses rx WHERE rx.journal_id = j.reverses_journal_id AND rx.reconciliation_line_id IS NOT NULL))
+                THEN 1 ELSE 0 END as undone_mistake")
+            ->addSelect([
                 'l.id as line_id',
                 'l.accounting_account_id as account_id',
                 'l.accounting_journal_id as journal_id',
@@ -812,6 +823,12 @@ class ReconciliationMatcher
             'claimed_by_line' => $row->claimed_by_line === null ? null : (int) $row->claimed_by_line,
             'reverses_journal_id' => $row->reverses_journal_id === null ? null : (int) $row->reverses_journal_id,
             'reversed_by_journal_id' => $row->reversed_by_journal_id === null ? null : (int) $row->reversed_by_journal_id,
+            // The entry of an expense recorded from a statement line and then
+            // reversed, or its reversal (finish run round 6): the expense was a
+            // mistake, and the pair nets to nothing on the bank, so neither is
+            // ever suggested (nor accepted by "accept all") for a statement
+            // line. It stays on the worksheet and can still be matched by hand.
+            'undone_mistake' => (int) ($row->undone_mistake ?? 0) === 1,
         ];
     }
 

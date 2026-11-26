@@ -12,6 +12,7 @@ use App\Models\SavingsTransaction;
 use App\Models\User;
 use App\Services\Savings\AccruedInterest;
 use App\Services\Savings\AvailableBalance;
+use App\Services\Savings\PayoutReferences;
 use App\Services\Savings\ProductRules;
 use App\Services\Savings\SavingsMath;
 use Carbon\CarbonInterface;
@@ -35,6 +36,7 @@ class Presenter
         private readonly AvailableBalance $available,
         private readonly AccruedInterest $accrued,
         private readonly ProductRules $rules,
+        private readonly PayoutReferences $payoutReferences,
     ) {}
 
     /** @return array<string, mixed> */
@@ -156,6 +158,7 @@ class Presenter
             ->with(['firstChecker', 'decider'])
             ->get(['id', 'first_checker_id', 'decided_by'])
             ->keyBy('id');
+        $caller = auth()->user();
         $counterpart = fn (SavingsTransaction $r): ?int => $r->counterpart_transaction_id ?? $pointedAt[$r->id] ?? null;
         $anchors = $rows->mapWithKeys(fn (SavingsTransaction $r) => [$r->id => Reverser::anchorIdOf($r, $counterpart($r))]);
         $pending = SavingsApproval::query()
@@ -198,6 +201,8 @@ class Presenter
             'fee_for_transaction_id' => $r->fee_for_transaction_id,
             'created_by' => SavingsUserRef::from($r->creator),
             'created_at' => $r->created_at?->toJSON(),
+            // Finish run round 6: whether the caller may record this payout's reference now.
+            'can_record_reference' => $this->payoutReferences->canRecordOnTransaction($caller instanceof User ? $caller : null, $r, isset($reversedBy[$r->id])),
         ])->values()->all();
     }
 

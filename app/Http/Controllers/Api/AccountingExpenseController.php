@@ -248,7 +248,7 @@ class AccountingExpenseController extends Controller
     #[OA\Post(
         path: '/api/accounting/expenses/{id}/payments/{payment}/reverse',
         summary: 'Reverse one payment of an expense',
-        description: 'Posts the mirror of the payment\'s journal (Dr the money account, Cr Accounts Payable) through the Journals screen\'s own path, so the period rules apply, dated today in Manila (the payment\'s own date when that is later), with the reason in its description, and writes an audit row in words. The payment then no longer counts as paid, so what it paid is owed again. A payment on an expense whose own journal was reversed by hand before can be reversed too. Under the locks paying takes, so a payment and a reversal on one expense, or two reversals, never interleave; a collision answers 409. Answers the expense, as `GET` does.',
+        description: 'Posts the mirror of the payment\'s journal (Dr the money account, Cr Accounts Payable) through the Journals screen\'s own path, so the period rules apply, dated today in Manila (the payment\'s own date when that is later), with the reason in its description, and writes an audit row in words. The payment then no longer counts as paid, so what it paid is owed again. A payment on an expense whose own journal was reversed by hand before can be reversed too. A bank reconciliation\'s match to the payment is left as it is. Under the locks paying takes, so a payment and a reversal on one expense, or two reversals, never interleave; a collision answers 409. Answers the expense, as `GET` does.',
         tags: ['Accounting'],
         security: [['sanctum' => []]],
         parameters: [
@@ -267,7 +267,7 @@ class AccountingExpenseController extends Controller
             new OA\Response(response: 403, description: 'Missing expenses:pay or journals:reverse'),
             new OA\Response(response: 404, description: 'No such expense in the caller\'s branches, or not one of its payments'),
             new OA\Response(response: 409, description: 'Another change in this branch was saved at the same time'),
-            new OA\Response(response: 422, description: 'In words: no reason, a payment already reversed or with no journal entry, a closed period, or a closed or closing branch'),
+            new OA\Response(response: 422, description: 'In words: no reason, a payment already reversed or with no journal entry, a reversal date in a closed month (the message names the date), or a closed or closing branch'),
         ],
     )]
     public function reversePayment(ReverseExpensePaymentRequest $request, AccountingExpense $expense, AccountingExpensePayment $payment): JsonResponse
@@ -285,7 +285,7 @@ class AccountingExpenseController extends Controller
     #[OA\Post(
         path: '/api/accounting/expenses/{id}/reverse',
         summary: 'Reverse an expense',
-        description: 'Posts the mirror of the expense\'s own journal through the Journals screen\'s own path, so the period rules apply, dated today in Manila (the expense\'s own date when that is later), with the reason in its description, and writes an audit row in words. The expense then reads `reversed` and counts in no total; an expense paid on the spot gets its cash back the same way. Refused while any of its payments stands (422 in words: reverse its payments first). Under the locks paying takes; a collision answers 409. Answers the expense, as `GET` does.',
+        description: 'Posts the mirror of the expense\'s own journal through the Journals screen\'s own path, so the period rules apply, dated today in Manila (the expense\'s own date when that is later), with the reason in its description, and writes an audit row in words. The expense then reads `reversed` and counts in no total; an expense paid on the spot gets its cash back the same way. Refused while any of its payments stands (422 in words: reverse its payments first). An expense recorded from a bank reconciliation statement line frees that line, with an audit row on the reconciliation, while that reconciliation is open; one that reads Reconciled refuses the reversal (422 in words) until it is reopened by unmatching the line. Any other match is left as it is. Under the locks paying takes; a collision answers 409. Answers the expense, as `GET` does.',
         tags: ['Accounting'],
         security: [['sanctum' => []]],
         parameters: [new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer'))],
@@ -301,7 +301,7 @@ class AccountingExpenseController extends Controller
             new OA\Response(response: 403, description: 'Missing expenses:update or journals:reverse'),
             new OA\Response(response: 404, description: 'No such expense in the caller\'s branches'),
             new OA\Response(response: 409, description: 'Another change in this branch was saved at the same time'),
-            new OA\Response(response: 422, description: 'In words: no reason, a payment still standing, an expense already reversed or with no journal entry, a closed period, or a closed or closing branch'),
+            new OA\Response(response: 422, description: 'In words: no reason, a payment still standing, an expense already reversed or with no journal entry, a reversal date in a closed month (the message names the date), a reconciliation that reads Reconciled, or a closed or closing branch'),
         ],
     )]
     public function reverse(ReverseExpenseRequest $request, AccountingExpense $expense): JsonResponse

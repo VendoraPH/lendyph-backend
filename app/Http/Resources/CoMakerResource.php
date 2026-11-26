@@ -16,11 +16,24 @@ class CoMakerResource extends JsonResource
      * how they relate to the member, never their address, contact number, work
      * or income (PersonalDataKeys::CO_MAKER).
      *
+     * Read through a loan, it also says when the co-maker was added to it
+     * (`added_at`, the link's own time, as toArray() sends it), so the release
+     * dialog can remind a releaser to reprint a promissory note printed before
+     * the co-maker was added (finish run round 6). That is a fact about the
+     * loan's paperwork, not about the co-maker. Who added them is left out.
+     *
      * @return array<string, mixed>
      */
     public static function slim(CoMaker $coMaker): array
     {
-        return Arr::except(self::record($coMaker), PersonalDataKeys::CO_MAKER);
+        $row = Arr::except(self::record($coMaker), PersonalDataKeys::CO_MAKER);
+        $link = $coMaker->getRelationValue('pivot');
+
+        if ($link !== null && $link->getTable() === 'co_maker_loan') {
+            $row['added_at'] = $link->created_at;
+        }
+
+        return $row;
     }
 
     /**

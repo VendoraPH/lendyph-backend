@@ -46,6 +46,8 @@ class UpdateSavingsProductRequest extends FormRequest
                 : ['prohibited'],
             'annual_interest_rate' => ['prohibited'],
             'is_active' => ['sometimes', 'boolean'],
+            // Only a regular product can be requested from the member portal (finish run round 6).
+            'portal_account_requests' => ['sometimes', 'boolean', ...($isTimeDeposit ? ['declined'] : [])],
             ...SavingsProductRuleFields::rules($isTimeDeposit, $this->user()),
         ];
     }

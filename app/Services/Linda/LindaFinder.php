@@ -12,7 +12,7 @@ use Illuminate\Support\Collection;
 
 /**
  * Linda's exact finders: a member by code or by name, a loan by its LN- or
- * LA- number, a receipt by its RCP- number. Each reads only what the user's
+ * LA- number or an imported loan's Loan No., a receipt by its RCP- number. Each reads only what the user's
  * branches hold (Borrower::visibleTo(), Loan::visibleTo(), a receipt through
  * its loan), so another branch's record is never found, by name or by
  * number, and reads exactly like one that doesn't exist.
@@ -72,6 +72,16 @@ final class LindaFinder
         $column = str_starts_with($number, Loan::CODE_PREFIX.'-') ? 'loans.application_number' : 'loans.loan_account_number';
 
         return Loan::query()->visibleTo($user)->whereIn($column, self::numberForms($number))->first();
+    }
+
+    /**
+     * An imported loan by its Loan No. from the cooperative's file
+     * (`loans.external_loan_no`), whole, case ignored by the column's
+     * collation.
+     */
+    public function loanByLoanNo(User $user, string $loanNo): ?Loan
+    {
+        return Loan::query()->visibleTo($user)->where('loans.external_loan_no', $loanNo)->first();
     }
 
     public function receiptByNumber(User $user, string $number): ?Repayment

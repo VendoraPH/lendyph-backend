@@ -177,7 +177,10 @@ class ImportedArrearsBaselineTest extends TestCase
         // the transaction on EVERY payment. loans:apply-penalties never loads
         // this loan, so this is the path that would have charged a migrated
         // member their whole backlog the first time they paid a peso.
-        [$loan, $schedules] = $this->importedLoan([180, 150], baselineDaysAgo: 0);
+        // Imported as of yesterday: the file counts payments up to its as-of
+        // date, so today's payment is the first one it accepts (finish run
+        // round 6, ImportedPaymentsCutoff).
+        [$loan, $schedules] = $this->importedLoan([180, 150], baselineDaysAgo: 1);
 
         $response = $this->postRepayment($loan, 500);
 
@@ -220,7 +223,10 @@ class ImportedArrearsBaselineTest extends TestCase
         // void would put back exactly the label applyPenalties() declined to
         // write — and the loans screen would show a migrated member as newly
         // delinquent because someone voided a mistyped receipt.
-        [$loan, $schedules] = $this->importedLoan([180, 150], baselineDaysAgo: 0);
+        // Imported as of yesterday: the file counts payments up to its as-of
+        // date, so today's payment is the first one it accepts (finish run
+        // round 6, ImportedPaymentsCutoff).
+        [$loan, $schedules] = $this->importedLoan([180, 150], baselineDaysAgo: 1);
 
         $repayment = $this->postRepayment($loan, 500);
         $this->assertSame('partial', $schedules[1]->refresh()->status, 'the repayment did not land where the void test needs it');

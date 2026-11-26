@@ -1,6 +1,7 @@
 <?php
 
 use App\Http\Controllers\Api\Savings\SavingsOpeningCheckController;
+use App\Http\Controllers\Api\Savings\SavingsPayoutReferenceController;
 use App\Http\Controllers\Api\SavingsAccountController;
 use App\Http\Controllers\Api\SavingsApprovalController;
 use App\Http\Controllers\Api\SavingsHoldController;
@@ -40,6 +41,9 @@ Route::prefix('savings')->group(function () {
     Route::get('/transactions', [SavingsTransactionController::class, 'index']);
     Route::get('/transactions/{transaction}', [SavingsTransactionController::class, 'show'])->whereNumber('transaction');
     Route::post('/transactions/{transaction}/reverse', [SavingsTransactionController::class, 'reverse'])->whereNumber('transaction');
+    // A payout's reference recorded after the transfer, and the payouts still missing one (finish run round 6).
+    Route::post('/transactions/{transaction}/reference', [SavingsPayoutReferenceController::class, 'transaction'])->whereNumber('transaction');
+    Route::get('/payouts/missing-reference', [SavingsPayoutReferenceController::class, 'missing']);
 
     Route::get('/approvals', [SavingsApprovalController::class, 'index']);
     Route::post('/approvals/{approval}/approve', [SavingsApprovalController::class, 'approve'])->whereNumber('approval');

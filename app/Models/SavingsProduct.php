@@ -77,6 +77,8 @@ class SavingsProduct extends Model
         'allow_transfers',
         'eligible_member_types',
         'eligible_branch_ids',
+        // Whether the member portal offers it for new-account requests (OpeningRequests::openProducts()).
+        'portal_account_requests',
         'created_by',
         'updated_by',
     ];
@@ -102,6 +104,7 @@ class SavingsProduct extends Model
             'allow_transfers' => 'boolean',
             'eligible_member_types' => 'array',
             'eligible_branch_ids' => 'array',
+            'portal_account_requests' => 'boolean',
             'created_by' => 'integer',
             'updated_by' => 'integer',
         ];

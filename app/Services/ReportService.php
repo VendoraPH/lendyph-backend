@@ -327,6 +327,9 @@ class ReportService
         return [
             'loan' => [
                 'loan_account_number' => $loan->loan_account_number,
+                // An imported loan has no LN- number: the file's own Loan No.
+                // names it, the statement's reference included.
+                'external_loan_no' => $loan->external_loan_no,
                 'application_number' => $loan->application_number,
                 'principal_amount' => (float) $loan->principal_amount,
                 'interest_rate' => (float) $loan->interest_rate,

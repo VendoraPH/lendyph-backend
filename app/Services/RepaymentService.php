@@ -167,6 +167,10 @@ class RepaymentService
      * previews that run in rolledBackUnderPaymentLock(): previewAllocation()
      * and LoanAdjustmentService::extensionPreview(). Everyone else calls
      * processRepayment().
+     *
+     * A payment dated on or before an imported loan's as-of date is refused
+     * here (422 on `payment_date`, ImportedPaymentsCutoff), whichever path
+     * records it.
      */
     public function recordRepaymentOnLockedLoan(
         Loan $loan,
@@ -180,6 +184,11 @@ class RepaymentService
         bool $preview = false,
     ): Repayment {
         $paymentDate = Carbon::parse($paymentDate);
+
+        // An imported loan's file already counts payments up to its as-of
+        // date: one dated on or before it would count twice. Read from the
+        // locked row, so every payment and preview is held to it.
+        ImportedPaymentsCutoff::assertAllowed($loan, $paymentDate);
 
         // The loan's status as locked, kept on the payment so a void puts back
         // exactly that (voidRepayment()).
@@ -1265,6 +1274,9 @@ class RepaymentService
             // The part of `total_repaid` paid before the import; 0 on a loan
             // that was not imported.
             'paid_before_import' => $paidBeforeImport / 100,
+            // The day the imported file counts payments up to; null when the
+            // loan has none (ImportedPaymentsCutoff).
+            'payments_counted_until' => ImportedPaymentsCutoff::until($loan),
             // Paid breakdown — frontend renders each as its own row
             'principal_paid' => round((float) $totalPrincipalPaid, 2),
             'interest_paid' => round((float) $totalInterestPaid, 2),

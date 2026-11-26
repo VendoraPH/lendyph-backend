@@ -5,6 +5,7 @@ namespace App\Http\Requests\Repayment;
 use App\Http\Requests\Concerns\DateInputMessages;
 use App\Http\Requests\Concerns\ReferenceNumberMessages;
 use App\Models\Loan;
+use App\Services\ImportedPaymentsCutoff;
 use Closure;
 use DateTimeImmutable;
 use Illuminate\Foundation\Http\FormRequest;
@@ -21,9 +22,10 @@ class StoreRepaymentRequest extends FormRequest
     public function rules(): array
     {
         $loan = $this->route('loan');
+        $loan = $loan instanceof Loan ? $loan : null;
 
         return [
-            'payment_date' => ['required', 'date', 'date_format:Y-m-d', 'before_or_equal:today', self::notBeforeRelease($loan instanceof Loan ? $loan : null)],
+            'payment_date' => ['required', 'date', 'date_format:Y-m-d', 'before_or_equal:today', self::notBeforeRelease($loan), ImportedPaymentsCutoff::rule($loan)],
             'amount_paid' => ['required', 'numeric', 'decimal:0,2', 'min:0.01'],
             'method' => ['sometimes', 'in:cash,gcash,maya,bank_transfer,online'],
             'reference_number' => ['nullable', 'string', 'max:100', 'required_unless:method,cash'],

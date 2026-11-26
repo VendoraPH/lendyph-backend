@@ -231,7 +231,12 @@ class ReviewFixesTest extends TestCase
         $audit = AuditLog::query()->where('action', 'savings_account_note_added')->firstOrFail();
         $this->assertEquals(['note_id' => $id, 'length' => 31], $audit->new_values);
         $this->assertSame("Note #{$id} (31 characters) added to savings account {$this->dormant->account_number} by {$poster->full_name}.", $audit->description);
-        $this->assertStringNotContainsString('1234', json_encode($audit->toArray()));
+        // None of the note's text: its words, or the ID number in it as written. A bare "1234"
+        // could also come from the row's own ids or the factory's random account number.
+        $stored = json_encode($audit->toArray());
+        foreach (['Member says', 'her ID', '1234-5678'] as $text) {
+            $this->assertStringNotContainsString($text, $stored);
+        }
     }
 
     // ── L4 ──

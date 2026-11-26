@@ -11,7 +11,9 @@ namespace App\Services\Linda;
  * period words the matcher reads never trip it.
  *
  * It is one of several steps that keep names and numbers on the server
- * (LindaAssistant): the matcher, then the parser, then a reply to a lookup
+ * (LindaAssistant): the matcher, then the Loan No. check (LindaLoanNumbers,
+ * which reads the deployment's imported Loan Nos. and fails closed), then
+ * the parser, then a reply to a lookup
  * turn (LindaLookup::reply()), then the full-name check (LindaNameCheck),
  * and only then the model, which sees the question and the earlier turns'
  * topics, never their text (LindaModelRequest). withoutLookups() is kept for

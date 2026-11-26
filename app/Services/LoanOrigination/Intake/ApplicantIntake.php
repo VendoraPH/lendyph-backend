@@ -20,11 +20,13 @@ use App\Services\LoanOrigination\OriginationNotices;
 use App\Services\LoanWriteTransaction;
 use App\Support\PhilippineMobile;
 use Brick\Math\RoundingMode;
+use Illuminate\Database\DetectsConcurrencyErrors;
 use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Http\Request;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
+use PDOException;
 use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
 
 /**
@@ -35,6 +37,8 @@ use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
  *
  * - open(): after a verified code. `apply` returns the mobile's open draft or
  *   starts one (one open draft per mobile, by the unique `open_mobile_hash`);
+ *   a start that deadlocks with another applicant's is run once more, then
+ *   answers 409 in words (STARTED_AT_ONCE), never a 500;
  *   `resume` finds the open draft on this link; `track` finds a submitted
  *   application by its reference and the mobile together, made on a link of
  *   the same kind (its own `is_test`, copied from its link when it started),
@@ -52,6 +56,8 @@ use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
  */
 final class ApplicantIntake
 {
+    use DetectsConcurrencyErrors;
+
     public const SUBMITTED = 'This application has already been submitted, so it can\'t be changed here.';
 
     public const NOT_SUBMITTABLE = 'This application can\'t be submitted any more. Please contact the office.';
@@ -63,6 +69,20 @@ final class ApplicantIntake
     public const NO_APPLICATION = 'We couldn\'t find an application with that reference for this number.';
 
     public const NOT_REPLACEABLE = 'This document can\'t be changed now.';
+
+    public const STARTED_AT_ONCE = 'Another application was being started at the same moment, so yours couldn\'t start. Please ask for a new code and try again.';
+
+    /**
+     * How many times a start runs when it deadlocks (finish run round 6): two
+     * first-time applicants starting at once each read the open draft for
+     * their mobile under a lock, find none, and take a gap lock on the same
+     * index range before inserting into it, which MySQL answers with a
+     * deadlock, rolling one back. That one is run once more, on what is
+     * committed by then.
+     */
+    private const START_TRIES = 2;
+
+    private const LOCK_WAIT_TIMEOUT = 1205;
 
     public function __construct(
         private readonly DraftRules $rules,
@@ -97,11 +117,25 @@ final class ApplicantIntake
                 ?? throw new NotFoundHttpException(self::NO_DRAFT);
         }
 
-        try {
-            return $this->startOrFind($link, $mobile, $hash, $request);
-        } catch (UniqueConstraintViolationException) {
-            // Another verify for the same mobile started it a moment ago.
-            return $this->startOrFind($link, $mobile, $hash, $request);
+        for ($try = 1; ; $try++) {
+            try {
+                try {
+                    return $this->startOrFind($link, $mobile, $hash, $request);
+                } catch (UniqueConstraintViolationException) {
+                    // Another verify for the same mobile started it a moment ago.
+                    return $this->startOrFind($link, $mobile, $hash, $request);
+                }
+            } catch (PDOException $e) {
+                if (DB::transactionLevel() > 0 || ! $this->causedByConcurrencyError($e)) {
+                    throw $e;
+                }
+
+                // A lock wait timeout already spent its wait; a second
+                // deadlock means the moment hasn't passed.
+                if ($try >= self::START_TRIES || ($e->errorInfo[1] ?? null) === self::LOCK_WAIT_TIMEOUT) {
+                    throw LoanWriteTransaction::conflict(self::STARTED_AT_ONCE);
+                }
+            }
         }
     }
 
