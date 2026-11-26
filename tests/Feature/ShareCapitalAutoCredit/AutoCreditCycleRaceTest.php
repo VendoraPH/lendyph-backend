@@ -20,7 +20,8 @@ use Tests\Traits\SetupLendyPH;
  * run reads the members' rows in the month FOR SHARE, so the second run's
  * credit waits for the first run to commit and, waiting too long, answers 409
  * with nothing posted. The cycle is then taken: running it again credits
- * nothing.
+ * nothing. Runs for a month's two cycles at once are held the same way, so a
+ * twice-monthly pledge never gets a third instalment.
  */
 class AutoCreditCycleRaceTest extends TestCase
 {
@@ -83,6 +84,45 @@ class AutoCreditCycleRaceTest extends TestCase
             ->assertJsonPath('data.member_count', 0)
             ->assertJsonPath('data.skipped.0.reason', ShareCapitalService::sameHalfReason('2026-11-15', '2026-11-16'));
         $this->assertSame(1, ShareCapitalLedger::query()->where('borrower_id', $this->member->id)->count());
+    }
+
+    public function test_runs_for_both_of_a_months_cycles_started_at_once_never_give_a_third_instalment(): void
+    {
+        // A twice-monthly pledge credited by hand in November: one instalment
+        // is left. Runs for Nov 15 (late) and Nov 30 start at the same moment;
+        // each alone would credit it.
+        Carbon::setTestNow(Carbon::parse('2026-11-30 10:00:00', 'Asia/Manila'));
+        ShareCapitalLedger::query()->create([
+            'borrower_id' => $this->member->id, 'branch_id' => $this->branch->id, 'date' => '2026-11-05',
+            'description' => 'Manual credit entry', 'debit' => 0, 'credit' => 500,
+            'method' => 'cash', 'created_by' => $this->admin->id,
+        ]);
+        $otherStatus = null;
+        $interleaved = false;
+
+        DB::connection()->beforeExecuting(function (string $query) use (&$interleaved, &$otherStatus): void {
+            if ($interleaved || ! str_starts_with($query, 'insert into `share_capital_ledger`')) {
+                return;
+            }
+
+            $interleaved = true;
+            $otherStatus = $this->onTheOtherConnection(fn () => app(ShareCapitalService::class)->processAutoCredit($this->admin, '2026-11-15'));
+        });
+
+        $this->postJson('/api/auto-credit/process', ['cycle_date' => '2026-11-30'])->assertCreated()->assertJsonPath('data.member_count', 1);
+
+        $this->assertTrue($interleaved);
+        $this->assertSame(409, $otherStatus);
+        $this->assertSame(2, ShareCapitalLedger::query()->where('borrower_id', $this->member->id)->where('credit', '>', 0)->count());
+
+        // Run again, the Nov 15 cycle finds November's two instalments in.
+        $this->postJson('/api/auto-credit/process', ['cycle_date' => '2026-11-15'])->assertCreated()
+            ->assertJsonPath('data.member_count', 0)
+            ->assertJsonPath('data.skipped.0.reason', ShareCapitalService::alreadyCreditedReason([
+                ['hand', '2026-11-05', null],
+                ['auto_credit', '2026-11-30', null],
+            ]));
+        $this->assertSame(2, ShareCapitalLedger::query()->where('borrower_id', $this->member->id)->where('credit', '>', 0)->count());
     }
 
     /** Run `$run` as another request would, on the other connection; its HTTP status. */

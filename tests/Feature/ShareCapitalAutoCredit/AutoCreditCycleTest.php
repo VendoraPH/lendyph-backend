@@ -16,8 +16,9 @@ use Tests\Traits\SetupLendyPH;
  * (`cycle_date`, a month's 15th or its 30th, the month's last day), as the
  * savings auto-credit picks its cycle.
  *
- * - The current cycle (by today in Manila) or a missed one up to 92 days ago,
- *   never a future one; refused in words.
+ * - The current cycle (the latest 15th or month's last day on or before today
+ *   in Manila) or a missed one up to 92 days ago, never a future one;
+ *   refused in words. A weekend cycle is run late, for its own cycle.
  * - A 15th credits "15" and "15/30" pledges, a 30th "30" and "15/30"; other
  *   schedules are skipped with the reason.
  * - A pledge is credited at most once per cycle by runs. Round 7's monthly cap
@@ -96,18 +97,25 @@ class AutoCreditCycleTest extends TestCase
     public function test_a_future_cycle_is_refused_in_words_and_posts_nothing(): void
     {
         $this->on('2026-11-14');
-        $this->postJson('/api/auto-credit/process', ['cycle_date' => '2026-11-30'])->assertUnprocessable()
-            ->assertJsonPath('errors.cycle_date.0', 'The 30th run for November opens on Nov 16.');
+        $this->postJson('/api/auto-credit/process', ['cycle_date' => '2026-11-15'])->assertUnprocessable()
+            ->assertJsonPath('errors.cycle_date.0', 'The 15th run for November opens on Nov 15.');
 
-        $this->on('2026-11-16');
+        // From the 16th to the 29th, the 30th's cycle is still ahead.
+        foreach (['2026-11-16', '2026-11-29'] as $day) {
+            $this->on($day);
+            $this->postJson('/api/auto-credit/process', ['cycle_date' => '2026-11-30'])->assertUnprocessable()
+                ->assertJsonPath('errors.cycle_date.0', 'The 30th run for November opens on Nov 30.');
+        }
+
+        $this->on('2026-12-01');
         $this->postJson('/api/auto-credit/process', ['cycle_date' => '2026-12-15'])->assertUnprocessable()
-            ->assertJsonPath('errors.cycle_date.0', 'The 15th run for December opens on Dec 1.');
+            ->assertJsonPath('errors.cycle_date.0', 'The 15th run for December opens on Dec 15.');
         $this->getJson('/api/auto-credit/status?cycle_date=2026-12-15')->assertUnprocessable()
-            ->assertJsonPath('errors.cycle_date.0', 'The 15th run for December opens on Dec 1.');
+            ->assertJsonPath('errors.cycle_date.0', 'The 15th run for December opens on Dec 15.');
 
-        $this->on('2026-12-20');
+        $this->on('2026-12-31');
         $this->postJson('/api/auto-credit/process', ['cycle_date' => '2027-01-15'])->assertUnprocessable()
-            ->assertJsonPath('errors.cycle_date.0', 'The 15th run for January 2027 opens on Jan 1.');
+            ->assertJsonPath('errors.cycle_date.0', 'The 15th run for January 2027 opens on Jan 15.');
 
         $this->assertSame(0, AutoCreditRun::query()->count());
         $this->assertSame(0, ShareCapitalLedger::query()->count());
@@ -155,13 +163,13 @@ class AutoCreditCycleTest extends TestCase
 
     public function test_the_sunday_scenario_gives_two_a_month_never_three(): void
     {
-        // Nov 15, 2026 is a Sunday: its run is done on Saturday the 14th, and
-        // again on Monday the 16th by someone who didn't know.
-        $this->on('2026-11-14');
-        $this->runFor('2026-11-15')->assertJsonPath('data.member_count', 2);
+        // Nov 15, 2026 is a Sunday: its run is done late, on Monday the 16th,
+        // and again on Tuesday the 17th by someone who didn't know.
         $this->on('2026-11-16');
+        $this->runFor('2026-11-15')->assertJsonPath('data.member_count', 2);
+        $this->on('2026-11-17');
         $this->runFor('2026-11-15')->assertJsonPath('data.member_count', 0)
-            ->assertJsonPath('data.skipped.2.reason', ShareCapitalService::sameHalfReason('2026-11-15', '2026-11-14'));
+            ->assertJsonPath('data.skipped.2.reason', ShareCapitalService::sameHalfReason('2026-11-15', '2026-11-16'));
 
         // The 30th's run, and a second one by mistake.
         $this->on('2026-11-30');
@@ -173,7 +181,7 @@ class AutoCreditCycleTest extends TestCase
         $this->runFor('2026-11-15')->assertJsonPath('data.member_count', 0);
 
         $this->assertSame(2, $this->creditsOf($this->cy));
-        $this->assertSame(['2026-11-14', '2026-11-30'], $this->datesOf($this->cy));
+        $this->assertSame(['2026-11-16', '2026-11-30'], $this->datesOf($this->cy));
         $this->assertSame(1, $this->creditsOf($this->ana));
         $this->assertSame(1, $this->creditsOf($this->ben));
     }
@@ -286,7 +294,7 @@ class AutoCreditCycleTest extends TestCase
         $this->handCredit($this->cy, '2026-11-02', null);
         $this->runFor('2026-11-15');
 
-        foreach (['2026-11-15' => '2026-11-16', '2026-11-30' => '2026-11-30', '2026-12-15' => '2026-12-01'] as $cycle => $day) {
+        foreach (['2026-11-15' => '2026-11-16', '2026-11-30' => '2026-11-30', '2026-12-15' => '2026-12-15'] as $cycle => $day) {
             $this->on($day);
             $preview = $this->getJson('/api/auto-credit/status?cycle_date='.$cycle)->assertOk()->json('data');
             $run = $this->postJson('/api/auto-credit/process', ['cycle_date' => $cycle])->assertCreated()->json('data');
@@ -303,36 +311,48 @@ class AutoCreditCycleTest extends TestCase
         }
     }
 
-    public function test_the_status_defaults_to_the_current_cycle_in_manila_and_lists_the_allowed_ones(): void
+    public function test_the_status_defaults_to_the_latest_cycle_on_or_before_today_in_manila_and_lists_the_allowed_ones(): void
     {
         // Nov 15, 23:30 in Manila (15:30 UTC): the November 15 cycle.
         Carbon::setTestNow(Carbon::parse('2026-11-15 15:30:00', 'UTC'));
         $this->getJson('/api/auto-credit/status')->assertOk()->assertJsonPath('data.cycle_date', '2026-11-15');
 
-        // Nov 16, 00:30 in Manila (Nov 15 in UTC): the November 30 cycle.
+        // Nov 16, 00:30 in Manila (Nov 15 in UTC): still November 15, never
+        // the 30th ahead of its date.
         Carbon::setTestNow(Carbon::parse('2026-11-15 16:30:00', 'UTC'));
         $data = $this->getJson('/api/auto-credit/status')->assertOk()
-            ->assertJsonPath('data.cycle_date', '2026-11-30')
-            ->assertJsonPath('data.cycle_label', 'November 30')
+            ->assertJsonPath('data.cycle_date', '2026-11-15')
+            ->assertJsonPath('data.cycle_label', 'November 15')
             ->assertJsonPath('data.active_count', 2)
+            ->assertJsonPath('data.skipped_members.0.reason', ShareCapitalService::otherHalfReason('30', '2026-11-15'))
             ->json('data');
 
         // The current cycle first, then each earlier one back to 92 days ago (Aug 16).
         $this->assertSame(
-            ['2026-11-30', '2026-11-15', '2026-10-31', '2026-10-15', '2026-09-30', '2026-09-15', '2026-08-31'],
+            ['2026-11-15', '2026-10-31', '2026-10-15', '2026-09-30', '2026-09-15', '2026-08-31'],
             array_column($data['cycle_options'], 'date'),
         );
-        $this->assertSame(['date' => '2026-10-31', 'label' => 'October 31'], $data['cycle_options'][2]);
+        $this->assertSame(['date' => '2026-10-31', 'label' => 'October 31'], $data['cycle_options'][1]);
 
-        $this->getJson('/api/auto-credit/status?cycle_date=2026-11-15')->assertOk()
-            ->assertJsonPath('data.cycle_date', '2026-11-15')
-            ->assertJsonPath('data.active_count', 2)
-            ->assertJsonPath('data.skipped_members.0.reason', ShareCapitalService::otherHalfReason('30', '2026-11-15'));
+        // The 30th is offered only from the 30th; before the 15th, last month's end.
+        $this->on('2026-11-29');
+        $this->assertSame('2026-11-15', $this->getJson('/api/auto-credit/status')->json('data.cycle_options.0.date'));
+        $this->on('2026-11-30');
+        $this->getJson('/api/auto-credit/status')->assertOk()->assertJsonPath('data.cycle_date', '2026-11-30')
+            ->assertJsonPath('data.cycle_options.0.date', '2026-11-30');
+        $this->on('2026-12-14');
+        $this->getJson('/api/auto-credit/status')->assertOk()->assertJsonPath('data.cycle_date', '2026-11-30')
+            ->assertJsonPath('data.cycle_options.0.date', '2026-11-30');
     }
 
     public function test_february_ends_its_30th_cycle_on_the_28th(): void
     {
-        $this->on('2027-02-20');
+        $this->on('2027-02-27');
+        $this->getJson('/api/auto-credit/status')->assertOk()->assertJsonPath('data.cycle_date', '2027-02-15');
+        $this->postJson('/api/auto-credit/process', ['cycle_date' => '2027-02-28'])->assertUnprocessable()
+            ->assertJsonPath('errors.cycle_date.0', 'The 30th run for February opens on Feb 28.');
+
+        $this->on('2027-02-28');
         $this->getJson('/api/auto-credit/status')->assertOk()->assertJsonPath('data.cycle_date', '2027-02-28')
             ->assertJsonPath('data.cycle_label', 'February 28');
         $this->runFor('2027-02-28')->assertJsonPath('data.member_count', 2);

@@ -110,12 +110,10 @@ class ShareCapitalService
     }
 
     /**
-     * The cycle a day falls in (finish run round 8), as the savings
-     * auto-credit's cycles: the 1st to the 15th falls in that month's 15th,
-     * later days in its 30th (the month's last day: Feb 28 or 29, Nov 30,
-     * Dec 31). Today's (Manila) is the run's current cycle, its default; an
-     * old run's row (no cycle recorded) counts toward the cycle its date falls
-     * in.
+     * The cycle an old run's row (no cycle recorded) counts toward, by its
+     * date (finish run round 8): the 1st to the 15th is that month's 15th,
+     * later days its 30th (the month's last day: Feb 28 or 29, Nov 30,
+     * Dec 31).
      */
     public static function cycleOf(CarbonInterface $day): CarbonImmutable
     {
@@ -124,23 +122,43 @@ class ShareCapitalService
         return $date->day <= 15 ? $date->setDay(15) : $date->endOfMonth()->startOfDay();
     }
 
+    /**
+     * The current cycle on `$day` (Manila), a run's default: the latest 15th
+     * or month's last day on or before it, as the savings auto-credit's
+     * cycles, so a run never credits a cycle ahead of its date. Nov 16 to 29
+     * gives Nov 15, Nov 30 gives Nov 30, Dec 1 to 14 gives Nov 30. A cycle that
+     * falls on a weekend is run late, on the next working day, still for its
+     * own cycle.
+     */
+    public static function currentCycle(CarbonInterface $day): CarbonImmutable
+    {
+        $date = CarbonImmutable::parse($day->toDateString(), self::TIMEZONE);
+
+        return match (true) {
+            $date->day === $date->daysInMonth => $date,
+            $date->day >= 15 => $date->setDay(15),
+            default => $date->subMonthNoOverflow()->endOfMonth()->startOfDay(),
+        };
+    }
+
     /** The current cycle, by today in Manila, as YYYY-MM-DD. */
     public static function currentCycleDate(): string
     {
-        return self::cycleOf(CarbonImmutable::now(self::TIMEZONE))->toDateString();
+        return self::currentCycle(CarbonImmutable::now(self::TIMEZONE))->toDateString();
     }
 
     /**
-     * The cycles a run on `$today` may take, newest first: the current one,
-     * then each earlier one (a missed run) up to Cycle::LOOKBACK_DAYS days
-     * ago, as the savings auto-credit allows. Never a future one.
+     * The cycles a run on `$today` may take, newest first: the current one
+     * (currentCycle()), then each earlier one (a missed run) up to
+     * Cycle::LOOKBACK_DAYS days ago, as the savings auto-credit allows. Never
+     * a future one.
      *
      * @return list<string>
      */
     public static function cycleOptions(CarbonInterface $today): array
     {
         $earliest = CarbonImmutable::parse($today->toDateString(), self::TIMEZONE)->subDays(Cycle::LOOKBACK_DAYS);
-        $cycle = self::cycleOf($today);
+        $cycle = self::currentCycle($today);
         $options = [];
 
         while ($cycle->gte($earliest)) {
@@ -154,8 +172,8 @@ class ShareCapitalService
     /**
      * Why a run can't take `$date` on `$today`, in words, or null when it
      * can (a YYYY-MM-DD already checked): not a 15th or a month's last day, a
-     * future cycle ("The 30th run for November opens on Nov 16."), or one more
-     * than Cycle::LOOKBACK_DAYS days ago.
+     * cycle dated after today ("The 30th run for November opens on Nov 30."),
+     * or one more than Cycle::LOOKBACK_DAYS days ago.
      */
     public static function cycleRefusal(string $date, CarbonInterface $today): ?string
     {
@@ -168,8 +186,8 @@ class ShareCapitalService
         $cycle = CarbonImmutable::parse($date, self::TIMEZONE)->startOfDay();
         $todayDate = CarbonImmutable::parse($today->toDateString(), self::TIMEZONE);
 
-        if ($cycle->gt(self::cycleOf($todayDate))) {
-            $opens = $slot === '15' ? $cycle->startOfMonth() : $cycle->setDay(16);
+        if ($cycle->gt($todayDate)) {
+            $opens = $cycle;
             $month = $cycle->year === $todayDate->year ? $cycle->format('F') : $cycle->format('F Y');
 
             return 'The '.($slot === '15' ? '15th' : '30th')." run for {$month} opens on ".$opens->format('M j').'.';
@@ -607,7 +625,7 @@ class ShareCapitalService
         // The run's cycle (finish run round 8): as asked, else the current one
         // by today in Manila.
         $today = CarbonImmutable::now(self::TIMEZONE);
-        $cycle = $cycleDate === null ? self::cycleOf($today) : CarbonImmutable::parse($cycleDate, self::TIMEZONE)->startOfDay();
+        $cycle = $cycleDate === null ? self::currentCycle($today) : CarbonImmutable::parse($cycleDate, self::TIMEZONE)->startOfDay();
 
         $allPledges = ShareCapitalPledge::with('borrower')
             ->forCurrentMembers()

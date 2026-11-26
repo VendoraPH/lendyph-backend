@@ -44,8 +44,8 @@ class ProcessAutoCreditRequest extends FormRequest
 
     /**
      * The run's cycle, YYYY-MM-DD: a month's 15th or its 30th (the month's
-     * last day), the current one by today in Manila or an earlier one up to
-     * the lookback, never a future one (ShareCapitalService::cycleRefusal()).
+     * last day) on or before today in Manila, the current one or an earlier
+     * one up to the lookback, never a future one (ShareCapitalService::cycleRefusal()).
      * Shared with GET /auto-credit/status's `?cycle_date=`.
      *
      * @return list<mixed>
