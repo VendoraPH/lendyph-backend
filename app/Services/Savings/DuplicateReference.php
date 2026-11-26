@@ -6,7 +6,9 @@ use App\Models\SavingsApproval;
 use App\Models\SavingsTransaction;
 use App\Models\TimeDeposit;
 use App\Services\Savings\Api\Refuse;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
+use LogicException;
 
 /**
  * One outside payment, one record (finish run round 2, decision 11): a
@@ -39,11 +41,22 @@ use Illuminate\Validation\ValidationException;
  * the system's own rows (interest, tax, fees, the maturity job's settlements
  * and reversals). New records only: rows already saved are never re-checked.
  *
- * The callers run it under the account row lock (the Teller, a closing), the
- * member row lock (the opener), the member's branch lock (a placement) or the
- * placement's row lock (its payout), so two entries for one account or one
- * placement can't both take a reference. Two entries for different members
- * at the same moment are not serialised.
+ * One writer per method at a time (finish run round 6, money review): before
+ * it reads, the check takes the method's row in `savings_reference_locks`
+ * `FOR UPDATE`, held until the caller's transaction ends, so two writers on
+ * different accounts checking the same method wait for each other and the
+ * second sees the first's reference. It is always the last of the caller's
+ * record locks: every caller already holds its own first, and none takes an
+ * account, placement or member lock after it:
+ * - Teller (deposit, withdrawal, an approved withdrawal posting): the account;
+ * - AccountCloser (close, an approved close): the account;
+ * - AccountOpener: the member row;
+ * - Placement (a non-cash placement): the member's branch;
+ * - Settlement and the td_payout and pretermination executors: the payout
+ *   account, then the placement;
+ * - PayoutReferences (a reference recorded afterwards): the account, then the
+ *   transaction; or the placement.
+ * Cash, a blank reference and a method with no lock row take no lock.
  */
 class DuplicateReference
 {
@@ -65,6 +78,9 @@ class DuplicateReference
         'pretermination' => ['payout_method', 'payout_reference'],
     ];
 
+    /** The methods with a row in `savings_reference_locks` (the migration seeds them). */
+    private const LOCKED_METHODS = ['bank_transfer', 'gcash', 'maya', 'savings'];
+
     /** "another …", by method. */
     private const RECORD_WORDS = [
         'bank_transfer' => 'bank transfer',
@@ -84,6 +100,10 @@ class DuplicateReference
 
         if ($method === null || $method === 'cash' || $reference === '') {
             return;
+        }
+
+        if (in_array($method, self::LOCKED_METHODS, true)) {
+            $this->lockMethod($method);
         }
 
         if ($this->onRecord($method, $reference)) {
@@ -125,19 +145,51 @@ class DuplicateReference
         );
     }
 
+    /**
+     * Wait for any other writer checking `$method`, and hold its lock row
+     * until this transaction ends.
+     */
+    private function lockMethod(string $method): void
+    {
+        if (DB::transactionLevel() === 0) {
+            throw new LogicException('A reference is checked only inside the transaction that saves it.');
+        }
+
+        DB::table('savings_reference_locks')->where('method', $method)->lockForUpdate()->value('method');
+    }
+
+    /**
+     * Locking reads throughout (`FOR SHARE`): under REPEATABLE READ a plain
+     * read answers from the transaction's first snapshot, taken before the
+     * method lock, so it would miss a reference another writer committed
+     * while this one waited for the lock. A locking read sees the latest
+     * committed rows.
+     */
     private function onRecord(string $method, string $reference): bool
     {
-        $onSavings = SavingsTransaction::query()
+        $candidates = SavingsTransaction::query()
             ->where('method', $method)
             ->where('external_reference', $reference)
-            ->whereNotExists(fn ($reversals) => $reversals->selectRaw('1')
-                ->from('savings_transactions as reversals')
-                ->whereColumn('reversals.reverses_transaction_id', 'savings_transactions.id'))
-            ->exists();
+            ->sharedLock()
+            ->pluck('id')
+            ->map(fn ($id): int => (int) $id)
+            ->all();
 
-        return $onSavings
-            || TimeDeposit::query()->where('funding_method', $method)->where('reference', $reference)->exists()
-            || TimeDeposit::query()->where('payout_method', $method)->where('payout_reference', $reference)->exists();
+        if ($candidates !== []) {
+            $reversed = SavingsTransaction::query()
+                ->whereIn('reverses_transaction_id', $candidates)
+                ->sharedLock()
+                ->pluck('reverses_transaction_id')
+                ->map(fn ($id): int => (int) $id)
+                ->all();
+
+            if (array_diff($candidates, $reversed) !== []) {
+                return true;
+            }
+        }
+
+        return TimeDeposit::query()->where('funding_method', $method)->where('reference', $reference)->sharedLock()->limit(1)->value('id') !== null
+            || TimeDeposit::query()->where('payout_method', $method)->where('payout_reference', $reference)->sharedLock()->limit(1)->value('id') !== null;
     }
 
     /**
@@ -145,7 +197,14 @@ class DuplicateReference
      * checker with this method and reference in its stored request, or null;
      * for an approved one being posted, only those requested before it. The
      * JSON value is compared in the columns' collation, so case and trailing
-     * spaces are ignored here too.
+     * spaces are ignored here too. A locking read, as in onRecord(), so a
+     * request another writer committed while this one waited is seen.
+     *
+     * A checker posting an approved payout holds its approval row and then
+     * waits for this method's lock; a writer holding the lock that reads that
+     * row here waits for the checker. InnoDB ends the cycle at once by rolling
+     * one back; the money posts run inside GeneratedNumberWrite (directly or
+     * through IdempotentWrite), which retries it.
      */
     private function heldBy(string $method, string $reference, ?int $postingApprovalId): ?string
     {
@@ -162,6 +221,7 @@ class DuplicateReference
                 }
             })
             ->orderBy('id')
+            ->sharedLock()
             ->value('kind');
     }
 }

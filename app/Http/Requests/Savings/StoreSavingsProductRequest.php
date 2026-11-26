@@ -39,6 +39,8 @@ class StoreSavingsProductRequest extends FormRequest
             ],
             'annual_interest_rate' => ['required', ...SavingsRules::rate('interest rate')],
             'is_active' => ['sometimes', 'boolean'],
+            // Only a regular product can be requested from the member portal (finish run round 6).
+            'portal_account_requests' => ['sometimes', 'boolean', 'declined_if:kind,'.SavingsProduct::KIND_TIME_DEPOSIT],
             ...SavingsProductRuleFields::rules(null, $this->user()),
         ];
     }

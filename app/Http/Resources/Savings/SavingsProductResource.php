@@ -52,6 +52,8 @@ class SavingsProductResource extends JsonResource
             'allow_transfers' => (bool) ($this->allow_transfers ?? true),
             'eligible_member_types' => $this->eligible_member_types,
             'eligible_branch_ids' => $this->eligible_branch_ids === null ? null : array_map('intval', $this->eligible_branch_ids),
+            // Finish run round 6: offered for new-account requests in the member portal.
+            'portal_account_requests' => (bool) ($this->portal_account_requests ?? false),
             'current_rates' => app(RateBook::class)->current($this->resource, now()->toDateString()),
             'account_count' => $holdings,
             'can_delete' => ! $inUse,

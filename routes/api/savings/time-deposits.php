@@ -1,5 +1,6 @@
 <?php
 
+use App\Http\Controllers\Api\Savings\SavingsPayoutReferenceController;
 use App\Http\Controllers\Api\SavingsTimeDepositController;
 use Illuminate\Support\Facades\Route;
 
@@ -24,4 +25,6 @@ Route::prefix('savings/time-deposits')->group(function () {
     Route::post('/{timeDeposit}/settle', [SavingsTimeDepositController::class, 'settle'])->whereNumber('timeDeposit');
     Route::get('/{timeDeposit}/pretermination-quote', [SavingsTimeDepositController::class, 'preterminationQuote'])->whereNumber('timeDeposit');
     Route::post('/{timeDeposit}/preterminate', [SavingsTimeDepositController::class, 'preterminate'])->whereNumber('timeDeposit');
+    // Its payout's reference, recorded after the transfer (finish run round 6): savings:transact or savings:close, by the payout.
+    Route::post('/{timeDeposit}/payout-reference', [SavingsPayoutReferenceController::class, 'timeDeposit'])->whereNumber('timeDeposit');
 });
