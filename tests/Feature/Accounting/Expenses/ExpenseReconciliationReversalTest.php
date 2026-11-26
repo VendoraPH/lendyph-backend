@@ -89,6 +89,9 @@ class ExpenseReconciliationReversalTest extends TestCase
 
         $this->postJson("/api/accounting/reconciliations/{$reconciliation->id}/match", ['accept_suggestions' => true])->assertOk();
         $this->assertNull($line->refresh()->matched_journal_line_id, 'accept all leaves it unmatched');
+
+        // Never suggested, but still on the worksheet: matched by hand, it's accepted.
+        $this->match($reconciliation, $line, $this->bankLineOf($journal->id));
     }
 
     public function test_an_ordinary_reversed_payment_is_still_suggested_as_before(): void

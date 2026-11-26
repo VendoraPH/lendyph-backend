@@ -774,10 +774,12 @@ class ReconciliationMatcher
             ->leftJoin('accounting_reconciliation_lines as r', 'r.matched_journal_line_id', '=', 'l.id')
             // An expense recorded from a statement line (`reconciliation_line_id`),
             // on its own entry or on that entry's reversal: see toLedgerLine()'s
-            // `undone_mistake`.
-            ->leftJoin('accounting_expenses as fx', fn ($join) => $join->on('fx.journal_id', '=', 'j.id')->whereNotNull('fx.reconciliation_line_id'))
-            ->leftJoin('accounting_expenses as rx', fn ($join) => $join->on('rx.journal_id', '=', 'j.reverses_journal_id')->whereNotNull('rx.reconciliation_line_id'))
-            ->selectRaw("CASE WHEN (fx.id IS NOT NULL AND j.status = 'reversed') OR rx.id IS NOT NULL THEN 1 ELSE 0 END as undone_mistake")
+            // `undone_mistake`. EXISTS, not a join: nothing makes
+            // accounting_expenses.journal_id unique, and a join would repeat
+            // the line for each such row.
+            ->selectRaw("CASE WHEN (j.status = 'reversed' AND EXISTS (SELECT 1 FROM accounting_expenses fx WHERE fx.journal_id = j.id AND fx.reconciliation_line_id IS NOT NULL))
+                OR (j.reverses_journal_id IS NOT NULL AND EXISTS (SELECT 1 FROM accounting_expenses rx WHERE rx.journal_id = j.reverses_journal_id AND rx.reconciliation_line_id IS NOT NULL))
+                THEN 1 ELSE 0 END as undone_mistake")
             ->addSelect([
                 'l.id as line_id',
                 'l.accounting_account_id as account_id',

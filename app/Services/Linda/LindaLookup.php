@@ -329,13 +329,37 @@ final class LindaLookup
             return self::request(LindaLookupRequest::MEMBER);
         }
 
+        // Both readings of a line break, kept and as a space (finish run round
+        // 6): reading it as a space only ever adds a lookup ("PN⏎42"), never
+        // loses one ("How about Juan⏎Man?", a phone number split over lines).
         try {
-            $request = self::read(self::normalise($question));
+            $kept = self::read(self::normalise($question, false));
+
+            if (preg_last_error() !== PREG_NO_ERROR) {
+                return self::request(LindaLookupRequest::MEMBER);
+            }
+
+            $spaced = self::read(self::normalise($question));
         } catch (UnexpectedValueException) {
             return self::request(LindaLookupRequest::MEMBER);
         }
 
-        return preg_last_error() === PREG_NO_ERROR ? $request : self::request(LindaLookupRequest::MEMBER);
+        return preg_last_error() === PREG_NO_ERROR ? self::either($spaced, $kept) : self::request(LindaLookupRequest::MEMBER);
+    }
+
+    /**
+     * The lookup of either reading: the one naming its target when only one
+     * does, else the first.
+     */
+    private static function either(?LindaLookupRequest $first, ?LindaLookupRequest $second): ?LindaLookupRequest
+    {
+        if ($first === null || $second === null) {
+            return $first ?? $second;
+        }
+
+        $named = fn (LindaLookupRequest $request): bool => $request->code !== null || $request->name !== null;
+
+        return ! $named($first) && $named($second) ? $second : $first;
     }
 
     /**
@@ -352,8 +376,19 @@ final class LindaLookup
             return null;
         }
 
+        // Both readings of a line break, as parse() reads them.
+        return self::either(self::replyIn($question, $kind, true), self::replyIn($question, $kind, false));
+    }
+
+    /**
+     * reply() on one reading of the question's line breaks.
+     *
+     * @param  'member'|'loan'|'receipt'  $kind
+     */
+    private static function replyIn(#[\SensitiveParameter] string $question, string $kind, bool $breaksAsSpaces): ?LindaLookupRequest
+    {
         try {
-            $question = self::normalise($question);
+            $question = self::normalise($question, $breaksAsSpaces);
 
             if (self::match('/^\s*+#?\s*+(\d{1,12}+)\s*+[?.!]?\s*+$/u', $question, $number)) {
                 return self::request($kind, (self::REPLY_PREFIXES[$kind] ?? 'BRW').'-'.$number[1]);
@@ -394,13 +429,14 @@ final class LindaLookup
 
     /**
      * NFKC, with invisible format characters (zero-width spaces, soft
-     * hyphens) dropped, every Unicode dash read as "-" and every space and
-     * line break as " ".
-     * The Loan No. check (LindaLoanNumbers) reads a question the same way.
+     * hyphens) dropped, every Unicode dash read as "-" and every space as " ";
+     * with `$breaksAsSpaces`, every line break too. parse() and reply() read
+     * a question both ways; the Loan No. check (LindaLoanNumbers) reads it
+     * with line breaks as spaces.
      *
      * @throws UnexpectedValueException
      */
-    public static function normalise(#[\SensitiveParameter] string $question): string
+    public static function normalise(#[\SensitiveParameter] string $question, bool $breaksAsSpaces = true): string
     {
         $normal = Normalizer::normalize($question, Normalizer::FORM_KC);
 
@@ -411,9 +447,11 @@ final class LindaLookup
         $normal = self::replace('/\p{Cf}/u', '', $normal);
         $normal = self::replace('/[\p{Pd}\x{2212}]/u', '-', $normal);
 
-        // Vertical white space too (\n, \r, \f and the Unicode line breaks): a
+        $normal = self::replace('/[\p{Zs}\x{00A0}\x{2007}\x{202F}]/u', ' ', $normal);
+
+        // Vertical white space (\n, \r, \f and the Unicode line breaks): a
         // Shift+Enter or a pasted cell between "PN" and "42" reads as a space.
-        return self::replace('/[\p{Zs}\x{00A0}\x{2007}\x{202F}\v]/u', ' ', $normal);
+        return $breaksAsSpaces ? self::replace('/\v/u', ' ', $normal) : $normal;
     }
 
     private static function read(#[\SensitiveParameter] string $question): ?LindaLookupRequest
