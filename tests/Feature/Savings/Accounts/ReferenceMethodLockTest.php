@@ -3,9 +3,13 @@
 namespace Tests\Feature\Savings\Accounts;
 
 use App\Models\Borrower;
+use App\Models\SavingsApproval;
 use App\Models\SavingsTransaction;
 use App\Services\GeneratedNumberWrite;
+use App\Services\Savings\DuplicateReference;
+use Closure;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Validation\ValidationException;
 use Tests\TestCase;
 use Tests\Traits\SetupLendyPH;
 
@@ -94,8 +98,57 @@ class ReferenceMethodLockTest extends TestCase
         $this->postJson("/api/savings/transactions/{$withdrawal->id}/reference", ['reference' => 'GC-779'])->assertOk();
     }
 
+    /**
+     * The check reads the latest committed rows, not the snapshot its
+     * transaction took on its first read: a writer that read before waiting
+     * for the lock still sees what the other writer committed meanwhile, a
+     * saved reference or a payout request holding one.
+     */
+    public function test_the_check_sees_rows_committed_after_its_transaction_first_read(): void
+    {
+        $today = now()->toDateString();
+        $account = $this->account(['opened_on' => $today, 'last_member_activity_on' => $today]);
+        $approval = SavingsApproval::factory()->create(['account_id' => $account->id, 'requested_by' => $this->admin->id]);
+        $other = DB::connection(self::OTHER_CONNECTION);
+        $check = app(DuplicateReference::class);
+
+        DB::beginTransaction();
+
+        try {
+            // A plain read first, as every caller makes: it fixes the snapshot.
+            SavingsTransaction::query()->count();
+            SavingsApproval::query()->count();
+
+            $other->table('savings_transactions')->insert([
+                'account_id' => $account->id, 'reference' => 'SVT-00000000-RACE02', 'type' => 'deposit', 'date' => $today,
+                'value_date' => $today, 'debit' => '0.00', 'credit' => '700.00', 'balance_after' => '700.00',
+                'method' => 'gcash', 'external_reference' => 'GC-777', 'created_at' => now(),
+            ]);
+            $other->table('savings_approvals')->where('id', $approval->id)->update([
+                'payload' => json_encode(['payment_method' => 'maya', 'reference' => 'MAYA-888']),
+            ]);
+
+            $this->assertRefusedWith(fn () => $check->assertUnused('gcash', 'GC-777'),
+                'Reference "GC-777" is already on record for another GCash transaction. Check the reference and enter the right one.');
+            $this->assertRefusedWith(fn () => $check->assertUnused('maya', 'MAYA-888'),
+                'Reference "MAYA-888" is held by a Maya withdrawal waiting for approval. Check the reference, or decide that withdrawal first.');
+        } finally {
+            DB::rollBack();
+        }
+    }
+
     public function test_every_non_cash_method_has_its_lock_row(): void
     {
         $this->assertSame(['bank_transfer', 'gcash', 'maya', 'savings'], DB::table('savings_reference_locks')->orderBy('method')->pluck('method')->all());
+    }
+
+    private function assertRefusedWith(Closure $check, string $message): void
+    {
+        try {
+            $check();
+            $this->fail("Accepted; expected: {$message}");
+        } catch (ValidationException $e) {
+            $this->assertSame($message, $e->errors()['reference'][0] ?? null);
+        }
     }
 }

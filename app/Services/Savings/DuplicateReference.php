@@ -158,19 +158,38 @@ class DuplicateReference
         DB::table('savings_reference_locks')->where('method', $method)->lockForUpdate()->value('method');
     }
 
+    /**
+     * Locking reads throughout (`FOR SHARE`): under REPEATABLE READ a plain
+     * read answers from the transaction's first snapshot, taken before the
+     * method lock, so it would miss a reference another writer committed
+     * while this one waited for the lock. A locking read sees the latest
+     * committed rows.
+     */
     private function onRecord(string $method, string $reference): bool
     {
-        $onSavings = SavingsTransaction::query()
+        $candidates = SavingsTransaction::query()
             ->where('method', $method)
             ->where('external_reference', $reference)
-            ->whereNotExists(fn ($reversals) => $reversals->selectRaw('1')
-                ->from('savings_transactions as reversals')
-                ->whereColumn('reversals.reverses_transaction_id', 'savings_transactions.id'))
-            ->exists();
+            ->sharedLock()
+            ->pluck('id')
+            ->map(fn ($id): int => (int) $id)
+            ->all();
 
-        return $onSavings
-            || TimeDeposit::query()->where('funding_method', $method)->where('reference', $reference)->exists()
-            || TimeDeposit::query()->where('payout_method', $method)->where('payout_reference', $reference)->exists();
+        if ($candidates !== []) {
+            $reversed = SavingsTransaction::query()
+                ->whereIn('reverses_transaction_id', $candidates)
+                ->sharedLock()
+                ->pluck('reverses_transaction_id')
+                ->map(fn ($id): int => (int) $id)
+                ->all();
+
+            if (array_diff($candidates, $reversed) !== []) {
+                return true;
+            }
+        }
+
+        return TimeDeposit::query()->where('funding_method', $method)->where('reference', $reference)->sharedLock()->limit(1)->value('id') !== null
+            || TimeDeposit::query()->where('payout_method', $method)->where('payout_reference', $reference)->sharedLock()->limit(1)->value('id') !== null;
     }
 
     /**
@@ -178,7 +197,14 @@ class DuplicateReference
      * checker with this method and reference in its stored request, or null;
      * for an approved one being posted, only those requested before it. The
      * JSON value is compared in the columns' collation, so case and trailing
-     * spaces are ignored here too.
+     * spaces are ignored here too. A locking read, as in onRecord(), so a
+     * request another writer committed while this one waited is seen.
+     *
+     * A checker posting an approved payout holds its approval row and then
+     * waits for this method's lock; a writer holding the lock that reads that
+     * row here waits for the checker. InnoDB ends the cycle at once by rolling
+     * one back; the money posts run inside GeneratedNumberWrite (directly or
+     * through IdempotentWrite), which retries it.
      */
     private function heldBy(string $method, string $reference, ?int $postingApprovalId): ?string
     {
@@ -195,6 +221,7 @@ class DuplicateReference
                 }
             })
             ->orderBy('id')
+            ->sharedLock()
             ->value('kind');
     }
 }
