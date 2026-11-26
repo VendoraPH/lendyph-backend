@@ -272,6 +272,31 @@ class AccountingLoanReleaseDiffCommandTest extends TestCase
         $this->assertMatchesRegularExpression('/processing fee\s*\|\s*1\s*\|\s*₱1,000\.00\s*\|/u', $output);
     }
 
+    /**
+     * Round 8: a journal's loan reads by its display number
+     * (Loan::displayNumber()): its LN- number, else the file's Loan No., else
+     * its application number.
+     */
+    public function test_a_skipped_journal_names_its_loan_by_its_display_number(): void
+    {
+        $this->seedChartOfAccounts();
+        $edited = $this->releaseLoan();
+
+        DB::table('loans')->where('id', $edited->id)->update([
+            'principal_amount' => 51000.00,
+            'loan_account_number' => null,
+            'external_loan_no' => 'OLD-DIFF-0003',
+        ]);
+
+        $output = $this->runCommand();
+
+        $this->assertMatchesRegularExpression(
+            '/'.preg_quote($this->releaseJournalOf($edited)->journal_no, '/').'\s*\|\s*OLD-DIFF-0003\s*\|[^\n]*does not reconcile/u',
+            $output,
+        );
+        $this->assertStringNotContainsString((string) $edited->application_number, $output);
+    }
+
     public function test_the_header_says_journals_posted_before_a_type_had_its_own_account_may_differ(): void
     {
         $this->seedChartOfAccounts();

@@ -134,7 +134,7 @@ class CheckPaidBeforeImport extends Command
         }
 
         return [
-            (string) ($loan->loan_account_number ?? $loan->application_number),
+            (string) $loan->displayNumber(),
             (string) ($loan->external_loan_no ?? '—'),
             (string) ($loan->borrower?->borrower_code ?? '—'),
             Money::format($parts['total']),

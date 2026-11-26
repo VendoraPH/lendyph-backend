@@ -74,7 +74,10 @@ class PaidBeforeImportCheckCommandTest extends TestCase
 
         $this->assertMatchesRegularExpression($this->row($loans['L-SHORT'], 'L-SHORT', '₱11,800\.00', '₱23,600\.00', 'Not what the file says'), $output);
         $this->assertMatchesRegularExpression($this->row($loans['L-NEG'], 'L-NEG', '-₱1,000\.00', '₱23,600\.00', 'Interest below zero: -₱1,000\.00; Not what the file says'), $output);
-        $this->assertStringNotContainsString($loans['L-OK']->application_number, $output);
+        $this->assertStringNotContainsString('L-OK', $output);
+        // Never the application number the importer gives an imported loan.
+        $this->assertStringNotContainsString((string) $loans['L-SHORT']->application_number, $output);
+        $this->assertStringNotContainsString((string) $loans['L-NEG']->application_number, $output);
         $this->assertMatchesRegularExpression('/Imported loans read:\s+3/', $output);
         $this->assertMatchesRegularExpression('/Imported loans to check:\s+2 loans/', $output);
     }
@@ -97,7 +100,7 @@ class PaidBeforeImportCheckCommandTest extends TestCase
         $output = $this->runCommand();
 
         // Short of the file, but the file's figures are gone: nothing to compare.
-        $this->assertStringNotContainsString($loans['L-SHORT']->application_number, $output);
+        $this->assertStringNotContainsString('L-SHORT', $output);
         $this->assertMatchesRegularExpression($this->row($loans['L-NEG'], 'L-NEG', '-₱500\.00', 'Not kept', 'Interest below zero: -₱500\.00'), $output);
         $this->assertMatchesRegularExpression('/Not compared with the file \(its import row is redacted or gone\):\s+2/', $output);
         $this->assertMatchesRegularExpression('/Imported loans to check:\s+1 loan\b/', $output);
@@ -141,7 +144,7 @@ class PaidBeforeImportCheckCommandTest extends TestCase
             'Not kept',
             'Penalty not zero, though the import writes none: ₱50\.00',
         ), $output);
-        $this->assertStringNotContainsString($loans['L-OK']->application_number, $output);
+        $this->assertStringNotContainsString('L-OK', $output);
         $this->assertMatchesRegularExpression('/Imported loans to check:\s+2 loans/', $output);
     }
 
@@ -156,13 +159,13 @@ class PaidBeforeImportCheckCommandTest extends TestCase
         }
 
         $main = $this->runCommand(['--branch' => (string) $this->branch->id]);
-        $this->assertStringContainsString($loans['L-SHORT']->application_number, $main);
-        $this->assertStringNotContainsString($loans['L-FAR']->application_number, $main);
+        $this->assertMatchesRegularExpression('/L-SHORT\s*\|\s*L-SHORT\s*\|/', $main);
+        $this->assertStringNotContainsString('L-FAR', $main);
         $this->assertMatchesRegularExpression('/Imported loans to check:\s+1 loan\b/', $main);
 
         $farOutput = $this->runCommand(['--branch' => (string) $far->id]);
-        $this->assertStringContainsString($loans['L-FAR']->application_number, $farOutput);
-        $this->assertStringNotContainsString($loans['L-SHORT']->application_number, $farOutput);
+        $this->assertMatchesRegularExpression('/L-FAR\s*\|\s*L-FAR\s*\|/', $farOutput);
+        $this->assertStringNotContainsString('L-SHORT', $farOutput);
 
         $this->assertSame(Command::INVALID, Artisan::call(self::COMMAND, ['--branch' => 'main']));
     }
@@ -224,7 +227,11 @@ class PaidBeforeImportCheckCommandTest extends TestCase
     /** One table line: the loan's number, its file Loan No., member, figure, the file's figure and why. */
     private function row(Loan $loan, string $loanNo, string $figure, string $inFile, string $why): string
     {
-        return '/'.preg_quote($loan->application_number, '/').'\s*\|\s*'.preg_quote($loanNo, '/').'\s*\|\s*'
+        // The loan reads by its display number (round 8): an imported loan's
+        // Loan No. from the file, never its application number.
+        $this->assertSame($loanNo, $loan->fresh()->displayNumber());
+
+        return '/'.preg_quote($loanNo, '/').'\s*\|\s*'.preg_quote($loanNo, '/').'\s*\|\s*'
             .preg_quote((string) $loan->borrower->borrower_code, '/').'\s*\|\s*'.$figure.'\s*\|\s*'.$inFile.'\s*\|\s*'.$why.'/u';
     }
 

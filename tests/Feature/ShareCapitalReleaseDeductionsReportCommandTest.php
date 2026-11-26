@@ -71,6 +71,23 @@ class ShareCapitalReleaseDeductionsReportCommandTest extends TestCase
         $this->assertStringContainsString($imported->loan_account_number, explode('Could not be read', $importedSection)[0]);
     }
 
+    /**
+     * Round 8: a loan reads by its display number (Loan::displayNumber()), so
+     * an imported loan, which has no LN- number, reads by its file's Loan No.,
+     * never by its application number.
+     */
+    public function test_an_imported_loan_reads_by_its_files_loan_no(): void
+    {
+        $imported = $this->releasedLoanReleasedBeforeTheFix([['name' => 'Share Capital', 'amount' => 321.09, 'type' => 'fixed']]);
+        DB::table('loans')->where('id', $imported->id)->update(['loan_account_number' => null, 'external_loan_no' => 'OLD-SC-0002']);
+
+        $output = $this->runCommand();
+
+        $importedSection = explode('Imported (CSV) loans', $output, 2)[1];
+        $this->assertMatchesRegularExpression('/OLD-SC-0002\s*\|/', $importedSection);
+        $this->assertStringNotContainsString((string) $imported->application_number, $output);
+    }
+
     public function test_a_loan_whose_share_capital_was_not_provable_is_listed_with_both_figures_and_in_no_total(): void
     {
         $loan = $this->approvedLoan([['name' => 'Share Capital', 'amount' => 500, 'type' => 'fixed']]);

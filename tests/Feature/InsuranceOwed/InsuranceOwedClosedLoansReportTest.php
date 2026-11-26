@@ -67,6 +67,22 @@ class InsuranceOwedClosedLoansReportTest extends TestCase
         $this->assertMatchesRegularExpression('/Closed loans showing premium owed:\s+1 loan, ₱400\.00/', $output);
     }
 
+    /**
+     * Round 8: a loan reads by its display number (Loan::displayNumber()), so
+     * an imported loan, which has no LN- number, reads by its file's Loan No.,
+     * never by the application number the importer gave it.
+     */
+    public function test_an_imported_loan_reads_by_its_files_loan_no(): void
+    {
+        $imported = $this->closedLoanOwingPremium('completed');
+        DB::table('loans')->where('id', $imported->id)->update(['loan_account_number' => null, 'external_loan_no' => 'OLD-INS-0007']);
+
+        $output = $this->runCommand();
+
+        $this->assertMatchesRegularExpression('/OLD-INS-0007\s*\|\s*completed\s*\|/', $output);
+        $this->assertStringNotContainsString((string) $imported->application_number, $output);
+    }
+
     public function test_it_writes_nothing(): void
     {
         $this->closedLoanOwingPremium('completed');

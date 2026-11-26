@@ -62,7 +62,7 @@ class ReportInsuranceOwedOnClosedLoans extends Command
             ->whereIn('status', self::CLOSED_STATUSES)
             ->where('insurance_remaining_balance', '>', 0)
             ->with('borrower:id,borrower_code')
-            ->select(['id', 'borrower_id', 'status', 'loan_account_number', 'application_number', 'insurance_premium_amount', 'insurance_partial_amount', 'insurance_remaining_balance'])
+            ->select(['id', 'borrower_id', 'status', 'loan_account_number', 'application_number', 'external_loan_no', 'insurance_premium_amount', 'insurance_partial_amount', 'insurance_remaining_balance'])
             ->chunkById(self::CHUNK, function (EloquentCollection $loans): void {
                 foreach ($loans as $loan) {
                     $this->count($loan);
@@ -88,7 +88,7 @@ class ReportInsuranceOwedOnClosedLoans extends Command
             'owed' => ($this->byStatus[$loan->status]['owed'] ?? 0) + $owed,
         ];
         $this->rows[] = [
-            (string) ($loan->loan_account_number ?? $loan->application_number),
+            (string) $loan->displayNumber(),
             $loan->status,
             (string) ($loan->borrower?->borrower_code ?? '—'),
             Money::format(Money::toCentavos($loan->insurance_premium_amount ?? 0) ?? 0),

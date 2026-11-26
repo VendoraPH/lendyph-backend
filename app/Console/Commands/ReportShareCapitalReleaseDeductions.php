@@ -122,7 +122,7 @@ class ReportShareCapitalReleaseDeductions extends Command
 
     private function count(Loan $loan, ShareCapitalReleaseCredit $credits, bool $booksKept): void
     {
-        $reference = (string) ($loan->loan_account_number ?? $loan->application_number);
+        $reference = (string) $loan->displayNumber();
         $section = $loan->isImported() ? self::IMPORTED : self::RELEASED_HERE;
         $released = $section === self::IMPORTED ? 'imported' : 'released here';
 
