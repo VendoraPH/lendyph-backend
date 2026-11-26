@@ -14,6 +14,9 @@ use Symfony\Component\HttpFoundation\Response;
  * than `idle_minutes` is deleted and answers 401. Measured like the staff
  * CheckTokenExpiry, from the last use Sanctum saw before this request
  * (TokenIdleWindow). The absolute expiry is the token's own `expires_at`.
+ * A request that passes is recorded as the token's latest activity here, after
+ * the portal limiters, so a request refused with 429 never resets the idle
+ * timer (finish run round 7; Sanctum's own write is off, config/sanctum.php).
  */
 class CheckPortalTokenExpiry
 {
@@ -33,6 +36,8 @@ class CheckPortalTokenExpiry
 
                 return response()->json(['message' => self::IDLE, 'code' => 'session_idle'], 401);
             }
+
+            TokenIdleWindow::touch($request, $token);
         }
 
         return $next($request);

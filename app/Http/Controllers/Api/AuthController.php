@@ -35,7 +35,15 @@ class AuthController extends Controller
                 properties: [
                     new OA\Property(property: 'login', type: 'string', example: 'admin'),
                     new OA\Property(property: 'password', type: 'string', example: 'password'),
-                    new OA\Property(property: 'remember', type: 'boolean', example: false),
+                    new OA\Property(
+                        property: 'remember',
+                        description: 'Ignored. "Remember me" was removed (finish run round 7): every sign-in gets the '
+                            .'normal session length (AUTH_TOKEN_TIMEOUT). Still accepted, as a boolean, so older '
+                            .'clients keep signing in.',
+                        type: 'boolean',
+                        example: false,
+                        deprecated: true,
+                    ),
                 ],
             ),
         ),
@@ -82,9 +90,10 @@ class AuthController extends Controller
             return response()->json(['message' => 'Your account has been deactivated.'], 403);
         }
 
-        $expiry = $request->boolean('remember')
-            ? now()->addDays(30)
-            : now()->addMinutes(TokenTimeout::minutes());
+        // Every sign-in gets the normal session length. `remember` is still
+        // accepted (LoginRequest) and ignored: "Remember me for 30 days" was
+        // removed at Pepito's QA request (finish run round 7, security).
+        $expiry = now()->addMinutes(TokenTimeout::minutes());
 
         $token = $user->createToken('auth-token', ['*'], $expiry);
 

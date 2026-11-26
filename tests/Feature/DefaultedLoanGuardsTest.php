@@ -127,7 +127,7 @@ it('reports a defaulted holder in active_loans', function () {
     defaultedPledgeDirectly($defaulted, $this->collateral);
 
     expect($this->getJson("/api/collaterals/{$this->collateral->id}")->assertOk()->json('data.active_loans'))
-        ->toBe([['id' => $defaulted->id, 'loan_account_number' => $defaulted->loan_account_number]]);
+        ->toBe([['id' => $defaulted->id, 'loan_account_number' => $defaulted->loan_account_number, 'display_number' => $defaulted->displayNumber()]]);
 });
 
 it('counts a collateral a defaulted loan holds as tagged in the register', function () {

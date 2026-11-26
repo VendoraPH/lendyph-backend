@@ -46,7 +46,7 @@ class PortalContractTest extends TestCase
     ];
 
     private const LOAN_ROW = [
-        'id', 'loan_account_number', 'product_name', 'display_status', 'release_date', 'maturity_date', 'principal_amount',
+        'id', 'loan_account_number', 'display_number', 'product_name', 'display_status', 'release_date', 'maturity_date', 'principal_amount',
         'total_outstanding', 'outstanding_principal', 'overdue_amount', 'next_due_date', 'next_due_amount', 'paid_percent',
         'penalty_months',
     ];
@@ -64,7 +64,7 @@ class PortalContractTest extends TestCase
     ];
 
     private const PAYMENT = [
-        'receipt_number', 'loan_account_number', 'payment_date', 'amount_paid', 'principal', 'interest', 'penalty', 'insurance',
+        'receipt_number', 'loan_account_number', 'loan_display_number', 'payment_date', 'amount_paid', 'principal', 'interest', 'penalty', 'insurance',
         'build_up', 'method', 'reference_number',
     ];
 

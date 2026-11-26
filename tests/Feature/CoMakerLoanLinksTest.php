@@ -163,12 +163,14 @@ class CoMakerLoanLinksTest extends TestCase
                 'id' => $released->id,
                 'application_number' => $released->application_number,
                 'loan_account_number' => 'LN-000042',
+                'display_number' => 'LN-000042',
                 'status' => 'released',
             ],
             [
                 'id' => $approved->id,
                 'application_number' => $approved->application_number,
                 'loan_account_number' => null,
+                'display_number' => $approved->application_number,
                 'status' => 'approved',
             ],
         ], $coMakers[$onBoth->id]['loans']);

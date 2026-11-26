@@ -383,6 +383,7 @@ class ReportController extends Controller
                     'id' => $s->id,
                     'loan_id' => $s->loan_id,
                     'loan_account_number' => $s->loan?->loan_account_number,
+                    'display_number' => $s->loan?->displayNumber(),
                     'borrower_name' => $s->loan?->borrower?->full_name,
                     'borrower_code' => $s->loan?->borrower?->borrower_code,
                     'branch_name' => $s->loan?->branch?->name,
@@ -907,7 +908,7 @@ class ReportController extends Controller
         return $this->streamCsv('releases.csv', [
             'Loan #', 'Member', 'Product', 'Principal', 'Interest Rate', 'Term', 'Released', 'Status',
         ], $query->lazy(500)->map(fn ($l) => [
-            $l->loan_account_number ?? $l->application_number,
+            $l->displayNumber(),
             $l->borrower?->full_name ?? '',
             $l->loanProduct?->name ?? '',
             $l->principal_amount,
@@ -942,7 +943,7 @@ class ReportController extends Controller
         ], $query->lazy(500)->map(fn ($r) => [
             $r->receipt_number,
             $r->loan?->borrower?->full_name ?? '',
-            $r->loan?->loan_account_number ?? '',
+            $r->loan?->displayNumber() ?? '',
             $r->payment_date?->toDateString() ?? '',
             $r->amount_paid,
             // The part of Amount that paid the insurance premium owed, first.
@@ -1062,7 +1063,7 @@ class ReportController extends Controller
 
             return [
                 $s->loan?->borrower?->full_name ?? '',
-                $s->loan?->loan_account_number ?? '',
+                $s->loan?->displayNumber() ?? '',
                 $dueDate?->toDateString() ?? '',
                 // Through the same helper as the preview. This column and the
                 // preview's `days_overdue` are asserted equal row for row by

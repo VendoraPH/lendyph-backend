@@ -827,6 +827,38 @@ class Loan extends Model
     }
 
     /**
+     * The columns displayNumber() reads, for a query that selects only some.
+     */
+    public const DISPLAY_NUMBER_COLUMNS = ['loan_account_number', 'external_loan_no', 'application_number'];
+
+    /**
+     * The number a loan is shown by, everywhere (finish run round 7): its own
+     * LN- number, else the cooperative file's Loan No. (an imported loan, whose
+     * LN- number the importer leaves empty on purpose), else its application
+     * number. Sent as `display_number` on loan rows. Null only when the loan
+     * has none of the three; a loan is never named "LN-<id>".
+     */
+    public function displayNumber(): ?string
+    {
+        return self::displayNumberOf($this->loan_account_number, $this->external_loan_no, $this->application_number);
+    }
+
+    /**
+     * displayNumber() on raw column values, for rows read without the model.
+     * Blank values are skipped.
+     */
+    public static function displayNumberOf(?string $loanAccountNumber, ?string $externalLoanNo, ?string $applicationNumber): ?string
+    {
+        foreach ([$loanAccountNumber, $externalLoanNo, $applicationNumber] as $number) {
+            if ($number !== null && trim($number) !== '') {
+                return $number;
+            }
+        }
+
+        return null;
+    }
+
+    /**
      * How many times this loan has been rolled forward via the Extend Loan
      * action (LoanAdjustmentService::extendLoan()), as distinct from `term`
      * — the term the loan was agreed at, which stays fixed regardless of how

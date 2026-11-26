@@ -40,6 +40,23 @@ class AppServiceProvider extends ServiceProvider
     private const FILE_READS_PER_MINUTE = 300;
 
     /**
+     * Dashboard and report reads allowed per staff user per minute (finish
+     * run round 7): GET under /api/dashboard/, /api/reports/ and
+     * /api/accounting/dashboard.
+     *
+     * The Executive Dashboard asks for 17 things at once on its first load
+     * (its 6 own endpoints, 9 reports, the accounting dashboard and a one-row
+     * loan list), and a filter change asks again. On the shared 60/min, next
+     * to the shell's own calls and the page just left, about 10 of them
+     * answered 429 (round 6, BC12b). 16 of the 17 are reads counted here: 120
+     * holds one load seven times over, and a development build's doubled load
+     * (React runs each effect twice there) three times, while still capping
+     * how fast one user can run heavy report queries. Its own `by()` prefix,
+     * so it never shares a counter with the shared budget.
+     */
+    private const REPORT_READS_PER_MINUTE = 120;
+
+    /**
      * Chunk uploads allowed per operator per minute.
      *
      * A CSV migration is one long request, cut up. The largest export this API
@@ -184,11 +201,11 @@ class AppServiceProvider extends ServiceProvider
          * Capture `last_used_at` while it still says what it said when the
          * request arrived.
          *
-         * Sanctum's Guard fires this event and then IMMEDIATELY overwrites the
-         * column with now(), so this listener is the only point at which the
-         * stored value is observable. CheckTokenExpiry reads what is captured
-         * here; without it the idle timeout always measures zero elapsed time.
-         * See App\Services\TokenIdleWindow.
+         * Sanctum's Guard fires this event while resolving the caller. Its own
+         * overwrite of the column is turned off (`sanctum.last_used_at`, finish
+         * run round 7): the idle checks move it after the limiters instead.
+         * CheckTokenExpiry reads what is captured here. See
+         * App\Services\TokenIdleWindow.
          */
         Event::listen(function (TokenAuthenticated $event): void {
             if ($event->token instanceof PersonalAccessToken) {
@@ -377,6 +394,13 @@ class AppServiceProvider extends ServiceProvider
             // bytes off disk and stay worth capping.
             if ($request->routeIs('files.*')) {
                 return Limit::perMinute(self::FILE_READS_PER_MINUTE)->by('files:'.$key);
+            }
+
+            // Dashboard and report reads, staff only (REPORT_READS_PER_MINUTE).
+            // Writes on these paths, exports' own 5/min and every other route
+            // keep their limits.
+            if ($caller instanceof User && $request->isMethod('GET') && $request->is('api/dashboard/*', 'api/reports/*', 'api/accounting/dashboard')) {
+                return Limit::perMinute(self::REPORT_READS_PER_MINUTE)->by('report-reads:'.$caller->getKey());
             }
 
             /**

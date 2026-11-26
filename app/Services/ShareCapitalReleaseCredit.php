@@ -120,7 +120,7 @@ final class ShareCapitalReleaseCredit
             return null;
         }
 
-        $number = $loan->loan_account_number ?? $loan->application_number;
+        $number = $loan->displayNumber();
 
         return ShareCapitalLedger::create([
             'borrower_id' => $loan->borrower_id,

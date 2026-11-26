@@ -30,6 +30,7 @@ use OpenApi\Attributes as OA;
         new OA\Property(property: 'id', type: 'integer'),
         new OA\Property(property: 'application_number', type: 'string'),
         new OA\Property(property: 'loan_account_number', type: 'string', nullable: true),
+        new OA\Property(property: 'display_number', type: 'string', nullable: true, description: "The number the loan is shown by (Loan::displayNumber()): its LN- number, else an imported loan's Loan No. from the file (`external_loan_no`), else its application number. Never \"LN-<id>\"."),
         new OA\Property(property: 'external_loan_no', type: 'string', nullable: true, description: "The cooperative's own reference for a loan migrated in by the CSV importer. Kept separate from `loan_account_number`, which is a generated LN- sequence."),
         new OA\Property(property: 'payments_counted_until', type: 'string', format: 'date', nullable: true, description: "An imported loan's as-of date: its file already counts payments up to this day, so a payment dated on or before it is refused (422 on `payment_date`). Null on a loan that wasn't imported with one."),
         new OA\Property(property: 'is_imported', type: 'boolean', description: 'True when this loan was migrated in from an existing book rather than originated here, so its amortization schedule is reconstructed and its pre-import arrears are not penalised.'),
@@ -298,6 +299,7 @@ class LoanResource extends JsonResource
             'id' => $this->id,
             'application_number' => $this->application_number,
             'loan_account_number' => $this->loan_account_number,
+            'display_number' => $this->resource->displayNumber(),
             'external_loan_no' => $this->external_loan_no,
             // Lets the UI label a reconstructed schedule — see
             // Loan::isImported(). A label only: the penalty and default paths
@@ -490,6 +492,7 @@ class LoanResource extends JsonResource
                 'id' => $this->sourceLoan->id,
                 'application_number' => $this->sourceLoan->application_number,
                 'loan_account_number' => $this->sourceLoan->loan_account_number,
+                'display_number' => $this->sourceLoan->displayNumber(),
                 'status' => $this->sourceLoan->status,
                 'principal_amount' => (float) $this->sourceLoan->principal_amount,
                 'restructured_at' => $this->sourceLoan->restructured_at,
@@ -505,6 +508,7 @@ class LoanResource extends JsonResource
                     'id' => $child->id,
                     'application_number' => $child->application_number,
                     'loan_account_number' => $child->loan_account_number,
+                    'display_number' => $child->displayNumber(),
                     'status' => $child->status,
                     'principal_amount' => (float) $child->principal_amount,
                     'start_date' => $child->start_date?->toDateString(),
@@ -586,6 +590,8 @@ class LoanResource extends JsonResource
             'id' => $this->id,
             'application_number' => $this->application_number,
             'loan_account_number' => $this->loan_account_number,
+            'display_number' => $this->resource->displayNumber(),
+            'external_loan_no' => $this->external_loan_no,
             'borrower' => $borrower === null ? null : [
                 'id' => $borrower->id,
                 'full_name' => $borrower->full_name,

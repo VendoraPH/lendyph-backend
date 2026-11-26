@@ -86,7 +86,7 @@ final class ReceiptLookupAnswer extends LookupAnswer
         $receipt->load('loan.borrower', 'loan.loanProduct', 'loan.amortizationSchedules', 'receivedByUser', 'voidedByUser', 'shareCapitalLedgerEntries');
         $shown = (new RepaymentResource($receipt))->toArray(Request::create('/'));
         $voided = $receipt->status === 'voided';
-        $loanNumber = (string) ($receipt->loan?->loan_account_number ?? $receipt->loan?->application_number ?? '');
+        $loanNumber = (string) $receipt->loan?->displayNumber();
 
         $applied = [
             LindaReply::money('Principal', $shown['principal_applied']),

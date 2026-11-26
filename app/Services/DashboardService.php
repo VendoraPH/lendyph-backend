@@ -231,6 +231,8 @@ class DashboardService
                 'amortization_schedules.interest_paid',
                 'amortization_schedules.penalty_paid',
                 'loans.loan_account_number',
+                'loans.external_loan_no',
+                'loans.application_number',
                 DB::raw("CONCAT(borrowers.first_name, ' ', borrowers.last_name) as borrower_name")
             )
             ->orderBy('amortization_schedules.id')
@@ -316,6 +318,7 @@ class DashboardService
         return [
             'loan_id' => $first->loan_id,
             'loan_account_number' => $first->loan_account_number,
+            'display_number' => Loan::displayNumberOf($first->loan_account_number, $first->external_loan_no, $first->application_number),
             'borrower_name' => $first->borrower_name,
             'amount_due' => $amountDue / 100,
             'amount_paid' => $amountPaid / 100,

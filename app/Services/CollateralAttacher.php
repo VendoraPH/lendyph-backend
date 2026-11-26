@@ -363,6 +363,6 @@ class CollateralAttacher
      */
     public static function reference(Loan $loan): string
     {
-        return $loan->loan_account_number ?? $loan->application_number ?? "#{$loan->getKey()}";
+        return $loan->displayNumber() ?? "#{$loan->getKey()}";
     }
 }

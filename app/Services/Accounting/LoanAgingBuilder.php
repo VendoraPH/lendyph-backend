@@ -348,7 +348,9 @@ final class LoanAgingBuilder
 
         return $loans->map(fn (Loan $loan): array => [
             'loan_id' => $loan->id,
-            'account_number' => $loan->loan_account_number,
+            // The loan's display number (Loan::displayNumber()): an imported
+            // loan, which has no LN- number, reads by its Loan No. from the file.
+            'account_number' => $loan->displayNumber(),
             'member' => $this->member($loan->borrower, (int) $loan->borrower_id),
             'branch' => $loan->branch === null ? null : ['id' => $loan->branch->id, 'name' => $loan->branch->name],
             'product' => $loan->loanProduct === null ? null : ['id' => $loan->loanProduct->id, 'name' => $loan->loanProduct->name],

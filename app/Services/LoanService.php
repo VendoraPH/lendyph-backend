@@ -456,7 +456,7 @@ class LoanService
                     'inherited_collateral_ids' => $inheritedCollaterals,
                 ],
                 description: "Restructure application {$newLoan->application_number} created from loan "
-                    .($lockedSource->loan_account_number ?? $lockedSource->application_number)
+                    .$lockedSource->displayNumber()
                     ." (outstanding ₱{$outstanding} → principal ₱{$principal}, shortfall ₱{$shortfall})",
             );
 
@@ -1901,7 +1901,7 @@ class LoanService
                     'carried_premium' => $carriedPremium / 100,
                 ],
                 description: 'Insurance premium owed of '.Money::format($carriedPremium)
-                    .' carried over from restructured loan '.($source->loan_account_number ?? $source->application_number),
+                    .' carried over from restructured loan '.$source->displayNumber(),
             );
         }
 
@@ -1941,7 +1941,7 @@ class LoanService
                 'restructure_written_off_principal' => $split['written_off_principal'] / 100,
             ],
             description: 'Loan closed as restructured — '.Money::format(self::toCentavos($closingBalance)).' moved to loan '
-                .($newLoan->loan_account_number ?? $newLoan->application_number)
+                .$newLoan->displayNumber()
                 .($writeOff > 0 || $split['written_off_principal'] > 0
                     ? ', '.Money::format(self::toCentavos($writeOff)).' forgiven (approved), '
                         .Money::format($split['written_off_principal']).' principal written off in the books'
@@ -2175,9 +2175,9 @@ class LoanService
             ['periods' => $after, 'total_collected' => $totalCollected, 'closed_by_loan_id' => $newLoan->id],
             sprintf(
                 'Restructure %s closed %d partly paid period(s) of loan %s at the ₱%s collected on them; the rest moved to the new loan.',
-                $newLoan->loan_account_number ?? $newLoan->application_number,
+                $newLoan->displayNumber(),
                 count($after),
-                $loan->loan_account_number ?? $loan->application_number,
+                $loan->displayNumber(),
                 number_format($totalCollected, 2),
             ),
         );

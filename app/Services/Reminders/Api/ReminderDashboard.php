@@ -131,7 +131,7 @@ final class ReminderDashboard
     {
         return $this->items($user, self::listFilters($filters), $from, $to)
             ->where('status', 'failed')
-            ->with(['loan:id,loan_account_number,application_number', 'borrower:id,branch_id,first_name,middle_name,last_name,suffix'])
+            ->with(['loan:id,loan_account_number,external_loan_no,application_number', 'borrower:id,branch_id,first_name,middle_name,last_name,suffix'])
             ->orderByDesc('fire_date')->orderBy('scheduled_at')->orderBy('id')
             ->limit($limit)
             ->get();

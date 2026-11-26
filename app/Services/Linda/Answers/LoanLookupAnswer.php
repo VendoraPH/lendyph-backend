@@ -63,8 +63,10 @@ final class LoanLookupAnswer extends LookupAnswer
         }
 
         $loan->loadMissing('borrower', 'loanProduct:id,name');
-        $shown = (string) ($loan->loan_account_number ?? $loan->application_number)
-            .($loan->external_loan_no === null ? '' : ' (Loan No. '.$loan->external_loan_no.')');
+        // Its display number (Loan::displayNumber()); a released import that
+        // also has an LN- number adds the file's Loan No.
+        $shown = (string) $loan->displayNumber()
+            .($loan->external_loan_no === null || $loan->loan_account_number === null ? '' : ' (Loan No. '.$loan->external_loan_no.')');
         $status = W::loanStatus($loan->displayStatus());
         $product = (string) ($loan->loanProduct?->name ?? '');
         $intro = $shown.' for '.self::memberLabel($loan->borrower).' is a '

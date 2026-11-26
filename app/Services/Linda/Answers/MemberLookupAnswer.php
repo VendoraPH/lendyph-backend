@@ -109,7 +109,7 @@ final class MemberLookupAnswer extends LookupAnswer
 
         if ($listed->isNotEmpty()) {
             $blocks[] = LindaReply::list('Loans that still owe', $listed->map(fn (Loan $loan): array => [
-                'title' => (string) ($loan->loan_account_number ?? $loan->application_number),
+                'title' => (string) $loan->displayNumber(),
                 'subtitle' => (string) ($loan->loanProduct?->name ?? ''),
                 'fields' => [
                     LindaReply::money('Outstanding', $loanSummaries[$loan->id]['total_outstanding']),

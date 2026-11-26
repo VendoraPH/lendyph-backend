@@ -63,7 +63,7 @@ final class ReminderRenderer
         return [
             'borrower_first_name' => trim((string) $member?->first_name),
             'borrower_full_name' => trim((string) $member?->full_name),
-            'loan_number' => (string) ($loan->loan_account_number ?: $loan->application_number),
+            'loan_number' => (string) $loan->displayNumber(),
             'installment_number' => (string) $periodNumber,
             'due_date' => self::date($due),
             'amount_due' => $amount,

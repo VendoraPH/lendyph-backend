@@ -121,11 +121,27 @@ class AuthTest extends TestCase
         $this->assertSame('2026-09-30 09:30:00', PersonalAccessToken::latest('id')->first()->expires_at->toDateTimeString());
     }
 
-    public function test_a_remembered_login_reports_thirty_days(): void
+    /**
+     * "Remember me" is gone (finish run round 7, Pepito's QA task 14zfbg0eqfd):
+     * an older client may still send `remember`, which is accepted and ignored,
+     * so every sign-in gets the normal session length.
+     */
+    public function test_remember_is_accepted_and_ignored(): void
     {
+        $this->travelTo(Carbon::parse('2026-11-26 09:00:00'));
+
         $this->postJson('/api/auth/login', ['login' => 'super_admin', 'password' => 'password', 'remember' => true])
             ->assertOk()
-            ->assertJsonPath('expires_in', 30 * 24 * 60 * 60);
+            ->assertJsonPath('expires_in', 30 * 60);
+
+        $this->assertSame('2026-11-26 09:30:00', PersonalAccessToken::latest('id')->first()->expires_at->toDateTimeString());
+    }
+
+    public function test_remember_must_still_be_a_boolean_when_sent(): void
+    {
+        $this->postJson('/api/auth/login', ['login' => 'super_admin', 'password' => 'password', 'remember' => 'forever'])
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors('remember');
     }
 
     public function test_refresh_reports_how_long_the_new_token_lasts(): void

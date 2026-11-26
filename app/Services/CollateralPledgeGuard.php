@@ -209,7 +209,7 @@ class CollateralPledgeGuard
     private static function activeHoldersOf(array $collateralIds, Loan $loan): EloquentCollection
     {
         return Loan::query()
-            ->select(['loans.id', 'loans.loan_account_number'])
+            ->select(['loans.id', ...Loan::DISPLAY_NUMBER_COLUMNS])
             ->whereIn('loans.status', Loan::PLEDGING_STATUSES)
             ->whereKeyNot($loan->getKey())
             ->whereHas('collaterals', fn ($query) => $query->whereIn('collaterals.id', $collateralIds))
@@ -229,7 +229,7 @@ class CollateralPledgeGuard
     private static function references(EloquentCollection $conflicts): string
     {
         return $conflicts
-            ->map(fn (Loan $active) => $active->loan_account_number ?? "loan #{$active->getKey()}")
+            ->map(fn (Loan $active) => $active->displayNumber() ?? "loan #{$active->getKey()}")
             ->implode(', ');
     }
 }
