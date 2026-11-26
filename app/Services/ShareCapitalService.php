@@ -643,6 +643,9 @@ class ShareCapitalService
         $noPledgeMembers = $allPledges->filter(fn ($p) => (float) $p->amount === 0.0);
 
         $lastRun = AutoCreditRun::latest('processed_at')->first();
+        // The chosen cycle's own run, if it has one (finish run round 8). Runs
+        // made before cycles were recorded belong to no cycle.
+        $cycleRun = AutoCreditRun::query()->whereDate('cycle_date', $cycle->toDateString())->latest('processed_at')->latest('id')->first();
 
         // A run records no branches, so its totals cover whatever its caller
         // could see, often the whole organisation. A caller limited to some
@@ -659,6 +662,11 @@ class ShareCapitalService
             'disabled_count' => $disabledMembers->count(),
             'no_pledge_count' => $noPledgeMembers->count(),
             'skipped_count' => $skippedMembers->count(),
+            'cycle_run' => $cycleRun ? [
+                'id' => $cycleRun->id,
+                'processed_at' => $cycleRun->processed_at?->toDateTimeString(),
+                'status' => $cycleRun->status,
+            ] : null,
             'last_run' => $lastRun ? [
                 'id' => $lastRun->id,
                 'total_amount' => $runTotalsVisible ? (float) $lastRun->total_amount : null,

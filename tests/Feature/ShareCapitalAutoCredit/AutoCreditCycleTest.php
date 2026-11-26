@@ -358,6 +358,27 @@ class AutoCreditCycleTest extends TestCase
         $this->runFor('2027-02-28')->assertJsonPath('data.member_count', 2);
     }
 
+    public function test_the_status_says_whether_the_chosen_cycle_has_a_run(): void
+    {
+        $this->getJson('/api/auto-credit/status?cycle_date=2026-11-15')->assertOk()->assertJsonPath('data.cycle_run', null);
+
+        $id = $this->runFor('2026-11-15')->json('data.id');
+
+        $this->on('2026-11-30');
+        $this->getJson('/api/auto-credit/status?cycle_date=2026-11-15')->assertOk()
+            ->assertJsonPath('data.cycle_run.id', $id)
+            ->assertJsonPath('data.cycle_run.status', 'completed')
+            ->assertJsonPath('data.cycle_run.processed_at', '2026-11-16 10:00:00');
+        // The last run is November 15's, but November 30 has none yet.
+        $this->getJson('/api/auto-credit/status')->assertOk()
+            ->assertJsonPath('data.cycle_date', '2026-11-30')
+            ->assertJsonPath('data.cycle_run', null)
+            ->assertJsonPath('data.last_run.id', $id);
+        // A run made before cycles is never any cycle's run.
+        $this->oldRun('2026-10-31 10:00:00', linksRows: true);
+        $this->getJson('/api/auto-credit/status?cycle_date=2026-10-31')->assertOk()->assertJsonPath('data.cycle_run', null);
+    }
+
     public function test_the_run_stores_its_cycle_and_names_it(): void
     {
         $id = $this->runFor('2026-11-15')

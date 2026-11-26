@@ -23,7 +23,7 @@ class AutoCreditController extends Controller
             new OA\Parameter(name: 'cycle_date', in: 'query', required: false, description: 'The cycle the run would be for: a month\'s 15th or its 30th (last day), the current one or one up to 92 days ago. Defaults to the current cycle: the latest 15th or month\'s last day on or before today in Manila.', schema: new OA\Schema(type: 'string', format: 'date')),
         ],
         responses: [
-            new OA\Response(response: 200, description: 'Auto-credit status: the run\'s preview for `data.cycle_date` (`cycle_label` in words), with the pledges it would skip and why, and `cycle_options`, the cycles a run may take now, the current one first.'),
+            new OA\Response(response: 200, description: 'Auto-credit status: the run\'s preview for `data.cycle_date` (`cycle_label` in words), with the pledges it would skip and why, `cycle_run` (that cycle\'s own latest run, or null), and `cycle_options`, the cycles a run may take now, the current one first.'),
             new OA\Response(response: 422, description: 'Not a 15th or a month\'s last day, a future cycle, or one more than 92 days ago, in words'),
             new OA\Response(response: 401, description: 'Unauthenticated'),
         ],
