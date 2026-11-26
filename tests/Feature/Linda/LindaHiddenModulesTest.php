@@ -5,6 +5,7 @@ namespace Tests\Feature\Linda;
 use App\Models\Borrower;
 use App\Models\LindaQuestion;
 use App\Models\User;
+use App\Services\Linda\Answers\NotYetAnswer;
 use App\Services\Linda\LindaAnswerer;
 use App\Services\Linda\LindaFacts;
 use App\Services\Linda\LindaIntent;
@@ -186,6 +187,22 @@ class LindaHiddenModulesTest extends LindaAnswersTestCase
         $this->assertStringNotContainsString('How many active loans do we have?', $answer);
         $this->assertStringNotContainsString('disbursed', $answer);
         $this->assertStringContainsString('How much have we collected this month?', $answer);
+    }
+
+    public function test_the_not_yet_answer_names_no_hidden_module(): void
+    {
+        $question = 'Where is the moon calendar page?';
+        $this->assertSame(LindaWording::notYet(), $this->chat($question)['answer']);
+
+        $this->hide('savings', 'share_capital', 'cda', 'accounting');
+
+        foreach ([$this->chat($question)['answer'], NotYetAnswer::for(LindaIntent::OpenQuestion, $this->asker())->answer] as $answer) {
+            foreach (['savings', 'share capital', 'CDA', 'income', 'expenses'] as $module) {
+                $this->assertStringNotContainsString($module, $answer);
+            }
+
+            $this->assertStringContainsString('collections', $answer);
+        }
     }
 
     public function test_when_linda_herself_is_hidden_her_api_answers_404(): void

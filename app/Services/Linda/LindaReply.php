@@ -49,9 +49,6 @@ final class LindaReply
     }
 
     /**
-     * @return array{intent: string, answer: string, blocks: list<array<string, mixed>>, links: list<array{label: string, url: string}>, as_of: string}
-     */
-    /**
      * This reply without the links `$drop` picks (Menu Visibility's hidden
      * pages): such a link leaves the links, and a row in a block keeps its
      * words but loses its link.
@@ -88,6 +85,9 @@ final class LindaReply
         return $value;
     }
 
+    /**
+     * @return array{intent: string, answer: string, blocks: list<array<string, mixed>>, links: list<array{label: string, url: string}>, as_of: string}
+     */
     public function toArray(): array
     {
         return [

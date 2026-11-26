@@ -22,14 +22,14 @@ final class HowToAnswer
     public function answer(User $user, #[\SensitiveParameter] ?string $question): LindaReply
     {
         $pages = $question === null ? null : LindaMenu::find($question);
+        $visibility = app(LindaVisibility::class);
 
         if ($pages === null) {
-            return new LindaReply(LindaIntent::HowTo->value, LindaWording::notYet(), 'not_yet', answerFunction: $this->name());
+            return new LindaReply(LindaIntent::HowTo->value, LindaWording::notYet($visibility->hidden()), 'not_yet', answerFunction: $this->name());
         }
 
         // A page of a module hidden in Menu Visibility is never linked or
         // named; when every page asked for is hidden, it is turned off here.
-        $visibility = app(LindaVisibility::class);
         $pages = array_values(array_filter($pages, fn (array $page) => ! $visibility->hidesPage($page['url'])));
 
         if ($pages === []) {

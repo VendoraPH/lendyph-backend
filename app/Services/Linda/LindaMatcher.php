@@ -556,31 +556,6 @@ final class LindaMatcher
     }
 
     /**
-     * Take every subject phrase out of the words, longest phrases first.
-     *
-     * Some subjects only describe another one, so they count only on their
-     * own:
-     * - a branch or officer performance question ranks by the figure it
-     *   names ("which branch collected the most"), so it wins over them all,
-     *   except savings and credit scoring: "which branch has the highest
-     *   savings" is a savings question, whose answer ranks the branches by
-     *   their deposits, and "which branch has the most high risk members" a
-     *   credit scoring one, whose answer lists each branch's counts;
-     * - reminders win over collections and overdue ("payment reminders",
-     *   "overdue reminders");
-     * - collection efficiency is about collections ("porsyento sa
-     *   koleksyon"), so it wins over collections;
-     * - a bare member word ("members", "miyembro") only says whose figures
-     *   another subject is about ("which members are overdue"), and beside a
-     *   loan word it is a loan question, so it counts only on its own;
-     * - "summary" beside another subject only describes it ("collection
-     *   summary"), and so do the weak phrases ("pila ka loan", "documents").
-     *
-     * @param  list<string>  $words
-     * @param  list<LindaIntent>  $performance  the performance subjects already taken
-     * @return array{list<string>, list<LindaIntent>}
-     */
-    /**
      * The topics a question names by their own words (the matcher's subjects,
      * the weak ones aside), whether or not the whole question matches: what
      * Menu Visibility's guard reads before a question goes to the model.
@@ -614,6 +589,31 @@ final class LindaMatcher
         return array_map(fn (string $intent) => LindaIntent::from($intent), array_keys($found));
     }
 
+    /**
+     * Take every subject phrase out of the words, longest phrases first.
+     *
+     * Some subjects only describe another one, so they count only on their
+     * own:
+     * - a branch or officer performance question ranks by the figure it
+     *   names ("which branch collected the most"), so it wins over them all,
+     *   except savings and credit scoring: "which branch has the highest
+     *   savings" is a savings question, whose answer ranks the branches by
+     *   their deposits, and "which branch has the most high risk members" a
+     *   credit scoring one, whose answer lists each branch's counts;
+     * - reminders win over collections and overdue ("payment reminders",
+     *   "overdue reminders");
+     * - collection efficiency is about collections ("porsyento sa
+     *   koleksyon"), so it wins over collections;
+     * - a bare member word ("members", "miyembro") only says whose figures
+     *   another subject is about ("which members are overdue"), and beside a
+     *   loan word it is a loan question, so it counts only on its own;
+     * - "summary" beside another subject only describes it ("collection
+     *   summary"), and so do the weak phrases ("pila ka loan", "documents").
+     *
+     * @param  list<string>  $words
+     * @param  list<LindaIntent>  $performance  the performance subjects already taken
+     * @return array{list<string>, list<LindaIntent>}
+     */
     private static function takeSubjects(array $words, array $performance = []): array
     {
         $phrases = [];

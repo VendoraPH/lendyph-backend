@@ -39,16 +39,6 @@ enum LindaIntent: string
     case UnsupportedQuestion = 'unsupported_question';
 
     /**
-     * Whether a question of this kind is read for a period at all. Overdue
-     * accounts, active loans and the portfolio are as of today, so any period words a
-     * question or the model gives them are ignored, never refused or called
-     * unclear; an unsupported question has no period either, and nor does a
-     * lookup (a member, a loan or a receipt), which is about one record.
-     * Savings take one since round 4 (deposits and withdrawals over it, and the
-     * balances at its end); with none, they are as of today. Reminders count a
-     * day or a period, today with none. Credit scoring is as of today.
-     */
-    /**
      * The side-menu module this topic belongs to (Menu Visibility, finish run
      * round 6): while that module is hidden, Linda answers the topic with a
      * short local answer and no figure or link. Null for how-to, open and
@@ -72,6 +62,16 @@ enum LindaIntent: string
         };
     }
 
+    /**
+     * Whether a question of this kind is read for a period at all. Overdue
+     * accounts, active loans and the portfolio are as of today, so any period words a
+     * question or the model gives them are ignored, never refused or called
+     * unclear; an unsupported question has no period either, and nor does a
+     * lookup (a member, a loan or a receipt), which is about one record.
+     * Savings take one since round 4 (deposits and withdrawals over it, and the
+     * balances at its end); with none, they are as of today. Reminders count a
+     * day or a period, today with none. Credit scoring is as of today.
+     */
     public function takesPeriod(): bool
     {
         return match ($this) {

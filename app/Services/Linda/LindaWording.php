@@ -50,6 +50,24 @@ final class LindaWording
         ['branch and officer performance', 'reports'],
     ];
 
+    /** What Linda helps with when she can't answer, each with its module, in the order she lists them. */
+    private const HELPS_WITH = [
+        ['collections', 'payments'],
+        ['payments', 'payments'],
+        ['collection efficiency', 'reports'],
+        ['disbursements', 'loans'],
+        ['loans', 'loans'],
+        ['overdue payments', 'loans'],
+        ['members', 'members'],
+        ['the portfolio', 'reports'],
+        ['income', 'accounting'],
+        ['expenses', 'accounting'],
+        ['savings', 'savings'],
+        ['share capital', 'share_capital'],
+        ['CDA', 'cda'],
+        ['branch and officer performance', 'reports'],
+    ];
+
     /** What Linda looks up, each with its module and its number. */
     private const LOOKS_UP = [
         ['a member', 'members', 'BRW-…'],
@@ -223,16 +241,25 @@ final class LindaWording
         return 'Sorry, I can only answer questions about your cooperative\'s lending figures, like collections, payments, disbursements, active loans, overdue payments, members, loans and receipts.';
     }
 
-    public static function notYet(): string
+    /**
+     * What Linda helps with instead, never naming a module hidden in Menu
+     * Visibility; word for word as before when nothing is hidden.
+     *
+     * @param  list<string>  $hidden
+     */
+    public static function notYet(array $hidden = []): string
     {
-        return 'I can\'t answer that yet. I can help with collections, payments, collection efficiency, disbursements, loans, '
-            .'overdue payments, members, the portfolio, income, expenses, savings, share capital, CDA, branch and officer '
-            .'performance, a member, a loan or a receipt, and finding a page.';
+        $topics = array_column(array_filter(self::HELPS_WITH, fn (array $topic): bool => ! in_array($topic[1], $hidden, true)), 0);
+        $lookups = array_column(array_filter(self::LOOKS_UP, fn (array $lookup): bool => ! in_array($lookup[1], $hidden, true)), 0);
+
+        return 'I can\'t answer that yet. I can help with '
+            .self::listed([...$topics, ...($lookups === [] ? [] : [self::listed($lookups, ' or ')]), 'finding a page'], ', and ').'.';
     }
 
-    public static function notYetWithReport(): string
+    /** @param  list<string>  $hidden */
+    public static function notYetWithReport(array $hidden = []): string
     {
-        return self::notYet().' The report linked below may help.';
+        return self::notYet($hidden).' The report linked below may help.';
     }
 
     public static function savingsNotSetUp(): string

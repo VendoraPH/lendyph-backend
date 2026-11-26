@@ -176,14 +176,6 @@ final class LindaAssistant
     }
 
     /**
-     * The lookup a question asks for: by the lookup parser, else, right after
-     * a lookup turn, as a reply naming its target. A "name" that is one of the
-     * user's own branches or a loan product is no lookup: its words are taken
-     * out and the rest of the question is read again ("collections from Main
-     * and balance of Juan"). A re-read that gives up (after 3 tries, or when
-     * the name can't be found again) stays local, asking which member.
-     */
-    /**
      * The topic a question names when every topic it names belongs to a module
      * hidden in Menu Visibility: answered here, so it never reaches the model.
      * A question that also names a module that is shown goes on, and its
@@ -202,6 +194,14 @@ final class LindaAssistant
         return $topics[0] ?? null;
     }
 
+    /**
+     * The lookup a question asks for: by the lookup parser, else, right after
+     * a lookup turn, as a reply naming its target. A "name" that is one of the
+     * user's own branches or a loan product is no lookup: its words are taken
+     * out and the rest of the question is read again ("collections from Main
+     * and balance of Juan"). A re-read that gives up (after 3 tries, or when
+     * the name can't be found again) stays local, asking which member.
+     */
     private function lookupIn(User $user, #[\SensitiveParameter] string $question, LindaHistory $history): ?LindaLookupRequest
     {
         $lookup = LindaLookup::parse($question);
@@ -351,7 +351,7 @@ final class LindaAssistant
 
         // A capped read named no one in particular: a neutral reply, kept local.
         if ($named->name === null) {
-            return $this->finish($log, $started, new LindaReply(LindaIntent::UnsupportedQuestion->value, LindaWording::notYet(), 'not_yet', answerFunction: class_basename(LindaNameCheck::class)));
+            return $this->finish($log, $started, new LindaReply(LindaIntent::UnsupportedQuestion->value, LindaWording::notYet($this->visibility->hidden()), 'not_yet', answerFunction: class_basename(LindaNameCheck::class)));
         }
 
         if ($named->kind !== LindaNameCheck::STAFF) {

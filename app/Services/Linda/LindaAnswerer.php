@@ -217,7 +217,6 @@ final class LindaAnswerer
         return $answer->find($user, $request);
     }
 
-    /** What Linda can answer, with the five suggested questions. */
     /**
      * Whether a lookup's module is hidden in Menu Visibility: a member's
      * (Members), a loan's (Loans) or a receipt's (Payments), and a member's
@@ -229,6 +228,7 @@ final class LindaAnswerer
             || ($answer instanceof MemberRemindersAnswer && $this->visibility->hides(LindaIntent::ReminderSummary->module()));
     }
 
+    /** What Linda can answer, with the five suggested questions. */
     public function unmatched(): LindaReply
     {
         return new LindaReply(LindaIntent::UnsupportedQuestion->value, LindaWording::unmatched($this->visibility->hidden()), 'unmatched');
