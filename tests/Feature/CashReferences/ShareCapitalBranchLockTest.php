@@ -57,7 +57,7 @@ class ShareCapitalBranchLockTest extends TestCase
         $this->ledgerEntry(['method' => 'gcash', 'reference_number' => 'GC-1'])->assertUnprocessable()->assertJsonPath('errors.borrower_id.0', self::CLOSING);
         $this->pledgeEntry()->assertUnprocessable()->assertJsonPath('errors.borrower_id.0', self::CLOSING);
         $this->assertSame([self::CLOSING], $this->bulkEntry([$this->member])->assertUnprocessable()->json('errors')['entries.0.pledge_id']);
-        $this->postJson('/api/auto-credit/process', ['method' => 'cash'])->assertUnprocessable()->assertJsonPath('errors.branch.0', self::AUTO_CREDIT_CLOSING);
+        $this->postJson('/api/auto-credit/process', ['cycle' => '30', 'method' => 'cash'])->assertUnprocessable()->assertJsonPath('errors.branch.0', self::AUTO_CREDIT_CLOSING);
 
         $this->assertSame(0, ShareCapitalLedger::query()->count());
         $this->assertSame(0, DB::table('cash_reference_sequences')->count());

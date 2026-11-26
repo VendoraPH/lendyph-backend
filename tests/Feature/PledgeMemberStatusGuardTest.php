@@ -156,7 +156,7 @@ it('keeps a pending applicant out of auto-credit even after an approval attempt 
 
     $this->patchJson("/api/pledges/{$pledge->id}/auto-credit")->assertUnprocessable();
 
-    $this->postJson('/api/auto-credit/process')
+    $this->postJson('/api/auto-credit/process', ['cycle' => '30'])
         ->assertCreated()
         ->assertJsonPath('data.member_count', 0);
 

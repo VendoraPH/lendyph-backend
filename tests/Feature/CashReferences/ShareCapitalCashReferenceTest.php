@@ -170,7 +170,7 @@ class ShareCapitalCashReferenceTest extends TestCase
     {
         $this->member->shareCapitalPledge->update(['auto_credit' => true, 'amount' => 500]);
 
-        $this->postJson('/api/auto-credit/process', ['method' => 'cash'])->assertCreated();
+        $this->postJson('/api/auto-credit/process', ['cycle' => '30', 'method' => 'cash'])->assertCreated();
 
         $this->assertNull(ShareCapitalLedger::query()->sole()->reference_number);
         $this->assertSame(0, DB::table('cash_reference_sequences')->count());

@@ -11,6 +11,7 @@ use App\Models\User;
 use App\Services\Accounting\AutomaticPoster;
 use App\Services\Branches\BranchRowLock;
 use Carbon\CarbonImmutable;
+use Carbon\CarbonInterface;
 use Closure;
 use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Database\Eloquent\ModelNotFoundException;
@@ -64,6 +65,18 @@ class ShareCapitalService
      */
     public const INSTALMENTS_PER_MONTH = ['15' => 1, '30' => 1, '15/30' => 2];
 
+    /**
+     * The halves of the month a run can be for (finish run round 8): `15`
+     * (the 15th) or `30` (the 30th), as the savings auto-credit's cycles.
+     */
+    public const CYCLES = ['15', '30'];
+
+    /**
+     * Which runs credit a pledge, by its schedule (finish run round 8): the
+     * 15th run credits "15" and "15/30", the 30th run "30" and "15/30".
+     */
+    public const CYCLES_BY_SCHEDULE = ['15' => ['15'], '30' => ['30'], '15/30' => ['15', '30']];
+
     /** The 409 when the auto-credit switch waited too long behind a run or an entry holding the pledge. */
     public const PLEDGE_SWITCH_BUSY = 'This pledge is being credited or saved by another action right now, so its auto-credit wasn\'t changed. Try again in a moment.';
 
@@ -93,6 +106,43 @@ class ShareCapitalService
         return $memberNames === []
             ? "This pledge is set to auto-credit, so the auto-credit run credits it: {$names}. Take it out of the batch, or turn auto-credit off for it, to record entries by hand."
             : "These pledges are set to auto-credit, so the auto-credit run credits them: {$names}. Take them out of the batch, or turn auto-credit off for them, to record entries by hand.";
+    }
+
+    /**
+     * The half of the month a day falls in (finish run round 8): the 1st to
+     * the 15th is the 15th's (`15`), later days the 30th's (`30`). It is the
+     * run's suggested cycle for today in Manila, and the half an old run's row
+     * (no cycle) counts toward, by its date.
+     */
+    public static function cycleFor(CarbonInterface $day): string
+    {
+        return $day->day <= 15 ? '15' : '30';
+    }
+
+    /** "the 15th" or "the 30th". */
+    public static function cycleWords(string $cycle): string
+    {
+        return $cycle === '15' ? 'the 15th' : 'the 30th';
+    }
+
+    /**
+     * Why a run skips a pledge credited in the other half only (finish run
+     * round 8): "This pledge is credited on the 30th, so the 15th run skips
+     * it."
+     */
+    public static function otherHalfReason(string $schedule, string $cycle): string
+    {
+        return 'This pledge is credited on '.self::cycleWords($schedule).', so '.self::cycleWords($cycle).' run skips it.';
+    }
+
+    /**
+     * Why a run skips a pledge a run already credited in its half this month
+     * (finish run round 8), naming that credit's date.
+     */
+    public static function sameHalfReason(string $cycle, string $date): string
+    {
+        return 'Credited by auto-credit for '.self::cycleWords($cycle).' on '.Carbon::parse($date)->format('M j, Y')
+            .', so '.self::cycleWords($cycle).' run skips it this month.';
     }
 
     /**
@@ -154,9 +204,19 @@ class ShareCapitalService
      * A pledge whose month's instalments are all in already (by hand, net of
      * hand debits, and by earlier runs; alreadyCreditedThisMonth()) is skipped, with the reason stored on the run (AutoCreditRunSkip) and
      * returned as the run's `skips` relation.
+     *
+     * The run is for one half of the month, `$cycle` (finish run round 8),
+     * stored on it: it credits only the pledges whose schedule falls in that
+     * half, and at most once per half by runs, on top of the monthly cap.
+     * Two runs for the same half at once: the second's credit waits on the
+     * first's locked month rows, and a deadlock or a wait too long answers
+     * 409 with nothing posted (AutoCreditCycleRaceTest).
+     *
+     * @param  '15'|'30'  $cycle
      */
     public function processAutoCredit(
         User $user,
+        string $cycle,
         ?User $scopeTo = null,
         string $method = 'bank_transfer',
         ?string $referenceNumber = null,
@@ -173,7 +233,7 @@ class ShareCapitalService
         // Never tried again. The pledges were read before this transaction, so
         // a retry after another run committed would credit each pledge twice.
         // The loser of a collision answers 409 and posts nothing.
-        return LoanWriteTransaction::run(function () use ($eligiblePledges, $branchIds, $user, $method, $referenceNumber) {
+        return LoanWriteTransaction::run(function () use ($eligiblePledges, $branchIds, $user, $cycle, $method, $referenceNumber) {
             BranchRowLock::lock(['branch' => $branchIds], ['branch' => self::AUTO_CREDIT_BRANCH_CONSEQUENCE]);
             $this->assertMembersStayed(
                 $eligiblePledges->mapWithKeys(fn (ShareCapitalPledge $pledge): array => [$pledge->borrower_id => $pledge->borrower?->branch_id])->all(),
@@ -184,7 +244,7 @@ class ShareCapitalService
 
             $runDay = CarbonImmutable::now(self::TIMEZONE);
             $locked = $this->stillOnAutoCredit($eligiblePledges);
-            $skipReasons = $this->alreadyCreditedThisMonth($locked, $runDay, true);
+            $skipReasons = $this->alreadyCreditedThisMonth($locked, $runDay, $cycle, true);
             $toCredit = $locked->reject(fn (ShareCapitalPledge $pledge): bool => isset($skipReasons[$pledge->borrower_id]));
             $totalCentavos = $toCredit->sum(fn (ShareCapitalPledge $pledge): int => LoanService::toCentavos((float) $pledge->amount));
 
@@ -198,6 +258,7 @@ class ShareCapitalService
                 'processed_at' => now(),
                 'processed_by' => $user->id,
                 'status' => 'completed',
+                'cycle' => $cycle,
             ]);
 
             $rows = [];
@@ -273,8 +334,15 @@ class ShareCapitalService
     }
 
     /**
-     * The pledges whose month's instalments are all in already, each with the
-     * reason in words: member id => reason. (finish run round 7)
+     * The pledges a run for `$cycle` skips, each with the reason in words:
+     * member id => reason. In this order (finish run round 8):
+     * - a pledge whose schedule isn't credited in this half (a "30" pledge on
+     *   the 15th's run, a "15" pledge on the 30th's);
+     * - a pledge a run already credited in this half this month. A run row's
+     *   half is its run's cycle; a row from a run made before cycles (none
+     *   recorded, or not linked to its run) counts toward the half its date
+     *   falls in (cycleFor());
+     * - a pledge whose month's instalments are all in already (round 7, below).
      *
      * A pledge takes INSTALMENTS_PER_MONTH instalments in the run's month in
      * Manila: 1 for "15" or "30", 2 for "15/30". Its credits this month count
@@ -302,7 +370,7 @@ class ShareCapitalService
      * @param  Collection<int, ShareCapitalPledge>  $pledges
      * @return array<int, string>
      */
-    private function alreadyCreditedThisMonth(Collection $pledges, CarbonImmutable $day, bool $lock = false): array
+    private function alreadyCreditedThisMonth(Collection $pledges, CarbonImmutable $day, string $cycle, bool $lock = false): array
     {
         if ($pledges->isEmpty()) {
             return [];
@@ -330,11 +398,30 @@ class ShareCapitalService
                 && $row->created_at !== null
                 && $row->created_at->lte(Carbon::parse($legacyRunsUntil)));
 
+        $runCycles = AutoCreditRun::query()
+            ->whereKey($rows->collapse()->pluck('auto_credit_run_id')->filter()->unique()->values()->all())
+            ->pluck('cycle', 'id');
+        $halfOf = fn (ShareCapitalLedger $row): string => $runCycles->get($row->auto_credit_run_id) ?? self::cycleFor($row->date);
+
         $reasons = [];
 
         foreach ($pledges as $pledge) {
+            if (! in_array($cycle, self::CYCLES_BY_SCHEDULE[$pledge->schedule] ?? self::CYCLES, true)) {
+                $reasons[$pledge->borrower_id] = self::otherHalfReason($pledge->schedule, $cycle);
+
+                continue;
+            }
+
             $memberRows = $rows->get($pledge->borrower_id) ?? collect();
             [$runRows, $handRows] = $memberRows->partition($isRunRow);
+            $sameHalf = $runRows->first(fn (ShareCapitalLedger $row): bool => (float) $row->credit > 0 && $halfOf($row) === $cycle);
+
+            if ($sameHalf !== null) {
+                $reasons[$pledge->borrower_id] = self::sameHalfReason($cycle, $sameHalf->date->toDateString());
+
+                continue;
+            }
+
             $handNet = $handRows->sum(fn (ShareCapitalLedger $row): int => LoanService::toCentavos((float) $row->credit) - LoanService::toCentavos((float) $row->debit));
             $credits = [];
 
@@ -419,8 +506,12 @@ class ShareCapitalService
      *
      * @return array<string, mixed>
      */
-    public function getAutoCreditStatus(?User $scopeTo = null): array
+    public function getAutoCreditStatus(?User $scopeTo = null, ?string $cycle = null): array
     {
+        // The run's half (finish run round 8): as asked, else by today in Manila.
+        $today = CarbonImmutable::now(self::TIMEZONE);
+        $cycle ??= self::cycleFor($today);
+
         $allPledges = ShareCapitalPledge::with('borrower')
             ->forCurrentMembers()
             ->when($scopeTo !== null, fn ($q) => $q->whereHas('borrower', fn ($b) => $b->visibleTo($scopeTo)))
@@ -430,7 +521,7 @@ class ShareCapitalService
         // The run's preview (finish run round 7): a pledge whose month's
         // instalments are all in already is listed as skipped, with its reason,
         // and left out of the members and total the run would credit.
-        $skipReasons = $this->alreadyCreditedThisMonth($onAutoCredit, CarbonImmutable::now(self::TIMEZONE));
+        $skipReasons = $this->alreadyCreditedThisMonth($onAutoCredit, $today, $cycle);
         $activeMembers = $onAutoCredit->reject(fn ($p) => isset($skipReasons[$p->borrower_id]));
         $skippedMembers = $onAutoCredit->filter(fn ($p) => isset($skipReasons[$p->borrower_id]));
         $disabledMembers = $allPledges->filter(fn ($p) => ! $p->auto_credit);
@@ -444,6 +535,7 @@ class ShareCapitalService
         $runTotalsVisible = $scopeTo === null || app(BranchAccess::class)->for($scopeTo) === null;
 
         return [
+            'cycle' => $cycle,
             'active_count' => $activeMembers->count(),
             'total_to_credit' => round($activeMembers->sum(fn ($p) => (float) $p->amount), 2),
             'disabled_count' => $disabledMembers->count(),
@@ -456,6 +548,7 @@ class ShareCapitalService
                 'skipped_count' => $runTotalsVisible ? (int) $lastRun->skipped_count : null,
                 'processed_at' => $lastRun->processed_at?->toDateTimeString(),
                 'status' => $lastRun->status,
+                'cycle' => $lastRun->cycle,
             ] : null,
             'active_members' => $activeMembers->map(fn ($p) => [
                 'id' => $p->id,

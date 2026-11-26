@@ -22,6 +22,9 @@ class AutoCreditRun extends Model
         'processed_at',
         'processed_by',
         'status',
+        // The half of the month the run is for, `15` or `30` (finish run round
+        // 8). Null on runs made before: their rows count toward a half by date.
+        'cycle',
     ];
 
     protected function casts(): array

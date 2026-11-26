@@ -42,7 +42,7 @@ class AutoCreditTest extends TestCase
         // Not eligible: auto_credit=false (default)
         $b3->shareCapitalPledge->update(['amount' => 500]);
 
-        $response = $this->postJson('/api/auto-credit/process');
+        $response = $this->postJson('/api/auto-credit/process', ['cycle' => '30']);
 
         $response->assertCreated()
             ->assertJsonPath('data.member_count', 2)
@@ -61,7 +61,7 @@ class AutoCreditTest extends TestCase
         // auto_credit=true but amount=0 — should NOT be processed
         $borrower->shareCapitalPledge->update(['auto_credit' => true]);
 
-        $this->postJson('/api/auto-credit/process')
+        $this->postJson('/api/auto-credit/process', ['cycle' => '30'])
             ->assertCreated()
             ->assertJsonPath('data.member_count', 0);
 
@@ -99,7 +99,7 @@ class AutoCreditTest extends TestCase
         ]);
         $applicant->shareCapitalPledge->update(['amount' => 500, 'auto_credit' => true]);
 
-        $this->postJson('/api/auto-credit/process')
+        $this->postJson('/api/auto-credit/process', ['cycle' => '30'])
             ->assertCreated()
             ->assertJsonPath('data.member_count', 0)
             ->assertJsonPath('data.total_amount', 0);
@@ -115,7 +115,7 @@ class AutoCreditTest extends TestCase
         $inactive->shareCapitalPledge->update(['amount' => 200, 'auto_credit' => true]);
         $blacklisted->shareCapitalPledge->update(['amount' => 300, 'auto_credit' => true]);
 
-        $this->postJson('/api/auto-credit/process')
+        $this->postJson('/api/auto-credit/process', ['cycle' => '30'])
             ->assertCreated()
             ->assertJsonPath('data.member_count', 2)
             ->assertJsonPath('data.total_amount', 500);
@@ -165,7 +165,7 @@ class AutoCreditTest extends TestCase
         $borrower = Borrower::factory()->create(['branch_id' => $this->branch->id]);
         $borrower->shareCapitalPledge->update(['amount' => 500, 'auto_credit' => true]);
 
-        $this->postJson('/api/auto-credit/process');
+        $this->postJson('/api/auto-credit/process', ['cycle' => '30']);
 
         $response = $this->getJson('/api/auto-credit/status')->assertOk();
         $this->assertNotNull($response->json('data.last_run'));

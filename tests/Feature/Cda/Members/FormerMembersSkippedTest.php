@@ -64,7 +64,7 @@ class FormerMembersSkippedTest extends TestCase
         $status = $this->getJson('/api/auto-credit/status')->assertOk();
         $this->assertSame(1, $status->json('data.active_count'));
 
-        $this->postJson('/api/auto-credit/process')
+        $this->postJson('/api/auto-credit/process', ['cycle' => '30'])
             ->assertCreated()
             ->assertJsonPath('data.member_count', 1);
 

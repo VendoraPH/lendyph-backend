@@ -234,7 +234,7 @@ class GeneratedNumberCollisionTest extends TestCase
         $before = $this->state();
         $slips = $this->slipTheNextNumberIn('share_capital_ledger', 'reference', times: PHP_INT_MAX);
 
-        $this->postJson('/api/auto-credit/process')->assertStatus(409)->assertExactJson(['message' => GeneratedNumberWrite::SHARE_CAPITAL_CONFLICT]);
+        $this->postJson('/api/auto-credit/process', ['cycle' => '30'])->assertStatus(409)->assertExactJson(['message' => GeneratedNumberWrite::SHARE_CAPITAL_CONFLICT]);
 
         $this->assertSame(1, $slips(), 'an auto-credit run must not be tried again: an overlapping one would credit each pledge twice');
         $this->assertSame($before, $this->state());
@@ -248,7 +248,7 @@ class GeneratedNumberCollisionTest extends TestCase
         $before = $this->state();
         $fired = $this->failOnInsertInto('share_capital_ledger', self::DEADLOCK, times: PHP_INT_MAX);
 
-        $this->postJson('/api/auto-credit/process')->assertStatus(409)->assertExactJson(['message' => GeneratedNumberWrite::SHARE_CAPITAL_CONFLICT]);
+        $this->postJson('/api/auto-credit/process', ['cycle' => '30'])->assertStatus(409)->assertExactJson(['message' => GeneratedNumberWrite::SHARE_CAPITAL_CONFLICT]);
 
         $this->assertSame(1, $fired());
         $this->assertSame($before, $this->state());

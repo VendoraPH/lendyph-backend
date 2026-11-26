@@ -52,7 +52,7 @@ class WithoutBooksTest extends TestCase
             ],
         ])->assertCreated()->assertJsonPath('count', 2);
 
-        $this->postJson('/api/auto-credit/process')->assertCreated()->assertJsonPath('data.member_count', 1);
+        $this->postJson('/api/auto-credit/process', ['cycle' => '30'])->assertCreated()->assertJsonPath('data.member_count', 1);
 
         $pending = $this->postJson('/api/gcash/transactions', ['borrower_id' => $member->id, 'type' => 'cash_in', 'amount' => 1000, 'is_pending' => true])
             ->assertCreated()->json('data.id');
