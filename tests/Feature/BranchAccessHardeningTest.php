@@ -18,6 +18,7 @@ use App\Models\ShareCapitalLedger;
 use App\Models\ShareCapitalPledge;
 use App\Models\User;
 use App\Services\BranchAccess;
+use App\Services\ShareCapitalService;
 use App\Services\SignedFileLink;
 use Illuminate\Support\Facades\Storage;
 use Spatie\Permission\PermissionRegistrar;
@@ -321,7 +322,7 @@ class BranchAccessHardeningTest extends TestCase
         $this->assertContains($herePledge->id, $active);
         $this->assertNotContains($therePledge->id, $active);
 
-        $this->postJson('/api/auto-credit/process', ['cycle' => '30'])->assertCreated();
+        $this->postJson('/api/auto-credit/process', ['cycle_date' => ShareCapitalService::currentCycleDate()])->assertCreated();
 
         $this->assertSame(1, ShareCapitalLedger::where('borrower_id', $here->id)->count());
         $this->assertSame(0, ShareCapitalLedger::where('borrower_id', $there->id)->count());
@@ -331,7 +332,7 @@ class BranchAccessHardeningTest extends TestCase
     {
         $member = Borrower::factory()->create(['branch_id' => $this->far->id, 'status' => 'active']);
         ShareCapitalPledge::where('borrower_id', $member->id)->update(['auto_credit' => true, 'amount' => 750]);
-        $this->postJson('/api/auto-credit/process', ['cycle' => '30'])->assertCreated();
+        $this->postJson('/api/auto-credit/process', ['cycle_date' => ShareCapitalService::currentCycleDate()])->assertCreated();
 
         $whole = $this->getJson('/api/auto-credit/status')->assertOk()->json('data.last_run');
         $this->assertNotNull($whole['total_amount']);

@@ -15,11 +15,11 @@ use Tests\TestCase;
 use Tests\Traits\SetupLendyPH;
 
 /**
- * Finish run round 8, on two real connections: two runs for the same half
+ * Finish run round 8, on two real connections: two runs for the same cycle
  * started at once never both credit a pledge. Round 7's locks hold it: each
  * run reads the members' rows in the month FOR SHARE, so the second run's
  * credit waits for the first run to commit and, waiting too long, answers 409
- * with nothing posted. The half is then taken: running it again credits
+ * with nothing posted. The cycle is then taken: running it again credits
  * nothing.
  */
 class AutoCreditCycleRaceTest extends TestCase
@@ -68,20 +68,20 @@ class AutoCreditCycleRaceTest extends TestCase
             }
 
             $interleaved = true;
-            $otherStatus = $this->onTheOtherConnection(fn () => app(ShareCapitalService::class)->processAutoCredit($this->admin, '15'));
+            $otherStatus = $this->onTheOtherConnection(fn () => app(ShareCapitalService::class)->processAutoCredit($this->admin, '2026-11-15'));
         });
 
-        $this->postJson('/api/auto-credit/process', ['cycle' => '15'])->assertCreated()->assertJsonPath('data.member_count', 1);
+        $this->postJson('/api/auto-credit/process', ['cycle_date' => '2026-11-15'])->assertCreated()->assertJsonPath('data.member_count', 1);
 
         $this->assertTrue($interleaved);
         $this->assertSame(409, $otherStatus);
         $this->assertSame(1, ShareCapitalLedger::query()->where('borrower_id', $this->member->id)->count());
         $this->assertSame(1, AutoCreditRun::query()->count(), 'the run that answered 409 left no run');
 
-        // The half is taken: the same half again credits nothing.
-        $this->postJson('/api/auto-credit/process', ['cycle' => '15'])->assertCreated()
+        // The cycle is taken: the same cycle again credits nothing.
+        $this->postJson('/api/auto-credit/process', ['cycle_date' => '2026-11-15'])->assertCreated()
             ->assertJsonPath('data.member_count', 0)
-            ->assertJsonPath('data.skipped.0.reason', ShareCapitalService::sameHalfReason('15', '2026-11-16'));
+            ->assertJsonPath('data.skipped.0.reason', ShareCapitalService::sameHalfReason('2026-11-15', '2026-11-16'));
         $this->assertSame(1, ShareCapitalLedger::query()->where('borrower_id', $this->member->id)->count());
     }
 

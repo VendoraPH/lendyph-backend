@@ -12,18 +12,20 @@ use Tests\TestCase;
 use Tests\Traits\SetupLendyPH;
 
 /**
- * Finish run round 8: a share capital auto-credit run is for one half of the
- * month (`cycle`, the 15th or the 30th), as the savings auto-credit picks its
- * cycle.
+ * Finish run round 8: a share capital auto-credit run is for one cycle
+ * (`cycle_date`, a month's 15th or its 30th, the month's last day), as the
+ * savings auto-credit picks its cycle.
  *
- * - The 15th run credits "15" and "15/30" pledges, the 30th run "30" and
- *   "15/30"; other schedules are skipped with the reason.
- * - A pledge is credited at most once per half by runs, in the run's month
- *   (Manila). Round 7's monthly cap still holds on top.
- * - Runs made before this (no cycle) count toward the cap, and toward a half
- *   by their row's date (1st–15th, or later).
- * - The status (the run's preview) takes `?cycle=`, defaulting by today in
- *   Manila, and equals what the run posts.
+ * - The current cycle (by today in Manila) or a missed one up to 92 days ago,
+ *   never a future one; refused in words.
+ * - A 15th credits "15" and "15/30" pledges, a 30th "30" and "15/30"; other
+ *   schedules are skipped with the reason.
+ * - A pledge is credited at most once per cycle by runs. Round 7's monthly cap
+ *   still holds on top. Both count in the cycle's month, not the run's date,
+ *   so a Nov 30 run done on Dec 1 counts for November.
+ * - Runs made before this (no cycle) count by their row's date.
+ * - The status (the run's preview) takes `?cycle_date=`, defaulting to the
+ *   current cycle, and equals what the run posts.
  */
 class AutoCreditCycleTest extends TestCase
 {
@@ -55,49 +57,97 @@ class AutoCreditCycleTest extends TestCase
 
     public function test_each_schedule_and_cycle_pairing(): void
     {
-        $this->run15()
-            ->assertJsonPath('data.cycle', '15')
+        $this->runFor('2026-11-15')
+            ->assertJsonPath('data.cycle_date', '2026-11-15')
             ->assertJsonPath('data.member_count', 2)
             ->assertJsonPath('data.total_amount', 700)
             ->assertJsonPath('data.skipped_count', 1)
             ->assertJsonPath('data.skipped.0.pledge_id', $this->ben->shareCapitalPledge->id)
-            ->assertJsonPath('data.skipped.0.reason', 'This pledge is credited on the 30th, so the 15th run skips it.');
+            ->assertJsonPath('data.skipped.0.reason', 'This pledge is credited on the 30th, so the November 15 run skips it.');
 
         $this->on('2026-11-30');
-        $this->run30()
-            ->assertJsonPath('data.cycle', '30')
+        $this->runFor('2026-11-30')
+            ->assertJsonPath('data.cycle_date', '2026-11-30')
             ->assertJsonPath('data.member_count', 2)
             ->assertJsonPath('data.total_amount', 500)
             ->assertJsonPath('data.skipped_count', 1)
             ->assertJsonPath('data.skipped.0.pledge_id', $this->ana->shareCapitalPledge->id)
-            ->assertJsonPath('data.skipped.0.reason', 'This pledge is credited on the 15th, so the 30th run skips it.');
+            ->assertJsonPath('data.skipped.0.reason', 'This pledge is credited on the 15th, so the November 30 run skips it.');
 
         $this->assertSame(1, $this->creditsOf($this->ana));
         $this->assertSame(1, $this->creditsOf($this->ben));
         $this->assertSame(2, $this->creditsOf($this->cy));
     }
 
-    public function test_the_other_half_reason_reads_in_words(): void
+    public function test_the_reasons_read_in_words(): void
     {
-        $this->assertSame('This pledge is credited on the 30th, so the 15th run skips it.', ShareCapitalService::otherHalfReason('30', '15'));
-        $this->assertSame('This pledge is credited on the 15th, so the 30th run skips it.', ShareCapitalService::otherHalfReason('15', '30'));
+        $this->assertSame('This pledge is credited on the 30th, so the November 15 run skips it.', ShareCapitalService::otherHalfReason('30', '2026-11-15'));
+        $this->assertSame('This pledge is credited on the 15th, so the February 28 run skips it.', ShareCapitalService::otherHalfReason('15', '2027-02-28'));
         $this->assertSame(
-            'Credited by auto-credit for the 15th on Nov 14, 2026, so the 15th run skips it this month.',
-            ShareCapitalService::sameHalfReason('15', '2026-11-14'),
+            'Credited by auto-credit for November 15 on Nov 14, 2026, so the November 15 run skips it.',
+            ShareCapitalService::sameHalfReason('2026-11-15', '2026-11-14'),
         );
+        $this->assertSame(
+            'Credited by hand on Nov 5, 2026, so auto-credit skips it for November 2026.',
+            ShareCapitalService::alreadyCreditedReason([['hand', '2026-11-05', null]], 'November 2026'),
+        );
+    }
+
+    public function test_a_future_cycle_is_refused_in_words_and_posts_nothing(): void
+    {
+        $this->on('2026-11-14');
+        $this->postJson('/api/auto-credit/process', ['cycle_date' => '2026-11-30'])->assertUnprocessable()
+            ->assertJsonPath('errors.cycle_date.0', 'The 30th run for November opens on Nov 16.');
+
+        $this->on('2026-11-16');
+        $this->postJson('/api/auto-credit/process', ['cycle_date' => '2026-12-15'])->assertUnprocessable()
+            ->assertJsonPath('errors.cycle_date.0', 'The 15th run for December opens on Dec 1.');
+        $this->getJson('/api/auto-credit/status?cycle_date=2026-12-15')->assertUnprocessable()
+            ->assertJsonPath('errors.cycle_date.0', 'The 15th run for December opens on Dec 1.');
+
+        $this->on('2026-12-20');
+        $this->postJson('/api/auto-credit/process', ['cycle_date' => '2027-01-15'])->assertUnprocessable()
+            ->assertJsonPath('errors.cycle_date.0', 'The 15th run for January 2027 opens on Jan 1.');
+
+        $this->assertSame(0, AutoCreditRun::query()->count());
+        $this->assertSame(0, ShareCapitalLedger::query()->count());
+    }
+
+    public function test_a_cycle_must_be_a_15th_or_a_month_end_within_92_days(): void
+    {
+        $this->postJson('/api/auto-credit/process')->assertUnprocessable()
+            ->assertJsonPath('errors.cycle_date.0', 'Choose the cycle this run is for: a 15th or a 30th.');
+
+        foreach (['15', '2026-11-1', ['2026-11-15']] as $wrong) {
+            $this->postJson('/api/auto-credit/process', ['cycle_date' => $wrong])->assertUnprocessable()
+                ->assertJsonPath('errors.cycle_date.0', 'The cycle date must be written as YYYY-MM-DD.');
+        }
+
+        // Nov 30 is the 30th; Oct 30 is not (Oct 31 is).
+        foreach (['2026-11-14', '2026-10-30'] as $notACycle) {
+            $this->postJson('/api/auto-credit/process', ['cycle_date' => $notACycle])->assertUnprocessable()
+                ->assertJsonPath('errors.cycle_date.0', "A run is for a month's 15th or its 30th (the month's last day).");
+        }
+
+        // 92 days before Nov 16 is Aug 16: Aug 31 can still be run, Aug 15 can't.
+        $this->postJson('/api/auto-credit/process', ['cycle_date' => '2026-08-15'])->assertUnprocessable()
+            ->assertJsonPath('errors.cycle_date.0', 'A missed run can be made for a cycle up to 92 days ago.');
+        $this->assertSame(0, AutoCreditRun::query()->count());
+
+        $this->runFor('2026-08-31')->assertJsonPath('data.cycle_date', '2026-08-31');
     }
 
     public function test_the_same_cycle_run_twice_gives_one_credit(): void
     {
-        $this->run15()->assertJsonPath('data.member_count', 2);
+        $this->runFor('2026-11-15')->assertJsonPath('data.member_count', 2);
 
-        $this->run15()
+        $this->runFor('2026-11-15')
             ->assertJsonPath('data.member_count', 0)
             ->assertJsonPath('data.total_amount', 0)
             ->assertJsonPath('data.skipped_count', 3)
-            ->assertJsonPath('data.skipped.0.reason', ShareCapitalService::sameHalfReason('15', '2026-11-16'))
-            ->assertJsonPath('data.skipped.1.reason', ShareCapitalService::otherHalfReason('30', '15'))
-            ->assertJsonPath('data.skipped.2.reason', ShareCapitalService::sameHalfReason('15', '2026-11-16'));
+            ->assertJsonPath('data.skipped.0.reason', ShareCapitalService::sameHalfReason('2026-11-15', '2026-11-16'))
+            ->assertJsonPath('data.skipped.1.reason', ShareCapitalService::otherHalfReason('30', '2026-11-15'))
+            ->assertJsonPath('data.skipped.2.reason', ShareCapitalService::sameHalfReason('2026-11-15', '2026-11-16'));
 
         $this->assertSame(1, $this->creditsOf($this->ana));
         $this->assertSame(1, $this->creditsOf($this->cy));
@@ -105,21 +155,22 @@ class AutoCreditCycleTest extends TestCase
 
     public function test_the_sunday_scenario_gives_two_a_month_never_three(): void
     {
-        // Nov 15, 2026 is a Sunday: the 15th run is done on Saturday the 14th,
-        // and again on Monday the 16th by someone who didn't know.
+        // Nov 15, 2026 is a Sunday: its run is done on Saturday the 14th, and
+        // again on Monday the 16th by someone who didn't know.
         $this->on('2026-11-14');
-        $this->run15()->assertJsonPath('data.member_count', 2);
+        $this->runFor('2026-11-15')->assertJsonPath('data.member_count', 2);
         $this->on('2026-11-16');
-        $this->run15()->assertJsonPath('data.member_count', 0);
+        $this->runFor('2026-11-15')->assertJsonPath('data.member_count', 0)
+            ->assertJsonPath('data.skipped.2.reason', ShareCapitalService::sameHalfReason('2026-11-15', '2026-11-14'));
 
-        // The 30th run, and a second one by mistake.
+        // The 30th's run, and a second one by mistake.
         $this->on('2026-11-30');
-        $this->run30()->assertJsonPath('data.member_count', 2);
-        $this->run30()->assertJsonPath('data.member_count', 0)
-            ->assertJsonPath('data.skipped.2.reason', ShareCapitalService::sameHalfReason('30', '2026-11-30'));
+        $this->runFor('2026-11-30')->assertJsonPath('data.member_count', 2);
+        $this->runFor('2026-11-30')->assertJsonPath('data.member_count', 0)
+            ->assertJsonPath('data.skipped.2.reason', ShareCapitalService::sameHalfReason('2026-11-30', '2026-11-30'));
 
-        // Both halves on the same day: still one each.
-        $this->run15()->assertJsonPath('data.member_count', 0);
+        // Both cycles on the same day: still one each.
+        $this->runFor('2026-11-15')->assertJsonPath('data.member_count', 0);
 
         $this->assertSame(2, $this->creditsOf($this->cy));
         $this->assertSame(['2026-11-14', '2026-11-30'], $this->datesOf($this->cy));
@@ -127,15 +178,49 @@ class AutoCreditCycleTest extends TestCase
         $this->assertSame(1, $this->creditsOf($this->ben));
     }
 
+    public function test_a_late_nov_30_run_on_dec_1_counts_for_november_and_decembers_cycles_still_credit(): void
+    {
+        // Ben's monthly pledge was credited by hand in November.
+        $this->handCredit($this->ben, '2026-11-05', 'CSH-0001-2026-0007');
+
+        $this->on('2026-12-01');
+        $this->runFor('2026-11-30')
+            ->assertJsonPath('data.member_count', 1)
+            ->assertJsonPath('data.skipped.0.reason', ShareCapitalService::otherHalfReason('15', '2026-11-30'))
+            // Counted in November, the cycle's month.
+            ->assertJsonPath('data.skipped.1.reason', ShareCapitalService::alreadyCreditedReason(
+                [['hand', '2026-11-05', 'CSH-0001-2026-0007']],
+                'November 2026',
+            ));
+        $this->assertSame(['2026-12-01'], $this->datesOf($this->cy));
+
+        // December's cycles credit as usual: the Dec 1 row is November's.
+        $this->on('2026-12-15');
+        $this->runFor('2026-12-15')->assertJsonPath('data.member_count', 2);
+        $this->on('2026-12-31');
+        $this->runFor('2026-12-31')->assertJsonPath('data.member_count', 2);
+        $this->runFor('2026-12-31')->assertJsonPath('data.member_count', 0);
+
+        $this->assertSame(['2026-12-01', '2026-12-15', '2026-12-31'], $this->datesOf($this->cy));
+        $this->assertSame(1, $this->creditsOf($this->ana, '2026-12'));
+        $this->assertSame(1, $this->creditsOf($this->ben, '2026-12'));
+
+        // November's cycles are both in for Cy: the 15th was missed, so it
+        // may still be run, once.
+        $this->runFor('2026-11-15')->assertJsonPath('data.member_count', 2);
+        $this->runFor('2026-11-15')->assertJsonPath('data.member_count', 0)
+            ->assertJsonPath('data.skipped.2.reason', ShareCapitalService::sameHalfReason('2026-11-15', '2026-12-31'));
+    }
+
     public function test_the_hand_credit_cap_still_holds(): void
     {
         // A twice-monthly pledge credited by hand counts one instalment: the
-        // 15th run gives the second, and the 30th run finds the month full.
+        // 15th's run gives the second, and the 30th's finds the month full.
         $this->handCredit($this->cy, '2026-11-05', 'CSH-0001-2026-0007');
-        $this->run15()->assertJsonPath('data.member_count', 2);
+        $this->runFor('2026-11-15')->assertJsonPath('data.member_count', 2);
 
         $this->on('2026-11-30');
-        $this->run30()
+        $this->runFor('2026-11-30')
             ->assertJsonPath('data.member_count', 1)
             ->assertJsonPath('data.skipped.1.pledge_id', $this->cy->shareCapitalPledge->id)
             ->assertJsonPath('data.skipped.1.reason', ShareCapitalService::alreadyCreditedReason([
@@ -146,7 +231,7 @@ class AutoCreditCycleTest extends TestCase
         // A monthly pledge credited by hand isn't credited by its own half's run.
         $this->handCredit($this->ana, '2026-12-02', null);
         $this->on('2026-12-15');
-        $this->run15()
+        $this->runFor('2026-12-15')
             ->assertJsonPath('data.skipped.0.pledge_id', $this->ana->shareCapitalPledge->id)
             ->assertJsonPath('data.skipped.0.reason', ShareCapitalService::handCreditedReason('2026-12-02', null));
 
@@ -154,44 +239,44 @@ class AutoCreditCycleTest extends TestCase
         $this->assertSame(1, $this->creditsOf($this->ana, '2026-12'));
     }
 
-    public function test_old_run_rows_with_no_cycle_count_toward_the_cap_and_their_half_by_date(): void
+    public function test_old_run_rows_with_no_cycle_count_toward_the_cap_and_their_cycle_by_date(): void
     {
-        // A round 7 run (rows linked, no cycle) on Monday the 16th: the 30th
-        // half by its date.
+        // A round 7 run (rows linked, no cycle) on Monday the 16th: the 30th's
+        // cycle by its date.
         $round7 = $this->oldRun('2026-11-16 10:00:00', linksRows: true);
         $this->runRow($this->cy, '2026-11-16', $round7);
-        // A run from before rows were linked, dated the 3rd: the 15th half.
+        // A run from before rows were linked, dated the 3rd: the 15th's cycle.
         // Its rows are told by the run's description, up to that run.
         $this->runRow($this->ben, '2026-11-03', null);
         $this->oldRun('2026-11-16 10:00:01', linksRows: false);
 
         $this->on('2026-11-30');
-        $this->run30()
+        $this->runFor('2026-11-30')
             ->assertJsonPath('data.member_count', 0)
             ->assertJsonPath('data.skipped_count', 3)
+            ->assertJsonPath('data.skipped.0.reason', ShareCapitalService::otherHalfReason('15', '2026-11-30'))
             // Ben's monthly pledge: its month is full (the cap), whatever the half.
-            ->assertJsonPath('data.skipped.0.reason', ShareCapitalService::otherHalfReason('15', '30'))
             ->assertJsonPath('data.skipped.1.reason', ShareCapitalService::alreadyCreditedReason([['auto_credit', '2026-11-03', null]]))
-            // Cy's 30th half is taken by the old run dated the 16th.
-            ->assertJsonPath('data.skipped.2.reason', ShareCapitalService::sameHalfReason('30', '2026-11-16'));
+            // Cy's November 30 cycle is taken by the old run dated the 16th.
+            ->assertJsonPath('data.skipped.2.reason', ShareCapitalService::sameHalfReason('2026-11-30', '2026-11-16'));
 
-        // The 15th half is still open for Cy (and Ana), once.
-        $this->run15()->assertJsonPath('data.member_count', 2);
-        $this->run15()->assertJsonPath('data.member_count', 0);
+        // The 15th's cycle is still open for Cy (and Ana), once.
+        $this->runFor('2026-11-15')->assertJsonPath('data.member_count', 2);
+        $this->runFor('2026-11-15')->assertJsonPath('data.member_count', 0);
 
         $this->assertSame(2, $this->creditsOf($this->cy));
         $this->assertSame(1, $this->creditsOf($this->ben));
     }
 
-    public function test_an_old_run_on_the_15th_takes_the_15th_half(): void
+    public function test_an_old_run_on_the_15th_takes_the_15th_cycle(): void
     {
         $round7 = $this->oldRun('2026-11-15 10:00:00', linksRows: true);
         $this->runRow($this->cy, '2026-11-15', $round7);
 
-        $this->run15()->assertJsonPath('data.member_count', 1)
-            ->assertJsonPath('data.skipped.1.reason', ShareCapitalService::sameHalfReason('15', '2026-11-15'));
+        $this->runFor('2026-11-15')->assertJsonPath('data.member_count', 1)
+            ->assertJsonPath('data.skipped.1.reason', ShareCapitalService::sameHalfReason('2026-11-15', '2026-11-15'));
         $this->on('2026-11-30');
-        $this->run30()->assertJsonPath('data.member_count', 2);
+        $this->runFor('2026-11-30')->assertJsonPath('data.member_count', 2);
 
         $this->assertSame(2, $this->creditsOf($this->cy));
     }
@@ -199,14 +284,14 @@ class AutoCreditCycleTest extends TestCase
     public function test_the_preview_equals_the_run(): void
     {
         $this->handCredit($this->cy, '2026-11-02', null);
-        $this->run15();
+        $this->runFor('2026-11-15');
 
-        foreach (['15', '30'] as $cycle) {
-            $this->on($cycle === '15' ? '2026-11-16' : '2026-11-30');
-            $preview = $this->getJson('/api/auto-credit/status?cycle='.$cycle)->assertOk()->json('data');
-            $run = $this->postJson('/api/auto-credit/process', ['cycle' => $cycle])->assertCreated()->json('data');
+        foreach (['2026-11-15' => '2026-11-16', '2026-11-30' => '2026-11-30', '2026-12-15' => '2026-12-01'] as $cycle => $day) {
+            $this->on($day);
+            $preview = $this->getJson('/api/auto-credit/status?cycle_date='.$cycle)->assertOk()->json('data');
+            $run = $this->postJson('/api/auto-credit/process', ['cycle_date' => $cycle])->assertCreated()->json('data');
 
-            $this->assertSame($cycle, $preview['cycle']);
+            $this->assertSame($cycle, $preview['cycle_date']);
             $this->assertSame($run['member_count'], $preview['active_count'], "cycle {$cycle}: members");
             $this->assertEquals($run['total_amount'], $preview['total_to_credit'], "cycle {$cycle}: total");
             $this->assertSame($run['skipped_count'], $preview['skipped_count'], "cycle {$cycle}: skipped");
@@ -218,62 +303,57 @@ class AutoCreditCycleTest extends TestCase
         }
     }
 
-    public function test_the_status_defaults_the_cycle_by_todays_date_in_manila(): void
+    public function test_the_status_defaults_to_the_current_cycle_in_manila_and_lists_the_allowed_ones(): void
     {
-        // Nov 15, 23:30 in Manila (15:30 UTC): the 15th.
+        // Nov 15, 23:30 in Manila (15:30 UTC): the November 15 cycle.
         Carbon::setTestNow(Carbon::parse('2026-11-15 15:30:00', 'UTC'));
-        $this->getJson('/api/auto-credit/status')->assertOk()->assertJsonPath('data.cycle', '15');
+        $this->getJson('/api/auto-credit/status')->assertOk()->assertJsonPath('data.cycle_date', '2026-11-15');
 
-        // Nov 16, 00:30 in Manila (Nov 15 in UTC): the 30th.
+        // Nov 16, 00:30 in Manila (Nov 15 in UTC): the November 30 cycle.
         Carbon::setTestNow(Carbon::parse('2026-11-15 16:30:00', 'UTC'));
-        $this->getJson('/api/auto-credit/status')->assertOk()->assertJsonPath('data.cycle', '30')
-            ->assertJsonPath('data.active_count', 2);
-
-        $this->getJson('/api/auto-credit/status?cycle=15')->assertOk()->assertJsonPath('data.cycle', '15')
+        $data = $this->getJson('/api/auto-credit/status')->assertOk()
+            ->assertJsonPath('data.cycle_date', '2026-11-30')
+            ->assertJsonPath('data.cycle_label', 'November 30')
             ->assertJsonPath('data.active_count', 2)
-            ->assertJsonPath('data.skipped_members.0.reason', ShareCapitalService::otherHalfReason('30', '15'));
+            ->json('data');
+
+        // The current cycle first, then each earlier one back to 92 days ago (Aug 16).
+        $this->assertSame(
+            ['2026-11-30', '2026-11-15', '2026-10-31', '2026-10-15', '2026-09-30', '2026-09-15', '2026-08-31'],
+            array_column($data['cycle_options'], 'date'),
+        );
+        $this->assertSame(['date' => '2026-10-31', 'label' => 'October 31'], $data['cycle_options'][2]);
+
+        $this->getJson('/api/auto-credit/status?cycle_date=2026-11-15')->assertOk()
+            ->assertJsonPath('data.cycle_date', '2026-11-15')
+            ->assertJsonPath('data.active_count', 2)
+            ->assertJsonPath('data.skipped_members.0.reason', ShareCapitalService::otherHalfReason('30', '2026-11-15'));
     }
 
-    public function test_the_run_needs_its_cycle_in_words(): void
+    public function test_february_ends_its_30th_cycle_on_the_28th(): void
     {
-        $this->postJson('/api/auto-credit/process')->assertUnprocessable()
-            ->assertJsonPath('errors.cycle.0', 'Choose the half of the month this run is for: the 15th or the 30th.');
-
-        foreach (['31', '1', 'fifteenth', ['15']] as $wrong) {
-            $this->postJson('/api/auto-credit/process', ['cycle' => $wrong])->assertUnprocessable()
-                ->assertJsonPath('errors.cycle.0', 'A run is for the 15th or the 30th.');
-        }
-
-        $this->getJson('/api/auto-credit/status?cycle=31')->assertUnprocessable()
-            ->assertJsonPath('errors.cycle.0', 'A run is for the 15th or the 30th.');
-
-        $this->assertSame(0, AutoCreditRun::query()->count());
-        $this->assertSame(0, ShareCapitalLedger::query()->count());
+        $this->on('2027-02-20');
+        $this->getJson('/api/auto-credit/status')->assertOk()->assertJsonPath('data.cycle_date', '2027-02-28')
+            ->assertJsonPath('data.cycle_label', 'February 28');
+        $this->runFor('2027-02-28')->assertJsonPath('data.member_count', 2);
     }
 
-    public function test_a_numeric_cycle_is_read_as_its_half(): void
+    public function test_the_run_stores_its_cycle_and_names_it(): void
     {
-        $this->postJson('/api/auto-credit/process', ['cycle' => 15])->assertCreated()->assertJsonPath('data.cycle', '15');
-    }
-
-    public function test_the_run_stores_its_cycle_and_names_its_half(): void
-    {
-        $id = $this->run15()
-            ->assertJsonPath('message', 'Auto-credit for the 15th processed for 2 members. Total: ₱700.00.')
+        $id = $this->runFor('2026-11-15')
+            ->assertJsonPath('message', 'Auto-credit for November 15 processed for 2 members. Total: ₱700.00.')
+            ->assertJsonPath('data.cycle_label', 'November 15')
             ->json('data.id');
 
-        $this->assertSame('15', AutoCreditRun::query()->findOrFail($id)->cycle);
-        $this->getJson('/api/auto-credit/status')->assertOk()->assertJsonPath('data.last_run.cycle', '15');
+        $this->assertSame('2026-11-15', AutoCreditRun::query()->findOrFail($id)->cycle_date->toDateString());
+        $this->getJson('/api/auto-credit/status')->assertOk()
+            ->assertJsonPath('data.last_run.cycle_date', '2026-11-15')
+            ->assertJsonPath('data.last_run.cycle_label', 'November 15');
     }
 
-    private function run15(): TestResponse
+    private function runFor(string $cycleDate): TestResponse
     {
-        return $this->postJson('/api/auto-credit/process', ['cycle' => '15'])->assertCreated();
-    }
-
-    private function run30(): TestResponse
-    {
-        return $this->postJson('/api/auto-credit/process', ['cycle' => '30'])->assertCreated();
+        return $this->postJson('/api/auto-credit/process', ['cycle_date' => $cycleDate])->assertCreated();
     }
 
     private function on(string $date): void

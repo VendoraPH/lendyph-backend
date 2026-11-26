@@ -8,6 +8,7 @@ use App\Models\Borrower;
 use App\Models\GCashTier;
 use App\Models\GCashTransaction;
 use App\Models\ShareCapitalLedger;
+use App\Services\ShareCapitalService;
 use Tests\TestCase;
 use Tests\Traits\SetupLendyPH;
 
@@ -52,7 +53,7 @@ class WithoutBooksTest extends TestCase
             ],
         ])->assertCreated()->assertJsonPath('count', 2);
 
-        $this->postJson('/api/auto-credit/process', ['cycle' => '30'])->assertCreated()->assertJsonPath('data.member_count', 1);
+        $this->postJson('/api/auto-credit/process', ['cycle_date' => ShareCapitalService::currentCycleDate()])->assertCreated()->assertJsonPath('data.member_count', 1);
 
         $pending = $this->postJson('/api/gcash/transactions', ['borrower_id' => $member->id, 'type' => 'cash_in', 'amount' => 1000, 'is_pending' => true])
             ->assertCreated()->json('data.id');

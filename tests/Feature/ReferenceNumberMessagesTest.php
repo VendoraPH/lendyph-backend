@@ -4,6 +4,7 @@ namespace Tests\Feature;
 
 use App\Models\Loan;
 use App\Models\ShareCapitalPledge;
+use App\Services\ShareCapitalService;
 use Tests\TestCase;
 use Tests\Traits\SetupLendyPH;
 
@@ -61,7 +62,7 @@ class ReferenceNumberMessagesTest extends TestCase
 
     public function test_an_overlong_reference_is_refused_in_words(): void
     {
-        $requests = $this->requests() + ['auto-credit' => ['POST', '/api/auto-credit/process', ['cycle' => '30']]];
+        $requests = $this->requests() + ['auto-credit' => ['POST', '/api/auto-credit/process', ['cycle_date' => ShareCapitalService::currentCycleDate()]]];
 
         foreach ($requests as $name => [$method, $url, $body]) {
             $response = $this->json($method, $url, $body + ['method' => 'cash', 'reference_number' => str_repeat('R', 101)])->assertStatus(422);

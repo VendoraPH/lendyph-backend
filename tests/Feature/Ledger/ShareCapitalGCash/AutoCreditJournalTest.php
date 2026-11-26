@@ -6,6 +6,7 @@ use App\Models\AutoCreditRun;
 use App\Models\Borrower;
 use App\Models\ShareCapitalLedger;
 use App\Services\GeneratedNumberWrite;
+use App\Services\ShareCapitalService;
 use Illuminate\Support\Carbon;
 use Tests\TestCase;
 use Tests\Traits\PostsJournals;
@@ -45,7 +46,7 @@ class AutoCreditJournalTest extends TestCase
 
     public function test_a_run_defaults_to_the_bank_and_posts_one_journal_per_member(): void
     {
-        $this->postJson('/api/auto-credit/process', ['cycle' => '30'])->assertCreated()->assertJsonPath('data.member_count', 2);
+        $this->postJson('/api/auto-credit/process', ['cycle_date' => ShareCapitalService::currentCycleDate()])->assertCreated()->assertJsonPath('data.member_count', 2);
 
         $this->assertCount(2, $this->journalsFrom('share_capital'));
 
@@ -62,7 +63,7 @@ class AutoCreditJournalTest extends TestCase
 
     public function test_a_picked_method_and_reference_are_honoured(): void
     {
-        $this->postJson('/api/auto-credit/process', ['cycle' => '30', 'method' => 'gcash', 'reference_number' => 'GC-RUN-11'])->assertCreated();
+        $this->postJson('/api/auto-credit/process', ['cycle_date' => ShareCapitalService::currentCycleDate(), 'method' => 'gcash', 'reference_number' => 'GC-RUN-11'])->assertCreated();
 
         foreach ([$this->first, $this->second] as $member) {
             $row = $this->rowOf($member);
@@ -74,7 +75,7 @@ class AutoCreditJournalTest extends TestCase
 
     public function test_cash_needs_no_reference_and_neither_does_any_other_method(): void
     {
-        $this->postJson('/api/auto-credit/process', ['cycle' => '30', 'method' => 'cash'])->assertCreated();
+        $this->postJson('/api/auto-credit/process', ['cycle_date' => ShareCapitalService::currentCycleDate(), 'method' => 'cash'])->assertCreated();
 
         $this->assertSame(['1010 Dr 50000', '3060 Cr 50000'], $this->linesOf($this->journalOn($this->rowOf($this->first), 'share_capital')));
     }
@@ -82,11 +83,11 @@ class AutoCreditJournalTest extends TestCase
     public function test_a_method_outside_the_run_list_is_refused_and_nothing_is_posted(): void
     {
         foreach (['online', 'auto_pay', 'cheque'] as $method) {
-            $this->postJson('/api/auto-credit/process', ['cycle' => '30', 'method' => $method])
+            $this->postJson('/api/auto-credit/process', ['cycle_date' => ShareCapitalService::currentCycleDate(), 'method' => $method])
                 ->assertUnprocessable()->assertJsonValidationErrors('method');
         }
 
-        $this->postJson('/api/auto-credit/process', ['cycle' => '30', 'method' => 'maya', 'reference_number' => str_repeat('1', 101)])
+        $this->postJson('/api/auto-credit/process', ['cycle_date' => ShareCapitalService::currentCycleDate(), 'method' => 'maya', 'reference_number' => str_repeat('1', 101)])
             ->assertUnprocessable()->assertJsonValidationErrors('reference_number');
 
         $this->assertSame(0, ShareCapitalLedger::count());
@@ -102,7 +103,7 @@ class AutoCreditJournalTest extends TestCase
         ShareCapitalLedger::factory()->create(['borrower_id' => $this->first->id, 'date' => '2026-11-09', 'reference' => 'SC-20261109-000003', 'credit' => 0, 'debit' => 1]);
         ShareCapitalLedger::factory()->create(['borrower_id' => $this->first->id, 'date' => '2026-11-09', 'reference' => 'SC-20261109-000001', 'credit' => 0, 'debit' => 1]);
 
-        $this->postJson('/api/auto-credit/process', ['cycle' => '30'])
+        $this->postJson('/api/auto-credit/process', ['cycle_date' => ShareCapitalService::currentCycleDate()])
             ->assertStatus(409)->assertExactJson(['message' => GeneratedNumberWrite::SHARE_CAPITAL_CONFLICT]);
 
         $this->assertSame(2, ShareCapitalLedger::count());
@@ -117,7 +118,7 @@ class AutoCreditJournalTest extends TestCase
         $clerk->givePermissionTo(['share_capital:view', 'share_capital:create', 'share_capital:update']);
         $this->actingAs($clerk);
 
-        $this->postJson('/api/auto-credit/process', ['cycle' => '30', 'method' => 'cash'])->assertForbidden();
+        $this->postJson('/api/auto-credit/process', ['cycle_date' => ShareCapitalService::currentCycleDate(), 'method' => 'cash'])->assertForbidden();
 
         $this->assertSame(0, ShareCapitalLedger::count());
         $this->assertSame(0, AutoCreditRun::count());

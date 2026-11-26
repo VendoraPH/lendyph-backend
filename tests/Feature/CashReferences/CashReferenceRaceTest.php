@@ -79,7 +79,7 @@ class CashReferenceRaceTest extends TestCase
             'auto-credit run' => [function (): TestResponse {
                 $this->member->shareCapitalPledge->update(['auto_credit' => true]);
 
-                return $this->postJson('/api/auto-credit/process', ['cycle' => '30', 'method' => 'cash'])->assertCreated();
+                return $this->postJson('/api/auto-credit/process', ['cycle_date' => ShareCapitalService::currentCycleDate(), 'method' => 'cash'])->assertCreated();
             }, false],
         ];
 

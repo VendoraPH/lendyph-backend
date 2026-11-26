@@ -5,6 +5,7 @@ use App\Models\Borrower;
 use App\Models\Branch;
 use App\Models\ShareCapitalPledge;
 use App\Models\User;
+use App\Services\ShareCapitalService;
 use Illuminate\Validation\ValidationException;
 use Tests\TestCase;
 
@@ -156,7 +157,7 @@ it('keeps a pending applicant out of auto-credit even after an approval attempt 
 
     $this->patchJson("/api/pledges/{$pledge->id}/auto-credit")->assertUnprocessable();
 
-    $this->postJson('/api/auto-credit/process', ['cycle' => '30'])
+    $this->postJson('/api/auto-credit/process', ['cycle_date' => ShareCapitalService::currentCycleDate()])
         ->assertCreated()
         ->assertJsonPath('data.member_count', 0);
 

@@ -10,6 +10,7 @@ use App\Models\ShareCapitalPledge;
 use App\Models\User;
 use App\Services\Accounting\AutomaticPoster;
 use App\Services\Branches\BranchRowLock;
+use App\Services\Savings\AutoCredit\Cycle;
 use Carbon\CarbonImmutable;
 use Carbon\CarbonInterface;
 use Closure;
@@ -109,40 +110,109 @@ class ShareCapitalService
     }
 
     /**
-     * The half of the month a day falls in (finish run round 8): the 1st to
-     * the 15th is the 15th's (`15`), later days the 30th's (`30`). It is the
-     * run's suggested cycle for today in Manila, and the half an old run's row
-     * (no cycle) counts toward, by its date.
+     * The cycle a day falls in (finish run round 8), as the savings
+     * auto-credit's cycles: the 1st to the 15th falls in that month's 15th,
+     * later days in its 30th (the month's last day: Feb 28 or 29, Nov 30,
+     * Dec 31). Today's (Manila) is the run's current cycle, its default; an
+     * old run's row (no cycle recorded) counts toward the cycle its date falls
+     * in.
      */
-    public static function cycleFor(CarbonInterface $day): string
+    public static function cycleOf(CarbonInterface $day): CarbonImmutable
     {
-        return $day->day <= 15 ? '15' : '30';
+        $date = CarbonImmutable::parse($day->toDateString(), self::TIMEZONE);
+
+        return $date->day <= 15 ? $date->setDay(15) : $date->endOfMonth()->startOfDay();
     }
 
-    /** "the 15th" or "the 30th". */
-    public static function cycleWords(string $cycle): string
+    /** The current cycle, by today in Manila, as YYYY-MM-DD. */
+    public static function currentCycleDate(): string
     {
-        return $cycle === '15' ? 'the 15th' : 'the 30th';
+        return self::cycleOf(CarbonImmutable::now(self::TIMEZONE))->toDateString();
+    }
+
+    /**
+     * The cycles a run on `$today` may take, newest first: the current one,
+     * then each earlier one (a missed run) up to Cycle::LOOKBACK_DAYS days
+     * ago, as the savings auto-credit allows. Never a future one.
+     *
+     * @return list<string>
+     */
+    public static function cycleOptions(CarbonInterface $today): array
+    {
+        $earliest = CarbonImmutable::parse($today->toDateString(), self::TIMEZONE)->subDays(Cycle::LOOKBACK_DAYS);
+        $cycle = self::cycleOf($today);
+        $options = [];
+
+        while ($cycle->gte($earliest)) {
+            $options[] = $cycle->toDateString();
+            $cycle = $cycle->day === 15 ? $cycle->subMonthNoOverflow()->endOfMonth()->startOfDay() : $cycle->setDay(15);
+        }
+
+        return $options;
+    }
+
+    /**
+     * Why a run can't take `$date` on `$today`, in words, or null when it
+     * can (a YYYY-MM-DD already checked): not a 15th or a month's last day, a
+     * future cycle ("The 30th run for November opens on Nov 16."), or one more
+     * than Cycle::LOOKBACK_DAYS days ago.
+     */
+    public static function cycleRefusal(string $date, CarbonInterface $today): ?string
+    {
+        $slot = Cycle::slotOf($date);
+
+        if ($slot === null) {
+            return "A run is for a month's 15th or its 30th (the month's last day).";
+        }
+
+        $cycle = CarbonImmutable::parse($date, self::TIMEZONE)->startOfDay();
+        $todayDate = CarbonImmutable::parse($today->toDateString(), self::TIMEZONE);
+
+        if ($cycle->gt(self::cycleOf($todayDate))) {
+            $opens = $slot === '15' ? $cycle->startOfMonth() : $cycle->setDay(16);
+            $month = $cycle->year === $todayDate->year ? $cycle->format('F') : $cycle->format('F Y');
+
+            return 'The '.($slot === '15' ? '15th' : '30th')." run for {$month} opens on ".$opens->format('M j').'.';
+        }
+
+        if ($cycle->lt($todayDate->subDays(Cycle::LOOKBACK_DAYS))) {
+            return 'A missed run can be made for a cycle up to '.Cycle::LOOKBACK_DAYS.' days ago.';
+        }
+
+        return null;
+    }
+
+    /** A cycle in words: "November 15", "November 30", "February 28". */
+    public static function cycleLabel(string $date): string
+    {
+        return CarbonImmutable::parse($date)->format('F j');
+    }
+
+    /** A schedule's half in words: "the 15th" or "the 30th". */
+    public static function cycleWords(string $slot): string
+    {
+        return $slot === '15' ? 'the 15th' : 'the 30th';
     }
 
     /**
      * Why a run skips a pledge credited in the other half only (finish run
-     * round 8): "This pledge is credited on the 30th, so the 15th run skips
-     * it."
+     * round 8): "This pledge is credited on the 30th, so the November 15 run
+     * skips it."
      */
-    public static function otherHalfReason(string $schedule, string $cycle): string
+    public static function otherHalfReason(string $schedule, string $cycleDate): string
     {
-        return 'This pledge is credited on '.self::cycleWords($schedule).', so '.self::cycleWords($cycle).' run skips it.';
+        return 'This pledge is credited on '.self::cycleWords($schedule).', so the '.self::cycleLabel($cycleDate).' run skips it.';
     }
 
     /**
-     * Why a run skips a pledge a run already credited in its half this month
-     * (finish run round 8), naming that credit's date.
+     * Why a run skips a pledge a run already credited for its cycle (finish
+     * run round 8), naming that credit's date.
      */
-    public static function sameHalfReason(string $cycle, string $date): string
+    public static function sameHalfReason(string $cycleDate, string $creditDate): string
     {
-        return 'Credited by auto-credit for '.self::cycleWords($cycle).' on '.Carbon::parse($date)->format('M j, Y')
-            .', so '.self::cycleWords($cycle).' run skips it this month.';
+        $label = self::cycleLabel($cycleDate);
+
+        return "Credited by auto-credit for {$label} on ".Carbon::parse($creditDate)->format('M j, Y').", so the {$label} run skips it.";
     }
 
     /**
@@ -159,9 +229,12 @@ class ShareCapitalService
      * credit that counted, by hand (its first hand credit, with its reference)
      * or by auto-credit, in date order.
      *
+     * `$month` ("November 2026") names the month counted when it isn't the
+     * run's own (a missed run, finish run round 8); otherwise "this month".
+     *
      * @param  list<array{0: 'hand'|'auto_credit', 1: string, 2: string|null}>  $credits
      */
-    public static function alreadyCreditedReason(array $credits): string
+    public static function alreadyCreditedReason(array $credits, ?string $month = null): string
     {
         $parts = array_map(function (array $credit): string {
             [$by, $date, $reference] = $credit;
@@ -172,7 +245,7 @@ class ShareCapitalService
         $last = array_pop($parts);
         $list = $parts === [] ? $last : implode(', ', $parts).' and '.$last;
 
-        return "Credited {$list}, so auto-credit skips it this month.";
+        return "Credited {$list}, so auto-credit skips it ".($month === null ? 'this month' : "for {$month}").'.';
     }
 
     /**
@@ -205,22 +278,33 @@ class ShareCapitalService
      * hand debits, and by earlier runs; alreadyCreditedThisMonth()) is skipped, with the reason stored on the run (AutoCreditRunSkip) and
      * returned as the run's `skips` relation.
      *
-     * The run is for one half of the month, `$cycle` (finish run round 8),
-     * stored on it: it credits only the pledges whose schedule falls in that
-     * half, and at most once per half by runs, on top of the monthly cap.
+     * The run is for one cycle, `$cycleDate` (finish run round 8): a month's
+     * 15th or its 30th, the current one or a missed one (cycleRefusal()),
+     * stored on it. It credits only the pledges whose schedule falls in that
+     * half, at most once per cycle by runs, on top of the monthly cap, both
+     * counted in the cycle's month; its rows are dated the run's day.
      * Two runs for the same half at once: the second's credit waits on the
      * first's locked month rows, and a deadlock or a wait too long answers
      * 409 with nothing posted (AutoCreditCycleRaceTest).
      *
-     * @param  '15'|'30'  $cycle
+     * @param  string  $cycleDate  YYYY-MM-DD
+     *
+     * @throws ValidationException a cycle the run can't take, on `cycle_date`
      */
     public function processAutoCredit(
         User $user,
-        string $cycle,
+        string $cycleDate,
         ?User $scopeTo = null,
         string $method = 'bank_transfer',
         ?string $referenceNumber = null,
     ): AutoCreditRun {
+        $refusal = self::cycleRefusal($cycleDate, CarbonImmutable::now(self::TIMEZONE));
+
+        if ($refusal !== null) {
+            throw ValidationException::withMessages(['cycle_date' => $refusal]);
+        }
+
+        $cycle = CarbonImmutable::parse($cycleDate, self::TIMEZONE)->startOfDay();
         $eligiblePledges = ShareCapitalPledge::with('borrower')
             ->forCurrentMembers()
             ->when($scopeTo !== null, fn ($q) => $q->whereHas('borrower', fn ($b) => $b->visibleTo($scopeTo)))
@@ -244,7 +328,7 @@ class ShareCapitalService
 
             $runDay = CarbonImmutable::now(self::TIMEZONE);
             $locked = $this->stillOnAutoCredit($eligiblePledges);
-            $skipReasons = $this->alreadyCreditedThisMonth($locked, $runDay, $cycle, true);
+            $skipReasons = $this->alreadyCreditedThisMonth($locked, $cycle, $runDay, true);
             $toCredit = $locked->reject(fn (ShareCapitalPledge $pledge): bool => isset($skipReasons[$pledge->borrower_id]));
             $totalCentavos = $toCredit->sum(fn (ShareCapitalPledge $pledge): int => LoanService::toCentavos((float) $pledge->amount));
 
@@ -258,7 +342,7 @@ class ShareCapitalService
                 'processed_at' => now(),
                 'processed_by' => $user->id,
                 'status' => 'completed',
-                'cycle' => $cycle,
+                'cycle_date' => $cycle->toDateString(),
             ]);
 
             $rows = [];
@@ -336,22 +420,24 @@ class ShareCapitalService
     /**
      * The pledges a run for `$cycle` skips, each with the reason in words:
      * member id => reason. In this order (finish run round 8):
-     * - a pledge whose schedule isn't credited in this half (a "30" pledge on
-     *   the 15th's run, a "15" pledge on the 30th's);
-     * - a pledge a run already credited in this half this month. A run row's
-     *   half is its run's cycle; a row from a run made before cycles (none
-     *   recorded, or not linked to its run) counts toward the half its date
-     *   falls in (cycleFor());
-     * - a pledge whose month's instalments are all in already (round 7, below).
+     * - a pledge whose schedule isn't credited in the cycle's half (a "30"
+     *   pledge on a 15th's run, a "15" pledge on a 30th's);
+     * - a pledge a run already credited for this cycle. A run row counts for
+     *   its run's cycle (`cycle_date`), whatever day it ran, so a Nov 30 run
+     *   done on Dec 1 counts for November. A row from a run made before cycles
+     *   (none recorded, or not linked to its run) counts for the cycle its
+     *   date falls in (cycleOf());
+     * - a pledge whose month's instalments are all in already (round 7, below),
+     *   counted in the cycle's month.
      *
-     * A pledge takes INSTALMENTS_PER_MONTH instalments in the run's month in
-     * Manila: 1 for "15" or "30", 2 for "15/30". Its credits this month count
-     * as:
+     * A pledge takes INSTALMENTS_PER_MONTH instalments in the cycle's month
+     * (Manila): 1 for "15" or "30", 2 for "15/30". Its credits in that month
+     * count as:
      * - one instalment for its hand credits less its hand debits, while that
      *   is above ₱0.00 (in centavos), so a credit posted by mistake and
      *   debited back doesn't count. Accepted as asked: an unrelated hand debit
      *   in the month nets a hand credit away too, and the run credits again;
-     * - one for each auto-credit row in the month.
+     * - one for each auto-credit row counting for a cycle in the month.
      * A run credits a pledge only while that count is below its instalments,
      * whatever day it runs, so a run done late or twice never credits beyond
      * the month's instalments (two runs in one month credit a monthly pledge
@@ -365,12 +451,14 @@ class ShareCapitalService
      * that description later counts as by hand.
      *
      * In the run (`$lock`), it reads FOR SHARE: the latest committed rows,
-     * and the members' rows in the month stay as read until the run commits.
+     * from the month's first day to Cycle::LOOKBACK_DAYS days after its last
+     * (where a missed run's rows, and this run's own, are dated), stay as read
+     * until the run commits.
      *
      * @param  Collection<int, ShareCapitalPledge>  $pledges
      * @return array<int, string>
      */
-    private function alreadyCreditedThisMonth(Collection $pledges, CarbonImmutable $day, string $cycle, bool $lock = false): array
+    private function alreadyCreditedThisMonth(Collection $pledges, CarbonImmutable $cycle, CarbonImmutable $runDay, bool $lock = false): array
     {
         if ($pledges->isEmpty()) {
             return [];
@@ -380,7 +468,7 @@ class ShareCapitalService
 
         $rows = ShareCapitalLedger::query()
             ->whereIn('borrower_id', $pledges->pluck('borrower_id')->unique()->values()->all())
-            ->whereBetween('date', [$day->startOfMonth()->toDateString(), $day->endOfMonth()->toDateString()])
+            ->whereBetween('date', [$cycle->startOfMonth()->toDateString(), $cycle->endOfMonth()->addDays(Cycle::LOOKBACK_DAYS)->toDateString()])
             ->whereNull('repayment_id')
             ->whereNull('loan_id')
             ->whereNull('savings_transaction_id')
@@ -400,24 +488,32 @@ class ShareCapitalService
 
         $runCycles = AutoCreditRun::query()
             ->whereKey($rows->collapse()->pluck('auto_credit_run_id')->filter()->unique()->values()->all())
-            ->pluck('cycle', 'id');
-        $halfOf = fn (ShareCapitalLedger $row): string => $runCycles->get($row->auto_credit_run_id) ?? self::cycleFor($row->date);
+            ->get(['id', 'cycle_date'])
+            ->mapWithKeys(fn (AutoCreditRun $run): array => [$run->id => $run->cycle_date?->toDateString()]);
+        $cycleOfRow = fn (ShareCapitalLedger $row): string => $runCycles->get($row->auto_credit_run_id) ?? self::cycleOf($row->date)->toDateString();
+        $cycleDate = $cycle->toDateString();
+        $slot = Cycle::slotOf($cycleDate);
+        $month = $cycle->format('Y-m');
+        $monthWords = $month === $runDay->format('Y-m') ? null : $cycle->format('F Y');
 
         $reasons = [];
 
         foreach ($pledges as $pledge) {
-            if (! in_array($cycle, self::CYCLES_BY_SCHEDULE[$pledge->schedule] ?? self::CYCLES, true)) {
-                $reasons[$pledge->borrower_id] = self::otherHalfReason($pledge->schedule, $cycle);
+            if (! in_array($slot, self::CYCLES_BY_SCHEDULE[$pledge->schedule] ?? self::CYCLES, true)) {
+                $reasons[$pledge->borrower_id] = self::otherHalfReason($pledge->schedule, $cycleDate);
 
                 continue;
             }
 
             $memberRows = $rows->get($pledge->borrower_id) ?? collect();
             [$runRows, $handRows] = $memberRows->partition($isRunRow);
-            $sameHalf = $runRows->first(fn (ShareCapitalLedger $row): bool => (float) $row->credit > 0 && $halfOf($row) === $cycle);
+            // Each in the cycle's month: a run row by its cycle, a hand row by its date.
+            $runRows = $runRows->filter(fn (ShareCapitalLedger $row): bool => str_starts_with($cycleOfRow($row), $month.'-'));
+            $handRows = $handRows->filter(fn (ShareCapitalLedger $row): bool => $row->date->format('Y-m') === $month);
+            $sameCycle = $runRows->first(fn (ShareCapitalLedger $row): bool => (float) $row->credit > 0 && $cycleOfRow($row) === $cycleDate);
 
-            if ($sameHalf !== null) {
-                $reasons[$pledge->borrower_id] = self::sameHalfReason($cycle, $sameHalf->date->toDateString());
+            if ($sameCycle !== null) {
+                $reasons[$pledge->borrower_id] = self::sameHalfReason($cycleDate, $sameCycle->date->toDateString());
 
                 continue;
             }
@@ -438,7 +534,7 @@ class ShareCapitalService
 
             if (count($credits) >= (self::INSTALMENTS_PER_MONTH[$pledge->schedule] ?? 1)) {
                 usort($credits, fn (array $a, array $b): int => strcmp($a[1], $b[1]));
-                $reasons[$pledge->borrower_id] = self::alreadyCreditedReason($credits);
+                $reasons[$pledge->borrower_id] = self::alreadyCreditedReason($credits, $monthWords);
             }
         }
 
@@ -506,11 +602,12 @@ class ShareCapitalService
      *
      * @return array<string, mixed>
      */
-    public function getAutoCreditStatus(?User $scopeTo = null, ?string $cycle = null): array
+    public function getAutoCreditStatus(?User $scopeTo = null, ?string $cycleDate = null): array
     {
-        // The run's half (finish run round 8): as asked, else by today in Manila.
+        // The run's cycle (finish run round 8): as asked, else the current one
+        // by today in Manila.
         $today = CarbonImmutable::now(self::TIMEZONE);
-        $cycle ??= self::cycleFor($today);
+        $cycle = $cycleDate === null ? self::cycleOf($today) : CarbonImmutable::parse($cycleDate, self::TIMEZONE)->startOfDay();
 
         $allPledges = ShareCapitalPledge::with('borrower')
             ->forCurrentMembers()
@@ -521,7 +618,7 @@ class ShareCapitalService
         // The run's preview (finish run round 7): a pledge whose month's
         // instalments are all in already is listed as skipped, with its reason,
         // and left out of the members and total the run would credit.
-        $skipReasons = $this->alreadyCreditedThisMonth($onAutoCredit, $today, $cycle);
+        $skipReasons = $this->alreadyCreditedThisMonth($onAutoCredit, $cycle, $today);
         $activeMembers = $onAutoCredit->reject(fn ($p) => isset($skipReasons[$p->borrower_id]));
         $skippedMembers = $onAutoCredit->filter(fn ($p) => isset($skipReasons[$p->borrower_id]));
         $disabledMembers = $allPledges->filter(fn ($p) => ! $p->auto_credit);
@@ -535,7 +632,10 @@ class ShareCapitalService
         $runTotalsVisible = $scopeTo === null || app(BranchAccess::class)->for($scopeTo) === null;
 
         return [
-            'cycle' => $cycle,
+            'cycle_date' => $cycle->toDateString(),
+            'cycle_label' => self::cycleLabel($cycle->toDateString()),
+            // The cycles a run may take now, the current one first.
+            'cycle_options' => array_map(fn (string $date): array => ['date' => $date, 'label' => self::cycleLabel($date)], self::cycleOptions($today)),
             'active_count' => $activeMembers->count(),
             'total_to_credit' => round($activeMembers->sum(fn ($p) => (float) $p->amount), 2),
             'disabled_count' => $disabledMembers->count(),
@@ -548,7 +648,8 @@ class ShareCapitalService
                 'skipped_count' => $runTotalsVisible ? (int) $lastRun->skipped_count : null,
                 'processed_at' => $lastRun->processed_at?->toDateTimeString(),
                 'status' => $lastRun->status,
-                'cycle' => $lastRun->cycle,
+                'cycle_date' => $lastRun->cycle_date?->toDateString(),
+                'cycle_label' => $lastRun->cycle_date === null ? null : self::cycleLabel($lastRun->cycle_date->toDateString()),
             ] : null,
             'active_members' => $activeMembers->map(fn ($p) => [
                 'id' => $p->id,

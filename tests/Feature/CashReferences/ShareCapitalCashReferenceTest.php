@@ -7,6 +7,7 @@ use App\Models\Role;
 use App\Models\ShareCapitalLedger;
 use App\Models\User;
 use App\Services\CashReferences;
+use App\Services\ShareCapitalService;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
@@ -170,7 +171,7 @@ class ShareCapitalCashReferenceTest extends TestCase
     {
         $this->member->shareCapitalPledge->update(['auto_credit' => true, 'amount' => 500]);
 
-        $this->postJson('/api/auto-credit/process', ['cycle' => '30', 'method' => 'cash'])->assertCreated();
+        $this->postJson('/api/auto-credit/process', ['cycle_date' => ShareCapitalService::currentCycleDate(), 'method' => 'cash'])->assertCreated();
 
         $this->assertNull(ShareCapitalLedger::query()->sole()->reference_number);
         $this->assertSame(0, DB::table('cash_reference_sequences')->count());
