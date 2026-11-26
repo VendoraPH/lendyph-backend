@@ -101,6 +101,31 @@ class LindaLoanNoLookupTest extends LindaAnswersTestCase
         $this->assertSame([$own->id], LindaQuestion::query()->latest('id')->firstOrFail()->loan_ids);
     }
 
+    /** @return array<string, array{string, string}> */
+    public static function lineBreaks(): array
+    {
+        return [
+            'a line feed' => ["How about PN\n42?", 'PN 42'],
+            'a carriage return and line feed' => ["How about LN\r\n0042?", 'LN 0042'],
+            'a carriage return' => ["How about PN\r42?", 'PN 42'],
+        ];
+    }
+
+    /**
+     * Shift+Enter or a pasted cell puts a line break between a prefix and its
+     * number; it reads as a space, so the question stays on the server.
+     */
+    #[DataProvider('lineBreaks')]
+    public function test_a_line_break_between_a_prefix_and_its_number_stays_on_the_server(string $question, string $loanNo): void
+    {
+        $this->loan->forceFill(['external_loan_no' => $loanNo])->save();
+
+        $this->actingAs($this->asker)->postJson(self::URL, ['message' => $question])->assertOk();
+
+        $this->assertSame([], $this->fake->requests, 'The model was asked: '.json_encode($question));
+        $this->assertSame(LindaQuestion::SOURCE_LOOKUP, LindaQuestion::query()->latest('id')->firstOrFail()->source);
+    }
+
     public function test_another_branchs_loan_no_reads_as_not_found_and_stays_on_the_server(): void
     {
         $user = $this->userWith(['loans:view', 'borrowers:view', 'linda:use'], $this->far);

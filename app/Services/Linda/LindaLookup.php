@@ -394,7 +394,8 @@ final class LindaLookup
 
     /**
      * NFKC, with invisible format characters (zero-width spaces, soft
-     * hyphens) dropped, every Unicode dash read as "-" and every space as " ".
+     * hyphens) dropped, every Unicode dash read as "-" and every space and
+     * line break as " ".
      * The Loan No. check (LindaLoanNumbers) reads a question the same way.
      *
      * @throws UnexpectedValueException
@@ -410,7 +411,9 @@ final class LindaLookup
         $normal = self::replace('/\p{Cf}/u', '', $normal);
         $normal = self::replace('/[\p{Pd}\x{2212}]/u', '-', $normal);
 
-        return self::replace('/[\p{Zs}\x{00A0}\x{2007}\x{202F}]/u', ' ', $normal);
+        // Vertical white space too (\n, \r, \f and the Unicode line breaks): a
+        // Shift+Enter or a pasted cell between "PN" and "42" reads as a space.
+        return self::replace('/[\p{Zs}\x{00A0}\x{2007}\x{202F}\v]/u', ' ', $normal);
     }
 
     private static function read(#[\SensitiveParameter] string $question): ?LindaLookupRequest
