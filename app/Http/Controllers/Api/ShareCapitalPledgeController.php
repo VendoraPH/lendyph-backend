@@ -16,6 +16,7 @@ use App\Services\LoanService;
 use App\Services\ShareCapitalService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
 use OpenApi\Attributes as OA;
 
@@ -196,11 +197,19 @@ DESC,
 
         $this->assertBorrowerIsMember($pledge);
 
-        $pledge->update(['auto_credit' => ! $pledge->auto_credit]);
+        // Read and flipped under the pledge's row lock (finish run round 7): an
+        // entry by hand or an auto-credit run holding the pledge FOR SHARE is
+        // waited for, and either sees the switch only once it has committed.
+        $autoCredit = DB::transaction(function () use ($pledge): bool {
+            $locked = ShareCapitalPledge::query()->whereKey($pledge->id)->lockForUpdate()->firstOrFail();
+            $locked->update(['auto_credit' => ! $locked->auto_credit]);
+
+            return (bool) $locked->auto_credit;
+        });
 
         return response()->json([
-            'message' => 'Auto-credit '.($pledge->auto_credit ? 'enabled' : 'disabled').'.',
-            'auto_credit' => $pledge->auto_credit,
+            'message' => 'Auto-credit '.($autoCredit ? 'enabled' : 'disabled').'.',
+            'auto_credit' => $autoCredit,
         ]);
     }
 
@@ -216,7 +225,7 @@ DESC,
         responses: [
             new OA\Response(response: 201, description: 'Entry created. A cash entry carries its CSH number in `reference_number` (CSH-[super admin id]-[year]-[0001]); a typed one is ignored for cash.'),
             new OA\Response(response: 409, description: 'Kept colliding with other saves taking the next reference. Nothing was saved; submit again.'),
-            new OA\Response(response: 422, description: 'The pledge belongs to a borrower whose registration is still `pending` or was `rejected`, or the member\'s branch is closed or waiting to close (on `borrower_id`)'),
+            new OA\Response(response: 422, description: 'The pledge belongs to a borrower whose registration is still `pending` or was `rejected`, or the member\'s branch is closed or waiting to close (on `borrower_id`), or the pledge is set to auto-credit, so the auto-credit run credits it (on `pledge_id`, credit or debit, nothing saved)'),
         ],
     )]
     public function manualEntry(ShareCapitalManualEntryRequest $request, ShareCapitalPledge $pledge): JsonResponse
@@ -250,7 +259,7 @@ DESC,
         responses: [
             new OA\Response(response: 201, description: 'Bulk entries created. `data.reference_numbers` lists each row\'s reference in the batch\'s order: a cash batch gives each row its own CSH number (CSH-[super admin id]-[year]-[0001]); any other method stores the batch\'s one reference on every row.'),
             new OA\Response(response: 409, description: 'Collided with another save taking the next reference. Not tried again, so a batch sent twice cannot post twice. Nothing was posted; check the ledger before submitting again.'),
-            new OA\Response(response: 422, description: 'One of the pledges belongs to a borrower whose registration is still `pending` or was `rejected`, or a row\'s member is in a branch that is closed or waiting to close (on `entries.N.pledge_id`)'),
+            new OA\Response(response: 422, description: 'One of the pledges belongs to a borrower whose registration is still `pending` or was `rejected`, or a row\'s member is in a branch that is closed or waiting to close (on `entries.N.pledge_id`), or the batch holds pledges set to auto-credit (on `entries`, naming their members; the whole batch is refused, nothing posted)'),
         ],
     )]
     public function bulkEntry(ShareCapitalBulkEntryRequest $request): JsonResponse

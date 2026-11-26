@@ -3,15 +3,19 @@
 namespace App\Services;
 
 use App\Models\AutoCreditRun;
+use App\Models\AutoCreditRunSkip;
 use App\Models\Borrower;
 use App\Models\ShareCapitalLedger;
 use App\Models\ShareCapitalPledge;
 use App\Models\User;
 use App\Services\Accounting\AutomaticPoster;
 use App\Services\Branches\BranchRowLock;
+use Carbon\CarbonImmutable;
 use Closure;
 use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Database\Eloquent\ModelNotFoundException;
+use Illuminate\Support\Carbon;
+use Illuminate\Validation\ValidationException;
 
 class ShareCapitalService
 {
@@ -48,7 +52,51 @@ class ShareCapitalService
     /** The 409 when a member's membership ended while the run was being saved. */
     public const AUTO_CREDIT_MEMBER_LEFT = 'A member\'s membership ended while auto-credit was running, so it no longer credits them. Nothing was posted; run it again.';
 
+    /** The description every auto-credit row carries, which tells it from an entry by hand. */
+    public const AUTO_CREDIT_DESCRIPTION = 'Monthly pledge - auto-credit';
+
+    /** An auto-credit run's day and month are Manila's (finish run round 7). */
+    public const TIMEZONE = 'Asia/Manila';
+
     public function __construct(private AutomaticPoster $poster, private CashReferences $cashReferences) {}
+
+    /**
+     * The 422 for an entry by hand on a pledge set to auto-credit (finish run
+     * round 7): the run credits it, so an entry by hand could credit a month
+     * twice.
+     */
+    public static function autoCreditPledgeRefusal(string $memberName): string
+    {
+        return "{$memberName}'s pledge is set to auto-credit, so the auto-credit run credits it. Turn auto-credit off for this pledge to record an entry by hand.";
+    }
+
+    /**
+     * The 422 for a bulk batch holding pledges set to auto-credit, naming
+     * them in the batch's order. The whole batch is refused.
+     *
+     * @param  list<string>  $memberNames
+     */
+    public static function autoCreditBatchRefusal(array $memberNames): string
+    {
+        $last = array_pop($memberNames);
+        $names = $memberNames === [] ? $last : implode(', ', $memberNames).' and '.$last;
+
+        return $memberNames === []
+            ? "This pledge is set to auto-credit, so the auto-credit run credits it: {$names}. Take it out of the batch, or turn auto-credit off for it, to record entries by hand."
+            : "These pledges are set to auto-credit, so the auto-credit run credits them: {$names}. Take them out of the batch, or turn auto-credit off for them, to record entries by hand.";
+    }
+
+    /**
+     * Why a run skips a pledge whose member was credited by hand in the run's
+     * month: the first such credit's date and reference.
+     */
+    public static function handCreditedReason(string $date, ?string $reference): string
+    {
+        $on = Carbon::parse($date)->format('M j, Y');
+        $reference = $reference === null || trim($reference) === '' ? '' : ' ('.$reference.')';
+
+        return "Credited by hand on {$on}{$reference}, so auto-credit skips it this month.";
+    }
 
     /**
      * Post one credit per eligible pledge and record the run.
@@ -72,6 +120,13 @@ class ShareCapitalService
      * moved since, or no longer a current member, answers 409. Each row posts
      * in the branch that was locked for it. The rows stay unnumbered: a run's
      * credits get no CSH reference (finish run round 2, decision 5).
+     *
+     * Then the pledges, FOR SHARE in id order (finish run round 7): only those
+     * still set to auto-credit with an amount are credited, at the amount read
+     * under that lock, and their switch can't change until the run commits.
+     * A pledge whose member was credited by hand in the run's month (Manila)
+     * is skipped, with the reason stored on the run (AutoCreditRunSkip) and
+     * returned as the run's `skips` relation.
      */
     public function processAutoCredit(
         User $user,
@@ -100,19 +155,27 @@ class ShareCapitalService
                 self::AUTO_CREDIT_MEMBER_LEFT,
             );
 
-            $today = now()->toDateString();
+            $runDay = CarbonImmutable::now(self::TIMEZONE);
+            $locked = $this->stillOnAutoCredit($eligiblePledges);
+            $skipReasons = $this->handCreditedThisMonth($locked, $runDay, true);
             $totalAmount = 0.0;
+            $credited = 0;
 
             $rows = [];
 
-            foreach ($eligiblePledges as $pledge) {
+            foreach ($locked as $pledge) {
+                if (isset($skipReasons[$pledge->borrower_id])) {
+                    continue;
+                }
+
                 $totalAmount += (float) $pledge->amount;
+                $credited++;
 
                 $rows[] = ShareCapitalLedger::create([
                     'borrower_id' => $pledge->borrower_id,
                     'branch_id' => $pledge->borrower?->branch_id,
-                    'date' => $today,
-                    'description' => 'Monthly pledge - auto-credit',
+                    'date' => $runDay->toDateString(),
+                    'description' => self::AUTO_CREDIT_DESCRIPTION,
                     'debit' => 0,
                     'credit' => $pledge->amount,
                     'method' => $method,
@@ -126,14 +189,160 @@ class ShareCapitalService
             // keeps it for the shortest time.
             $this->postEntries($rows);
 
-            return AutoCreditRun::create([
+            $run = AutoCreditRun::create([
                 'total_amount' => round($totalAmount, 2),
-                'member_count' => $eligiblePledges->count(),
+                'member_count' => $credited,
+                'skipped_count' => count($skipReasons),
                 'processed_at' => now(),
                 'processed_by' => $user->id,
                 'status' => 'completed',
             ]);
+
+            $skips = new Collection;
+
+            foreach ($locked as $pledge) {
+                if (isset($skipReasons[$pledge->borrower_id])) {
+                    $skip = AutoCreditRunSkip::create([
+                        'run_id' => $run->id,
+                        'pledge_id' => $pledge->id,
+                        'borrower_id' => $pledge->borrower_id,
+                        'amount' => $pledge->amount,
+                        'reason' => $skipReasons[$pledge->borrower_id],
+                    ]);
+                    $skips->push($skip->setRelation('borrower', $pledge->borrower));
+                }
+            }
+
+            return $run->setRelation('skips', $skips);
         }, GeneratedNumberWrite::SHARE_CAPITAL_REFERENCE_INDEX, GeneratedNumberWrite::SHARE_CAPITAL_CONFLICT);
+    }
+
+    /**
+     * The run's pledges read again FOR SHARE, in id order, after their
+     * members' rows (the lock order: branches, members, then pledges). Only
+     * those still set to auto-credit with an amount stay, at the amount read
+     * now; their switch and amount can't change until the run commits.
+     *
+     * @param  Collection<int, ShareCapitalPledge>  $eligible
+     * @return Collection<int, ShareCapitalPledge>
+     */
+    private function stillOnAutoCredit(Collection $eligible): Collection
+    {
+        if ($eligible->isEmpty()) {
+            return new Collection;
+        }
+
+        $now = ShareCapitalPledge::query()->whereKey($eligible->modelKeys())->orderBy('id')->sharedLock()
+            ->get(['id', 'auto_credit', 'amount'])->keyBy('id');
+
+        return $eligible->filter(function (ShareCapitalPledge $pledge) use ($now): bool {
+            $current = $now->get($pledge->id);
+
+            if ($current === null || ! $current->auto_credit || (float) $current->amount <= 0) {
+                return false;
+            }
+
+            $pledge->amount = $current->amount;
+
+            return true;
+        })->sortBy('id')->values();
+    }
+
+    /**
+     * The pledges whose member was already credited by hand in `$day`'s month
+     * (Manila), each with the reason in words: member id => reason.
+     *
+     * "By hand" is a standalone credit: not a payment's build-up, a release's
+     * deduction or a savings transfer (each carries its link), not an import,
+     * and not an auto-credit row (AUTO_CREDIT_DESCRIPTION). Pledge Entry's
+     * single and bulk entries and the Share Capital Ledger's own entry all
+     * count. Share capital entries are never reversed or voided (a mistake is
+     * corrected by a new entry), so every such credit counts; a hand debit
+     * doesn't.
+     *
+     * In the run (`$lock`), it reads FOR SHARE: the latest committed rows,
+     * and the members' rows in the month stay as read until the run commits.
+     *
+     * @param  Collection<int, ShareCapitalPledge>  $pledges
+     * @return array<int, string>
+     */
+    private function handCreditedThisMonth(Collection $pledges, CarbonImmutable $day, bool $lock = false): array
+    {
+        if ($pledges->isEmpty()) {
+            return [];
+        }
+
+        $credits = ShareCapitalLedger::query()
+            ->whereIn('borrower_id', $pledges->pluck('borrower_id')->unique()->values()->all())
+            ->whereBetween('date', [$day->startOfMonth()->toDateString(), $day->endOfMonth()->toDateString()])
+            ->where('credit', '>', 0)
+            ->whereNull('repayment_id')
+            ->whereNull('loan_id')
+            ->whereNull('savings_transaction_id')
+            ->where('is_imported', false)
+            ->where('description', '<>', self::AUTO_CREDIT_DESCRIPTION)
+            ->orderBy('borrower_id')
+            ->orderBy('date')
+            ->orderBy('id')
+            ->when($lock, fn ($q) => $q->sharedLock())
+            ->get(['id', 'borrower_id', 'date', 'reference_number']);
+
+        $reasons = [];
+
+        foreach ($credits as $credit) {
+            $reasons[$credit->borrower_id] ??= self::handCreditedReason($credit->date->toDateString(), $credit->reference_number);
+        }
+
+        return $reasons;
+    }
+
+    /**
+     * Refuses an entry by hand on any pledge set to auto-credit (finish run
+     * round 7), in words, with nothing saved: a single entry on `$field`
+     * (`pledge_id` or `borrower_id`), a batch on `entries`, naming its
+     * pledges' members in the batch's order.
+     *
+     * Read FOR SHARE in id order, after the members' rows (the lock order:
+     * branches, members, then pledges). PATCH /pledges/{pledge}/auto-credit
+     * flips the switch FOR UPDATE, so a switch committed while the entry was
+     * on its way in is seen here, and one that starts now waits for the entry
+     * to commit.
+     *
+     * @param  'id'|'borrower_id'  $column  the pledges by their own ids, or by their member
+     * @param  list<int>  $values  in the entries' order
+     */
+    private function assertPledgesTakeEntries(string $column, array $values, string $field): void
+    {
+        $values = array_values(array_unique($values));
+
+        if ($values === []) {
+            return;
+        }
+
+        $onAutoCredit = ShareCapitalPledge::query()->whereIn($column, $values)->orderBy('id')->sharedLock()
+            ->get(['id', 'borrower_id', 'auto_credit'])
+            ->filter(fn (ShareCapitalPledge $pledge): bool => (bool) $pledge->auto_credit);
+
+        if ($onAutoCredit->isEmpty()) {
+            return;
+        }
+
+        $names = Borrower::query()->whereKey($onAutoCredit->pluck('borrower_id')->all())->get()
+            ->mapWithKeys(fn (Borrower $member): array => [$member->id => $member->full_name]);
+        $byValue = $onAutoCredit->keyBy($column);
+        $named = [];
+
+        foreach ($values as $value) {
+            $pledge = $byValue->get($value);
+
+            if ($pledge !== null) {
+                $named[] = (string) ($names->get($pledge->borrower_id) ?: 'A member');
+            }
+        }
+
+        throw ValidationException::withMessages($field === 'entries'
+            ? ['entries' => self::autoCreditBatchRefusal($named)]
+            : [$field => self::autoCreditPledgeRefusal($named[0])]);
     }
 
     /**
@@ -155,7 +364,13 @@ class ShareCapitalService
             ->when($scopeTo !== null, fn ($q) => $q->whereHas('borrower', fn ($b) => $b->visibleTo($scopeTo)))
             ->get();
 
-        $activeMembers = $allPledges->filter(fn ($p) => $p->auto_credit && (float) $p->amount > 0);
+        $onAutoCredit = $allPledges->filter(fn ($p) => $p->auto_credit && (float) $p->amount > 0);
+        // The run's preview (finish run round 7): a pledge already credited
+        // by hand this month is listed as skipped, with its reason, and left
+        // out of the members and total the run would credit.
+        $skipReasons = $this->handCreditedThisMonth($onAutoCredit, CarbonImmutable::now(self::TIMEZONE));
+        $activeMembers = $onAutoCredit->reject(fn ($p) => isset($skipReasons[$p->borrower_id]));
+        $skippedMembers = $onAutoCredit->filter(fn ($p) => isset($skipReasons[$p->borrower_id]));
         $disabledMembers = $allPledges->filter(fn ($p) => ! $p->auto_credit);
         $noPledgeMembers = $allPledges->filter(fn ($p) => (float) $p->amount === 0.0);
 
@@ -171,10 +386,12 @@ class ShareCapitalService
             'total_to_credit' => round($activeMembers->sum(fn ($p) => (float) $p->amount), 2),
             'disabled_count' => $disabledMembers->count(),
             'no_pledge_count' => $noPledgeMembers->count(),
+            'skipped_count' => $skippedMembers->count(),
             'last_run' => $lastRun ? [
                 'id' => $lastRun->id,
                 'total_amount' => $runTotalsVisible ? (float) $lastRun->total_amount : null,
                 'member_count' => $runTotalsVisible ? $lastRun->member_count : null,
+                'skipped_count' => $runTotalsVisible ? (int) $lastRun->skipped_count : null,
                 'processed_at' => $lastRun->processed_at?->toDateTimeString(),
                 'status' => $lastRun->status,
             ] : null,
@@ -191,6 +408,12 @@ class ShareCapitalService
             'no_pledge_members' => $noPledgeMembers->map(fn ($p) => [
                 'id' => $p->id,
                 'borrower_name' => $p->borrower?->full_name,
+            ])->values(),
+            'skipped_members' => $skippedMembers->map(fn ($p) => [
+                'id' => $p->id,
+                'borrower_name' => $p->borrower?->full_name,
+                'pledge_amount' => (float) $p->amount,
+                'reason' => $skipReasons[$p->borrower_id],
             ])->values(),
         ];
     }
@@ -217,6 +440,7 @@ class ShareCapitalService
             $description ?? ('Manual '.$type.' entry'),
             $method,
             $referenceNumber,
+            $pledge->id,
         );
     }
 
@@ -238,6 +462,11 @@ class ShareCapitalService
      *    any other method keeps the one it was given.
      * 3. The row, then its journal.
      *
+     * Then the member's pledge FOR SHARE: a pledge set to auto-credit refuses
+     * the entry in words, credit or debit (finish run round 7), on `pledge_id`
+     * for POST /pledges/{pledge}/entries (`$pledgeId`) and on `borrower_id` for
+     * POST /share-capital/ledger, which is Pledge Entry's own single entry.
+     *
      * The member's branch and the series' owner are read before the
      * transaction, so its first plain read comes after those locks.
      */
@@ -250,13 +479,18 @@ class ShareCapitalService
         string $description,
         string $method = 'cash',
         ?string $referenceNumber = null,
+        ?int $pledgeId = null,
     ): ShareCapitalLedger {
         $branchId = $this->memberBranch($borrowerId);
         $owner = $method === 'cash' ? $this->cashReferences->owner() : null;
 
-        return GeneratedNumberWrite::run(function () use ($borrowerId, $branchId, $owner, $amount, $type, $date, $user, $description, $method, $referenceNumber): ShareCapitalLedger {
+        return GeneratedNumberWrite::run(function () use ($borrowerId, $branchId, $owner, $amount, $type, $date, $user, $description, $method, $referenceNumber, $pledgeId): ShareCapitalLedger {
             BranchRowLock::lock(['borrower_id' => $branchId]);
             $this->assertMembersStayed([$borrowerId => $branchId], self::MEMBER_MOVED, fn (?string $status): bool => self::takesEntries($status), self::MEMBER_LEFT);
+
+            $pledgeId !== null
+                ? $this->assertPledgesTakeEntries('id', [$pledgeId], 'pledge_id')
+                : $this->assertPledgesTakeEntries('borrower_id', [$borrowerId], 'borrower_id');
 
             $reference = $method === 'cash'
                 ? $this->cashReferences->assign(CashReferences::SHARE_CAPITAL, $owner, [$date], 'reference_number')[0]
@@ -310,8 +544,10 @@ class ShareCapitalService
      * in words, on that row's `entries.N.pledge_id`. The members' branches
      * and statuses are then read again under their rows' shared locks: a
      * member moved since, or who withdrew meanwhile, answers 409 with nothing
-     * posted. The pledges, their members' branches and the series' owner are
-     * read before the transaction.
+     * posted. Then the pledges FOR SHARE: any set to auto-credit refuses the
+     * whole batch, in words, naming them (finish run round 7). The pledges,
+     * their members' branches and the series' owner are read before the
+     * transaction.
      *
      * @param  list<array{pledge_id: int, amount: float|int|string, type: string, date: string, description?: string|null}>  $entries
      */
@@ -340,6 +576,7 @@ class ShareCapitalService
         return LoanWriteTransaction::run(function () use ($entries, $pledges, $branches, $members, $owner, $user, $method, $referenceNumber) {
             BranchRowLock::lock($branches);
             $this->assertMembersStayed($members, self::BATCH_MEMBER_MOVED, fn (?string $status): bool => self::takesEntries($status), self::BATCH_MEMBER_LEFT);
+            $this->assertPledgesTakeEntries('id', array_map('intval', array_column($entries, 'pledge_id')), 'entries');
 
             $references = $method === 'cash'
                 ? $this->cashReferences->assign(CashReferences::SHARE_CAPITAL, $owner, array_column($entries, 'date'), 'reference_number')
