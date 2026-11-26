@@ -179,6 +179,69 @@ jobs:
           done
           exit 1
 
+      # Menu Visibility's administrator override (Kevin's task 14zfbg0e9jq; Arvin, 2026-11-26):
+      # only the bcrypt hash of the Vendora administrator password, never the password itself.
+      # Delivered like Linda's key: over this SSH session's STDIN into a 0600 file in the deploy
+      # user's home, never in a command line or a log. The deploy step exports it before
+      # deploy.sh, so config:cache bakes it in. No secret means off: the box's copy is removed
+      # and the page says the override isn't set up. Never fatal.
+      - name: Deliver the Menu Visibility override hash (staging only)
+        id: menu_hash
+        continue-on-error: true
+        env:
+          MENU_HASH: ${{ secrets.MENU_VISIBILITY_OVERRIDE_PASSWORD_HASH }}
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          umask 077
+          key="$RUNNER_TEMP/vps_key_menu"
+          trap 'rm -f "$key"' EXIT
+          printf '%s\n' "$VPS_SSH_KEY" > "$key"
+          # Pin the box's host key, as the other delivery steps do. No key, no connection.
+          known="$RUNNER_TEMP/known_hosts_menu"
+          printf '%s\n' "${VPS_KNOWN_HOSTS:-}" | awk -v h="$VPS_HOST" 'NF >= 3 && $1 !~ /^#/ { print h, $2, $3 }' > "$known"
+          if [ ! -s "$known" ]; then
+            echo "::warning title=Host key missing::VPS_KNOWN_HOSTS holds no key; the Menu Visibility hash was neither delivered nor removed."
+            exit 1
+          fi
+          box() {
+            ssh -i "$key" -o BatchMode=yes -o IdentitiesOnly=yes \
+              -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$known" -o GlobalKnownHostsFile=/dev/null \
+              -o ConnectTimeout=60 "$VPS_USER@$VPS_HOST" "$1"
+          }
+          # No secret means off: remove the box's copy (paths only, nothing on stdin).
+          if [ -z "$MENU_HASH" ]; then
+            for attempt in 1 2 3; do
+              if box "rm -f \"\$HOME/.lendyph-menu-override/binhs-coop-backend-staging\" \"\$HOME/.lendyph-menu-override/binhs-coop-backend-staging.tmp\"; echo 'menu visibility hash removed'" < /dev/null; then
+                echo "::warning title=Menu Visibility hash removed::MENU_VISIBILITY_OVERRIDE_PASSWORD_HASH is not set; the box's copy was removed and the override isn't set up."
+                exit 0
+              fi
+              echo "attempt $attempt to remove the Menu Visibility hash failed"
+              [ "$attempt" -lt 3 ] && sleep 60
+            done
+            exit 1
+          fi
+          # A bcrypt hash on one line ($2y$, $2b$ or $2a$, a two-digit cost, 53 characters).
+          # A plain password, or anything multi-line, is refused and never delivered.
+          hash_format='^\$2[aby]\$[0-9]{2}\$[./A-Za-z0-9]{53}$'
+          if ! [[ $MENU_HASH =~ $hash_format ]]; then
+            echo "::warning title=Menu Visibility hash not delivered::MENU_VISIBILITY_OVERRIDE_PASSWORD_HASH is not a bcrypt hash on one line; the box keeps its last one, if any."
+            exit 1
+          fi
+          # Only paths in the remote command; the value is read from stdin by cat.
+          remote="set -eu; umask 077; d=\"\$HOME/.lendyph-menu-override\"; mkdir -p \"\$d\"; chmod 700 \"\$d\"; f=\"\$d/binhs-coop-backend-staging\"; cat > \"\$f.tmp\"; if [ ! -s \"\$f.tmp\" ]; then rm -f \"\$f.tmp\"; exit 1; fi; chmod 600 \"\$f.tmp\"; mv -f \"\$f.tmp\" \"\$f\"; echo 'menu visibility hash delivered'"
+          for attempt in 1 2 3; do
+            if printf '%s\n' "$MENU_HASH" | box "$remote"; then
+              exit 0
+            fi
+            echo "attempt $attempt to deliver the Menu Visibility hash failed"
+            [ "$attempt" -lt 3 ] && sleep 60
+          done
+          exit 1
+
       - name: Deploy to VPS via SSH
         id: deploy
         uses: appleboy/ssh-action@v1
@@ -263,6 +326,17 @@ jobs:
                 echo "linda key: loaded"
               else
                 echo "NOTE: no Linda key on the box; Linda answers with its matcher only."
+              fi
+              # Menu Visibility's administrator override (Kevin's task 14zfbg0e9jq; Arvin, 2026-11-26):
+              # only the bcrypt hash of the password, delivered by the step above. Exported so
+              # config:cache bakes it in; never echoed. Without it the override answers "isn't set up".
+              MENU_HASH_FILE="$HOME/.lendyph-menu-override/binhs-coop-backend-staging"
+              if [ -s "$MENU_HASH_FILE" ]; then
+                MENU_VISIBILITY_OVERRIDE_PASSWORD_HASH="$(sed -n 1p "$MENU_HASH_FILE")"
+                export MENU_VISIBILITY_OVERRIDE_PASSWORD_HASH
+                echo "menu visibility override: hash loaded"
+              else
+                echo "NOTE: no Menu Visibility override hash on the box; its page says the override isn't set up."
               fi
               # While deploy.sh runs, config:cache writes config.php (which holds the proxy
               # secret and Linda's key) at 0644, and the trap above only sets 0640 when this
@@ -522,6 +596,17 @@ jobs:
                 echo "linda key: loaded"
               else
                 echo "NOTE: no Linda key on the box; Linda answers with its matcher only."
+              fi
+              # Menu Visibility's administrator override (Kevin's task 14zfbg0e9jq; Arvin, 2026-11-26):
+              # only the bcrypt hash of the password, delivered by the step above. Exported so
+              # config:cache bakes it in; never echoed. Without it the override answers "isn't set up".
+              MENU_HASH_FILE="$HOME/.lendyph-menu-override/binhs-coop-backend-staging"
+              if [ -s "$MENU_HASH_FILE" ]; then
+                MENU_VISIBILITY_OVERRIDE_PASSWORD_HASH="$(sed -n 1p "$MENU_HASH_FILE")"
+                export MENU_VISIBILITY_OVERRIDE_PASSWORD_HASH
+                echo "menu visibility override: hash loaded"
+              else
+                echo "NOTE: no Menu Visibility override hash on the box; its page says the override isn't set up."
               fi
               # While deploy.sh runs, config:cache writes config.php (which holds the proxy
               # secret and Linda's key) at 0644, and the trap above only sets 0640 when this
@@ -816,3 +901,6 @@ jobs:
       - name: Warn if Linda's key was not delivered
         if: ${{ !cancelled() && steps.linda_key.outcome == 'failure' }}
         run: echo "::warning title=Linda key not delivered::The box keeps its previous Linda key, if any, and Linda's AI stays on with it; with none, Linda answers with its matcher only."
+      - name: Warn if the Menu Visibility hash was not delivered
+        if: ${{ !cancelled() && steps.menu_hash.outcome == 'failure' }}
+        run: echo "::warning title=Menu Visibility hash not delivered::The box keeps its previous hash, if any; with none, Menu Visibility says the override isn't set up."
