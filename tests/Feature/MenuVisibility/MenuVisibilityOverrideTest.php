@@ -409,12 +409,12 @@ it('stays closed, unchecked and audited, while the cache can\'t count tries betw
 
     $this->openOverride($this->tokenFor($this->superAdmin()))
         ->assertStatus(503)
-        ->assertExactJson(['message' => "The administrator override needs a shared cache on this server (array or null caches can't count tries)."]);
+        ->assertExactJson(['message' => "The administrator override can't be used on this server yet: it needs a shared cache to count password tries. Ask Vendora to set one up."]);
 
     expect($seen->checks)->toBe(0)
         ->and(MenuVisibilityOverride::query()->exists())->toBeFalse()
         ->and(AuditLog::query()->where('action', 'menu_visibility_override_refused')->sole()->description)
-        ->toBe('Administrator override for Menu Visibility refused: no shared cache on this server to count tries')
+        ->toBe('Administrator override for Menu Visibility refused: this server has no shared cache to count password tries')
         ->and(auditRowsWithout(self::OVERRIDE_PASSWORD))->toBeTrue();
 })->with(['array', 'null']);
 

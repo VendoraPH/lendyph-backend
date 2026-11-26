@@ -40,7 +40,7 @@ final class AdministratorOverride
     /** Why a try was refused, in the audit row's words. */
     public const NOT_SET_UP = 'not set up on this server';
 
-    public const NO_SHARED_CACHE = 'no shared cache on this server to count tries';
+    public const NO_SHARED_CACHE = 'this server has no shared cache to count password tries';
 
     public const LOCKED_OUT = 'too many tries';
 

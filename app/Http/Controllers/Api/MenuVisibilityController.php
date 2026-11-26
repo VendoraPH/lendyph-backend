@@ -25,7 +25,7 @@ class MenuVisibilityController extends Controller
 
     public const WRONG_PASSWORD = "That password isn't right.";
 
-    public const NO_SHARED_CACHE = "The administrator override needs a shared cache on this server (array or null caches can't count tries).";
+    public const NO_SHARED_CACHE = "The administrator override can't be used on this server yet: it needs a shared cache to count password tries. Ask Vendora to set one up.";
 
     public function __construct(
         private readonly MenuVisibility $visibility,
@@ -98,7 +98,7 @@ class MenuVisibilityController extends Controller
             new OA\Response(response: 403, description: 'No permission'),
             new OA\Response(response: 422, description: 'A wrong password'),
             new OA\Response(response: 429, description: 'Too many wrong tries'),
-            new OA\Response(response: 503, description: 'No override password is set up on this server, or its cache can\'t count tries (array or null)'),
+            new OA\Response(response: 503, description: 'No override password is set up on this server, or it has no shared cache to count password tries'),
         ],
     )]
     public function grantOverride(Request $request): JsonResponse
