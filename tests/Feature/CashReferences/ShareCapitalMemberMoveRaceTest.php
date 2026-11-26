@@ -91,7 +91,7 @@ class ShareCapitalMemberMoveRaceTest extends TestCase
         $this->member->shareCapitalPledge->update(['auto_credit' => true, 'amount' => 500]);
         $moved = $this->moveTheMemberRightAfterTheBranchLock();
 
-        $this->postJson('/api/auto-credit/process', ['method' => 'cash'])
+        $this->postJson('/api/auto-credit/process', ['cycle_date' => ShareCapitalService::currentCycleDate(), 'method' => 'cash'])
             ->assertStatus(409)->assertExactJson(['message' => ShareCapitalService::AUTO_CREDIT_MEMBER_MOVED]);
 
         $this->assertTrue($moved());
@@ -137,7 +137,7 @@ class ShareCapitalMemberMoveRaceTest extends TestCase
         $this->member->shareCapitalPledge->update(['auto_credit' => true, 'amount' => 500]);
         $changed = $this->changeTheMemberRightAfterTheBranchLock(['status' => 'deceased']);
 
-        $this->postJson('/api/auto-credit/process', ['method' => 'cash'])
+        $this->postJson('/api/auto-credit/process', ['cycle_date' => ShareCapitalService::currentCycleDate(), 'method' => 'cash'])
             ->assertStatus(409)->assertExactJson(['message' => ShareCapitalService::AUTO_CREDIT_MEMBER_LEFT]);
 
         $this->assertTrue($changed());

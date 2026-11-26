@@ -22,6 +22,9 @@ class AutoCreditRun extends Model
         'processed_at',
         'processed_by',
         'status',
+        // The cycle the run is for, a month's 15th or its 30th (finish run
+        // round 8). Null on runs made before: their rows count by their date.
+        'cycle_date',
     ];
 
     protected function casts(): array
@@ -31,6 +34,7 @@ class AutoCreditRun extends Model
             'skipped_count' => 'integer',
             'links_rows' => 'boolean',
             'processed_at' => 'datetime',
+            'cycle_date' => 'date',
         ];
     }
 

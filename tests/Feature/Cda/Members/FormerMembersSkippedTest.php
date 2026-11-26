@@ -4,6 +4,7 @@ namespace Tests\Feature\Cda\Members;
 
 use App\Models\Borrower;
 use App\Models\ReminderQueueItem;
+use App\Services\ShareCapitalService;
 use Tests\Feature\Reminders\BuildsReminderLoans;
 use Tests\TestCase;
 
@@ -64,7 +65,7 @@ class FormerMembersSkippedTest extends TestCase
         $status = $this->getJson('/api/auto-credit/status')->assertOk();
         $this->assertSame(1, $status->json('data.active_count'));
 
-        $this->postJson('/api/auto-credit/process')
+        $this->postJson('/api/auto-credit/process', ['cycle_date' => ShareCapitalService::currentCycleDate()])
             ->assertCreated()
             ->assertJsonPath('data.member_count', 1);
 

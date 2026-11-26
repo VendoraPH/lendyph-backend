@@ -32,7 +32,8 @@ class AutoCreditHandCreditSkipTest extends TestCase
     {
         parent::setUp();
         $this->seedAndLogin();
-        Carbon::setTestNow(Carbon::parse('2026-11-24 10:00:00', 'Asia/Manila'));
+        // The November 30 cycle, for these "30" pledges (finish run round 8).
+        Carbon::setTestNow(Carbon::parse('2026-11-30 10:00:00', 'Asia/Manila'));
 
         $this->ana = Borrower::factory()->create(['branch_id' => $this->branch->id, 'first_name' => 'Ana', 'middle_name' => null, 'last_name' => 'Santos']);
         $this->ben = Borrower::factory()->create(['branch_id' => $this->branch->id, 'first_name' => 'Ben', 'middle_name' => null, 'last_name' => 'Cruz']);
@@ -52,7 +53,7 @@ class AutoCreditHandCreditSkipTest extends TestCase
     {
         $this->handCredit($this->ana, '2026-11-05', 'CSH-0001-2026-0007');
 
-        $response = $this->postJson('/api/auto-credit/process')
+        $response = $this->postJson('/api/auto-credit/process', ['cycle_date' => ShareCapitalService::currentCycleDate()])
             ->assertCreated()
             ->assertJsonPath('data.member_count', 1)
             ->assertJsonPath('data.total_amount', 300)
@@ -63,7 +64,7 @@ class AutoCreditHandCreditSkipTest extends TestCase
             ->assertJsonPath('data.skipped.0.reason', ShareCapitalService::handCreditedReason('2026-11-05', 'CSH-0001-2026-0007'));
 
         $this->assertSame(1, ShareCapitalLedger::query()->where('description', ShareCapitalService::AUTO_CREDIT_DESCRIPTION)->count());
-        $this->assertDatabaseHas('share_capital_ledger', ['borrower_id' => $this->ben->id, 'credit' => 300, 'date' => '2026-11-24']);
+        $this->assertDatabaseHas('share_capital_ledger', ['borrower_id' => $this->ben->id, 'credit' => 300, 'date' => '2026-11-30']);
 
         $run = AutoCreditRun::query()->findOrFail($response->json('data.id'));
         $this->assertSame(1, (int) $run->skipped_count);
@@ -108,11 +109,12 @@ class AutoCreditHandCreditSkipTest extends TestCase
 
     public function test_a_hand_credit_in_another_month_does_not_skip(): void
     {
+        // Their "30" pledges: December's 30th cycle (finish run round 8).
         $this->handCredit($this->ana, '2026-10-31', null);
-        Carbon::setTestNow(Carbon::parse('2026-12-01 00:30:00', 'Asia/Manila'));
+        Carbon::setTestNow(Carbon::parse('2026-12-31 00:30:00', 'Asia/Manila'));
         $this->handCredit($this->ben, '2026-11-30', null);
 
-        $this->postJson('/api/auto-credit/process')
+        $this->postJson('/api/auto-credit/process', ['cycle_date' => ShareCapitalService::currentCycleDate()])
             ->assertCreated()
             ->assertJsonPath('data.member_count', 2)
             ->assertJsonPath('data.skipped_count', 0)
@@ -122,10 +124,14 @@ class AutoCreditHandCreditSkipTest extends TestCase
     public function test_the_month_is_manilas(): void
     {
         // 2026-11-30 17:00 UTC is already Dec 1 in Manila.
+        // Twice monthly, so November 30, the current cycle on Dec 1, credits
+        // both: Ana's hand credit is one of November's two.
         Carbon::setTestNow(Carbon::parse('2026-11-30 17:00:00', 'UTC'));
+        $this->ana->shareCapitalPledge->update(['schedule' => '15/30']);
+        $this->ben->shareCapitalPledge->update(['schedule' => '15/30']);
         $this->handCredit($this->ana, '2026-11-30', null);
 
-        $this->postJson('/api/auto-credit/process')
+        $this->postJson('/api/auto-credit/process', ['cycle_date' => ShareCapitalService::currentCycleDate()])
             ->assertCreated()
             ->assertJsonPath('data.member_count', 2);
         $this->assertSame(2, ShareCapitalLedger::query()->where('date', '2026-12-01')->count());
@@ -135,7 +141,7 @@ class AutoCreditHandCreditSkipTest extends TestCase
     {
         $this->handCredit($this->ana, '2026-11-05', null, 'debit');
 
-        $this->postJson('/api/auto-credit/process')->assertCreated()->assertJsonPath('data.member_count', 2);
+        $this->postJson('/api/auto-credit/process', ['cycle_date' => ShareCapitalService::currentCycleDate()])->assertCreated()->assertJsonPath('data.member_count', 2);
     }
 
     public function test_credits_not_made_by_hand_or_by_a_run_do_not_count(): void
@@ -146,7 +152,7 @@ class AutoCreditHandCreditSkipTest extends TestCase
             'description' => 'Imported', 'debit' => 0, 'credit' => 300, 'is_imported' => true, 'created_by' => $this->admin->id,
         ]);
 
-        $this->postJson('/api/auto-credit/process')->assertCreated()->assertJsonPath('data.member_count', 2);
+        $this->postJson('/api/auto-credit/process', ['cycle_date' => ShareCapitalService::currentCycleDate()])->assertCreated()->assertJsonPath('data.member_count', 2);
     }
 
     public function test_a_row_from_an_earlier_run_counts_as_that_months_instalment_linked_or_by_the_older_rule(): void
@@ -171,7 +177,7 @@ class AutoCreditHandCreditSkipTest extends TestCase
             'total_amount' => 300, 'member_count' => 1, 'processed_at' => now()->addSecond(), 'processed_by' => $this->admin->id, 'status' => 'completed',
         ]);
 
-        $this->postJson('/api/auto-credit/process')->assertCreated()
+        $this->postJson('/api/auto-credit/process', ['cycle_date' => ShareCapitalService::currentCycleDate()])->assertCreated()
             ->assertJsonPath('data.member_count', 0)
             ->assertJsonPath('data.skipped.0.reason', ShareCapitalService::alreadyCreditedReason([['auto_credit', '2026-11-02', null]]))
             ->assertJsonPath('data.skipped.1.reason', ShareCapitalService::alreadyCreditedReason([['auto_credit', '2026-11-03', null]]));
@@ -188,13 +194,13 @@ class AutoCreditHandCreditSkipTest extends TestCase
             'method' => 'cash', 'reference_number' => 'CSH-0001-2026-0009', 'created_by' => $this->admin->id,
         ]);
 
-        $this->postJson('/api/auto-credit/process')->assertCreated()->assertJsonPath('data.member_count', 1)
+        $this->postJson('/api/auto-credit/process', ['cycle_date' => ShareCapitalService::currentCycleDate()])->assertCreated()->assertJsonPath('data.member_count', 1)
             ->assertJsonPath('data.skipped.0.borrower_name', 'Ana Santos');
     }
 
     public function test_the_runs_rows_carry_their_run(): void
     {
-        $id = $this->postJson('/api/auto-credit/process')->assertCreated()->json('data.id');
+        $id = $this->postJson('/api/auto-credit/process', ['cycle_date' => ShareCapitalService::currentCycleDate()])->assertCreated()->json('data.id');
 
         $this->assertSame([$id, $id], ShareCapitalLedger::query()->orderBy('id')->pluck('auto_credit_run_id')->all());
         $this->assertTrue((bool) AutoCreditRun::query()->findOrFail($id)->links_rows);
@@ -205,7 +211,7 @@ class AutoCreditHandCreditSkipTest extends TestCase
         $this->handCredit($this->ana, '2026-11-05', 'CSH-0001-2026-0007');
         $this->handCredit($this->ana, '2026-11-06', 'CSH-0001-2026-0008', 'debit');
 
-        $this->postJson('/api/auto-credit/process')->assertCreated()
+        $this->postJson('/api/auto-credit/process', ['cycle_date' => ShareCapitalService::currentCycleDate()])->assertCreated()
             ->assertJsonPath('data.member_count', 2)
             ->assertJsonPath('data.skipped_count', 0);
     }
@@ -218,7 +224,7 @@ class AutoCreditHandCreditSkipTest extends TestCase
             'description' => 'Correction', 'debit' => 499.99, 'credit' => 0, 'method' => 'cash', 'created_by' => $this->admin->id,
         ]);
 
-        $this->postJson('/api/auto-credit/process')->assertCreated()
+        $this->postJson('/api/auto-credit/process', ['cycle_date' => ShareCapitalService::currentCycleDate()])->assertCreated()
             ->assertJsonPath('data.member_count', 1)
             ->assertJsonPath('data.skipped.0.reason', ShareCapitalService::handCreditedReason('2026-11-05', 'CSH-0001-2026-0007'));
     }
@@ -228,14 +234,16 @@ class AutoCreditHandCreditSkipTest extends TestCase
         $this->ana->shareCapitalPledge->update(['schedule' => '15/30']);
         $this->handCredit($this->ana, '2026-11-14', 'CSH-0001-2026-0007');
 
-        // The "15th" run, done on Monday the 16th: the second instalment.
+        // The November 15 run, done on Monday the 16th: the second
+        // instalment. Ben's "30" pledge waits for the 30th's run (finish run
+        // round 8).
         Carbon::setTestNow(Carbon::parse('2026-11-16 10:00:00', 'Asia/Manila'));
-        $this->postJson('/api/auto-credit/process')->assertCreated()->assertJsonPath('data.member_count', 2);
+        $this->postJson('/api/auto-credit/process', ['cycle_date' => '2026-11-15'])->assertCreated()->assertJsonPath('data.member_count', 1);
 
         // The 30th run: two instalments are in already.
         Carbon::setTestNow(Carbon::parse('2026-11-30 10:00:00', 'Asia/Manila'));
-        $this->postJson('/api/auto-credit/process')->assertCreated()
-            ->assertJsonPath('data.member_count', 0)
+        $this->postJson('/api/auto-credit/process', ['cycle_date' => ShareCapitalService::currentCycleDate()])->assertCreated()
+            ->assertJsonPath('data.member_count', 1)
             ->assertJsonPath('data.skipped.0.borrower_name', 'Ana Santos')
             ->assertJsonPath('data.skipped.0.reason', ShareCapitalService::alreadyCreditedReason([
                 ['hand', '2026-11-14', 'CSH-0001-2026-0007'],
@@ -247,20 +255,21 @@ class AutoCreditHandCreditSkipTest extends TestCase
 
     public function test_two_runs_in_a_month_credit_a_monthly_pledge_once(): void
     {
-        Carbon::setTestNow(Carbon::parse('2026-11-02 10:00:00', 'Asia/Manila'));
-        $this->postJson('/api/auto-credit/process')->assertCreated()->assertJsonPath('data.member_count', 2);
+        $this->postJson('/api/auto-credit/process', ['cycle_date' => ShareCapitalService::currentCycleDate()])->assertCreated()->assertJsonPath('data.member_count', 2);
 
-        Carbon::setTestNow(Carbon::parse('2026-11-24 10:00:00', 'Asia/Manila'));
-        $this->postJson('/api/auto-credit/process')->assertCreated()
+        // Run again on Dec 1, when November 30 is still the current cycle.
+        Carbon::setTestNow(Carbon::parse('2026-12-01 10:00:00', 'Asia/Manila'));
+        $this->postJson('/api/auto-credit/process', ['cycle_date' => ShareCapitalService::currentCycleDate()])->assertCreated()
             ->assertJsonPath('data.member_count', 0)
             ->assertJsonPath('data.skipped_count', 2)
-            ->assertJsonPath('data.skipped.0.reason', ShareCapitalService::alreadyCreditedReason([['auto_credit', '2026-11-02', null]]));
+            // The same cycle was credited (finish run round 8).
+            ->assertJsonPath('data.skipped.0.reason', ShareCapitalService::sameHalfReason('2026-11-30', '2026-11-30'));
 
         $this->assertSame(1, $this->creditsOf($this->ana, '2026-11'));
 
         // Next month it is credited again.
-        Carbon::setTestNow(Carbon::parse('2026-12-01 10:00:00', 'Asia/Manila'));
-        $this->postJson('/api/auto-credit/process')->assertCreated()->assertJsonPath('data.member_count', 2);
+        Carbon::setTestNow(Carbon::parse('2026-12-31 10:00:00', 'Asia/Manila'));
+        $this->postJson('/api/auto-credit/process', ['cycle_date' => ShareCapitalService::currentCycleDate()])->assertCreated()->assertJsonPath('data.member_count', 2);
     }
 
     public function test_a_twice_monthly_pledge_with_no_hand_credit_is_credited_by_two_runs_and_no_third(): void
@@ -269,9 +278,9 @@ class AutoCreditHandCreditSkipTest extends TestCase
 
         foreach (['2026-11-15', '2026-11-30'] as $day) {
             Carbon::setTestNow(Carbon::parse($day.' 10:00:00', 'Asia/Manila'));
-            $this->postJson('/api/auto-credit/process')->assertCreated();
+            $this->postJson('/api/auto-credit/process', ['cycle_date' => $day])->assertCreated();
         }
-        $this->postJson('/api/auto-credit/process')->assertCreated()->assertJsonPath('data.member_count', 0);
+        $this->postJson('/api/auto-credit/process', ['cycle_date' => ShareCapitalService::currentCycleDate()])->assertCreated()->assertJsonPath('data.member_count', 0);
 
         $this->assertSame(2, $this->creditsOf($this->ana, '2026-11'));
         $this->assertSame(1, $this->creditsOf($this->ben, '2026-11'));
@@ -299,7 +308,7 @@ class AutoCreditHandCreditSkipTest extends TestCase
         $reference = ShareCapitalLedger::query()->sole()->reference_number;
         $this->patchJson("/api/pledges/{$this->ana->shareCapitalPledge->id}/auto-credit")->assertOk()->assertJsonPath('auto_credit', true);
 
-        $this->postJson('/api/auto-credit/process')
+        $this->postJson('/api/auto-credit/process', ['cycle_date' => ShareCapitalService::currentCycleDate()])
             ->assertCreated()
             ->assertJsonPath('data.member_count', 1)
             ->assertJsonPath('data.skipped.0.reason', ShareCapitalService::handCreditedReason('2026-11-10', $reference));
@@ -315,7 +324,7 @@ class AutoCreditHandCreditSkipTest extends TestCase
         $entries = ShareCapitalLedger::query()->orderBy('id')->get()->toArray();
         $run = DB::table('auto_credit_runs')->where('id', $pastRun->id)->first();
 
-        $this->postJson('/api/auto-credit/process')->assertCreated();
+        $this->postJson('/api/auto-credit/process', ['cycle_date' => ShareCapitalService::currentCycleDate()])->assertCreated();
 
         $this->assertSame($entries, ShareCapitalLedger::query()->orderBy('id')->limit(count($entries))->get()->toArray());
         $this->assertEquals($run, DB::table('auto_credit_runs')->where('id', $pastRun->id)->first());

@@ -99,7 +99,7 @@ class AutoCreditToggleRaceTest extends TestCase
         $other->shareCapitalPledge->update(['amount' => 300, 'auto_credit' => true]);
         $switched = $this->switchAutoCreditRightAfterTheMemberLock(false);
 
-        $this->postJson('/api/auto-credit/process', ['method' => 'cash'])
+        $this->postJson('/api/auto-credit/process', ['cycle_date' => ShareCapitalService::currentCycleDate(), 'method' => 'cash'])
             ->assertCreated()
             ->assertJsonPath('data.member_count', 1)
             ->assertJsonPath('data.total_amount', 300);
