@@ -367,7 +367,9 @@ class ExpenseRecorder
      * from a bank reconciliation statement line frees that line while its
      * reconciliation is open, and is refused while it reads Reconciled
      * (ReconciliationMatchRelease, which takes its locks after these and
-     * before JournalPoster's, finish run round 6).
+     * before JournalPoster's, finish run round 6). A line on an "all branches"
+     * reconciliation is freed only by a user holding `branches:view_all`;
+     * anyone else is refused in words (finish run round 7).
      */
     public function reverse(AccountingExpense $expense, string $reason, ?int $userId = null): AccountingExpense
     {
@@ -399,7 +401,7 @@ class ExpenseRecorder
             }
 
             $journal = AccountingJournal::query()->findOrFail($chains[$locked->journal_id]['last']);
-            $line = $this->reconciliations->hold($locked, $journal);
+            $line = $this->reconciliations->hold($locked, $journal, $userId);
             $date = $this->openReversalDate($journal, 'expense');
             $reversal = $this->poster->reverse($journal, $date, $reason, $userId);
             $this->reconciliations->release($line, $journal, $reversal, $locked->payee, $userId);

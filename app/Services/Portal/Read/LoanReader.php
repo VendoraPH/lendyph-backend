@@ -146,7 +146,7 @@ final class LoanReader
         return Repayment::query()
             ->whereIn('loan_id', $loan === null ? $this->query()->select('loans.id') : [$loan->id])
             ->where('status', 'posted')
-            ->with('loan:id,loan_account_number')
+            ->with('loan:id,'.implode(',', Loan::DISPLAY_NUMBER_COLUMNS))
             ->orderByDesc('payment_date')
             ->orderByDesc('id')
             ->paginate($perPage);
@@ -163,6 +163,9 @@ final class LoanReader
         return $rows->map(fn (Repayment $r): array => [
             'receipt_number' => $r->receipt_number,
             'loan_account_number' => $r->loan?->loan_account_number,
+            // The loan's number as shown (Loan::displayNumber()): an imported
+            // loan, which has no LN- number, reads by its Loan No. from the file.
+            'loan_display_number' => $r->loan?->displayNumber(),
             'payment_date' => $r->payment_date?->toDateString(),
             'amount_paid' => Pesos::of($r->getRawOriginal('amount_paid')),
             'principal' => Pesos::of($r->getRawOriginal('principal_applied')),
@@ -185,6 +188,8 @@ final class LoanReader
         return [
             'id' => $loan->id,
             'loan_account_number' => $loan->loan_account_number,
+            // Its title (Loan::displayNumber()), never blank on an imported loan.
+            'display_number' => $loan->displayNumber(),
             'product_name' => $loan->loanProduct?->name,
             'display_status' => $loan->displayStatus(),
             'release_date' => $loan->released_at?->toDateString(),

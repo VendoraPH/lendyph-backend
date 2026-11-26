@@ -311,8 +311,8 @@ class AuditLogResource extends JsonResource
 
         $loans = $loanIds->isEmpty()
             ? collect()
-            : Loan::query()->whereIn('id', $loanIds)->get(['id', 'loan_account_number', 'application_number'])
-                ->mapWithKeys(fn (Loan $loan) => [$loan->id => $loan->loan_account_number ?? $loan->application_number]);
+            : Loan::query()->whereIn('id', $loanIds)->get(['id', ...Loan::DISPLAY_NUMBER_COLUMNS])
+                ->mapWithKeys(fn (Loan $loan) => [$loan->id => $loan->displayNumber()]);
 
         // "Vehicle: ABC 1234", in one query with the type's name.
         $collaterals = $collateralIds->isEmpty()

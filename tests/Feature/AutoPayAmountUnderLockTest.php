@@ -52,6 +52,7 @@ class AutoPayAmountUnderLockTest extends TestCase
         $this->assertSame([[
             'loan_id' => $loan->id,
             'loan_account_number' => $loan->loan_account_number,
+            'display_number' => $loan->displayNumber(),
             'reason' => 'Nothing was due any more once the loan was locked: another payment settled it.',
         ]], $response->json('data.skips'));
         $this->assertSame(0, Repayment::where('loan_id', $loan->id)->count());
@@ -158,6 +159,7 @@ class AutoPayAmountUnderLockTest extends TestCase
         $this->assertEquals([
             'loan_id' => $loan->id,
             'loan_account_number' => $loan->loan_account_number,
+            'display_number' => $loan->displayNumber(),
             'borrower_name' => $preview['loans'][0]['borrower_name'],
             'total_principal' => 10000,
             'total_interest' => 1800,
@@ -191,6 +193,7 @@ class AutoPayAmountUnderLockTest extends TestCase
         $skip = [
             'loan_id' => $loan->id,
             'loan_account_number' => $loan->loan_account_number,
+            'display_number' => $loan->displayNumber(),
             'reason' => 'Has earlier unpaid periods; collect them first.',
         ];
 
@@ -228,6 +231,7 @@ class AutoPayAmountUnderLockTest extends TestCase
         $this->assertSame([[
             'loan_id' => $loan->id,
             'loan_account_number' => $loan->loan_account_number,
+            'display_number' => $loan->displayNumber(),
             'reason' => 'Another change to this loan was saved at the same time. Reload and try again.',
         ]], $run['failures']);
     }
@@ -343,6 +347,7 @@ class AutoPayAmountUnderLockTest extends TestCase
         $skip = [
             'loan_id' => $loan->id,
             'loan_account_number' => $loan->loan_account_number,
+            'display_number' => $loan->displayNumber(),
             'reason' => "Has a part-paid period that isn't selected; select it or collect it first.",
         ];
         $range = ['date_from' => $period1->due_date->toDateString(), 'date_to' => $period2->due_date->toDateString()];

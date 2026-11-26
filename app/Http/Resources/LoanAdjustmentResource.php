@@ -14,6 +14,7 @@ class LoanAdjustmentResource extends JsonResource
             'adjustment_number' => $this->adjustment_number,
             'loan_id' => $this->loan_id,
             'loan_account_number' => $this->loan?->loan_account_number,
+            'loan_display_number' => $this->loan?->displayNumber(),
             'adjustment_type' => $this->adjustment_type,
             'description' => $this->description,
             'old_values' => $this->old_values,

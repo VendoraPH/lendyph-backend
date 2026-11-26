@@ -194,7 +194,7 @@ final class DashboardReader
             Repayment::query()
                 ->whereIn('loan_id', Loan::query()->where('borrower_id', $member->getKey())->whereIn('status', Loan::EVER_RELEASED_STATUSES)->select('id'))
                 ->where('status', 'posted')
-                ->with('loan:id,loan_account_number')
+                ->with('loan:id,'.implode(',', Loan::DISPLAY_NUMBER_COLUMNS))
                 ->orderByDesc('payment_date')->orderByDesc('id')
                 ->limit(self::RECENT_ACTIVITY)
                 ->get()
@@ -202,7 +202,7 @@ final class DashboardReader
                     'sort' => $r->payment_date->toDateString().'#1#'.str_pad((string) $r->id, 12, '0', STR_PAD_LEFT),
                     'date' => $r->payment_date->toDateString(),
                     'kind' => 'loan_payment',
-                    'description' => 'Loan payment, '.$r->loan?->loan_account_number,
+                    'description' => 'Loan payment, '.$r->loan?->displayNumber(),
                     'amount' => Pesos::of((string) $r->getRawOriginal('amount_paid')),
                 ]));
         }

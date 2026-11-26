@@ -40,7 +40,7 @@ final class ReminderFormat
 
     public static function loanNumber(?Loan $loan): string
     {
-        return (string) ($loan?->loan_account_number ?: $loan?->application_number);
+        return (string) $loan?->displayNumber();
     }
 
     /**

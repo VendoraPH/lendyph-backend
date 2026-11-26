@@ -58,7 +58,7 @@ final class PortalStatements
             subtitle: 'As of '.$this->day($asOf),
             member: $loan->borrower,
             lines: [
-                ['Loan account', $loan->loan_account_number],
+                ['Loan account', $loan->displayNumber()],
                 ['Product', $soa['loan']['product_name']],
                 ['Released', $this->day($soa['loan']['released_at'])],
                 ['Maturity date', $this->day($soa['loan']['maturity_date'])],
@@ -87,7 +87,7 @@ final class PortalStatements
                     Pesos::printed($soa['transaction_totals']['credit']),
                 ], 'No transactions yet.'),
             ],
-            fileName: 'statement-of-account-'.$loan->loan_account_number.'-'.str_replace('-', '', $asOf).'.pdf',
+            fileName: 'statement-of-account-'.$loan->displayNumber().'-'.str_replace('-', '', $asOf).'.pdf',
         );
     }
 

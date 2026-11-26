@@ -137,10 +137,10 @@ final class MembershipStatus
             ->whereIn('status', [...self::UNRELEASED_LOAN_STATUSES, ...Loan::COLLECTIBLE_STATUSES])
             ->whereHas('coMakers', fn ($query) => $query->where('co_makers.member_borrower_id', $borrower->id))
             ->orderBy('id')
-            ->get(['id', 'loan_account_number', 'application_number']);
+            ->get(['id', ...Loan::DISPLAY_NUMBER_COLUMNS]);
 
         if ($coMakerOn->isNotEmpty()) {
-            $numbers = $coMakerOn->map(fn (Loan $loan) => $loan->loan_account_number ?? $loan->application_number)->filter()->values()->all();
+            $numbers = $coMakerOn->map(fn (Loan $loan) => $loan->displayNumber())->filter()->values()->all();
             $open[] = 'co-maker liability on '.self::count($coMakerOn->count(), 'loan', 'loans').' not yet paid'.($numbers === [] ? '' : ' ('.implode(', ', $numbers).')');
         }
 

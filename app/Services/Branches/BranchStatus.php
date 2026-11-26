@@ -58,6 +58,12 @@ class BranchStatus
     /** A loan that isn't finished: being drafted, approved, or still owed. */
     public const OPEN_LOAN_STATUSES = ['draft', 'for_review', 'approved', 'released', 'ongoing', 'defaulted'];
 
+    /**
+     * A loan adjustment still waiting: pending a decision, or approved and
+     * not applied yet, so it can still be applied or cancelled.
+     */
+    public const OPEN_ADJUSTMENT_STATUSES = ['pending', 'approved'];
+
     /** A time deposit that hasn't been paid out or rolled over yet. */
     public const OPEN_TIME_DEPOSIT_STATUSES = ['active', 'matured'];
 
@@ -177,14 +183,17 @@ class BranchStatus
         $deposits = DB::table('time_deposits')->where('branch_id', $id);
         [$moneyAccounts, $moneyCentavos] = $this->money($id);
 
-        $pending = LoanAdjustment::query()->where('status', 'pending')
+        // Pending ones wait for a decision; approved ones that aren't applied
+        // yet can still be applied or cancelled (finish run rounds 6 and 7).
+        $adjustments = LoanAdjustment::query()->whereIn('status', self::OPEN_ADJUSTMENT_STATUSES)
             ->whereIn('loan_id', Loan::query()->select('id')->where('branch_id', $id))
+            ->count();
+
+        $pending = DB::table('savings_approvals')->where('status', 'pending')
+            ->where(fn ($q) => $q
+                ->whereIn('account_id', (clone $accounts)->select('id'))
+                ->orWhereIn('time_deposit_id', (clone $deposits)->select('id')))
             ->count()
-            + DB::table('savings_approvals')->where('status', 'pending')
-                ->where(fn ($q) => $q
-                    ->whereIn('account_id', (clone $accounts)->select('id'))
-                    ->orWhereIn('time_deposit_id', (clone $deposits)->select('id')))
-                ->count()
             + PortalRequest::query()->where('branch_id', $id)->whereIn('status', PortalRequest::OPEN_STATUSES)->count()
             + $this->transfers($id, InterbranchTransfer::STATUS_PENDING);
 
@@ -193,6 +202,7 @@ class BranchStatus
             $item('open_savings_accounts', 'Open savings accounts', (clone $accounts)->where('status', '!=', SavingsAccount::STATUS_CLOSED)->count()),
             $item('open_time_deposits', 'Open time deposits', (clone $deposits)->whereIn('status', self::OPEN_TIME_DEPOSIT_STATUSES)->count()),
             $item('money_in_accounts', 'Money in its cash and bank accounts', $moneyAccounts, $moneyAccounts === 0 ? null : self::pesos($moneyCentavos)),
+            $item('loan_adjustments', 'Loan adjustments to approve, cancel or apply', $adjustments),
             $item('pending_approvals', 'Pending approvals and requests', $pending),
             $item('transfers_in_transit', 'Transfers in transit', $this->transfers($id, InterbranchTransfer::STATUS_IN_TRANSIT)),
             $item('pending_gcash_cash_ins', 'GCash Cash Ins not yet paid', $this->pendingCashIns($id)),
@@ -389,6 +399,7 @@ class BranchStatus
             'open_savings_accounts' => self::counted($item['count'], 'open savings account'),
             'open_time_deposits' => self::counted($item['count'], 'open time deposit'),
             'money_in_accounts' => self::pesosWords((string) $item['amount']).' in its cash and bank accounts',
+            'loan_adjustments' => self::counted($item['count'], 'loan adjustment').' to approve, cancel or apply',
             'pending_approvals' => $item['count'] === 1 ? '1 pending approval or request' : "{$item['count']} pending approvals or requests",
             'transfers_in_transit' => self::counted($item['count'], 'transfer').' in transit',
             'pending_gcash_cash_ins' => self::counted($item['count'], 'GCash Cash In').' not yet paid',

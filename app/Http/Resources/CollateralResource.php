@@ -142,6 +142,10 @@ class CollateralResource extends JsonResource
                         'loan_account_number' => $request->user() !== null && app(BranchAccess::class)->canSee($request->user(), $loan->branch_id)
                             ? $loan->loan_account_number
                             : null,
+                        // The number it is shown by (Loan::displayNumber()), on the same rule.
+                        'display_number' => $request->user() !== null && app(BranchAccess::class)->canSee($request->user(), $loan->branch_id)
+                            ? $loan->displayNumber()
+                            : null,
                     ])
                     ->values()
                     ->all()

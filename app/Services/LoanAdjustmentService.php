@@ -299,7 +299,7 @@ class LoanAdjustmentService
                     '%s %s on loan %s was cancelled before it was applied. Reason: %s',
                     $adjustment->typeInWords(),
                     $adjustment->adjustment_number,
-                    $loan->loan_account_number ?? $loan->external_loan_no ?? $loan->application_number,
+                    $loan->displayNumber(),
                     $reason,
                 ),
             );
@@ -1011,7 +1011,7 @@ class LoanAdjustmentService
                 '%s closed %d partly paid period(s) of loan %s at the ₱%s collected on them and carried the rest forward.',
                 $adjustment->adjustment_number,
                 count($after),
-                $loan->loan_account_number ?? $loan->application_number,
+                $loan->displayNumber(),
                 number_format($totalCollected, 2),
             ),
         );
@@ -1478,7 +1478,7 @@ class LoanAdjustmentService
                 'Penalty waiver %s forgave ₱%s of unpaid penalty on loan %s.',
                 $adjustment->adjustment_number,
                 number_format($totalWaived, 2),
-                $loan->loan_account_number ?? $loan->application_number,
+                $loan->displayNumber(),
             ),
         );
     }

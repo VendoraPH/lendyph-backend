@@ -115,6 +115,18 @@ class LoanAgingListTest extends TestCase
         $this->assertSame(123456, $row['past_due_amount']);
     }
 
+    /**
+     * Finish run round 7: an imported loan has no LN- number, so its row reads
+     * by the file's Loan No. (Loan::displayNumber()), never blank.
+     */
+    public function test_an_imported_loan_reads_by_its_files_loan_no(): void
+    {
+        $loan = $this->agedLoan(['loan_account_number' => null, 'external_loan_no' => 'OLD-2023-0041']);
+        $this->period($loan, 10, principal: 1000.00, interest: 200.00);
+
+        $this->assertArrayHasKey('OLD-2023-0041', $this->rowsByAccount());
+    }
+
     public function test_a_loan_row_has_exactly_the_contract_fields_and_no_member_contact_data(): void
     {
         $member = Borrower::factory()->create([

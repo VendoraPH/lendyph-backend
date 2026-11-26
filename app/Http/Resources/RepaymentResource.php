@@ -25,6 +25,7 @@ use OpenApi\Attributes as OA;
         new OA\Property(property: 'loan_id', type: 'integer'),
         new OA\Property(property: 'borrower_id', type: 'integer', nullable: true, description: "The loan's borrower"),
         new OA\Property(property: 'loan_account_number', type: 'string', nullable: true),
+        new OA\Property(property: 'loan_display_number', type: 'string', nullable: true, description: "The loan's number as shown (Loan::displayNumber()): its LN- number, else an imported loan's Loan No. from the file, else its application number."),
         new OA\Property(property: 'borrower_name', type: 'string', nullable: true),
         new OA\Property(property: 'borrower_code', type: 'string', nullable: true, description: "The member's code, the Official Receipt's Member No."),
         new OA\Property(property: 'borrower_first_last', type: 'string', nullable: true, description: 'First and last name, as the list search matches it'),
@@ -122,6 +123,9 @@ class RepaymentResource extends JsonResource
             'loan_id' => $this->loan_id,
             'borrower_id' => $this->loan?->borrower_id,
             'loan_account_number' => $this->loan?->loan_account_number,
+            // The loan's number as shown (Loan::displayNumber()): an imported
+            // loan's Loan No. from the file, which has no LN- number.
+            'loan_display_number' => $this->loan?->displayNumber(),
             'borrower_name' => $this->loan?->borrower?->full_name,
             'borrower_code' => $this->loan?->borrower?->borrower_code,
             // "first last", exactly what the list's `search` matches (CONCAT of the two),

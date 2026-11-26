@@ -289,7 +289,7 @@ it('refuses to release a loan whose collateral another active loan already holds
         ->and($loan->amortizationSchedules()->count())->toBe(0);
 
     expect($this->getJson("/api/collaterals/{$collateral->id}")->assertOk()->json('data.active_loans'))
-        ->toBe([['id' => $rival->id, 'loan_account_number' => $rival->loan_account_number]]);
+        ->toBe([['id' => $rival->id, 'loan_account_number' => $rival->loan_account_number, 'display_number' => $rival->displayNumber()]]);
 });
 
 it('still releases a loan holding collateral no other active loan wants', function () {
@@ -306,7 +306,7 @@ it('still releases a loan holding collateral no other active loan wants', functi
         ->and($loan->loan_account_number)->not->toBeNull();
 
     expect($this->getJson("/api/collaterals/{$collateral->id}")->assertOk()->json('data.active_loans'))
-        ->toBe([['id' => $loan->id, 'loan_account_number' => $loan->loan_account_number]]);
+        ->toBe([['id' => $loan->id, 'loan_account_number' => $loan->loan_account_number, 'display_number' => $loan->displayNumber()]]);
 });
 
 it('still releases when the collateral\'s only other holder is not active', function (string $holderStatus) {
@@ -412,7 +412,7 @@ it('refuses to void a payment that would re-activate a loan onto collateral anot
         ->and($loanA->fresh()->status)->toBe('completed');
 
     expect($this->getJson("/api/collaterals/{$collateral->id}")->assertOk()->json('data.active_loans'))
-        ->toBe([['id' => $loanB->id, 'loan_account_number' => $loanB->loan_account_number]]);
+        ->toBe([['id' => $loanB->id, 'loan_account_number' => $loanB->loan_account_number, 'display_number' => $loanB->displayNumber()]]);
 });
 
 it('still voids a payment when nothing else has taken the collateral', function () {
@@ -438,7 +438,7 @@ it('still voids a payment when nothing else has taken the collateral', function 
         ->and($repayment->fresh()->status)->toBe('voided');
 
     expect($this->getJson("/api/collaterals/{$collateral->id}")->assertOk()->json('data.active_loans'))
-        ->toBe([['id' => $loan->id, 'loan_account_number' => $loan->loan_account_number]]);
+        ->toBe([['id' => $loan->id, 'loan_account_number' => $loan->loan_account_number, 'display_number' => $loan->displayNumber()]]);
 });
 
 it('still voids a payment on a loan that holds no collateral', function () {
@@ -526,7 +526,7 @@ it('still releases a restructure that inherited its source loan\'s collateral', 
         ->and($restructure->fresh()->status)->toBe('released');
 
     expect($this->getJson("/api/collaterals/{$collateral->id}")->assertOk()->json('data.active_loans'))
-        ->toBe([['id' => $restructure->id, 'loan_account_number' => $restructure->fresh()->loan_account_number]]);
+        ->toBe([['id' => $restructure->id, 'loan_account_number' => $restructure->fresh()->loan_account_number, 'display_number' => $restructure->fresh()->displayNumber()]]);
 });
 
 // ── 3. index(): filters gated on presence, not truthiness ────────────────
