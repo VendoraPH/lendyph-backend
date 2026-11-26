@@ -123,6 +123,9 @@ it('works out every row\'s Outstanding in one grouped read, not one per row', fu
         return $queries;
     };
 
+    // The first request also reads the hidden menus (Menu Visibility).
+    $count();
+
     foreach (range(1, 2) as $i) {
         $this->period(($this->loanOf)($this->scoredMember()), 4, '2026-12-01');
     }

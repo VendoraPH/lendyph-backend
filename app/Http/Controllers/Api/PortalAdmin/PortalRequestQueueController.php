@@ -8,6 +8,7 @@ use App\Http\Requests\Savings\SavingsReference;
 use App\Models\PortalRequest;
 use App\Services\BranchAccess;
 use App\Services\GeneratedNumberWrite;
+use App\Services\Portal\Requests\RequestDesk;
 use App\Services\Portal\Requests\RequestPresenter;
 use App\Services\Portal\Requests\StaffQueue;
 use App\Services\Savings\IdempotentWrite;
@@ -140,12 +141,13 @@ class PortalRequestQueueController extends Controller
             new OA\Response(response: 422, description: 'Invalid body, refused by the savings rules, or no Idempotency-Key'),
         ],
     )]
-    public function decide(Request $http, IdempotentWrite $idempotent, int $request): JsonResponse
+    public function decide(Request $http, IdempotentWrite $idempotent, RequestDesk $desk, int $request): JsonResponse
     {
         $this->authorize('member_portal:requests');
         $staff = $http->user();
         $found = $this->queue->find($staff, $request);
         $this->authorize(StaffQueue::TYPE_PERMISSIONS[$found->type] ?? 'member_portal:settings');
+        $desk->refuseWhileSavingsHidden($found, 'decision', RequestDesk::SAVINGS_WAIT_FOR_STAFF);
 
         $input = $http->validate($this->rules($found, $http), $this->messages($http));
 

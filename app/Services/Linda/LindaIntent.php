@@ -39,6 +39,30 @@ enum LindaIntent: string
     case UnsupportedQuestion = 'unsupported_question';
 
     /**
+     * The side-menu module this topic belongs to (Menu Visibility, finish run
+     * round 6): while that module is hidden, Linda answers the topic with a
+     * short local answer and no figure or link. Null for how-to, open and
+     * unsupported questions, which have no module of their own.
+     */
+    public function module(): ?string
+    {
+        return match ($this) {
+            self::CollectionSummary, self::CollectionDetails, self::TransactionLookup => 'payments',
+            self::LoanSummary, self::LoanDetails, self::OverdueAccounts, self::DisbursementSummary,
+            self::GeneralLendingSummary => 'loans',
+            self::BorrowerLookup, self::BorrowerSummary => 'members',
+            self::IncomeSummary, self::ExpenseSummary => 'accounting',
+            self::BranchPerformance, self::OfficerPerformance, self::CollectionEfficiency, self::PortfolioSummary => 'reports',
+            self::SavingsSummary => 'savings',
+            self::ShareCapitalSummary => 'share_capital',
+            self::CdaSummary => 'cda',
+            self::ReminderSummary => 'loans.reminders',
+            self::CreditScoringSummary => 'credit_scoring',
+            self::HowTo, self::OpenQuestion, self::UnsupportedQuestion => null,
+        };
+    }
+
+    /**
      * Whether a question of this kind is read for a period at all. Overdue
      * accounts, active loans and the portfolio are as of today, so any period words a
      * question or the model gives them are ignored, never refused or called

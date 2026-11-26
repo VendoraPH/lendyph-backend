@@ -38,6 +38,19 @@ final class RequestDesk
         PortalRequest::TYPE_SAVINGS_OPENING => ['account_requests', 'savings'],
     ];
 
+    /**
+     * The request kinds that are Savings' own (finish run round 6). While
+     * Savings is hidden in Menu Visibility a new one answers 404, like the rest
+     * of the Savings API, and one already open waits as it is: the member can't
+     * change it and staff can't decide it until Savings is shown again. The
+     * expiry sweep runs as before.
+     */
+    public const SAVINGS_TYPES = [PortalRequest::TYPE_SAVINGS_WITHDRAWAL, PortalRequest::TYPE_SAVINGS_OPENING];
+
+    public const SAVINGS_WAIT_FOR_MEMBER = 'Savings requests can\'t be changed right now. Your branch will decide this one once savings is available again.';
+
+    public const SAVINGS_WAIT_FOR_STAFF = 'Savings is turned off in Menu Visibility. Turn it on to decide this request.';
+
     public function __construct(
         private readonly PortalSettings $settings,
         private readonly WithdrawalRequests $withdrawals,
@@ -83,6 +96,10 @@ final class RequestDesk
             'details.array' => 'Fill in the request\'s details.',
             'remarks.max' => 'The remarks can be at most 500 characters.',
         ])->validate();
+
+        if (in_array($base['type'], self::SAVINGS_TYPES, true) && $this->settings->moduleHidden('savings')) {
+            throw new HttpResponseException(response()->json(['message' => 'Not found.'], 404));
+        }
 
         if (! $this->typeOn($base['type'])) {
             throw new HttpResponseException(response()->json(['success' => false, 'message' => EnsurePortalFeature::OFF, 'code' => 'feature_off'], 403));
@@ -131,6 +148,8 @@ final class RequestDesk
     /** The member cancels, inside a transaction. The hold, if any, is released by nobody. */
     public function cancel(PortalRequest $request): PortalRequest
     {
+        $this->refuseWhileSavingsHidden($request, 'request', self::SAVINGS_WAIT_FOR_MEMBER);
+
         $locked = $this->lockForMember($request, self::CANCELLABLE, 'It can be cancelled only while your branch hasn\'t decided it yet.');
 
         if ($this->withdrawals->releaseHold($locked, "Member cancelled request {$locked->reference}", null) !== null) {
@@ -150,6 +169,8 @@ final class RequestDesk
     /** The member answers staff's question, inside a transaction: back to review. */
     public function reply(PortalRequest $request, string $message): PortalRequest
     {
+        $this->refuseWhileSavingsHidden($request, 'request', self::SAVINGS_WAIT_FOR_MEMBER);
+
         $locked = $this->lockForMember($request, [PortalRequest::STATUS_NEED_INFO], 'You can reply only when your branch asks for more information.');
 
         $this->timeline->move($locked, PortalRequest::STATUS_UNDER_REVIEW, PortalRequestEvent::ACTOR_MEMBER, null, $message);
@@ -193,6 +214,19 @@ final class RequestDesk
         }
 
         return $locked;
+    }
+
+    /**
+     * Refuse, in words on `$field`, any change to a savings request while
+     * Savings is hidden in Menu Visibility (self::SAVINGS_TYPES).
+     *
+     * @throws ValidationException
+     */
+    public function refuseWhileSavingsHidden(PortalRequest $request, string $field, string $words): void
+    {
+        if (in_array($request->type, self::SAVINGS_TYPES, true) && $this->settings->moduleHidden('savings')) {
+            throw ValidationException::withMessages([$field => [$words]]);
+        }
     }
 
     /**

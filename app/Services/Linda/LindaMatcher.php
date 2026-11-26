@@ -556,6 +556,40 @@ final class LindaMatcher
     }
 
     /**
+     * The topics a question names by their own words (the matcher's subjects,
+     * the weak ones aside), whether or not the whole question matches: what
+     * Menu Visibility's guard reads before a question goes to the model.
+     *
+     * @return list<LindaIntent>
+     */
+    public static function subjectsIn(#[\SensitiveParameter] string $question): array
+    {
+        $words = LindaText::words(LindaText::clean($question));
+        $phrases = [];
+
+        foreach (self::SUBJECTS as $intent => $list) {
+            foreach ($list as $phrase) {
+                $phrases[$phrase] = $intent;
+            }
+        }
+
+        uksort($phrases, fn (string $a, string $b) => substr_count($b, ' ') <=> substr_count($a, ' ') ?: strlen($b) <=> strlen($a));
+
+        $found = [];
+
+        foreach ($phrases as $phrase => $intent) {
+            $parts = explode(' ', $phrase);
+
+            while (($at = self::find($words, $parts)) !== null) {
+                $words = self::without($words, $at, count($parts));
+                $found[$intent] = true;
+            }
+        }
+
+        return array_map(fn (string $intent) => LindaIntent::from($intent), array_keys($found));
+    }
+
+    /**
      * Take every subject phrase out of the words, longest phrases first.
      *
      * Some subjects only describe another one, so they count only on their

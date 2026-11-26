@@ -100,12 +100,18 @@ final class LindaLinks
         foreach ($pages as $page) {
             $entry = self::PAGES[$page] ?? null;
 
-            if ($entry !== null && self::canOpen($user, $entry['needs'])) {
+            if ($entry !== null && self::canOpen($user, $entry['needs']) && ! self::hidden($entry['url'])) {
                 $links[] = ['label' => $entry['label'], 'url' => $entry['url']];
             }
         }
 
         return $links;
+    }
+
+    /** Whether the page belongs to a module hidden in Menu Visibility, so no answer links it. */
+    private static function hidden(string $url): bool
+    {
+        return app(LindaVisibility::class)->hidesPage($url);
     }
 
     /**
@@ -122,7 +128,7 @@ final class LindaLinks
         foreach ($pages as $page) {
             $entry = self::PAGES[$page] ?? null;
 
-            if ($entry === null || ! self::canOpen($user, $entry['needs'])) {
+            if ($entry === null || ! self::canOpen($user, $entry['needs']) || self::hidden($entry['url'])) {
                 continue;
             }
 

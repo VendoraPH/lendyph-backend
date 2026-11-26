@@ -18,7 +18,7 @@ final class LindaReply
         'answered', 'not_yet', 'unsupported', 'denied', 'unmatched',
         'unclear_period', 'period_refused', 'no_branch', 'ambiguous_branch',
         // A lookup with no member, loan or receipt named; none found; several found.
-        'no_target', 'not_found', 'ambiguous_record',
+        'no_target', 'not_found', 'ambiguous_record', 'turned_off',
     ];
 
     /** When the figures were read, in Manila. */
@@ -46,6 +46,43 @@ final class LindaReply
         }
 
         $this->asOf = ($asOf ?? CarbonImmutable::now())->setTimezone(LindaPeriod::timezone());
+    }
+
+    /**
+     * This reply without the links `$drop` picks (Menu Visibility's hidden
+     * pages): such a link leaves the links, and a row in a block keeps its
+     * words but loses its link.
+     *
+     * @param  \Closure(string): bool  $drop
+     */
+    public function withoutLinks(\Closure $drop): self
+    {
+        $links = array_values(array_filter($this->links, fn (mixed $link): bool => ! (is_array($link) && is_string($link['url'] ?? null) && $drop($link['url']))));
+        $blocks = self::withoutUrls($this->blocks, $drop);
+
+        if ($links === $this->links && $blocks === $this->blocks) {
+            return $this;
+        }
+
+        return new self($this->intent, $this->answer, $this->outcome, $blocks, $links, $this->memberIds, $this->answerFunction, $this->asOf, $this->loanIds);
+    }
+
+    /**
+     * @param  array<mixed>  $value
+     * @param  \Closure(string): bool  $drop
+     * @return array<mixed>
+     */
+    private static function withoutUrls(array $value, \Closure $drop): array
+    {
+        foreach ($value as $key => $item) {
+            if (is_array($item)) {
+                $value[$key] = self::withoutUrls($item, $drop);
+            } elseif ($key === 'url' && is_string($item) && $drop($item)) {
+                unset($value[$key]);
+            }
+        }
+
+        return $value;
     }
 
     /**

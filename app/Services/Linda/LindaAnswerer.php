@@ -78,6 +78,8 @@ final class LindaAnswerer
     /** The record numbers a lookup reads: receipts, loans (LN-, LA-) and members. */
     private const LOOKUP_PREFIXES = [Repayment::RECEIPT_PREFIX, 'LN', Loan::CODE_PREFIX, Borrower::CODE_PREFIX];
 
+    public function __construct(private readonly LindaVisibility $visibility) {}
+
     /**
      * @param  ?string  $question  the question as typed, read only to rank or name rows (performance); never stored
      */
@@ -90,6 +92,12 @@ final class LindaAnswerer
         // Where a page is in the menu: no figures, so no branch scope.
         if ($intent === LindaIntent::HowTo) {
             return app(HowToAnswer::class)->answer($user, $question);
+        }
+
+        // A topic of a module hidden in Menu Visibility: a short local answer,
+        // with no figure or link, before anything is read.
+        if ($this->visibility->hidesIntent($intent)) {
+            return $this->visibility->turnedOff($intent);
         }
 
         $lookupKind = $intent->lookupKind();
@@ -167,6 +175,10 @@ final class LindaAnswerer
             default => MemberLookupAnswer::class,
         });
 
+        if ($this->hiddenFor($answer)) {
+            return $this->visibility->turnedOff($answer->intent());
+        }
+
         if (! $answer->allows($user)) {
             return $answer->denied();
         }
@@ -190,6 +202,10 @@ final class LindaAnswerer
     {
         $answer = app(LoanLookupAnswer::class);
 
+        if ($this->hiddenFor($answer)) {
+            return $this->visibility->turnedOff($answer->intent());
+        }
+
         if (! $answer->allows($user)) {
             return $answer->denied();
         }
@@ -201,10 +217,21 @@ final class LindaAnswerer
         return $answer->find($user, $request);
     }
 
+    /**
+     * Whether a lookup's module is hidden in Menu Visibility: a member's
+     * (Members), a loan's (Loans) or a receipt's (Payments), and a member's
+     * reminders with Reminders too.
+     */
+    private function hiddenFor(LookupAnswer $answer): bool
+    {
+        return $this->visibility->hidesIntent($answer->intent())
+            || ($answer instanceof MemberRemindersAnswer && $this->visibility->hides(LindaIntent::ReminderSummary->module()));
+    }
+
     /** What Linda can answer, with the five suggested questions. */
     public function unmatched(): LindaReply
     {
-        return new LindaReply(LindaIntent::UnsupportedQuestion->value, LindaWording::unmatched(), 'unmatched');
+        return new LindaReply(LindaIntent::UnsupportedQuestion->value, LindaWording::unmatched($this->visibility->hidden()), 'unmatched');
     }
 
     public function unclearPeriod(?LindaIntent $intent = null): LindaReply
@@ -243,6 +270,6 @@ final class LindaAnswerer
     /** For a question only the model could read while it can't be asked. */
     public function aiOffForNow(): LindaReply
     {
-        return new LindaReply(LindaIntent::UnsupportedQuestion->value, LindaWording::aiOffForNow(), 'unmatched');
+        return new LindaReply(LindaIntent::UnsupportedQuestion->value, LindaWording::aiOffForNow($this->visibility->hidden()), 'unmatched');
     }
 }

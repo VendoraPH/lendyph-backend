@@ -25,6 +25,56 @@ final class LindaWording
         'Give me a summary of our lending operation this month.',
     ];
 
+    /** The module each suggested question asks about, so a hidden module's are left out. */
+    private const SUGGESTED_MODULES = [
+        'How much have we collected this month?' => 'payments',
+        'Which members currently have overdue payments?' => 'loans',
+        'How many active loans do we have?' => 'loans',
+        'How much have we disbursed this month?' => 'loans',
+        'Give me a summary of our lending operation this month.' => 'loans',
+    ];
+
+    /** What else Linda answers, each with its module, in the order she lists them. */
+    private const ALSO_ANSWERS = [
+        ['payments', 'payments'],
+        ['collection efficiency', 'reports'],
+        ['members', 'members'],
+        ['the portfolio', 'reports'],
+        ['income', 'accounting'],
+        ['expenses', 'accounting'],
+        ['savings', 'savings'],
+        ['share capital', 'share_capital'],
+        ['credit scoring risk levels', 'credit_scoring'],
+        ['payment reminders', 'loans.reminders'],
+        ['CDA readiness and deadlines', 'cda'],
+        ['branch and officer performance', 'reports'],
+    ];
+
+    /** What Linda helps with when she can't answer, each with its module, in the order she lists them. */
+    private const HELPS_WITH = [
+        ['collections', 'payments'],
+        ['payments', 'payments'],
+        ['collection efficiency', 'reports'],
+        ['disbursements', 'loans'],
+        ['loans', 'loans'],
+        ['overdue payments', 'loans'],
+        ['members', 'members'],
+        ['the portfolio', 'reports'],
+        ['income', 'accounting'],
+        ['expenses', 'accounting'],
+        ['savings', 'savings'],
+        ['share capital', 'share_capital'],
+        ['CDA', 'cda'],
+        ['branch and officer performance', 'reports'],
+    ];
+
+    /** What Linda looks up, each with its module and its number. */
+    private const LOOKS_UP = [
+        ['a member', 'members', 'BRW-…'],
+        ['a loan', 'loans', 'LN-…'],
+        ['a receipt', 'payments', 'RCP-…'],
+    ];
+
     /** The longest part of a typed branch name repeated back in a reply. */
     private const ECHO_MAX = 60;
 
@@ -103,26 +153,71 @@ final class LindaWording
         return 'These figures are as of today; I can\'t show them for an earlier date yet.';
     }
 
-    /** The five questions, one per line. */
-    public static function suggestions(): string
+    /**
+     * The five questions, one per line, less those about a module hidden in
+     * Menu Visibility.
+     *
+     * @param  list<string>  $hidden
+     */
+    public static function suggestions(array $hidden = []): string
     {
-        return implode("\n", array_map(fn (string $question): string => '- '.$question, self::SUGGESTED_QUESTIONS));
+        $shown = array_filter(self::SUGGESTED_QUESTIONS, fn (string $question): bool => ! in_array(self::SUGGESTED_MODULES[$question] ?? null, $hidden, true));
+
+        return implode("\n", array_map(fn (string $question): string => '- '.$question, $shown));
     }
 
-    public static function unmatched(): string
+    /**
+     * What Linda can answer, never naming a module hidden in Menu Visibility.
+     *
+     * @param  list<string>  $hidden
+     */
+    public static function unmatched(array $hidden = []): string
     {
-        return "I can't answer that question yet. Here's what I can answer for now:\n\n"
-            .self::suggestions()
-            ."\n\nI can also answer about payments, collection efficiency, members, the portfolio, income, expenses, savings, "
-            .'share capital, credit scoring risk levels, payment reminders, CDA readiness and deadlines, and branch and officer performance, look up a member, a loan or a receipt by name or '
-            .'number (BRW-…, LN-…, RCP-…), and tell you where a page is in the menu. '
+        $suggested = self::suggestions($hidden);
+        $topics = array_column(array_filter(self::ALSO_ANSWERS, fn (array $topic): bool => ! in_array($topic[1], $hidden, true)), 0);
+        $lookups = array_values(array_filter(self::LOOKS_UP, fn (array $lookup): bool => ! in_array($lookup[1], $hidden, true)));
+
+        $also = [
+            ...($topics === [] ? [] : ['answer about '.self::listed($topics, ', and ')]),
+            ...($lookups === [] ? [] : ['look up '.self::listed(array_column($lookups, 0), ' or ').' by name or number ('.implode(', ', array_column($lookups, 2)).')']),
+            'tell you where a page is in the menu',
+        ];
+
+        return "I can't answer that question yet. "
+            .($suggested === '' ? '' : "Here's what I can answer for now:\n\n".$suggested."\n\n")
+            .'I can also '.self::listed($also, ', and ').'. '
             .'You can also name a period ("last month") or one of your branches.';
     }
 
-    public static function aiOffForNow(): string
+    /** @param  list<string>  $hidden */
+    public static function aiOffForNow(array $hidden = []): string
     {
-        return "I can't read that question right now. These questions still work:\n\n"
-            .self::suggestions();
+        $suggested = self::suggestions($hidden);
+
+        return "I can't read that question right now.".($suggested === '' ? '' : " These questions still work:\n\n".$suggested);
+    }
+
+    /** The local answer to a question about a module hidden in Menu Visibility. */
+    public static function turnedOff(): string
+    {
+        return 'That part of the app is turned off here.';
+    }
+
+    /**
+     * Items in a sentence: "a", "a and b" ("a or b"), "a, b, and c" ("a, b or c").
+     *
+     * @param  list<string>  $items
+     */
+    private static function listed(array $items, string $lastJoin): string
+    {
+        $items = array_values($items);
+        $last = array_pop($items);
+
+        return match (count($items)) {
+            0 => (string) $last,
+            1 => $items[0].' '.trim(ltrim($lastJoin, ',')).' '.$last,
+            default => implode(', ', $items).$lastJoin.$last,
+        };
     }
 
     public static function unclearPeriod(): string
@@ -146,16 +241,25 @@ final class LindaWording
         return 'Sorry, I can only answer questions about your cooperative\'s lending figures, like collections, payments, disbursements, active loans, overdue payments, members, loans and receipts.';
     }
 
-    public static function notYet(): string
+    /**
+     * What Linda helps with instead, never naming a module hidden in Menu
+     * Visibility; word for word as before when nothing is hidden.
+     *
+     * @param  list<string>  $hidden
+     */
+    public static function notYet(array $hidden = []): string
     {
-        return 'I can\'t answer that yet. I can help with collections, payments, collection efficiency, disbursements, loans, '
-            .'overdue payments, members, the portfolio, income, expenses, savings, share capital, CDA, branch and officer '
-            .'performance, a member, a loan or a receipt, and finding a page.';
+        $topics = array_column(array_filter(self::HELPS_WITH, fn (array $topic): bool => ! in_array($topic[1], $hidden, true)), 0);
+        $lookups = array_column(array_filter(self::LOOKS_UP, fn (array $lookup): bool => ! in_array($lookup[1], $hidden, true)), 0);
+
+        return 'I can\'t answer that yet. I can help with '
+            .self::listed([...$topics, ...($lookups === [] ? [] : [self::listed($lookups, ' or ')]), 'finding a page'], ', and ').'.';
     }
 
-    public static function notYetWithReport(): string
+    /** @param  list<string>  $hidden */
+    public static function notYetWithReport(array $hidden = []): string
     {
-        return self::notYet().' The report linked below may help.';
+        return self::notYet($hidden).' The report linked below may help.';
     }
 
     public static function savingsNotSetUp(): string

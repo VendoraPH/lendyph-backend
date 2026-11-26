@@ -24,6 +24,8 @@ use App\Models\TimeDeposit;
 use App\Models\User;
 use App\Services\AuditLogModules;
 use App\Services\AuditLogService;
+use App\Services\MenuVisibility\MenuModules;
+use App\Services\MenuVisibility\MenuVisibility;
 use App\Services\PersonalDataKeys;
 use Carbon\CarbonImmutable;
 use Illuminate\Database\Eloquent\Model;
@@ -739,6 +741,10 @@ class AuditLogResource extends JsonResource
             return null;
         }
 
+        if (($modules = $this->menuModulesInWords($field, $value)) !== null) {
+            return $modules;
+        }
+
         return $this->namedBy($field, $value)
             ?? $this->dashboardThresholdInWords($field, $value)
             ?? $this->feeValueInWords($field, $value, $row)
@@ -1330,5 +1336,21 @@ class AuditLogResource extends JsonResource
     private static function isPeriod(array $item): bool
     {
         return self::isId($item['period_number'] ?? null) && ! isset($item['name']);
+    }
+
+    /**
+     * A Menu Visibility save's hidden lists (finish run round 6) by each
+     * module's name, a submenu with its menu ("Auto-Credit (Share Capital)"),
+     * or "none"; null for any other field or row.
+     */
+    private function menuModulesInWords(string $field, mixed $value): ?string
+    {
+        if ($this->action !== MenuVisibility::AUDIT_CHANGED || $field !== 'hidden' || ! is_array($value)) {
+            return null;
+        }
+
+        $words = array_map(fn (mixed $key) => is_string($key) ? MenuModules::words($key) : (string) json_encode($key), $value);
+
+        return $words === [] ? 'none' : implode(', ', $words);
     }
 }

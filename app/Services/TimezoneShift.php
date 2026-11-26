@@ -419,6 +419,10 @@ class TimezoneShift
         // run round 3, reprint after a change, 2026-11-25), well after the
         // cutover.
         'loan_document_prints' => ['printed_at'],
+        // Menu Visibility's switches and administrator overrides (finish run
+        // round 6, 2026-11-25), well after the cutover.
+        'menu_visibility_overrides' => ['created_at', 'expires_at', 'updated_at'],
+        'menu_visibility_switches' => ['created_at', 'updated_at'],
         // When an approved adjustment was cancelled (finish run round 6,
         // 2026-11-25), a column added well after the cutover to a table the
         // shift covers, as `documents.portal_shared_at` is.
