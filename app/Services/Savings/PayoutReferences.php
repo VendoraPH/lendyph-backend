@@ -120,7 +120,7 @@ class PayoutReferences
         return in_array($deposit->status, self::SETTLED_STATUSES, true)
             && in_array($deposit->payout_method, SavingsTransaction::PAYOUT_REFERENCE_METHODS, true)
             && SavingsMath::centavos((string) ($deposit->settled_amount ?? '0')) > 0
-            && trim((string) $deposit->payout_reference) === '';
+            && SavingsTransaction::isBlankReference($deposit->payout_reference);
     }
 
     /**
@@ -135,9 +135,8 @@ class PayoutReferences
             Refuse::field('reference', 'A reference can be recorded afterwards only on a withdrawal or a closing payout.');
         }
 
-        $stored = trim((string) $row->external_reference);
-
-        if ($stored !== '') {
+        if (! SavingsTransaction::isBlankReference($row->external_reference)) {
+            $stored = trim((string) $row->external_reference);
             Refuse::field('reference', "{$row->reference} already has its reference ({$stored}). A recorded reference can't be changed.");
         }
 
@@ -155,9 +154,8 @@ class PayoutReferences
             Refuse::field('reference', "{$number} hasn't been paid out yet. Its payout reference is recorded when it's settled.");
         }
 
-        $stored = trim((string) $deposit->payout_reference);
-
-        if ($stored !== '') {
+        if (! SavingsTransaction::isBlankReference($deposit->payout_reference)) {
+            $stored = trim((string) $deposit->payout_reference);
             Refuse::field('reference', "{$number} already has its payout reference ({$stored}). A recorded reference can't be changed.");
         }
 
@@ -184,14 +182,14 @@ class PayoutReferences
     public function recordOnTransaction(SavingsTransaction $row, string $reference, User $user): SavingsTransaction
     {
         $this->assertInTransaction();
-        $reference = trim($reference);
+        $reference = $this->typed($reference);
         $this->assertTransactionTakesIt($row);
 
         $this->locks->accounts([$row->account_id]);
         /** @var SavingsTransaction $locked */
         $locked = SavingsTransaction::query()->whereKey($row->id)->lockForUpdate()->firstOrFail();
 
-        if (trim((string) $locked->external_reference) !== '') {
+        if (! SavingsTransaction::isBlankReference($locked->external_reference)) {
             Refuse::conflict("Someone recorded the reference of {$locked->reference} a moment ago. Refresh to see it.");
         }
 
@@ -235,12 +233,12 @@ class PayoutReferences
     public function recordOnTimeDeposit(TimeDeposit $deposit, string $reference, User $user): TimeDeposit
     {
         $this->assertInTransaction();
-        $reference = trim($reference);
+        $reference = $this->typed($reference);
         $this->assertTimeDepositTakesIt($deposit);
 
         $locked = $this->locks->timeDeposit($deposit->id);
 
-        if (trim((string) $locked->payout_reference) !== '') {
+        if (! SavingsTransaction::isBlankReference($locked->payout_reference)) {
             Refuse::conflict("Someone recorded the payout reference of {$locked->certificate_number} a moment ago. Refresh to see it.");
         }
 
@@ -250,7 +248,7 @@ class PayoutReferences
         // model auditing: the audit row below is this change's only one.
         $written = DB::table('time_deposits')
             ->where('id', $locked->id)
-            ->where(fn ($blank) => $blank->whereNull('payout_reference')->orWhereRaw("TRIM(`payout_reference`) = ''"))
+            ->whereRaw(SavingsTransaction::blankReferenceSql('`payout_reference`'))
             ->update(['payout_reference' => $reference, 'updated_at' => now()]);
 
         if ($written !== 1) {
@@ -276,6 +274,20 @@ class PayoutReferences
         );
 
         return $locked;
+    }
+
+    /**
+     * The reference as stored: trimmed, and never blank by the one rule.
+     *
+     * @throws ValidationException
+     */
+    private function typed(string $reference): string
+    {
+        if (SavingsTransaction::isBlankReference($reference)) {
+            Refuse::field('reference', 'Enter the reference of this payout.');
+        }
+
+        return trim($reference);
     }
 
     private function assertInTransaction(): void

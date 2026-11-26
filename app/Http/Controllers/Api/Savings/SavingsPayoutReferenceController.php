@@ -8,6 +8,7 @@ use App\Http\Requests\Savings\Transaction\ListPayoutsMissingReferenceRequest;
 use App\Http\Requests\Savings\Transaction\RecordPayoutReferenceRequest;
 use App\Models\SavingsTransaction;
 use App\Services\BranchAccess;
+use App\Services\GeneratedNumberWrite;
 use App\Services\Savings\Api\Presenter;
 use App\Services\Savings\PayoutReferences;
 use App\Services\Savings\PayoutsMissingReference;
@@ -39,7 +40,7 @@ class SavingsPayoutReferenceController extends Controller
             new OA\Response(response: 200, description: 'The transaction, with its reference'),
             new OA\Response(response: 403, description: 'Missing the permission that posts this payout'),
             new OA\Response(response: 404, description: 'No such transaction in the caller\'s branches'),
-            new OA\Response(response: 409, description: 'Someone recorded its reference a moment ago'),
+            new OA\Response(response: 409, description: 'Someone recorded its reference a moment ago, or another write held the lock too long'),
             new OA\Response(response: 422, description: 'Not a non-cash payout, already has a reference, reversed, or the reference is blank, too long or already used'),
         ],
     )]
@@ -50,7 +51,11 @@ class SavingsPayoutReferenceController extends Controller
         $reference = (string) $request->validated('reference');
         $user = $request->user();
 
-        $recorded = DB::transaction(fn (): SavingsTransaction => $this->references->recordOnTransaction($row, $reference, $user));
+        // A lock wait (another writer checking the same method) or deadlock answers 409, never 500.
+        $recorded = GeneratedNumberWrite::run(
+            fn (): SavingsTransaction => DB::transaction(fn (): SavingsTransaction => $this->references->recordOnTransaction($row, $reference, $user)),
+            GeneratedNumberWrite::SAVINGS_CONFLICT,
+        );
 
         return response()->json(['success' => true, 'data' => $presenter->transaction($recorded)]);
     }
@@ -69,7 +74,7 @@ class SavingsPayoutReferenceController extends Controller
             new OA\Response(response: 200, description: 'The time deposit, with its payout reference'),
             new OA\Response(response: 403, description: 'Missing the permission that posts this payout'),
             new OA\Response(response: 404, description: 'No such placement in the caller\'s branches'),
-            new OA\Response(response: 409, description: 'Someone recorded its payout reference a moment ago'),
+            new OA\Response(response: 409, description: 'Someone recorded its payout reference a moment ago, or another write held the lock too long'),
             new OA\Response(response: 422, description: 'Not paid out by bank transfer, GCash or Maya, already has a reference, or the reference is blank, too long or already used'),
         ],
     )]
@@ -79,7 +84,10 @@ class SavingsPayoutReferenceController extends Controller
         $reference = (string) $request->validated('reference');
         $user = $request->user();
 
-        $recorded = DB::transaction(fn () => $this->references->recordOnTimeDeposit($deposit, $reference, $user));
+        $recorded = GeneratedNumberWrite::run(
+            fn () => DB::transaction(fn () => $this->references->recordOnTimeDeposit($deposit, $reference, $user)),
+            GeneratedNumberWrite::SAVINGS_CONFLICT,
+        );
 
         return response()->json(['success' => true, 'data' => $presenter->present($recorded)]);
     }

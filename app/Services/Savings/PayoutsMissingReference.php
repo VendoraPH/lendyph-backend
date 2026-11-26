@@ -43,7 +43,7 @@ class PayoutsMissingReference
             ->whereIn('t.type', SavingsTransaction::PAYOUT_REFERENCE_TYPES)
             ->whereNull('t.reverses_transaction_id')
             ->whereIn('t.method', SavingsTransaction::PAYOUT_REFERENCE_METHODS)
-            ->where(fn (Builder $blank) => $blank->whereNull('t.external_reference')->orWhereRaw("TRIM(t.external_reference) = ''"))
+            ->whereRaw(SavingsTransaction::blankReferenceSql('t.external_reference'))
             ->whereNotExists(fn (Builder $reversals) => $reversals->selectRaw('1')
                 ->from('savings_transactions as r')
                 ->whereColumn('r.reverses_transaction_id', 't.id'));
@@ -54,7 +54,7 @@ class PayoutsMissingReference
             ->whereIn('d.status', PayoutReferences::SETTLED_STATUSES)
             ->whereIn('d.payout_method', SavingsTransaction::PAYOUT_REFERENCE_METHODS)
             ->where('d.settled_amount', '>', 0)
-            ->where(fn (Builder $blank) => $blank->whereNull('d.payout_reference')->orWhereRaw("TRIM(d.payout_reference) = ''"));
+            ->whereRaw(SavingsTransaction::blankReferenceSql('d.payout_reference'));
         $this->filter($deposits, 'd.branch_id', 'd.settled_on', 'd.payout_method', $branchIds, $filters);
 
         return DB::query()->fromSub($transactions->unionAll($deposits), 'payouts');

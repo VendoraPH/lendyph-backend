@@ -126,6 +126,31 @@ class SavingsTransaction extends Model
     }
 
     /**
+     * The one rule of a blank reference, on both sides (finish run round 6,
+     * money review): null, or nothing but the characters PHP's trim() strips
+     * (space, tab, newline, carriage return, NUL, vertical tab).
+     */
+    public static function isBlankReference(?string $value): bool
+    {
+        return $value === null || trim($value) === '';
+    }
+
+    /**
+     * The same rule in SQL for `$column` (a trusted column name): MySQL's
+     * TRIM() strips only spaces, so each of trim()'s characters is removed.
+     */
+    public static function blankReferenceSql(string $column): string
+    {
+        $stripped = $column;
+
+        foreach ([32, 9, 10, 13, 0, 11] as $code) {
+            $stripped = "REPLACE({$stripped}, CHAR({$code} USING utf8mb4), '')";
+        }
+
+        return "({$column} IS NULL OR {$stripped} = '')";
+    }
+
+    /**
      * Whether this row, as stored, still takes its payout reference: a
      * withdrawal or closing payout by bank transfer, GCash or Maya with a
      * blank reference, that is neither a reversal nor reversed.
@@ -135,7 +160,7 @@ class SavingsTransaction extends Model
         return in_array($this->getOriginal('type'), self::PAYOUT_REFERENCE_TYPES, true)
             && in_array($this->getOriginal('method'), self::PAYOUT_REFERENCE_METHODS, true)
             && $this->getOriginal('reverses_transaction_id') === null
-            && trim((string) $this->getOriginal('external_reference')) === ''
+            && self::isBlankReference($this->getOriginal('external_reference'))
             && ! ($reversed ?? $this->reversedBy()->exists());
     }
 
@@ -152,7 +177,7 @@ class SavingsTransaction extends Model
         $dirty = $this->getDirty();
         $reference = $dirty['external_reference'] ?? null;
 
-        if (array_keys($dirty) !== ['external_reference'] || ! is_string($reference) || trim($reference) === '' || ! $this->takesPayoutReferenceAfterwards()) {
+        if (array_keys($dirty) !== ['external_reference'] || ! is_string($reference) || self::isBlankReference($reference) || ! $this->takesPayoutReferenceAfterwards()) {
             throw ($this->appendOnlyException())::update($this->getTable(), $this->getKey());
         }
 
@@ -161,7 +186,7 @@ class SavingsTransaction extends Model
         }
 
         $written = $this->setKeysForSaveQuery($query)->toBase()
-            ->where(fn ($blank) => $blank->whereNull('external_reference')->orWhereRaw("TRIM(`external_reference`) = ''"))
+            ->whereRaw(self::blankReferenceSql('`external_reference`'))
             ->update(['external_reference' => $reference]);
 
         if ($written !== 1) {
