@@ -34,6 +34,15 @@ class LindaLoanNumbersTest extends LindaTestCase
             'slash-joined' => ['Compare L-1/L-2', ['L-1', 'L-2']],
             'comma and semicolon joined' => ['L-1,L-2;L-3 please', ['L-1', 'L-2', 'L-3']],
             'a Loan No. holding a slash, whole' => ['Status of L/2019/42', ['L/2019/42']],
+            'no digit, after loan' => ['Status of loan ABC-XYZ', ['ABC-XYZ']],
+            'no digit, after loan no.' => ['loan no. ABCD please', ['ABCD']],
+            'no digit, after loan #' => ['loan # ABC-XYZ', ['ABC-XYZ']],
+            'glued to loan no.' => ['Loan No.BC-07 status', ['BC-07']],
+            'glued to loan #' => ['Status of loan#ABC-XYZ?', ['ABC-XYZ']],
+            'glued to loan no:' => ['Loan No:BC-07', ['BC-07']],
+            'glued, any case' => ['LOAN NO.bc-07', ['bc-07']],
+            'glued bare number' => ['loan no.42', ['42']],
+            'glued to utang' => ['utang#XY-Z', ['XY-Z']],
         ];
     }
 
@@ -59,6 +68,10 @@ class LindaLoanNumbersTest extends LindaTestCase
             'the app\'s own loan number' => ['Status of LN-0042', 'LN-0042'],
             'the app\'s own number with a space' => ['Status of PN 42', 'PN 42'],
             'a receipt number' => ['Find RCP-000123', 'RCP-000123'],
+            'no digit, no loan word' => ['Status of ABC-XYZ', 'ABC-XYZ'],
+            'no digit, glued to another word' => ['Status#ABC-XYZ', 'ABC-XYZ'],
+            'a loan word itself' => ['loan no. ABCD', 'no'],
+            'the app\'s own number glued to loan' => ['loan#LN-0042', 'LN-0042'],
         ];
     }
 
@@ -71,6 +84,12 @@ class LindaLoanNumbersTest extends LindaTestCase
     public function test_a_question_with_no_digit_checks_nothing(): void
     {
         $this->assertSame([], LindaLoanNumbers::candidates('How much did we collect this month?'));
+    }
+
+    /** A value with no digit is checked only after a loan word (round 7). */
+    public function test_without_a_loan_word_nothing_new_is_checked(): void
+    {
+        $this->assertSame([], LindaLoanNumbers::candidates('Status of ABC-XYZ and XY-Z today'));
     }
 
     public function test_no_value_is_longer_than_the_column(): void

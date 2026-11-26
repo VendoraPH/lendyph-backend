@@ -8,8 +8,9 @@ use InvalidArgumentException;
  * The API token lifetime, in minutes, from `auth.token_timeout`
  * (`AUTH_TOKEN_TIMEOUT`, default 30).
  *
- * It is how long a normal sign-in's token lives, how long a refreshed token
- * lives, and the idle window CheckTokenExpiry applies to a remembered one. It
+ * It is how long every sign-in's token lives (there is no "Remember me" since
+ * finish run round 7), how long a refreshed token lives, and the idle window
+ * CheckTokenExpiry applies to any token that lives longer. It
  * must be a whole number above zero. Zero was once documented as "disable",
  * but addMinutes(0) mints a token that has already expired, so every request
  * after login answered 401. A token that never expires is not supported

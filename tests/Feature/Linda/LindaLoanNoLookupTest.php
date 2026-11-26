@@ -64,6 +64,12 @@ class LindaLoanNoLookupTest extends LindaAnswersTestCase
             'with spaces' => ['Status of BC 2019 07', 'BC 2019 07'],
             'a possessive, with spaces' => ["What is BC 2019 07's status?", 'BC 2019 07'],
             'slash-joined' => ['How about L-2019-0042/L-2019-0043?', 'L-2019-0042'],
+            'no digit, after loan' => ['Status of loan ABC-XYZ', 'ABC-XYZ'],
+            'no digit, any case' => ['status of loan abc-xyz?', 'ABC-XYZ'],
+            'glued to loan no.' => ['Loan No.BC-07 status?', 'BC-07'],
+            'glued to loan #' => ['How about loan#ABC-XYZ?', 'ABC-XYZ'],
+            'glued to loan no:' => ['Loan No:BC-07', 'BC-07'],
+            'glued, no digit, tl' => ['Kumusta ang utang#ABC-XYZ?', 'ABC-XYZ'],
         ];
     }
 
@@ -153,6 +159,18 @@ class LindaLoanNoLookupTest extends LindaAnswersTestCase
         $this->actingAs($this->asker)->postJson(self::URL, ['message' => 'How about D-9?'])->assertOk();
 
         $this->assertCount(1, $this->fake->requests, 'no Loan No. matched, so the model reads it as before');
+    }
+
+    /** A Loan No. with no digit is found only after a loan word (round 7): no new match without one. */
+    public function test_a_loan_no_with_no_digit_and_no_loan_word_is_not_a_lookup(): void
+    {
+        $this->loan->forceFill(['external_loan_no' => 'ABC-XYZ'])->save();
+
+        $response = $this->actingAs($this->asker)->postJson(self::URL, ['message' => 'What is the status of ABC-XYZ?'])->assertOk();
+
+        $this->assertNotSame('loan_details', $response->json('data.intent'));
+        $this->assertStringNotContainsString('(Loan No. ABC-XYZ)', (string) $response->json('data.answer'));
+        $this->assertEmpty(LindaQuestion::query()->latest('id')->firstOrFail()->loan_ids);
     }
 
     public function test_a_later_question_sends_the_model_no_loan_no(): void
