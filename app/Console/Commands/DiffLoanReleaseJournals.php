@@ -171,7 +171,7 @@ class DiffLoanReleaseJournals extends Command
                 $loans = Loan::query()
                     ->whereIn('id', $journals->where('postable_type', Loan::class)->pluck('postable_id')->all())
                     ->get([
-                        'id', 'loan_account_number', 'application_number', 'principal_amount', 'net_proceeds', 'total_deductions', 'deductions',
+                        'id', 'loan_account_number', 'application_number', 'external_loan_no', 'principal_amount', 'net_proceeds', 'total_deductions', 'deductions',
                         'release_method', 'source_loan_id', 'restructure_carried_principal', 'restructure_capitalised_interest',
                         'restructure_capitalised_penalty', 'restructure_written_off_principal',
                     ])
@@ -230,7 +230,7 @@ class DiffLoanReleaseJournals extends Command
             return;
         }
 
-        $reference = (string) ($loan->loan_account_number ?? $loan->application_number ?? self::NOTHING);
+        $reference = $loan->displayNumber() ?? self::NOTHING;
         $restructure = $loan->source_loan_id !== null;
 
         if ($restructure && ! $this->hasStoredSplit($loan)) {
