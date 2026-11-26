@@ -58,6 +58,20 @@ class ShareCapitalService
     /** An auto-credit run's day and month are Manila's (finish run round 7). */
     public const TIMEZONE = 'Asia/Manila';
 
+    /**
+     * The period a hand credit covers for a pledge (finish run round 7): the
+     * run's whole month, or for a twice-monthly ("15/30") pledge the run's
+     * half of it, the 1st to the 15th or the 16th to the month's end.
+     */
+    public const WHOLE_MONTH = 'month';
+
+    public const FIRST_HALF = 'first_half';
+
+    public const SECOND_HALF = 'second_half';
+
+    /** The 409 when the auto-credit switch waited too long behind a run or an entry holding the pledge. */
+    public const PLEDGE_SWITCH_BUSY = 'This pledge is being credited or saved by another action right now, so its auto-credit wasn\'t changed. Try again in a moment.';
+
     public function __construct(private AutomaticPoster $poster, private CashReferences $cashReferences) {}
 
     /**
@@ -88,14 +102,20 @@ class ShareCapitalService
 
     /**
      * Why a run skips a pledge whose member was credited by hand in the run's
-     * month: the first such credit's date and reference.
+     * period (the month, or a twice-monthly pledge's half of it): the first
+     * such credit's date and reference.
      */
-    public static function handCreditedReason(string $date, ?string $reference): string
+    public static function handCreditedReason(string $date, ?string $reference, string $period = self::WHOLE_MONTH): string
     {
         $on = Carbon::parse($date)->format('M j, Y');
         $reference = $reference === null || trim($reference) === '' ? '' : ' ('.$reference.')';
+        $for = match ($period) {
+            self::FIRST_HALF => 'for the 1st to the 15th',
+            self::SECOND_HALF => 'for the 16th to the month\'s end',
+            default => 'this month',
+        };
 
-        return "Credited by hand on {$on}{$reference}, so auto-credit skips it this month.";
+        return "Credited by hand on {$on}{$reference}, so auto-credit skips it {$for}.";
     }
 
     /**
@@ -124,8 +144,8 @@ class ShareCapitalService
      * Then the pledges, FOR SHARE in id order (finish run round 7): only those
      * still set to auto-credit with an amount are credited, at the amount read
      * under that lock, and their switch can't change until the run commits.
-     * A pledge whose member was credited by hand in the run's month (Manila)
-     * is skipped, with the reason stored on the run (AutoCreditRunSkip) and
+     * A pledge whose member was credited by hand, net of hand debits, in the
+     * run's month (Manila; a twice-monthly pledge's half of it) is skipped, with the reason stored on the run (AutoCreditRunSkip) and
      * returned as the run's `skips` relation.
      */
     public function processAutoCredit(
@@ -157,23 +177,29 @@ class ShareCapitalService
 
             $runDay = CarbonImmutable::now(self::TIMEZONE);
             $locked = $this->stillOnAutoCredit($eligiblePledges);
-            $skipReasons = $this->handCreditedThisMonth($locked, $runDay, true);
-            $totalAmount = 0.0;
-            $credited = 0;
+            $skipReasons = $this->handCreditedInPeriod($locked, $runDay, true);
+            $toCredit = $locked->reject(fn (ShareCapitalPledge $pledge): bool => isset($skipReasons[$pledge->borrower_id]));
+            $totalCentavos = $toCredit->sum(fn (ShareCapitalPledge $pledge): int => LoanService::toCentavos((float) $pledge->amount));
+
+            // The run first, so each row carries it (`auto_credit_run_id`): what
+            // tells the run's own rows from entries by hand.
+            $run = AutoCreditRun::create([
+                'total_amount' => $totalCentavos / 100,
+                'member_count' => $toCredit->count(),
+                'skipped_count' => count($skipReasons),
+                'links_rows' => true,
+                'processed_at' => now(),
+                'processed_by' => $user->id,
+                'status' => 'completed',
+            ]);
 
             $rows = [];
 
-            foreach ($locked as $pledge) {
-                if (isset($skipReasons[$pledge->borrower_id])) {
-                    continue;
-                }
-
-                $totalAmount += (float) $pledge->amount;
-                $credited++;
-
+            foreach ($toCredit as $pledge) {
                 $rows[] = ShareCapitalLedger::create([
                     'borrower_id' => $pledge->borrower_id,
                     'branch_id' => $pledge->borrower?->branch_id,
+                    'auto_credit_run_id' => $run->id,
                     'date' => $runDay->toDateString(),
                     'description' => self::AUTO_CREDIT_DESCRIPTION,
                     'debit' => 0,
@@ -188,15 +214,6 @@ class ShareCapitalService
             // taken by the first posting and held to commit, so posting last
             // keeps it for the shortest time.
             $this->postEntries($rows);
-
-            $run = AutoCreditRun::create([
-                'total_amount' => round($totalAmount, 2),
-                'member_count' => $credited,
-                'skipped_count' => count($skipReasons),
-                'processed_at' => now(),
-                'processed_by' => $user->id,
-                'status' => 'completed',
-            ]);
 
             $skips = new Collection;
 
@@ -249,16 +266,24 @@ class ShareCapitalService
     }
 
     /**
-     * The pledges whose member was already credited by hand in `$day`'s month
-     * (Manila), each with the reason in words: member id => reason.
+     * The pledges whose member was already credited by hand in the run's
+     * period, each with the reason in words: member id => reason.
      *
-     * "By hand" is a standalone credit: not a payment's build-up, a release's
+     * The period is the run's month in Manila, or for a twice-monthly ("15/30")
+     * pledge the run's half of it (creditPeriod()). A pledge is skipped only
+     * while the period's hand credits less its hand debits are above ₱0.00, in
+     * centavos, so a credit posted by mistake and debited back doesn't skip
+     * it. The reason names the period's first hand credit.
+     *
+     * "By hand" is a standalone row: not a payment's build-up, a release's
      * deduction or a savings transfer (each carries its link), not an import,
-     * and not an auto-credit row (AUTO_CREDIT_DESCRIPTION). Pledge Entry's
-     * single and bulk entries and the Share Capital Ledger's own entry all
-     * count. Share capital entries are never reversed or voided (a mistake is
-     * corrected by a new entry), so every such credit counts; a hand debit
-     * doesn't.
+     * and not an auto-credit row. A run's rows carry their run
+     * (`auto_credit_run_id`); rows from runs before that are told apart by the
+     * run's fixed description, but only up to the last run that didn't link
+     * its rows, so a hand entry typed with that description later counts as by
+     * hand. Pledge Entry's entries and the Share Capital Ledger's own entry all
+     * count. Share capital entries are never reversed or voided: a mistake is
+     * corrected by an entry the other way, which this nets.
      *
      * In the run (`$lock`), it reads FOR SHARE: the latest committed rows,
      * and the members' rows in the month stay as read until the run commits.
@@ -266,34 +291,67 @@ class ShareCapitalService
      * @param  Collection<int, ShareCapitalPledge>  $pledges
      * @return array<int, string>
      */
-    private function handCreditedThisMonth(Collection $pledges, CarbonImmutable $day, bool $lock = false): array
+    private function handCreditedInPeriod(Collection $pledges, CarbonImmutable $day, bool $lock = false): array
     {
         if ($pledges->isEmpty()) {
             return [];
         }
 
-        $credits = ShareCapitalLedger::query()
+        $legacyRunsUntil = AutoCreditRun::query()->where('links_rows', false)->max('processed_at');
+
+        $rows = ShareCapitalLedger::query()
             ->whereIn('borrower_id', $pledges->pluck('borrower_id')->unique()->values()->all())
             ->whereBetween('date', [$day->startOfMonth()->toDateString(), $day->endOfMonth()->toDateString()])
-            ->where('credit', '>', 0)
             ->whereNull('repayment_id')
             ->whereNull('loan_id')
             ->whereNull('savings_transaction_id')
+            ->whereNull('auto_credit_run_id')
             ->where('is_imported', false)
-            ->where('description', '<>', self::AUTO_CREDIT_DESCRIPTION)
+            ->when($legacyRunsUntil !== null, fn ($q) => $q->where(fn ($w) => $w
+                ->where('description', '<>', self::AUTO_CREDIT_DESCRIPTION)
+                ->orWhereNull('description')
+                ->orWhere('created_at', '>', $legacyRunsUntil)))
             ->orderBy('borrower_id')
             ->orderBy('date')
             ->orderBy('id')
             ->when($lock, fn ($q) => $q->sharedLock())
-            ->get(['id', 'borrower_id', 'date', 'reference_number']);
+            ->get(['id', 'borrower_id', 'date', 'debit', 'credit', 'reference_number'])
+            ->groupBy('borrower_id');
 
         $reasons = [];
 
-        foreach ($credits as $credit) {
-            $reasons[$credit->borrower_id] ??= self::handCreditedReason($credit->date->toDateString(), $credit->reference_number);
+        foreach ($pledges as $pledge) {
+            [$period, $from, $to] = self::creditPeriod($pledge, $day);
+            $inPeriod = ($rows->get($pledge->borrower_id) ?? collect())
+                ->filter(fn (ShareCapitalLedger $row): bool => $row->date->toDateString() >= $from && $row->date->toDateString() <= $to);
+            $net = $inPeriod->sum(fn (ShareCapitalLedger $row): int => LoanService::toCentavos((float) $row->credit) - LoanService::toCentavos((float) $row->debit));
+            $first = $inPeriod->first(fn (ShareCapitalLedger $row): bool => (float) $row->credit > 0);
+
+            if ($net > 0 && $first !== null) {
+                $reasons[$pledge->borrower_id] = self::handCreditedReason($first->date->toDateString(), $first->reference_number, $period);
+            }
         }
 
         return $reasons;
+    }
+
+    /**
+     * The period a hand credit covers for this pledge on `$day`: the whole
+     * month, or for a twice-monthly ("15/30") pledge the day's half of it.
+     *
+     * @return array{0: string, 1: string, 2: string} the period, its first and last day
+     */
+    private static function creditPeriod(ShareCapitalPledge $pledge, CarbonImmutable $day): array
+    {
+        $start = $day->startOfMonth();
+
+        if ($pledge->schedule !== '15/30') {
+            return [self::WHOLE_MONTH, $start->toDateString(), $day->endOfMonth()->toDateString()];
+        }
+
+        return $day->day <= 15
+            ? [self::FIRST_HALF, $start->toDateString(), $start->addDays(14)->toDateString()]
+            : [self::SECOND_HALF, $start->addDays(15)->toDateString(), $day->endOfMonth()->toDateString()];
     }
 
     /**
@@ -368,7 +426,7 @@ class ShareCapitalService
         // The run's preview (finish run round 7): a pledge already credited
         // by hand this month is listed as skipped, with its reason, and left
         // out of the members and total the run would credit.
-        $skipReasons = $this->handCreditedThisMonth($onAutoCredit, CarbonImmutable::now(self::TIMEZONE));
+        $skipReasons = $this->handCreditedInPeriod($onAutoCredit, CarbonImmutable::now(self::TIMEZONE));
         $activeMembers = $onAutoCredit->reject(fn ($p) => isset($skipReasons[$p->borrower_id]));
         $skippedMembers = $onAutoCredit->filter(fn ($p) => isset($skipReasons[$p->borrower_id]));
         $disabledMembers = $allPledges->filter(fn ($p) => ! $p->auto_credit);

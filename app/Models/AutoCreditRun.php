@@ -17,6 +17,8 @@ class AutoCreditRun extends Model
         // How many pledges it skipped (finish run round 7); its skipped list is
         // AutoCreditRunSkip.
         'skipped_count',
+        // True once the run links its rows (share_capital_ledger.auto_credit_run_id).
+        'links_rows',
         'processed_at',
         'processed_by',
         'status',
@@ -27,6 +29,7 @@ class AutoCreditRun extends Model
         return [
             'total_amount' => 'decimal:2',
             'skipped_count' => 'integer',
+            'links_rows' => 'boolean',
             'processed_at' => 'datetime',
         ];
     }

@@ -23,6 +23,9 @@ class ShareCapitalLedger extends Model
         'repayment_id',
         'loan_id',
         'savings_transaction_id',
+        // The auto-credit run that made the row, set only by the run (finish
+        // run round 7); null on entries by hand and on rows from earlier runs.
+        'auto_credit_run_id',
         'date',
         'description',
         'reference',

@@ -13,10 +13,10 @@ use App\Models\ShareCapitalPledge;
 use App\Services\BranchAccess;
 use App\Services\LikePattern;
 use App\Services\LoanService;
+use App\Services\LoanWriteTransaction;
 use App\Services\ShareCapitalService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
-use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
 use OpenApi\Attributes as OA;
 
@@ -188,6 +188,7 @@ DESC,
         ],
         responses: [
             new OA\Response(response: 200, description: 'Auto-credit toggled'),
+            new OA\Response(response: 409, description: 'The pledge was held by an auto-credit run or an entry for too long; nothing changed, try again'),
             new OA\Response(response: 422, description: 'The pledge belongs to a borrower whose registration is still `pending` or was `rejected`'),
         ],
     )]
@@ -200,12 +201,13 @@ DESC,
         // Read and flipped under the pledge's row lock (finish run round 7): an
         // entry by hand or an auto-credit run holding the pledge FOR SHARE is
         // waited for, and either sees the switch only once it has committed.
-        $autoCredit = DB::transaction(function () use ($pledge): bool {
+        // A wait that times out (or a deadlock) answers 409 in words, never 500.
+        $autoCredit = LoanWriteTransaction::run(function () use ($pledge): bool {
             $locked = ShareCapitalPledge::query()->whereKey($pledge->id)->lockForUpdate()->firstOrFail();
             $locked->update(['auto_credit' => ! $locked->auto_credit]);
 
             return (bool) $locked->auto_credit;
-        });
+        }, null, ShareCapitalService::PLEDGE_SWITCH_BUSY);
 
         return response()->json([
             'message' => 'Auto-credit '.($autoCredit ? 'enabled' : 'disabled').'.',

@@ -36,8 +36,10 @@ class AutoCreditHandCreditSkipTest extends TestCase
 
         $this->ana = Borrower::factory()->create(['branch_id' => $this->branch->id, 'first_name' => 'Ana', 'middle_name' => null, 'last_name' => 'Santos']);
         $this->ben = Borrower::factory()->create(['branch_id' => $this->branch->id, 'first_name' => 'Ben', 'middle_name' => null, 'last_name' => 'Cruz']);
-        $this->ana->shareCapitalPledge->update(['amount' => 500, 'auto_credit' => true]);
-        $this->ben->shareCapitalPledge->update(['amount' => 300, 'auto_credit' => true]);
+        // Once a month (on the 30th): a hand credit covers the whole month. A
+        // pledge's default schedule is twice a month ("15/30"), tested below.
+        $this->ana->shareCapitalPledge->update(['amount' => 500, 'auto_credit' => true, 'schedule' => '30']);
+        $this->ben->shareCapitalPledge->update(['amount' => 300, 'auto_credit' => true, 'schedule' => '30']);
     }
 
     protected function tearDown(): void
@@ -138,11 +140,25 @@ class AutoCreditHandCreditSkipTest extends TestCase
 
     public function test_credits_not_made_by_hand_do_not_skip(): void
     {
-        // A credit from an earlier auto-credit run this month, and an imported row.
+        // A row a run made since run rows carry their run, and one made by an
+        // earlier run (before that, told apart by its description), plus an
+        // imported row.
+        $linked = AutoCreditRun::query()->create([
+            'total_amount' => 500, 'member_count' => 1, 'processed_at' => now(), 'processed_by' => $this->admin->id,
+            'status' => 'completed', 'links_rows' => true,
+        ]);
+        ShareCapitalLedger::query()->create([
+            'borrower_id' => $this->ana->id, 'branch_id' => $this->branch->id, 'date' => '2026-11-02',
+            'description' => 'Anything', 'debit' => 0, 'credit' => 500,
+            'method' => 'bank_transfer', 'created_by' => $this->admin->id, 'auto_credit_run_id' => $linked->id,
+        ]);
         ShareCapitalLedger::query()->create([
             'borrower_id' => $this->ana->id, 'branch_id' => $this->branch->id, 'date' => '2026-11-02',
             'description' => ShareCapitalService::AUTO_CREDIT_DESCRIPTION, 'debit' => 0, 'credit' => 500,
             'method' => 'bank_transfer', 'created_by' => $this->admin->id,
+        ]);
+        AutoCreditRun::query()->create([
+            'total_amount' => 500, 'member_count' => 1, 'processed_at' => now()->addSecond(), 'processed_by' => $this->admin->id, 'status' => 'completed',
         ]);
         ShareCapitalLedger::query()->create([
             'borrower_id' => $this->ben->id, 'branch_id' => $this->branch->id, 'date' => '2026-11-02',
@@ -150,6 +166,93 @@ class AutoCreditHandCreditSkipTest extends TestCase
         ]);
 
         $this->postJson('/api/auto-credit/process')->assertCreated()->assertJsonPath('data.member_count', 2);
+    }
+
+    public function test_a_hand_entry_typed_with_the_runs_description_after_the_last_unlinked_run_counts_as_by_hand(): void
+    {
+        AutoCreditRun::query()->create([
+            'total_amount' => 500, 'member_count' => 1, 'processed_at' => now()->subDay(), 'processed_by' => $this->admin->id, 'status' => 'completed',
+        ]);
+        ShareCapitalLedger::query()->create([
+            'borrower_id' => $this->ana->id, 'branch_id' => $this->branch->id, 'date' => '2026-11-24',
+            'description' => ShareCapitalService::AUTO_CREDIT_DESCRIPTION, 'debit' => 0, 'credit' => 500,
+            'method' => 'cash', 'reference_number' => 'CSH-0001-2026-0009', 'created_by' => $this->admin->id,
+        ]);
+
+        $this->postJson('/api/auto-credit/process')->assertCreated()->assertJsonPath('data.member_count', 1)
+            ->assertJsonPath('data.skipped.0.borrower_name', 'Ana Santos');
+    }
+
+    public function test_the_runs_rows_carry_their_run(): void
+    {
+        $id = $this->postJson('/api/auto-credit/process')->assertCreated()->json('data.id');
+
+        $this->assertSame([$id, $id], ShareCapitalLedger::query()->orderBy('id')->pluck('auto_credit_run_id')->all());
+        $this->assertTrue((bool) AutoCreditRun::query()->findOrFail($id)->links_rows);
+    }
+
+    public function test_a_hand_credit_debited_back_the_same_month_does_not_skip(): void
+    {
+        $this->handCredit($this->ana, '2026-11-05', 'CSH-0001-2026-0007');
+        $this->handCredit($this->ana, '2026-11-06', 'CSH-0001-2026-0008', 'debit');
+
+        $this->postJson('/api/auto-credit/process')->assertCreated()
+            ->assertJsonPath('data.member_count', 2)
+            ->assertJsonPath('data.skipped_count', 0);
+    }
+
+    public function test_a_hand_credit_only_partly_debited_back_still_skips(): void
+    {
+        $this->handCredit($this->ana, '2026-11-05', 'CSH-0001-2026-0007');
+        ShareCapitalLedger::query()->create([
+            'borrower_id' => $this->ana->id, 'branch_id' => $this->branch->id, 'date' => '2026-11-06',
+            'description' => 'Correction', 'debit' => 499.99, 'credit' => 0, 'method' => 'cash', 'created_by' => $this->admin->id,
+        ]);
+
+        $this->postJson('/api/auto-credit/process')->assertCreated()
+            ->assertJsonPath('data.member_count', 1)
+            ->assertJsonPath('data.skipped.0.reason', ShareCapitalService::handCreditedReason('2026-11-05', 'CSH-0001-2026-0007'));
+    }
+
+    public function test_a_twice_monthly_pledge_skips_only_the_run_for_its_half_of_the_month(): void
+    {
+        $this->ana->shareCapitalPledge->update(['schedule' => '15/30']);
+        $this->handCredit($this->ana, '2026-11-05', null);
+
+        // The second half's run credits it.
+        $this->postJson('/api/auto-credit/process')->assertCreated()->assertJsonPath('data.member_count', 2);
+
+        // The first half's run skips it, for that half only.
+        Carbon::setTestNow(Carbon::parse('2026-11-10 10:00:00', 'Asia/Manila'));
+        $this->postJson('/api/auto-credit/process')->assertCreated()
+            ->assertJsonPath('data.member_count', 1)
+            ->assertJsonPath('data.skipped.0.reason', ShareCapitalService::handCreditedReason('2026-11-05', null, ShareCapitalService::FIRST_HALF));
+
+        // A hand credit on the 16th skips the second half's run.
+        $this->handCredit($this->ana, '2026-11-16', null);
+        Carbon::setTestNow(Carbon::parse('2026-11-30 10:00:00', 'Asia/Manila'));
+        $this->postJson('/api/auto-credit/process')->assertCreated()
+            ->assertJsonPath('data.skipped.0.reason', ShareCapitalService::handCreditedReason('2026-11-16', null, ShareCapitalService::SECOND_HALF));
+    }
+
+    public function test_a_once_monthly_pledge_skips_the_whole_month(): void
+    {
+        $this->ana->shareCapitalPledge->update(['schedule' => '15']);
+        $this->handCredit($this->ana, '2026-11-02', null);
+
+        $this->postJson('/api/auto-credit/process')->assertCreated()->assertJsonPath('data.member_count', 1);
+    }
+
+    public function test_the_half_month_reasons_read_in_words(): void
+    {
+        $this->assertSame(
+            'Credited by hand on Nov 5, 2026, so auto-credit skips it for the 1st to the 15th.',
+            ShareCapitalService::handCreditedReason('2026-11-05', null, ShareCapitalService::FIRST_HALF),
+        );
+        $this->assertSame(
+            'Credited by hand on Nov 16, 2026, so auto-credit skips it for the 16th to the month\'s end.',
+            ShareCapitalService::handCreditedReason('2026-11-16', null, ShareCapitalService::SECOND_HALF),
+        );
     }
 
     public function test_a_hand_credit_made_before_auto_credit_was_switched_on_skips_the_month(): void

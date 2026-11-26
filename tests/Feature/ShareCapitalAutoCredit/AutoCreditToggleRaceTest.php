@@ -124,6 +124,25 @@ class AutoCreditToggleRaceTest extends TestCase
         $this->assertTrue((bool) $this->member->shareCapitalPledge->refresh()->auto_credit);
     }
 
+    public function test_a_switch_waiting_too_long_behind_a_run_answers_409_in_words_and_changes_nothing(): void
+    {
+        $other = DB::connection(self::OTHER_CONNECTION);
+        $other->beginTransaction();
+        $other->table('share_capital_pledges')->where('id', $this->member->shareCapitalPledge->id)->sharedLock()->first();
+        DB::statement('SET SESSION innodb_lock_wait_timeout = 1');
+
+        try {
+            $this->patchJson("/api/pledges/{$this->member->shareCapitalPledge->id}/auto-credit")
+                ->assertStatus(409)
+                ->assertExactJson(['message' => ShareCapitalService::PLEDGE_SWITCH_BUSY]);
+        } finally {
+            $other->rollBack();
+            DB::statement('SET SESSION innodb_lock_wait_timeout = 50');
+        }
+
+        $this->assertFalse((bool) $this->member->shareCapitalPledge->refresh()->auto_credit);
+    }
+
     /**
      * Right after the write reads its members again under their shared
      * locks, another connection switches the pledge's auto-credit and
