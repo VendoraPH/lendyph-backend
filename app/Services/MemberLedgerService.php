@@ -108,7 +108,7 @@ final class MemberLedgerService
     private function entries(Loan $loan, int $order, array $rows, EloquentCollection $repayments, bool $shareCapitalVisible): array
     {
         $voided = array_column(array_filter($rows, fn (array $row): bool => $row['kind'] === 'void'), 'repayment_id');
-        $reference = $loan->loan_account_number ?? $loan->application_number;
+        $reference = $loan->displayNumber();
         $before = 0;
         $entries = [];
 
@@ -134,6 +134,7 @@ final class MemberLedgerService
                 'reference' => $repayment->receipt_number ?? $reference,
                 'loan_id' => $loan->id,
                 'loan_account_number' => $loan->loan_account_number,
+                'display_number' => $loan->displayNumber(),
                 'kind' => $row['kind'],
                 'repayment_id' => $row['repayment_id'],
                 'payment' => in_array($row['kind'], self::PAYMENT_KINDS, true)
@@ -173,6 +174,7 @@ final class MemberLedgerService
                 'balance' => $balance / 100,
                 'loan_id' => $entry['loan_id'],
                 'loan_account_number' => $entry['loan_account_number'],
+                'display_number' => $entry['display_number'],
                 'kind' => $entry['kind'],
                 'repayment_id' => $entry['repayment_id'],
                 ...$entry['payment'],

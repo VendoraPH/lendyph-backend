@@ -331,6 +331,7 @@ class ReportService
                 // names it, the statement's reference included.
                 'external_loan_no' => $loan->external_loan_no,
                 'application_number' => $loan->application_number,
+                'display_number' => $loan->displayNumber(),
                 'principal_amount' => (float) $loan->principal_amount,
                 'interest_rate' => (float) $loan->interest_rate,
                 'interest_rate_frequency' => $loan->interest_rate_frequency?->value,
@@ -863,6 +864,7 @@ class ReportService
 
             return [
                 'loan_account_number' => $loan->loan_account_number,
+                'display_number' => $loan->displayNumber(),
                 'product_name' => $loan->loanProduct->name,
                 'principal_amount' => (float) $loan->principal_amount,
                 'released_at' => $loan->released_at?->toDateString(),

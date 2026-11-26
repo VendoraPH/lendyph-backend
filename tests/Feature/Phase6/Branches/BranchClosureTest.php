@@ -172,7 +172,8 @@ class BranchClosureTest extends TestCase
             ['key' => 'open_savings_accounts', 'label' => 'Open savings accounts', 'count' => 1, 'amount' => null, 'clear' => false],
             ['key' => 'open_time_deposits', 'label' => 'Open time deposits', 'count' => 1, 'amount' => null, 'clear' => false],
             ['key' => 'money_in_accounts', 'label' => 'Money in its cash and bank accounts', 'count' => 1, 'amount' => '1500.00', 'clear' => false],
-            ['key' => 'pending_approvals', 'label' => 'Pending approvals and requests', 'count' => 3, 'amount' => null, 'clear' => false],
+            ['key' => 'loan_adjustments', 'label' => 'Loan adjustments to approve, cancel or apply', 'count' => 1, 'amount' => null, 'clear' => false],
+            ['key' => 'pending_approvals', 'label' => 'Pending approvals and requests', 'count' => 2, 'amount' => null, 'clear' => false],
             ['key' => 'transfers_in_transit', 'label' => 'Transfers in transit', 'count' => 0, 'amount' => null, 'clear' => true],
             ['key' => 'pending_gcash_cash_ins', 'label' => 'GCash Cash Ins not yet paid', 'count' => 0, 'amount' => null, 'clear' => true],
             ['key' => 'unpaid_payables', 'label' => 'Unpaid payables', 'count' => 0, 'amount' => null, 'clear' => true],
@@ -182,7 +183,7 @@ class BranchClosureTest extends TestCase
 
         $this->postJson("/api/branches/{$this->quiet->id}/closure", ['effective_on' => now()->toDateString(), 'reason' => 'x'])
             ->assertUnprocessable()
-            ->assertJsonPath('errors.branch.0', "This branch can't be closed yet: 1 open loan, 1 open savings account, 1 open time deposit, ₱1,500.00 in its cash and bank accounts, 3 pending approvals or requests and 1 assigned user.");
+            ->assertJsonPath('errors.branch.0', "This branch can't be closed yet: 1 open loan, 1 open savings account, 1 open time deposit, ₱1,500.00 in its cash and bank accounts, 1 loan adjustment to approve, cancel or apply, 2 pending approvals or requests and 1 assigned user.");
     }
 
     /**

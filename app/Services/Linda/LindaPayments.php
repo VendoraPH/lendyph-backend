@@ -46,7 +46,7 @@ final class LindaPayments
             'count' => (int) ($totals->payment_count ?? 0),
             'total' => round((float) ($totals->total ?? 0), 2),
             'latest' => $posted()
-                ->with('loan:id,borrower_id,loan_account_number', 'loan.borrower:id,first_name,middle_name,last_name,suffix,borrower_code,branch_id')
+                ->with('loan:id,borrower_id,loan_account_number,external_loan_no,application_number', 'loan.borrower:id,first_name,middle_name,last_name,suffix,borrower_code,branch_id')
                 ->latest('payment_date')
                 ->orderByDesc('id')
                 ->limit($limit)

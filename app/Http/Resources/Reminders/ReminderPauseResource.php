@@ -18,7 +18,7 @@ use Illuminate\Http\Resources\Json\JsonResource;
  */
 class ReminderPauseResource extends JsonResource
 {
-    public const RELATIONS = ['borrower:id,branch_id,first_name,middle_name,last_name,suffix', 'loan:id,borrower_id,loan_account_number,application_number', 'loan.borrower:id,branch_id', 'pausedBy:id,first_name,last_name'];
+    public const RELATIONS = ['borrower:id,branch_id,first_name,middle_name,last_name,suffix', 'loan:id,borrower_id,loan_account_number,external_loan_no,application_number', 'loan.borrower:id,branch_id', 'pausedBy:id,first_name,last_name'];
 
     /**
      * @return array<string, mixed>

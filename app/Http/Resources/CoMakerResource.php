@@ -87,6 +87,7 @@ class CoMakerResource extends JsonResource
                     'id' => $loan->id,
                     'application_number' => $loan->application_number,
                     'loan_account_number' => $loan->loan_account_number,
+                    'display_number' => $loan->displayNumber(),
                     'status' => $loan->status,
                 ])
                 ->values()

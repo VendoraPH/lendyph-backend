@@ -594,7 +594,7 @@ it('loads the loan and collateral names in one query each, whatever the page siz
     DB::disableQueryLog();
 
     // The loans' numbers; the rows' own targets load separately, as they always have.
-    expect($queries->filter(fn (string $sql) => str_contains($sql, '`loan_account_number`, `application_number` from `loans`'))->count())->toBe(1)
+    expect($queries->filter(fn (string $sql) => str_contains($sql, '`loan_account_number`, `external_loan_no`, `application_number` from `loans`'))->count())->toBe(1)
         ->and($queries->filter(fn (string $sql) => str_contains($sql, 'from `collaterals`'))->count())->toBe(1);
 });
 

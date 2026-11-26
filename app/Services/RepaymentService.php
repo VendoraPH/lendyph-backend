@@ -466,7 +466,7 @@ class RepaymentService
                 // unique and at most 20 characters, in a 30-character column.
                 'reference' => "SC-{$repayment->receipt_number}",
                 'date' => $paymentDate,
-                'description' => "Share capital build-up from payment {$repayment->receipt_number} (Loan {$loan->loan_account_number})",
+                'description' => "Share capital build-up from payment {$repayment->receipt_number} (Loan {$loan->displayNumber()})",
                 'debit' => 0,
                 'credit' => $scbCredit,
                 'created_by' => $user->id,

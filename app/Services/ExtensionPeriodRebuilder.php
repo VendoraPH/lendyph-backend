@@ -66,7 +66,7 @@ class ExtensionPeriodRebuilder
         $result = ['rebuilt' => [], 'skipped' => []];
 
         foreach ($this->loansMissingPayments() as $loan) {
-            $label = $loan->loan_account_number ?? $loan->application_number;
+            $label = Loan::displayNumberOf($loan->loan_account_number, $loan->external_loan_no, $loan->application_number);
             $plan = $this->plan($loan);
 
             if (is_string($plan)) {
@@ -413,7 +413,7 @@ class ExtensionPeriodRebuilder
             'description' => sprintf(
                 'Rebuilt %d period(s) of loan %s that an extension had deleted, putting back the ₱%s collected on them.',
                 count($periods),
-                $loan->loan_account_number ?? $loan->application_number,
+                Loan::displayNumberOf($loan->loan_account_number, $loan->external_loan_no, $loan->application_number),
                 number_format($restored, 2),
             ),
             'created_at' => $now,

@@ -162,6 +162,7 @@ class AutoPayService
                 $loanRows[] = [
                     'loan_id' => $loan->id,
                     'loan_account_number' => $loan->loan_account_number,
+                    'display_number' => $loan->displayNumber(),
                     'borrower_name' => $this->shortBorrowerName($loan),
                     'total_principal' => $loanTotals['principal'] / 100,
                     'total_interest' => $loanTotals['interest'] / 100,
@@ -339,6 +340,7 @@ class AutoPayService
                 $failures[] = [
                     'loan_id' => $loan->id,
                     'loan_account_number' => $loan->loan_account_number,
+                    'display_number' => $loan->displayNumber(),
                     'reason' => $this->failureReason($e),
                 ];
 
@@ -511,11 +513,11 @@ class AutoPayService
     }
 
     /**
-     * @return array{loan_id: int, loan_account_number: string|null, reason: string}
+     * @return array{loan_id: int, loan_account_number: string|null, display_number: string|null, reason: string}
      */
     private function skip(Loan $loan, string $reason): array
     {
-        return ['loan_id' => $loan->id, 'loan_account_number' => $loan->loan_account_number, 'reason' => $reason];
+        return ['loan_id' => $loan->id, 'loan_account_number' => $loan->loan_account_number, 'display_number' => $loan->displayNumber(), 'reason' => $reason];
     }
 
     /**

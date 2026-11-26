@@ -571,7 +571,7 @@ final class Notifications
 
     private function loanLabel(Loan $loan): string
     {
-        return (string) ($loan->loan_account_number ?: $loan->application_number);
+        return (string) $loan->displayNumber();
     }
 
     private function borrowerName(Loan $loan): string

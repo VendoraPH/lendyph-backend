@@ -7,7 +7,9 @@ use App\Models\AccountingJournal;
 use App\Models\AccountingJournalLine;
 use App\Models\AccountingReconciliation;
 use App\Models\AccountingReconciliationLine;
+use App\Models\User;
 use App\Services\AuditLogService;
+use App\Services\BranchAccess;
 use Carbon\CarbonImmutable;
 use Illuminate\Validation\ValidationException;
 
@@ -27,6 +29,10 @@ use Illuminate\Validation\ValidationException;
  *   row in words on the reconciliation, as the reconciliation actions write.
  * - **Reads Reconciled:** the reversal is refused in words until it's
  *   reopened, and nothing is posted.
+ * - **All branches** (no branch): head office's. A user without
+ *   `branches:view_all` would free a line on it, so their reversal is refused
+ *   in words, nothing is posted, and they ask head office (finish run round
+ *   7). A branch reconciliation is unchanged.
  *
  * Only that line. Any other match, a payment or an expense paired on the
  * worksheet, or the line paired with another entry since, is left alone: the
@@ -49,17 +55,18 @@ use Illuminate\Validation\ValidationException;
  */
 final class ReconciliationMatchRelease
 {
-    public function __construct(private ReconciliationMatcher $matcher) {}
+    public function __construct(private ReconciliationMatcher $matcher, private BranchAccess $branches) {}
 
     /**
      * The statement line `$expense` was recorded from, locked, when it is
      * still matched to the expense's own entry or to `$journal` (the entry
      * the reversal undoes); null when there is none. Refused while its
-     * reconciliation reads Reconciled.
+     * reconciliation reads Reconciled, and, on an "all branches"
+     * reconciliation, for a user (`$userId`) without `branches:view_all`.
      *
      * @throws ValidationException
      */
-    public function hold(AccountingExpense $expense, AccountingJournal $journal): ?AccountingReconciliationLine
+    public function hold(AccountingExpense $expense, AccountingJournal $journal, ?int $userId): ?AccountingReconciliationLine
     {
         $lineId = $expense->reconciliation_line_id;
 
@@ -95,6 +102,11 @@ final class ReconciliationMatchRelease
         }
 
         $reconciliation = AccountingReconciliation::query()->findOrFail($reconciliationId);
+
+        if ($reconciliation->branch_id === null && ! $this->seesAllBranches($userId)) {
+            throw ValidationException::withMessages(['expense' => [self::headOfficesInWords($reconciliation)]]);
+        }
+
         $everyLineMatched = $lines->every(static fn (AccountingReconciliationLine $row): bool => $row->matched_journal_line_id !== null);
 
         if ($everyLineMatched && $this->matcher->present($reconciliation)['difference'] === 0) {
@@ -137,6 +149,27 @@ final class ReconciliationMatchRelease
     }
 
     /**
+     * Whether the user reversing holds `branches:view_all` (BranchAccess's
+     * rule). No user means no.
+     */
+    private function seesAllBranches(?int $userId): bool
+    {
+        $user = $userId === null ? null : User::query()->find($userId);
+
+        return $user !== null && $this->branches->for($user) === null;
+    }
+
+    /**
+     * "This expense is matched on head office's all-branches reconciliation of
+     * 1040 Bank Accounts for September 2026. Ask head office to reverse it."
+     */
+    private static function headOfficesInWords(AccountingReconciliation $reconciliation): string
+    {
+        return "This expense is matched on head office's all-branches reconciliation of "
+            .self::accountWords($reconciliation).' for '.self::periodWords($reconciliation).'. Ask head office to reverse it.';
+    }
+
+    /**
      * "This expense is matched on the September 2026 reconciliation of 1040
      * Bank Accounts (All branches), which reads Reconciled. Reopen that
      * reconciliation first by unmatching its statement line there, then
@@ -144,18 +177,33 @@ final class ReconciliationMatchRelease
      */
     private static function reconciledInWords(AccountingReconciliation $reconciliation): string
     {
-        $reconciliation->loadMissing(['account:id,code,name', 'branch:id,name']);
-        $period = trim((string) $reconciliation->period);
-
-        if ($period === '') {
-            $period = CarbonImmutable::parse($reconciliation->start_date)->format('M j, Y').' – '
-                .CarbonImmutable::parse($reconciliation->end_date)->format('M j, Y');
-        }
-
-        $account = trim($reconciliation->account?->code.' '.$reconciliation->account?->name);
+        $reconciliation->loadMissing('branch:id,name');
+        $period = self::periodWords($reconciliation);
+        $account = self::accountWords($reconciliation);
         $branch = $reconciliation->branch_id === null ? ReconciliationMatcher::ALL_BRANCHES : (string) $reconciliation->branch?->name;
 
         return "This expense is matched on the {$period} reconciliation of {$account} ({$branch}), which reads Reconciled. "
             .'Reopen that reconciliation first by unmatching its statement line there, then reverse again.';
+    }
+
+    /** "September 2026", else the reconciliation's dates. */
+    private static function periodWords(AccountingReconciliation $reconciliation): string
+    {
+        $period = trim((string) $reconciliation->period);
+
+        if ($period !== '') {
+            return $period;
+        }
+
+        return CarbonImmutable::parse($reconciliation->start_date)->format('M j, Y').' – '
+            .CarbonImmutable::parse($reconciliation->end_date)->format('M j, Y');
+    }
+
+    /** "1040 Bank Accounts". */
+    private static function accountWords(AccountingReconciliation $reconciliation): string
+    {
+        $reconciliation->loadMissing('account:id,code,name');
+
+        return trim($reconciliation->account?->code.' '.$reconciliation->account?->name);
     }
 }

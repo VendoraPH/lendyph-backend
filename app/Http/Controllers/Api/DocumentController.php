@@ -248,7 +248,7 @@ class DocumentController extends Controller implements HasMiddleware
     private static function parentInWords(Model $parent): string
     {
         return match (true) {
-            $parent instanceof Loan => 'loan '.($parent->loan_account_number ?? $parent->application_number ?? "#{$parent->id}"),
+            $parent instanceof Loan => 'loan '.($parent->displayNumber() ?? "#{$parent->id}"),
             $parent instanceof CoMaker => "Co-maker #{$parent->id}",
             default => "Member #{$parent->id}",
         };

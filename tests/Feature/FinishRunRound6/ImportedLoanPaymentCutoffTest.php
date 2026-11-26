@@ -195,13 +195,13 @@ class ImportedLoanPaymentCutoffTest extends TestCase
         $reason = "This loan's imported file already counts payments up to Jul 10, 2026. Record only payments made after that date.";
 
         $preview = $this->getJson('/api/auto-pay/preview?'.http_build_query($range))->assertOk()->json('data');
-        $this->assertContains(['loan_id' => $loan->id, 'loan_account_number' => $loan->loan_account_number, 'reason' => $reason], $preview['skips']);
+        $this->assertContains(['loan_id' => $loan->id, 'loan_account_number' => $loan->loan_account_number, 'display_number' => $loan->displayNumber(), 'reason' => $reason], $preview['skips']);
         $this->assertNotContains($loan->id, array_column($preview['loans'], 'loan_id'));
 
         $run = $this->postJson('/api/auto-pay/process', $range)->assertCreated()->json('data');
         $this->assertSame(1, $run['processed']);
         $this->assertSame(0, $run['failed']);
-        $this->assertContains(['loan_id' => $loan->id, 'loan_account_number' => $loan->loan_account_number, 'reason' => $reason], $run['skips']);
+        $this->assertContains(['loan_id' => $loan->id, 'loan_account_number' => $loan->loan_account_number, 'display_number' => $loan->displayNumber(), 'reason' => $reason], $run['skips']);
         $this->assertSame(0, Repayment::where('loan_id', $loan->id)->count());
         $this->assertSame(1, Repayment::where('loan_id', $other->id)->count());
     }

@@ -34,7 +34,7 @@ class RepaymentObserver
 
     private function tell(Repayment $repayment, string $title, string $body): void
     {
-        $loan = Loan::query()->find($repayment->loan_id, ['id', 'borrower_id', 'loan_account_number']);
+        $loan = Loan::query()->find($repayment->loan_id, ['id', 'borrower_id', ...Loan::DISPLAY_NUMBER_COLUMNS]);
 
         if ($loan === null) {
             return;
@@ -44,7 +44,7 @@ class RepaymentObserver
             $loan->borrower_id === null ? null : (int) $loan->borrower_id,
             PortalNotices::CATEGORY_LOANS,
             $title,
-            sprintf($body, MoneyNotices::peso($repayment->amount_paid), $loan->loan_account_number ?? '', $repayment->receipt_number),
+            sprintf($body, MoneyNotices::peso($repayment->amount_paid), (string) $loan->displayNumber(), $repayment->receipt_number),
             '/member/loans/'.$loan->id,
         );
     }

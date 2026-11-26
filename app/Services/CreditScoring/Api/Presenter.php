@@ -420,7 +420,7 @@ final class Presenter
     {
         return [
             'decidedByUser:id,first_name,last_name',
-            'loan' => fn ($query) => $query->visibleTo($viewer)->select(['loans.id', 'loans.loan_account_number', 'loans.application_number']),
+            'loan' => fn ($query) => $query->visibleTo($viewer)->select(['loans.id', 'loans.loan_account_number', 'loans.external_loan_no', 'loans.application_number']),
         ];
     }
 
@@ -433,7 +433,7 @@ final class Presenter
         $decision->loadMissing($this->decisionRelations($viewer));
         $loan = $decision->getRelation('loan');
 
-        return $loan === null ? null : ($loan->loan_account_number ?: $loan->application_number);
+        return $loan?->displayNumber();
     }
 
     public static function time(?CarbonInterface $time): ?string
