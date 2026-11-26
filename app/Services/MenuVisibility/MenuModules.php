@@ -43,54 +43,63 @@ final class MenuModules
     public const ALWAYS_OPEN = ['auth', 'health', 'notifications', 'menu-visibility'];
 
     /**
-     * @var array<string, array{label: string, parent: string|null, blocks: list<string>, open?: array<string, array{for: string, page: string}>}>
+     * @var array<string, array{label: string, pages: list<string>, parent: string|null, blocks: list<string>, open?: array<string, array{for: string, page: string}>}>
      */
     private const MODULES = [
         'dashboard' => [
             'label' => 'Dashboard',
+            'pages' => ['/dashboard'],
             'parent' => null,
             'blocks' => ['dashboard/stats', 'dashboard/collections-trend', 'dashboard/daily-dues', 'dashboard/recent-transactions'],
         ],
         'executive_dashboard' => [
             'label' => 'Executive Dashboard',
+            'pages' => ['/dashboard/executive'],
             'parent' => null,
             'blocks' => ['dashboard/executive', 'dashboard/history', 'dashboard/settings'],
         ],
         'linda' => [
             'label' => 'Linda',
+            'pages' => ['/linda', '/settings/linda'],
             'parent' => null,
             'blocks' => ['linda'],
         ],
         'members' => [
             // Every screen reads members, and public registration creates them.
             'label' => 'Members',
+            'pages' => ['/borrowers'],
             'parent' => null,
             'blocks' => [],
         ],
         'loans' => [
             // Payments, Collateral, Members, Reports and the dashboards read loans.
             'label' => 'Loans',
+            'pages' => ['/loans', '/settings/loan-products', '/settings/fees', '/settings/penalties'],
             'parent' => null,
             'blocks' => ['loan-adjustments', 'loans/amortization-calculator'],
         ],
         'loans.reminders' => [
             'label' => 'Reminders',
+            'pages' => ['/loans/reminders'],
             'parent' => 'loans',
             'blocks' => ['reminders', 'loans/*/reminders', 'borrowers/*/notification-preferences'],
         ],
         'loans.origination' => [
             'label' => 'Loan Origination',
+            'pages' => ['/loans/origination'],
             'parent' => 'loans',
             'blocks' => ['loan-origination', 'public-apply'],
         ],
         'payments' => [
             // A loan's page records, previews and voids its payments.
             'label' => 'Payments',
+            'pages' => ['/payments'],
             'parent' => null,
             'blocks' => [],
         ],
         'payments.auto_pay' => [
             'label' => 'Auto-Pay',
+            'pages' => ['/payments/auto-pay'],
             'parent' => 'payments',
             'blocks' => ['auto-pay', 'PATCH loans/*/auto-pay'],
         ],
@@ -99,16 +108,19 @@ final class MenuModules
             // card, the loan and restructure forms, Collateral and a member's
             // collaterals read balances from it.
             'label' => 'Share Capital',
+            'pages' => ['/share-capital'],
             'parent' => null,
             'blocks' => ['share-capital/members', 'share-capital/cash-reference', 'POST share-capital/ledger', 'pledges'],
         ],
         'share_capital.auto_credit' => [
             'label' => 'Auto-Credit',
+            'pages' => ['/share-capital/auto-credit'],
             'parent' => 'share_capital',
             'blocks' => ['auto-credit', 'PATCH pledges/*/auto-credit'],
         ],
         'savings' => [
             'label' => 'Savings',
+            'pages' => ['/savings', '/settings/savings', '/settings/savings-products'],
             'parent' => null,
             'blocks' => ['savings', 'reports/savings', 'portal/savings', 'portal/time-deposits'],
             'open' => [
@@ -118,36 +130,43 @@ final class MenuModules
         'collateral' => [
             // The loan forms and a member's collaterals tab list and attach them.
             'label' => 'Collateral',
+            'pages' => ['/collaterals', '/settings/collateral-types'],
             'parent' => null,
             'blocks' => ['collaterals/register', 'POST collaterals', 'PUT collaterals/*', 'DELETE collaterals/*'],
         ],
         'gcash' => [
             'label' => 'GCash',
+            'pages' => ['/gcash', '/settings/gcash'],
             'parent' => null,
             'blocks' => ['gcash'],
         ],
         'credit_scoring' => [
             'label' => 'Credit Scoring',
+            'pages' => ['/credit-scoring', '/settings/credit-scoring', '/settings/scorecard-configuration'],
             'parent' => null,
             'blocks' => ['credit-scoring'],
         ],
         'cda' => [
             'label' => 'CDA Compliance',
+            'pages' => ['/cda', '/settings/cda'],
             'parent' => null,
             'blocks' => ['cda', 'settings/approval-workflow?type=cda'],
         ],
         'member_portal' => [
             'label' => 'Member Portal',
+            'pages' => ['/member-portal', '/settings/member-portal'],
             'parent' => null,
             'blocks' => ['portal-admin', 'portal'],
         ],
         'amla' => [
             'label' => 'AMLA Compliance',
+            'pages' => ['/amla', '/settings/amla'],
             'parent' => null,
             'blocks' => ['amla'],
         ],
         'accounting' => [
             'label' => 'Accounting',
+            'pages' => ['/accounting', '/settings/accounting'],
             'parent' => null,
             'blocks' => ['accounting', 'interbranch-transfers'],
             'open' => [
@@ -156,6 +175,7 @@ final class MenuModules
         ],
         'users' => [
             'label' => 'User Management',
+            'pages' => ['/users'],
             'parent' => null,
             'blocks' => ['users'],
         ],
@@ -163,6 +183,7 @@ final class MenuModules
             // The dashboards, a loan's Statement of Account, Past Due Loans and
             // the printables read the other reports.
             'label' => 'Reports',
+            'pages' => ['/reports'],
             'parent' => null,
             'blocks' => [
                 'reports/daily-collection', 'reports/income', 'reports/profit-sharing', 'reports/provisioning',
@@ -172,11 +193,13 @@ final class MenuModules
         'documents' => [
             // The printables read other modules' API only.
             'label' => 'Documents',
+            'pages' => ['/printables'],
             'parent' => null,
             'blocks' => [],
         ],
         'audit_trail' => [
             'label' => 'Audit Trail',
+            'pages' => ['/audit-trail'],
             'parent' => null,
             'blocks' => ['audit-logs'],
         ],
@@ -215,6 +238,29 @@ final class MenuModules
     public static function blocks(string $key): array
     {
         return self::MODULES[$key]['blocks'] ?? [];
+    }
+
+    /**
+     * The module a screen's page belongs to (its own pages and its Settings
+     * pages), by the longest prefix of whole path segments, as the frontend's
+     * menu map reads it; null for pages no module owns (Settings' own pages,
+     * the profile). A query string is ignored.
+     */
+    public static function forPage(string $url): ?string
+    {
+        $path = '/'.trim((string) strtok($url, '?#'), '/');
+        $best = null;
+        $bestLength = -1;
+
+        foreach (self::MODULES as $key => $module) {
+            foreach ($module['pages'] as $prefix) {
+                if (($path === $prefix || str_starts_with($path, $prefix.'/')) && strlen($prefix) > $bestLength) {
+                    [$best, $bestLength] = [$key, strlen($prefix)];
+                }
+            }
+        }
+
+        return $best;
     }
 
     /**

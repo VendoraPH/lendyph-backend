@@ -6,6 +6,7 @@ use App\Models\User;
 use App\Services\Linda\LindaIntent;
 use App\Services\Linda\LindaMenu;
 use App\Services\Linda\LindaReply;
+use App\Services\Linda\LindaVisibility;
 use App\Services\Linda\LindaWording;
 
 /**
@@ -24,6 +25,15 @@ final class HowToAnswer
 
         if ($pages === null) {
             return new LindaReply(LindaIntent::HowTo->value, LindaWording::notYet(), 'not_yet', answerFunction: $this->name());
+        }
+
+        // A page of a module hidden in Menu Visibility is never linked or
+        // named; when every page asked for is hidden, it is turned off here.
+        $visibility = app(LindaVisibility::class);
+        $pages = array_values(array_filter($pages, fn (array $page) => ! $visibility->hidesPage($page['url'])));
+
+        if ($pages === []) {
+            return $visibility->turnedOff(LindaIntent::HowTo);
         }
 
         $open = array_values(array_filter($pages, fn (array $page) => LindaMenu::canOpen($user, $page)));

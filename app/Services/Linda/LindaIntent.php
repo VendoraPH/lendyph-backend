@@ -48,6 +48,30 @@ enum LindaIntent: string
      * balances at its end); with none, they are as of today. Reminders count a
      * day or a period, today with none. Credit scoring is as of today.
      */
+    /**
+     * The side-menu module this topic belongs to (Menu Visibility, finish run
+     * round 6): while that module is hidden, Linda answers the topic with a
+     * short local answer and no figure or link. Null for how-to, open and
+     * unsupported questions, which have no module of their own.
+     */
+    public function module(): ?string
+    {
+        return match ($this) {
+            self::CollectionSummary, self::CollectionDetails, self::TransactionLookup => 'payments',
+            self::LoanSummary, self::LoanDetails, self::OverdueAccounts, self::DisbursementSummary,
+            self::GeneralLendingSummary => 'loans',
+            self::BorrowerLookup, self::BorrowerSummary => 'members',
+            self::IncomeSummary, self::ExpenseSummary => 'accounting',
+            self::BranchPerformance, self::OfficerPerformance, self::CollectionEfficiency, self::PortfolioSummary => 'reports',
+            self::SavingsSummary => 'savings',
+            self::ShareCapitalSummary => 'share_capital',
+            self::CdaSummary => 'cda',
+            self::ReminderSummary => 'loans.reminders',
+            self::CreditScoringSummary => 'credit_scoring',
+            self::HowTo, self::OpenQuestion, self::UnsupportedQuestion => null,
+        };
+    }
+
     public function takesPeriod(): bool
     {
         return match ($this) {

@@ -88,6 +88,7 @@ final class LindaAssistant
         private readonly LindaSettings $settings,
         private readonly LindaBudget $budget,
         private readonly BranchAccess $branchAccess,
+        private readonly LindaVisibility $visibility,
     ) {}
 
     /**
@@ -142,6 +143,14 @@ final class LindaAssistant
             return $this->lookedUp($log, $started, $user, self::aboutReminders($lookup, $question));
         }
 
+        $hiddenTopic = $this->hiddenTopicIn($question);
+
+        if ($hiddenTopic !== null) {
+            $log->fill(['source' => LindaQuestion::SOURCE_MATCHER, 'intent' => $hiddenTopic->value]);
+
+            return $this->finish($log, $started, $this->visibility->turnedOff($hiddenTopic));
+        }
+
         if (! in_array(config('linda.driver'), ['fake', 'anthropic'], true)) {
             return $this->finish($log, $started, $this->answerer->unmatched());
         }
@@ -174,6 +183,25 @@ final class LindaAssistant
      * and balance of Juan"). A re-read that gives up (after 3 tries, or when
      * the name can't be found again) stays local, asking which member.
      */
+    /**
+     * The topic a question names when every topic it names belongs to a module
+     * hidden in Menu Visibility: answered here, so it never reaches the model.
+     * A question that also names a module that is shown goes on, and its
+     * answer leaves the hidden one out.
+     */
+    private function hiddenTopicIn(#[\SensitiveParameter] string $question): ?LindaIntent
+    {
+        $topics = LindaMatcher::subjectsIn($question);
+
+        foreach ($topics as $topic) {
+            if (! $this->visibility->hidesIntent($topic)) {
+                return null;
+            }
+        }
+
+        return $topics[0] ?? null;
+    }
+
     private function lookupIn(User $user, #[\SensitiveParameter] string $question, LindaHistory $history): ?LindaLookupRequest
     {
         $lookup = LindaLookup::parse($question);
@@ -695,6 +723,9 @@ final class LindaAssistant
 
     private function finish(LindaQuestion $log, int $started, LindaReply $reply, ?string $outcome = null): LindaReply
     {
+        // No answer links a page of a module hidden in Menu Visibility.
+        $reply = $this->visibility->withoutHiddenLinks($reply);
+
         $log->fill([
             'intent' => $log->intent ?? $reply->intent,
             'answer_function' => $reply->answerFunction,
