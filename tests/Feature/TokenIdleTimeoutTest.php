@@ -16,11 +16,11 @@ uses(TestCase::class);
  * these bugs — it attaches the user before any middleware runs and yields a
  * TransientToken, so the idle path is never entered.
  *
- * Tokens here are minted with a far-future `expires_at`, the shape
- * AuthController::login gives a "remember me" sign-in. Sanctum's own absolute
+ * Tokens here are minted with a far-future `expires_at`, the shape a
+ * "remember me" sign-in had before round 7 removed it. Sanctum's own absolute
  * expiry works correctly and returns 401 on its own; for a normal 30-minute
  * sign-in it always lands first, which would mask whether the idle check ran at
- * all. The remembered token is the one with a genuine idle gap to close.
+ * all. A longer-lived token is the one with a genuine idle gap to close.
  */
 beforeEach(function () {
     $this->operator = User::where('username', 'super_admin')->first();
@@ -127,13 +127,14 @@ it('does not gate the idle check on property_exists', function () {
 /**
  * Regression guard for cause #2.
  *
- * Sanctum's Guard runs `forceFill(['last_used_at' => now()])->save()` on every
- * authenticated request, BEFORE any middleware sees the token. Reading the
- * column inside the middleware therefore always measures ~0 minutes elapsed.
- * This proves the overwrite really happens, so the fix cannot regress to
- * reading the column directly.
+ * Sanctum's Guard used to run `forceFill(['last_used_at' => now()])->save()`
+ * on every authenticated request, BEFORE any middleware saw the token, so
+ * reading the column inside the middleware measured ~0 minutes. Since round 7
+ * that write is off and CheckTokenExpiry moves the column itself, after the
+ * limiters (ThrottledRequestIdleTimerTest). This proves an accepted request
+ * still moves it, so the idle check keeps reading the captured arrival value.
  */
-it('confirms sanctum overwrites last_used_at before middleware runs', function () {
+it('moves last_used_at to now on an accepted request', function () {
     [$plain, $token] = rememberedToken($this->operator, idleMinutes: 5);
 
     expect($token->last_used_at->diffInMinutes(now()))->toBeGreaterThan(4);

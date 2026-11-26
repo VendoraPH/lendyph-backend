@@ -8,7 +8,18 @@ use Laravel\Sanctum\PersonalAccessToken;
 
 /**
  * Carries `personal_access_tokens.last_used_at` as it stood when the request
- * ARRIVED, from Sanctum's guard to CheckTokenExpiry.
+ * ARRIVED, from Sanctum's guard to CheckTokenExpiry, and moves it on (touch())
+ * once the request has passed the limiters.
+ *
+ * Who writes the column (finish run round 7): Sanctum's own write is turned off
+ * (`sanctum.last_used_at` false), because it ran while the caller was resolved,
+ * ahead of every limiter, so a request the limiter then refused with 429 still
+ * reset the idle timer. The idle checks (CheckTokenExpiry and
+ * CheckPortalTokenExpiry) call touch() after a token passes, and they sort
+ * after ThrottleRequests (bootstrap/app.php), so only a request that passes the
+ * limiters counts as activity. The history below is why the value is captured
+ * at all; with the write turned off it still guards the read against any other
+ * write of the column during the request.
  *
  * This exists because of an ordering problem no middleware can work around.
  * Sanctum's Guard does exactly this, in this order, while resolving the caller
@@ -47,6 +58,35 @@ final class TokenIdleWindow
     {
         $request->attributes->set(self::TOKEN_ID, $token->getKey());
         $request->attributes->set(self::SINCE, $token->last_used_at);
+    }
+
+    /**
+     * Record this request as the token's latest activity, as Sanctum's own
+     * write did (Guard::updateLastUsedAt()), keeping the connection's
+     * "records modified" state so a sticky read connection isn't switched
+     * to the writer by this bookkeeping write.
+     *
+     * Only for a token Sanctum's guard resolved on THIS request (the one
+     * capture() saw), which is exactly the set Sanctum used to write: a token
+     * attached any other way (Sanctum::actingAs() in tests) is left alone.
+     */
+    public static function touch(Request $request, PersonalAccessToken $token): void
+    {
+        if ($request->attributes->get(self::TOKEN_ID) !== $token->getKey()) {
+            return;
+        }
+
+        $connection = $token->getConnection();
+
+        if (method_exists($connection, 'hasModifiedRecords') && method_exists($connection, 'setRecordModificationState')) {
+            $hasModifiedRecords = $connection->hasModifiedRecords();
+            $token->forceFill(['last_used_at' => now()])->save();
+            $connection->setRecordModificationState($hasModifiedRecords);
+
+            return;
+        }
+
+        $token->forceFill(['last_used_at' => now()])->save();
     }
 
     /**

@@ -25,16 +25,24 @@ use UnexpectedValueException;
  *   found this way);
  * - never a value written like one of the app's own numbers ("LN-0042",
  *   "PN 42"), which the parser reads (LindaLookup::isKnownCode());
- * - only values holding a digit, at most 50 characters (the column);
+ * - at most 50 characters (the column);
+ * - values holding a digit anywhere; a value with no digit only right after a
+ *   loan word ("loan ABC-XYZ", "loan no. ABCD"; finish run round 7), and never
+ *   a loan word itself, so a question without a loan word checks nothing new;
  * - a bare number of 1 to 4 digits only right after a loan word ("loan 42",
  *   "loan no. 42", "utang 42"), so a count or a year ("top 10", "2026") is
- *   never taken for a loan.
+ *   never taken for a loan;
+ * - a value glued to a loan word by ".", "#" or ":" ("Loan No.BC-07",
+ *   "loan#ABC-XYZ", "Loan No:BC-07"; round 7) counts as right after it, and
+ *   so does a run of two or three words that starts right after a loan word
+ *   or with a glued value ("loan ABC XYZ", "Loan No.BC 2019 07").
  *
  * The values go through one query on the column's unique index; its
  * collation (utf8mb4_unicode_ci) ignores case. Every loan of the deployment
  * counts, whatever the caller's branches, so a Loan No. never reaches the
- * model; the answer itself keeps the caller's branch scope. The longest
- * match wins. A value that matches nothing leaves the question to the rules
+ * model; the answer itself keeps the caller's branch scope. A match holding a
+ * digit wins, then the longest (so "loan summary for loan BC-07" finds BC-07,
+ * not a Loan No. "SUMMARY"). A value that matches nothing leaves the question to the rules
  * before this one.
  *
  * find() throws when the question or the database can't be read, and the
@@ -51,8 +59,11 @@ final class LindaLoanNumbers
     /** The most tokens one value spans. */
     private const MAX_WORDS = 3;
 
-    /** Words after which a short bare number may be a Loan No. */
+    /** Words after which a short bare number, or a value with no digit, may be a Loan No. */
     private const LOAN_WORDS = ['loan', 'loans', 'no', 'num', 'number', 'utang', 'pautang', 'account', 'acct'];
+
+    /** A loan word with a value glued to it by ".", "#" or ":" ("No.BC-07", "loan#ABC"). */
+    private const GLUED = '/^(?<word>\pL+)[.#:]+(?<value>.+)$/u';
 
     /**
      * The Loan No. the question holds, as stored, or null.
@@ -69,6 +80,7 @@ final class LindaLoanNumbers
 
         $found = Loan::query()
             ->whereIn('external_loan_no', $candidates)
+            ->orderByRaw("external_loan_no REGEXP '[0-9]' DESC")
             ->orderByRaw('CHAR_LENGTH(external_loan_no) DESC')
             ->value('external_loan_no');
 
@@ -107,14 +119,36 @@ final class LindaLoanNumbers
 
         $count = count($parts);
 
-        foreach ($parts as $at => $part) {
-            $previous = $at === 0 ? '' : mb_strtolower(self::cleaned($parts[$at - 1]));
-            $value = self::cleaned($part);
-            $candidates[$value] = ($candidates[$value] ?? false) || self::checks($value, in_array($previous, self::LOAN_WORDS, true));
+        // The word before each part, skipping marks that clean to nothing
+        // ("loan # ABC-XYZ" reads ABC-XYZ as right after "loan").
+        $previous = '';
 
+        foreach ($parts as $at => $part) {
+            if ($at > 0) {
+                $before = mb_strtolower(self::cleaned($parts[$at - 1]));
+                $previous = $before === '' ? $previous : $before;
+            }
+
+            $afterLoanWord = in_array($previous, self::LOAN_WORDS, true);
+            $value = self::cleaned($part);
+            $candidates[$value] = ($candidates[$value] ?? false) || self::checks($value, $afterLoanWord);
+
+            // A run right after a loan word counts as after it ("loan ABC XYZ").
             for ($words = 2; $words <= self::MAX_WORDS && $at + $words <= $count; $words++) {
                 $run = self::cleaned(implode(' ', array_slice($parts, $at, $words)));
-                $candidates[$run] = ($candidates[$run] ?? false) || self::checks($run, false);
+                $candidates[$run] = ($candidates[$run] ?? false) || self::checks($run, $afterLoanWord);
+            }
+
+            // A value glued to a loan word, alone and with the parts after it
+            // ("Loan No.BC 2019 07" checks "BC", "BC 2019" and "BC 2019 07").
+            $glued = self::gluedToLoanWord($part);
+            if ($glued !== null) {
+                $candidates[$glued] = ($candidates[$glued] ?? false) || self::checks($glued, true);
+
+                for ($words = 2; $words <= self::MAX_WORDS && $at + $words <= $count; $words++) {
+                    $run = self::cleaned($glued.' '.implode(' ', array_slice($parts, $at + 1, $words - 1)));
+                    $candidates[$run] = ($candidates[$run] ?? false) || self::checks($run, true);
+                }
             }
         }
 
@@ -136,6 +170,25 @@ final class LindaLoanNumbers
         }
 
         return $bare === $trimmed ? $trimmed : self::trimmed($bare);
+    }
+
+    /**
+     * The value glued to a loan word ("No.BC-07" gives "BC-07"), or null when
+     * the part doesn't start with a loan word and a glue mark.
+     */
+    private static function gluedToLoanWord(string $part): ?string
+    {
+        $matched = preg_match(self::GLUED, self::trimmed($part), $glued);
+
+        if ($matched === false) {
+            throw new UnexpectedValueException('glued');
+        }
+
+        if ($matched !== 1 || ! in_array(mb_strtolower($glued['word']), self::LOAN_WORDS, true)) {
+            return null;
+        }
+
+        return self::cleaned($glued['value']);
     }
 
     /** @return list<string> */
@@ -164,8 +217,13 @@ final class LindaLoanNumbers
 
     private static function checks(string $value, bool $afterLoanWord): bool
     {
-        if ($value === '' || mb_strlen($value) > self::MAX_LENGTH || preg_match('/\d/u', $value) !== 1) {
+        if ($value === '' || mb_strlen($value) > self::MAX_LENGTH) {
             return false;
+        }
+
+        // No digit: only right after a loan word, and never a loan word itself.
+        if (preg_match('/\d/u', $value) !== 1) {
+            return $afterLoanWord && ! in_array(mb_strtolower($value), self::LOAN_WORDS, true);
         }
 
         // The app's own numbers are the parser's (LN-, RCP- and the rest).

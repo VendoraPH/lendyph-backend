@@ -16,6 +16,8 @@ class LoginRequest extends FormRequest
         return [
             'login' => ['required', 'string'],
             'password' => ['required', 'string'],
+            // Ignored since "Remember me" was removed (finish run round 7);
+            // still accepted so older clients keep signing in.
             'remember' => ['sometimes', 'boolean'],
         ];
     }

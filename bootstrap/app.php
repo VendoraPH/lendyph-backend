@@ -191,8 +191,9 @@ return Application::configure(basePath: dirname(__DIR__))
         // A module hidden in Settings → Menu Visibility answers 404 on its own
         // API (finish run round 6). Listed last, so it sorts after every gate
         // above, staff and portal: an idle token is still expired and deleted
-        // by CheckTokenExpiry (Sanctum has already bumped last_used_at, so a
-        // 404 ahead of it would revive the session), and a deactivated or
+        // by CheckTokenExpiry (a 404 ahead of it would answer an idle token
+        // and leave it alive; since finish run round 7 the idle checks, not
+        // Sanctum, move last_used_at, after the limiters), and a deactivated or
         // locked sign-in still gets its own answer. Still ahead of
         // SubstituteBindings, so a hidden module's ids are never looked up.
         // The limiters run first: a hidden module's requests are metered like
