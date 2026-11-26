@@ -4,9 +4,12 @@ namespace Tests\Feature\Savings\Accounts;
 
 use App\Models\Borrower;
 use App\Models\SavingsApproval;
+use App\Models\SavingsProduct;
 use App\Models\SavingsTransaction;
+use App\Models\TimeDeposit;
 use App\Services\GeneratedNumberWrite;
 use App\Services\Savings\DuplicateReference;
+use App\Services\Savings\SavingsLedger;
 use Closure;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
@@ -101,14 +104,30 @@ class ReferenceMethodLockTest extends TestCase
     /**
      * The check reads the latest committed rows, not the snapshot its
      * transaction took on its first read: a writer that read before waiting
-     * for the lock still sees what the other writer committed meanwhile, a
-     * saved reference or a payout request holding one.
+     * for the lock still sees what the other writer committed meanwhile: a
+     * saved reference, a reversal that frees one, a time deposit's placement
+     * and payout references, and a payout request holding one.
      */
     public function test_the_check_sees_rows_committed_after_its_transaction_first_read(): void
     {
         $today = now()->toDateString();
         $account = $this->account(['opened_on' => $today, 'last_member_activity_on' => $today]);
         $approval = SavingsApproval::factory()->create(['account_id' => $account->id, 'requested_by' => $this->admin->id]);
+        $this->fund($account, 50_000, $today);
+        $reversed = DB::transaction(fn () => app(SavingsLedger::class)->debit($account, 'withdrawal', 10_000, ['method' => 'gcash', 'external_reference' => 'GC-REV-1']));
+        $deposit = TimeDeposit::factory()->raw([
+            'borrower_id' => $this->member->id,
+            'product_id' => SavingsProduct::factory()->timeDeposit()->create()->id,
+            'branch_id' => $this->member->branch_id,
+            'certificate_number' => 'TD-0000-RACE01',
+            'funding_method' => 'bank_transfer',
+            'reference' => 'BDO-PLACED-1',
+            'status' => 'withdrawn',
+            'settled_on' => $today,
+            'settled_amount' => '50369.86',
+            'payout_method' => 'gcash',
+            'payout_reference' => 'GC-TD-PAID-1',
+        ]);
         $other = DB::connection(self::OTHER_CONNECTION);
         $check = app(DuplicateReference::class);
 
@@ -124,12 +143,24 @@ class ReferenceMethodLockTest extends TestCase
                 'value_date' => $today, 'debit' => '0.00', 'credit' => '700.00', 'balance_after' => '700.00',
                 'method' => 'gcash', 'external_reference' => 'GC-777', 'created_at' => now(),
             ]);
+            $other->table('savings_transactions')->insert([
+                'account_id' => $account->id, 'reference' => 'SVT-00000000-RACE03', 'type' => 'reversal', 'date' => $today,
+                'value_date' => $today, 'debit' => '0.00', 'credit' => '100.00', 'balance_after' => '500.00',
+                'reverses_transaction_id' => $reversed->id, 'created_at' => now(),
+            ]);
+            $other->table('time_deposits')->insert([...$deposit, 'created_at' => now(), 'updated_at' => now()]);
             $other->table('savings_approvals')->where('id', $approval->id)->update([
                 'payload' => json_encode(['payment_method' => 'maya', 'reference' => 'MAYA-888']),
             ]);
 
             $this->assertRefusedWith(fn () => $check->assertUnused('gcash', 'GC-777'),
                 'Reference "GC-777" is already on record for another GCash transaction. Check the reference and enter the right one.');
+            // Its reversal, committed meanwhile, frees the withdrawal's reference.
+            $check->assertUnused('gcash', 'GC-REV-1');
+            $this->assertRefusedWith(fn () => $check->assertUnused('bank_transfer', 'BDO-PLACED-1'),
+                'Reference "BDO-PLACED-1" is already on record for another bank transfer. Check the reference and enter the right one.');
+            $this->assertRefusedWith(fn () => $check->assertUnused('gcash', 'GC-TD-PAID-1'),
+                'Reference "GC-TD-PAID-1" is already on record for another GCash transaction. Check the reference and enter the right one.');
             $this->assertRefusedWith(fn () => $check->assertUnused('maya', 'MAYA-888'),
                 'Reference "MAYA-888" is held by a Maya withdrawal waiting for approval. Check the reference, or decide that withdrawal first.');
         } finally {
