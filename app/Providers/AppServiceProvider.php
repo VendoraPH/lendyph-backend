@@ -5,6 +5,7 @@ namespace App\Providers;
 use App\Models\CsvImportRun;
 use App\Models\PortalUser;
 use App\Models\User;
+use App\Services\AuditLogService;
 use App\Services\BorrowerSubmissionTokenService;
 use App\Services\CsvImport\CsvImportUploadService;
 use App\Services\CsvImport\ImportErrorDigest;
@@ -12,6 +13,7 @@ use App\Services\Linda\LindaHttpError;
 use App\Services\TokenIdleWindow;
 use App\Services\TokenTimeout;
 use Illuminate\Cache\RateLimiting\Limit;
+use Illuminate\Database\Events\MigrationEnded;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Event;
@@ -195,6 +197,11 @@ class AppServiceProvider extends ServiceProvider
         // to the permission checks, which grant them nothing.
         Gate::before(function ($user) {
             return $user instanceof User && $user->hasRole('super_admin') ? true : null;
+        });
+
+        // The promotion upgrades from main in one run: a migration may add audit_logs columns, so the audit writer reads them again after each one.
+        Event::listen(MigrationEnded::class, static function (): void {
+            AuditLogService::forgetColumns();
         });
 
         /**

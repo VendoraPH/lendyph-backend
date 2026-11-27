@@ -6,6 +6,7 @@ use App\Models\AuditLog;
 use App\Models\PortalUser;
 use App\Models\User;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Support\Facades\Schema;
 use LogicException;
 
 class AuditLogService
@@ -20,6 +21,21 @@ class AuditLogService
      * the trait already calls into covers every auditable model there is.
      */
     private static bool $modelAuditingSuppressed = false;
+
+    /**
+     * `audit_logs` columns added after the schema production started from:
+     * the portal actor (2026_11_11_700100) and the record's branch
+     * (2026_11_23_100000).
+     */
+    private const LATER_COLUMNS = ['actor_type', 'portal_user_id', 'branch_id'];
+
+    /**
+     * Which of LATER_COLUMNS the table has, read once per process (null: not
+     * read yet), and again after each migration through forgetColumns().
+     *
+     * @var list<string>|null
+     */
+    private static ?array $laterColumnsPresent = null;
 
     /** `audit_logs.actor_type` for a row a member's own action wrote. */
     public const ACTOR_MEMBER = 'member';
@@ -159,25 +175,56 @@ class AuditLogService
 
         [$staffId, $member] = $asSystem || $asApplicant ? [null, null] : self::actor($userId, $member);
 
-        return AuditLog::create([
+        $row = [
             'user_id' => $staffId,
-            'actor_type' => match (true) {
-                $asApplicant => self::ACTOR_APPLICANT,
-                $member !== null => self::ACTOR_MEMBER,
-                default => null,
-            },
-            'portal_user_id' => $member?->getKey(),
             'action' => $action,
             'auditable_type' => $auditable ? $auditable->getMorphClass() : null,
             'auditable_id' => $auditable?->getKey(),
-            // The audited record's branch (Phase 6 MB-BE6), never the actor's.
-            'branch_id' => AuditBranch::of($auditable),
             'old_values' => $oldValues,
             'new_values' => $newValues,
             'ip_address' => $ipAddress ?? request()->ip(),
             'user_agent' => self::cleanHeader(request()->userAgent()),
             'description' => $description,
-        ]);
+        ];
+
+        // The promotion upgrades from main in one run, so a migration's audit row can land before these columns exist; it omits them (null: staff, or System).
+        if (self::hasLaterColumn('actor_type')) {
+            $row['actor_type'] = match (true) {
+                $asApplicant => self::ACTOR_APPLICANT,
+                $member !== null => self::ACTOR_MEMBER,
+                default => null,
+            };
+        }
+
+        if (self::hasLaterColumn('portal_user_id')) {
+            $row['portal_user_id'] = $member?->getKey();
+        }
+
+        if (self::hasLaterColumn('branch_id')) {
+            // The audited record's branch (Phase 6 MB-BE6), never the actor's.
+            $row['branch_id'] = AuditBranch::of($auditable);
+        }
+
+        return AuditLog::create($row);
+    }
+
+    /**
+     * Read the table's columns again on the next write. Called after each
+     * migration (AppServiceProvider), since a migration may add one.
+     */
+    public static function forgetColumns(): void
+    {
+        self::$laterColumnsPresent = null;
+    }
+
+    private static function hasLaterColumn(string $column): bool
+    {
+        self::$laterColumnsPresent ??= array_values(array_intersect(
+            self::LATER_COLUMNS,
+            Schema::getColumnListing((new AuditLog)->getTable()),
+        ));
+
+        return in_array($column, self::$laterColumnsPresent, true);
     }
 
     /**
