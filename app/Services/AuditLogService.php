@@ -30,8 +30,17 @@ class AuditLogService
     private const LATER_COLUMNS = ['actor_type', 'portal_user_id', 'branch_id'];
 
     /**
-     * Which of LATER_COLUMNS the table has, read once per process (null: not
-     * read yet), and again after each migration through forgetColumns().
+     * Whether a migrate run is in progress (MigrationsStarted until
+     * MigrationsEnded, wired in AppServiceProvider). Only then may a write
+     * leave out one of LATER_COLUMNS; any other write names all three, so a
+     * missing column still fails loudly and costs no lookup.
+     */
+    private static bool $migrating = false;
+
+    /**
+     * Which of LATER_COLUMNS the table has during a migrate run, read once
+     * (null: not read yet) and again after each migration through
+     * forgetColumns().
      *
      * @var list<string>|null
      */
@@ -187,7 +196,9 @@ class AuditLogService
             'description' => $description,
         ];
 
-        // The promotion upgrades from main in one run, so a migration's audit row can land before these columns exist; it omits them (null: staff, or System).
+        // The promotion upgrades from main in one run, so a migration's audit
+        // row can land before these columns exist. It leaves them out, and a
+        // null keeps its meaning: staff, or System when user_id is null.
         if (self::hasLaterColumn('actor_type')) {
             $row['actor_type'] = match (true) {
                 $asApplicant => self::ACTOR_APPLICANT,
@@ -209,6 +220,25 @@ class AuditLogService
     }
 
     /**
+     * A migrate run has started: writes may leave out later columns the table
+     * doesn't have yet.
+     */
+    public static function migrationsStarted(): void
+    {
+        self::$migrating = true;
+        self::$laterColumnsPresent = null;
+    }
+
+    /**
+     * The migrate run has ended: every write names all of LATER_COLUMNS again.
+     */
+    public static function migrationsEnded(): void
+    {
+        self::$migrating = false;
+        self::$laterColumnsPresent = null;
+    }
+
+    /**
      * Read the table's columns again on the next write. Called after each
      * migration (AppServiceProvider), since a migration may add one.
      */
@@ -219,6 +249,10 @@ class AuditLogService
 
     private static function hasLaterColumn(string $column): bool
     {
+        if (! self::$migrating) {
+            return true;
+        }
+
         self::$laterColumnsPresent ??= array_values(array_intersect(
             self::LATER_COLUMNS,
             Schema::getColumnListing((new AuditLog)->getTable()),
