@@ -54,6 +54,12 @@ it('accepts PH mobile and international contact_number formats', function () {
         'last_name' => 'One',
         'branch_id' => $this->branch->id,
         'contact_number' => '09171234567',
+        'birthdate' => '1990-05-12',
+        'civil_status' => 'single',
+        'gender' => 'female',
+        'address' => '12 Mabini St',
+        'city' => 'Butuan',
+        'province' => 'Agusan del Norte',
     ])->assertCreated();
 
     $this->postJson('/api/borrowers', [
@@ -61,6 +67,12 @@ it('accepts PH mobile and international contact_number formats', function () {
         'last_name' => 'Two',
         'branch_id' => $this->branch->id,
         'contact_number' => '+639171234568',
+        'birthdate' => '1991-06-13',
+        'civil_status' => 'single',
+        'gender' => 'female',
+        'address' => '12 Mabini St',
+        'city' => 'Butuan',
+        'province' => 'Agusan del Norte',
     ])->assertCreated();
 });
 
@@ -90,6 +102,12 @@ it('accepts an adult (18+) birthdate', function () {
         'last_name' => 'Enough',
         'branch_id' => $this->branch->id,
         'birthdate' => now()->subYears(25)->toDateString(),
+        'civil_status' => 'single',
+        'gender' => 'female',
+        'address' => '12 Mabini St',
+        'city' => 'Butuan',
+        'province' => 'Agusan del Norte',
+        'contact_number' => '09170000222',
     ])->assertCreated();
 });
 
@@ -99,6 +117,13 @@ it('accepts pledge_amount on borrower create and uses it for the pledge', functi
         'last_name' => 'User',
         'branch_id' => $this->branch->id,
         'pledge_amount' => 1500,
+        'birthdate' => '1990-05-12',
+        'civil_status' => 'single',
+        'gender' => 'female',
+        'address' => '12 Mabini St',
+        'city' => 'Butuan',
+        'province' => 'Agusan del Norte',
+        'contact_number' => '09170000222',
     ])->assertCreated();
 
     $borrowerId = $response->json('data.id');
@@ -113,6 +138,13 @@ it('defaults pledge_amount to zero when not provided', function () {
         'first_name' => 'Test',
         'last_name' => 'User',
         'branch_id' => $this->branch->id,
+        'birthdate' => '1990-05-12',
+        'civil_status' => 'single',
+        'gender' => 'female',
+        'address' => '12 Mabini St',
+        'city' => 'Butuan',
+        'province' => 'Agusan del Norte',
+        'contact_number' => '09170000222',
     ])->assertCreated();
 
     $borrower = Borrower::find($response->json('data.id'));
@@ -130,6 +162,10 @@ it('accepts structured address fields on borrower create', function () {
         'barangay' => 'Poblacion',
         'city' => 'Butuan',
         'province' => 'Agusan del Norte',
+        'birthdate' => '1990-05-12',
+        'civil_status' => 'single',
+        'gender' => 'female',
+        'contact_number' => '09170000222',
     ])->assertCreated();
 
     $borrower = Borrower::find($response->json('data.id'));
@@ -147,6 +183,13 @@ it('accepts date_hired on borrower create and exposes it in the resource', funct
         'branch_id' => $this->branch->id,
         'employer_or_business' => 'Acme Corp',
         'date_hired' => '2020-03-01',
+        'birthdate' => '1990-05-12',
+        'civil_status' => 'single',
+        'gender' => 'female',
+        'address' => '12 Mabini St',
+        'city' => 'Butuan',
+        'province' => 'Agusan del Norte',
+        'contact_number' => '09170000222',
     ])->assertCreated();
 
     $borrower = Borrower::find($response->json('data.id'));
@@ -218,6 +261,7 @@ it('uploads valid id with only front_file (no back)', function () {
     $response = $this->postJson("/api/borrowers/{$borrower->id}/valid-ids", [
         'type' => 'PhilSys ID',
         'front_file' => UploadedFile::fake()->image('philsys.jpg'),
+        'id_number' => '1234-5678-9012',
     ])->assertCreated();
 
     expect($response->json('data'))->toHaveCount(1);
@@ -229,6 +273,7 @@ it('still supports legacy single file upload', function () {
     $response = $this->postJson("/api/borrowers/{$borrower->id}/valid-ids", [
         'type' => 'PhilSys ID',
         'file' => UploadedFile::fake()->image('philsys.jpg'),
+        'id_number' => '1234-5678-9012',
     ])->assertCreated();
 
     // Legacy shape: returns single document object

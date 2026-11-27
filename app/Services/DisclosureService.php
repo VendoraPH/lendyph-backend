@@ -2,11 +2,149 @@
 
 namespace App\Services;
 
+use App\Enums\TermUnit;
 use App\Models\Loan;
+use App\Services\Accounting\PostingRules;
+use App\Services\Penalties\PenaltyTerms;
+use Illuminate\Validation\ValidationException;
 
+/**
+ * The disclosure statement R.A. 3765 (Truth in Lending) requires, figures and all.
+ *
+ * ## What is a finance charge
+ *
+ * Interest and the cooperative's own fees, and nothing else. Each item of
+ * `loans.deductions` is sorted by its type, read exactly as the release
+ * journal reads it ({@see PostingRules::deductionType()} and
+ * {@see PostingRules::DEDUCTION_ROLES}), so the statement and the books never
+ * disagree on what a deduction is:
+ *
+ * - finance charge: a processing or service fee (booked to the cooperative's
+ *   income), a catalog fee or any other untyped deduction (income too), and
+ *   the part of `total_deductions` no item explains (the unitemised
+ *   remainder, signed: "Other Charges" above zero, "Adjustment" below);
+ * - non-finance charge: a notarial fee or an insurance premium (both booked
+ *   as owed to somebody else), and any tax, recognised by the same matcher
+ *   as the books (PostingRules::taxRoleFor()). A tax wins over being a
+ *   catalog fee, but not over a type with an account of its own;
+ * - share capital: the member's own equity, deducted from the proceeds and
+ *   shown there, never a charge.
+ *
+ * Every figure is worked in whole centavos, so the printed lines add up
+ * exactly and the browser adds nothing.
+ *
+ * ## Before release: the catalog fees the release will charge
+ *
+ * The statement is signed before release, but the release appends every
+ * catalog fee that applies ({@see LoanReleaseFeeService::applyOnRelease()}).
+ * So until the loan is released the statement adds the fees
+ * {@see LoanReleaseFeeService::itemsFor()} names, the very code the release
+ * and GET /loans/{id}/release-preview run, each sorted by kindOf() like a
+ * stored item and marked `provisional` (the fee rules can still change before
+ * release) with `provisional_reason` "release_fee". `total_deductions`, the
+ * three `net_proceeds` and the amount financed include them, so the net
+ * proceeds equal the release preview's `net_proceeds` before insurance. Only
+ * an open application (draft, for review, approved) gets them: a rejected or
+ * void loan will never be released. Fees that would take the net proceeds
+ * below zero are refused with the release preview's own 422, never printed
+ * as a negative net. Once released the fees are stored items and nothing is
+ * added.
+ *
+ * ## Insurance
+ *
+ * One line, whatever the release did: `amount` is the premium charged,
+ * `deducted` what was withheld from the proceeds (the "Insurance Premium"
+ * items the release appends), and `owed` what the release left unpaid
+ * (`insurance_premium_amount` less the partial amount collected). Read from
+ * the release's own columns, never from `insurance_remaining_balance`, which
+ * falls as payments collect the premium and so would understate what was
+ * charged once the member starts paying. A hand-typed "Insurance Premium" on
+ * a loan with no premium columns is deducted in full and owes nothing.
+ *
+ * Premium a restructure moved onto the loan from the loan it closed
+ * (`insurance_carried_over`) is a second line, "Insurance premium carried
+ * from the previous loan": all of it owed, none deducted, with `provisional`
+ * true (and `provisional_reason` "carried_premium") before release, when it is the open source's live premium owed.
+ *
+ * ## Rates
+ *
+ * The nominal annual rate is the contractual rate times the periods in a year
+ * of the period it is quoted per, as the printable used to work it out in the
+ * browser. The effective interest rate follows BSP Circular 730 (Memorandum
+ * M-2011-040): the amount financed is the principal less the finance charges
+ * deducted, the cash flows are each instalment's total due at its period
+ * index, and the rate per period is the one that discounts those flows to the
+ * amount financed. Annualised by the periods in a year of the PAYMENT
+ * frequency; monthly is the annual rate over twelve. Non-finance charges and
+ * share capital are not cash flows of the credit.
+ */
 class DisclosureService
 {
-    public function __construct(private LoanService $loanService) {}
+    /**
+     * Periods in a year of each frequency: the multipliers the printable used
+     * (`FREQUENCY_META` in the frontend's printable templates) before the
+     * server owned these figures. `upon_maturity` is not here: its one period
+     * is the loan's own term, see {@see self::paymentPeriodsPerYear()}.
+     *
+     * @var array<string, int>
+     */
+    public const PERIODS_PER_YEAR = [
+        'daily' => 365,
+        'weekly' => 52,
+        'bi_weekly' => 26,
+        'semi_monthly' => 24,
+        'monthly' => 12,
+        // A rate period only (a rate per year); no loan is paid yearly.
+        'annual' => 1,
+    ];
+
+    /**
+     * How each role in {@see PostingRules::DEDUCTION_ROLES} is disclosed. A
+     * fee the cooperative keeps as income is a finance charge; one it owes on
+     * to somebody else is not; share capital is the member's own.
+     *
+     * @var array<string, string>
+     */
+    private const KIND_BY_ROLE = [
+        'processing_fee_income' => self::FINANCE,
+        'service_fee_income' => self::FINANCE,
+        'notarial_fees_payable' => self::NON_FINANCE,
+        'insurance_premium_payable' => self::INSURANCE,
+        'share_capital' => self::SHARE_CAPITAL,
+    ];
+
+    private const FINANCE = 'finance';
+
+    private const NON_FINANCE = 'non_finance';
+
+    private const INSURANCE = 'insurance';
+
+    private const SHARE_CAPITAL = 'share_capital';
+
+    /** Why a line is provisional: a catalog fee the release will charge. */
+    public const REASON_RELEASE_FEE = 'release_fee';
+
+    /** Why a line is provisional: premium the release will carry from the loan it closes. */
+    public const REASON_CARRIED_PREMIUM = 'carried_premium';
+
+    /**
+     * The statuses of an application still on its way to release: the only
+     * loans the catalog fees are added to before release.
+     *
+     * @var list<string>
+     */
+    private const OPEN_APPLICATION_STATUSES = ['draft', 'for_review', 'approved'];
+
+    /** The keys that mark a line provisional, passed through as they are. */
+    private const PROVISIONAL_KEYS = ['provisional' => true, 'provisional_reason' => true];
+
+    /** The one line every insurance premium on a loan is disclosed under. */
+    private const INSURANCE_LINE = 'Insurance Premium';
+
+    /** The premium a restructure carried over from the loan it closed. */
+    private const CARRIED_INSURANCE_LINE = 'Insurance premium carried from the previous loan';
+
+    public function __construct(private LoanService $loanService, private LoanReleaseFeeService $releaseFees) {}
 
     public function generateDisclosure(Loan $loan): array
     {
@@ -23,22 +161,44 @@ class DisclosureService
             ])->values()->toArray()
             : $this->loanService->buildAmortizationPreview($loan);
 
-        $totalPrincipal = array_sum(array_column($schedule, 'principal_due'));
-        $totalInterest = array_sum(array_column($schedule, 'interest_due'));
+        // Every total in whole centavos, so the printed statement's figures
+        // add up exactly and the browser adds nothing.
+        $sumOf = fn (string $column): int => array_sum(array_map(self::centavos(...), array_column($schedule, $column)));
+
+        $totalPrincipal = $sumOf('principal_due');
+        $totalInterest = $sumOf('interest_due');
+        $principal = self::centavos($loan->principal_amount);
+        $charges = $this->sortDeductions($loan);
+        $totalDeductions = self::centavos($loan->total_deductions) + $charges['provisional_total'];
+        $netProceeds = self::centavos($loan->net_proceeds) - $charges['provisional_total'];
+
+        // What the release preview refuses, refused here with its own 422 and
+        // message (LoanReleaseFeeService::assertWithinPrincipal()).
+        if ($charges['provisional_total'] > 0 && $netProceeds < 0) {
+            throw ValidationException::withMessages([
+                'fees' => [LoanReleaseFeeService::overrunMessage(
+                    $charges['provisional_total'] / 100,
+                    $totalDeductions / 100,
+                    (float) $loan->principal_amount,
+                )],
+            ]);
+        }
+
+        $financeItems = array_sum(array_column($charges['finance'], 'amount'));
+        $financeTotal = $totalInterest + $financeItems;
+        $nonFinanceTotal = array_sum(array_column($charges['non_finance'], 'amount'));
+        $nonFinanceDeducted = array_sum(array_column($charges['non_finance'], 'deducted'));
 
         return [
             'document_title' => 'DISCLOSURE STATEMENT',
             'reference_number' => $loan->application_number,
             'generated_at' => now()->toDateTimeString(),
 
+            // What the statement prints, and nothing else: this answers to
+            // `loans:view`, not `borrowers:view`.
             'borrower' => [
                 'borrower_code' => $loan->borrower->borrower_code,
                 'full_name' => $loan->borrower->full_name,
-                'address' => $loan->borrower->address,
-                'contact_number' => $loan->borrower->contact_number,
-                'email' => $loan->borrower->email,
-                'employer_or_business' => $loan->borrower->employer_or_business,
-                'monthly_income' => (float) $loan->borrower->monthly_income,
             ],
 
             'loan_terms' => [
@@ -47,36 +207,424 @@ class DisclosureService
                 'loan_product_name' => $loan->loanProduct->name,
                 'principal_amount' => (float) $loan->principal_amount,
                 'interest_rate' => (float) $loan->interest_rate,
+                'interest_rate_frequency' => $loan->interest_rate_frequency->value,
                 'interest_method' => $loan->interest_method,
                 'term' => $loan->term,
+                'term_unit' => $loan->term_unit->value,
                 'frequency' => $loan->frequency,
                 'penalty_rate' => (float) $loan->penalty_rate,
+                // The late penalty terms the statement prints: the day ranges
+                // of the configuration copied at creation, with its name, or
+                // both null on a loan charged by `penalty_rate`.
+                'penalty_config_name' => $loan->penalty_config_name,
+                'penalty_brackets' => PenaltyTerms::bracketsOf($loan),
                 'grace_period_days' => $loan->grace_period_days,
                 'start_date' => $loan->start_date->toDateString(),
                 'maturity_date' => $loan->maturity_date->toDateString(),
             ],
 
+            // The stored items, then (before release) the catalog fees the
+            // release will add, each marked provisional; the two figures
+            // include them.
             'deductions' => [
-                'items' => $loan->deductions ?? [],
-                'total_deductions' => (float) $loan->total_deductions,
-                'net_proceeds' => (float) $loan->net_proceeds,
+                'items' => array_merge(is_array($loan->deductions) ? $loan->deductions : [], $charges['provisional_items']),
+                'total_deductions' => $totalDeductions / 100,
+                'net_proceeds' => $netProceeds / 100,
             ],
 
             'totals' => [
-                'total_principal' => round($totalPrincipal, 2),
-                'total_interest' => round($totalInterest, 2),
-                'total_obligation' => round($totalPrincipal + $totalInterest, 2),
-                'total_deductions' => (float) $loan->total_deductions,
-                'net_proceeds' => (float) $loan->net_proceeds,
+                'total_principal' => $totalPrincipal / 100,
+                'total_interest' => $totalInterest / 100,
+                'total_obligation' => ($totalPrincipal + $totalInterest) / 100,
+                // The schedule's Total Amortization column added up.
+                'total_amortization' => $sumOf('total_due') / 100,
+                'total_deductions' => $totalDeductions / 100,
+                'net_proceeds' => $netProceeds / 100,
+                // Interest plus the cooperative's own fees: the finance charges
+                // R.A. 3765 has disclosed. Not every deduction, as it once was.
+                'total_finance_charges' => $financeTotal / 100,
+                'total_non_finance_charges' => $nonFinanceTotal / 100,
+                // The total less the itemised deductions, signed, printed as a
+                // charge (or an adjustment) of its own so the lettered lines
+                // add up to the total.
+                'unitemised_deductions' => $loan->unitemisedDeductions(),
             ],
+
+            'finance_charges' => [
+                'interest' => $totalInterest / 100,
+                'items' => array_map(fn (array $item) => ['name' => $item['name'], 'amount' => $item['amount'] / 100]
+                    + array_intersect_key($item, self::PROVISIONAL_KEYS), $charges['finance']),
+                'total' => $financeTotal / 100,
+            ],
+
+            'non_finance_charges' => [
+                'items' => array_map(fn (array $item) => [
+                    'name' => $item['name'],
+                    'amount' => $item['amount'] / 100,
+                    'deducted' => $item['deducted'] / 100,
+                    'owed' => $item['owed'] / 100,
+                ] + array_intersect_key($item, self::PROVISIONAL_KEYS), $charges['non_finance']),
+                'total' => $nonFinanceTotal / 100,
+            ],
+
+            // Exact by construction: the three deducted parts are every item
+            // plus the unitemised remainder, i.e. `total_deductions`, so the
+            // net is `principal_amount - total_deductions` — what every write
+            // path stores as `net_proceeds` (before release, less the catalog
+            // fees the release will charge).
+            'proceeds' => [
+                'principal' => $principal / 100,
+                'finance_charges_deducted' => $financeItems / 100,
+                'non_finance_charges_deducted' => $nonFinanceDeducted / 100,
+                'share_capital' => $charges['share_capital'] / 100,
+                'net_proceeds' => ($principal - $financeItems - $nonFinanceDeducted - $charges['share_capital']) / 100,
+            ],
+
+            'rates' => $this->rates($loan, $schedule, $principal - $financeItems),
 
             'amortization_schedule' => $schedule,
 
             'co_makers' => $loan->coMakers->map(fn ($cm) => [
                 'full_name' => $cm->full_name,
-                'address' => $cm->address,
-                'contact_number' => $cm->contact_number,
             ])->values()->toArray(),
         ];
+    }
+
+    /**
+     * The loan's deductions sorted into finance charges, non-finance charges
+     * and share capital, in centavos, each list in the order of the items.
+     *
+     * An entry with no numeric amount is not an item here, exactly as
+     * {@see Loan::unitemisedDeductions()} reads it: its money, if any, is in
+     * the remainder, which closes the stored finance items.
+     *
+     * Before release the catalog fees the release will charge follow the
+     * stored items (and the remainder), sorted the same way and marked
+     * `provisional` with reason "release_fee"; they are
+     * also returned as deduction items (`provisional_items`) with their sum
+     * (`provisional_total`, centavos), 0 once released.
+     *
+     * @return array{
+     *     finance: list<array{name: string, amount: int, provisional?: bool, provisional_reason?: string}>,
+     *     non_finance: list<array{name: string, amount: int, deducted: int, owed: int, provisional?: bool, provisional_reason?: string}>,
+     *     share_capital: int,
+     *     provisional_items: list<array<string, mixed>>,
+     *     provisional_total: int,
+     * }
+     */
+    private function sortDeductions(Loan $loan): array
+    {
+        $finance = [];
+        $nonFinance = [];
+        $shareCapital = 0;
+        $insuranceAt = null;
+        $insuranceDeducted = 0;
+        $insuranceProvisional = false;
+        $provisionalItems = $this->feesToChargeAtRelease($loan);
+        $provisionalTotal = 0;
+
+        $stored = array_map(fn ($item) => [$item, false], is_array($loan->deductions) ? $loan->deductions : []);
+        $pending = array_map(fn (array $item) => [$item, true], $provisionalItems);
+
+        foreach ([...$stored, ...$pending] as [$item, $provisional]) {
+            if (! is_array($item) || ! is_numeric($item['amount'] ?? null)) {
+                continue;
+            }
+
+            $name = is_string($item['name'] ?? null) ? $item['name'] : '';
+            $amount = self::centavos($item['amount']);
+            $flag = $provisional ? self::releaseFeeFlag() : [];
+
+            if ($provisional) {
+                $provisionalTotal += $amount;
+            }
+
+            switch (self::kindOf($name)) {
+                case self::SHARE_CAPITAL:
+                    $shareCapital += $amount;
+                    break;
+                case self::INSURANCE:
+                    // One line for the premium, where its first item was.
+                    $insuranceAt ??= count($nonFinance);
+                    $nonFinance[$insuranceAt] = null;
+                    $insuranceDeducted += $amount;
+                    $insuranceProvisional = $insuranceProvisional || $provisional;
+                    break;
+                case self::NON_FINANCE:
+                    $nonFinance[] = ['name' => $name, 'amount' => $amount, 'deducted' => $amount, 'owed' => 0] + $flag;
+                    break;
+                default:
+                    $finance[] = ['name' => $name, 'amount' => $amount] + $flag;
+            }
+        }
+
+        $remainder = self::centavos($loan->unitemisedDeductions());
+
+        if ($remainder !== 0) {
+            // After the stored items, before the fees the release will add.
+            $storedCount = count(array_filter($finance, fn (array $item) => ! isset($item['provisional'])));
+            array_splice($finance, $storedCount, 0, [['name' => $remainder > 0 ? 'Other Charges' : 'Adjustment', 'amount' => $remainder]]);
+        }
+
+        $owed = $this->insuranceOwedAtRelease($loan);
+
+        if ($insuranceAt !== null || $owed > 0) {
+            $nonFinance[$insuranceAt ?? count($nonFinance)] = [
+                'name' => self::INSURANCE_LINE,
+                'amount' => $insuranceDeducted + $owed,
+                'deducted' => $insuranceDeducted,
+                'owed' => $owed,
+            ] + ($insuranceProvisional ? self::releaseFeeFlag() : []);
+        }
+
+        // The premium a restructure moved onto this loan from the loan it
+        // closed: owed on this loan, nothing of it deducted, so it is a line
+        // of its own rather than part of this release's premium.
+        [$carried, $provisional] = $this->carriedPremium($loan);
+
+        if ($carried > 0) {
+            $nonFinance[] = ['name' => self::CARRIED_INSURANCE_LINE, 'amount' => $carried, 'deducted' => 0, 'owed' => $carried, 'provisional' => $provisional]
+                + ($provisional ? ['provisional_reason' => self::REASON_CARRIED_PREMIUM] : []);
+        }
+
+        return [
+            'finance' => $finance,
+            'non_finance' => array_values($nonFinance),
+            'share_capital' => $shareCapital,
+            'provisional_items' => array_map(fn (array $item) => $item + self::releaseFeeFlag(), $provisionalItems),
+            'provisional_total' => $provisionalTotal,
+        ];
+    }
+
+    /**
+     * The catalog fee items the release will append to `$loan`: for an open
+     * application not yet released, {@see LoanReleaseFeeService::itemsFor()},
+     * the same two steps applyOnRelease() and the release preview take. None
+     * once released, because the release stored them, and none for a loan
+     * that will never be released (rejected, void).
+     *
+     * @return list<array<string, mixed>>
+     */
+    private function feesToChargeAtRelease(Loan $loan): array
+    {
+        if ($loan->released_at !== null || ! in_array($loan->status, self::OPEN_APPLICATION_STATUSES, true)) {
+            return [];
+        }
+
+        return $this->releaseFees->itemsFor($loan);
+    }
+
+    /** @return array{provisional: true, provisional_reason: string} */
+    private static function releaseFeeFlag(): array
+    {
+        return ['provisional' => true, 'provisional_reason' => self::REASON_RELEASE_FEE];
+    }
+
+    /**
+     * How a deduction named `$name` is disclosed.
+     *
+     * A type with an account of its own decides first, so a catalog fee
+     * called "Service Fee" is a service fee. Then a tax, so a catalog fee
+     * called "Documentary Stamp Tax" is not the cooperative's own. Anything
+     * else (a catalog fee, a hand-typed charge) is booked to the
+     * cooperative's income, so it is a finance charge.
+     */
+    private static function kindOf(string $name): string
+    {
+        $type = PostingRules::deductionType($name);
+        $role = PostingRules::DEDUCTION_ROLES[$type] ?? null;
+
+        if ($role !== null) {
+            return self::KIND_BY_ROLE[$role] ?? self::FINANCE;
+        }
+
+        if (PostingRules::taxRoleFor($type) !== null) {
+            return self::NON_FINANCE;
+        }
+
+        return self::FINANCE;
+    }
+
+    /**
+     * The premium a restructure carries onto `$loan`, in centavos, and whether
+     * the figure is provisional.
+     *
+     * Once released it is `insurance_carried_over`, set by the release. Before
+     * release (the disclosure the borrower signs while the restructure is
+     * approved) it is the premium the open source still owes, clamped at 0:
+     * what the release would carry if it ran now, provisional because a
+     * payment on the source before release still lowers it.
+     *
+     * @return array{0: int, 1: bool}
+     */
+    private function carriedPremium(Loan $loan): array
+    {
+        if ($loan->released_at === null && $loan->source_loan_id !== null) {
+            $source = $loan->sourceLoan;
+
+            if ($source !== null && in_array($source->status, ['released', 'ongoing'], true)) {
+                return [max(0, self::centavos($source->insurance_remaining_balance ?? 0)), true];
+            }
+
+            return [0, true];
+        }
+
+        return [max(0, self::centavos($loan->insurance_carried_over ?? 0)), false];
+    }
+
+    /**
+     * The premium the release left unpaid, in centavos: the full premium
+     * less what a partial payment collected, or 0 when it was paid in full
+     * or the loan carries no premium.
+     */
+    private function insuranceOwedAtRelease(Loan $loan): int
+    {
+        $premium = self::centavos($loan->insurance_premium_amount ?? 0);
+
+        if ($premium <= 0 || $loan->insurance_payment_type !== 'partial') {
+            return 0;
+        }
+
+        return max(0, $premium - self::centavos($loan->insurance_partial_amount ?? 0));
+    }
+
+    /**
+     * The contractual, nominal annual and effective interest rates, in percent.
+     *
+     * @param  list<array<string, mixed>>  $schedule  the instalments disclosed
+     * @param  int  $financed  the amount financed, in centavos
+     * @return array{contractual_rate: float, rate_frequency: string|null, nominal_annual_rate: float|null, effective_rate_monthly: float|null, effective_rate_annual: float|null}
+     */
+    private function rates(Loan $loan, array $schedule, int $financed): array
+    {
+        $rate = (float) $loan->interest_rate;
+        $rateFrequency = $loan->interest_rate_frequency?->value;
+        $ratePeriods = self::PERIODS_PER_YEAR[$rateFrequency] ?? null;
+
+        usort($schedule, fn (array $a, array $b) => $a['period_number'] <=> $b['period_number']);
+
+        $perPeriod = self::periodicRate($financed, array_map(fn (array $row) => self::centavos($row['total_due']), $schedule));
+        $paymentPeriods = $this->paymentPeriodsPerYear($loan);
+        $annual = $perPeriod === null || $paymentPeriods === null ? null : $perPeriod * $paymentPeriods * 100;
+
+        return [
+            'contractual_rate' => $rate,
+            'rate_frequency' => $rateFrequency,
+            'nominal_annual_rate' => $ratePeriods === null ? null : self::nominalAnnualRate($rate, $ratePeriods),
+            'effective_rate_monthly' => $annual === null ? null : self::percent($annual / 12),
+            'effective_rate_annual' => $annual === null ? null : self::percent($annual),
+        ];
+    }
+
+    /**
+     * Instalments in a year: the payment frequency's periods, or for a loan
+     * paid in one sum at maturity, as many of its terms as fit in a year
+     * (12 / months, or 365 / days, the daily convention above). Null when
+     * neither is known.
+     */
+    private function paymentPeriodsPerYear(Loan $loan): ?float
+    {
+        if ($loan->frequency !== 'upon_maturity') {
+            return isset(self::PERIODS_PER_YEAR[$loan->frequency]) ? (float) self::PERIODS_PER_YEAR[$loan->frequency] : null;
+        }
+
+        $term = (int) $loan->term;
+
+        if ($term <= 0) {
+            return null;
+        }
+
+        return ($loan->term_unit === TermUnit::Days ? 365 : 12) / $term;
+    }
+
+    /**
+     * The rate per period `r` at which the flows, the k-th discounted by
+     * (1 + r)^k, are worth exactly `$financed`; null when there is none.
+     *
+     * With no negative flow the present value falls steadily as the rate
+     * rises (from the plain sum at 0 towards 0), so there is at most one
+     * answer: the search brackets it on whichever side of 0 it lies, then
+     * halves the bracket until it is narrower than 1e-15, far finer than the
+     * four places of a percent the statement prints.
+     *
+     * @param  int  $financed  centavos
+     * @param  list<int>  $flows  centavos, in period order
+     */
+    private static function periodicRate(int $financed, array $flows): ?float
+    {
+        if ($financed <= 0 || $flows === [] || min($flows) < 0 || array_sum($flows) <= 0) {
+            return null;
+        }
+
+        $presentValue = function (float $rate) use ($flows): float {
+            $value = 0.0;
+            $discount = 1.0;
+
+            foreach ($flows as $flow) {
+                $discount /= 1 + $rate;
+                $value += $flow * $discount;
+            }
+
+            return $value;
+        };
+
+        $low = 0.0;
+        $high = 0.0;
+
+        if ($presentValue(0.0) >= $financed) {
+            $high = 1.0;
+
+            while ($presentValue($high) > $financed) {
+                $high *= 2;
+
+                if ($high > 1e6) {
+                    return null;
+                }
+            }
+        } else {
+            $low = -0.5;
+
+            while ($presentValue($low) < $financed) {
+                $low = ($low - 1) / 2;
+
+                if ($low < -1 + 1e-12) {
+                    return null;
+                }
+            }
+        }
+
+        for ($i = 0; $i < 200 && $high - $low > 1e-15; $i++) {
+            $mid = ($low + $high) / 2;
+
+            if ($presentValue($mid) > $financed) {
+                $low = $mid;
+            } else {
+                $high = $mid;
+            }
+        }
+
+        return ($low + $high) / 2;
+    }
+
+    /**
+     * The contractual rate times its periods a year, never rounded. The rate
+     * is stored to four places (decimal 8,4), so the product of a whole number
+     * of periods is exact in ten-thousandths of a percent: worked in those, so
+     * no float noise is sent and nothing is cut.
+     */
+    private static function nominalAnnualRate(float $rate, int $periods): float
+    {
+        return ((int) round($rate * 10000)) * $periods / 10000 + 0.0;
+    }
+
+    /** A percentage to four places, never a negative zero. */
+    private static function percent(float $value): float
+    {
+        return round($value, 4) + 0.0;
+    }
+
+    private static function centavos(mixed $pesos): int
+    {
+        return (int) round((float) $pesos * 100);
     }
 }

@@ -2,30 +2,48 @@
 
 namespace App\Http\Controllers\Api;
 
+use App\Http\Controllers\Api\Traits\RespondsWithValidIds;
 use App\Http\Controllers\Controller;
+use App\Http\Requests\Borrower\ApproveRegistrationRequest;
 use App\Http\Requests\Borrower\RejectBorrowerRequest;
 use App\Http\Requests\Borrower\StoreBorrowerRequest;
 use App\Http\Requests\Borrower\UpdateBorrowerRequest;
+use App\Http\Requests\Document\UploadFileTypes;
 use App\Http\Resources\BorrowerResource;
-use App\Http\Resources\DocumentResource;
+use App\Http\Resources\PossibleDuplicatePresenter;
 use App\Models\Borrower;
-use App\Models\Document;
+use App\Services\BorrowerDuplicateDetector;
+use App\Services\BorrowerLoanSummaryService;
 use App\Services\BorrowerPurgeService;
+use App\Services\BorrowerRegistration;
 use App\Services\BorrowerSubmissionTokenService;
+use App\Services\BranchAccess;
+use App\Services\Cda\MembershipStatus;
 use App\Services\Diagnostics\ErrorDigest;
-use Illuminate\Database\UniqueConstraintViolationException;
+use App\Services\MemberLedgerService;
+use App\Services\RegistrationReview;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
-use Illuminate\Http\UploadedFile;
-use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Validation\Rule;
 use Illuminate\Validation\ValidationException;
 use OpenApi\Attributes as OA;
 
 class BorrowerController extends Controller
 {
+    use RespondsWithValidIds;
+
+    /**
+     * A registration still waiting on, or turned down at, Registration Review.
+     * Only approval makes it a member (borrowers:approve, a valid ID and a
+     * branch), so deactivate and reactivate leave it alone (Phase 6 D7).
+     */
+    private const UNREVIEWED_STATUSES = ['pending', 'rejected'];
+
+    private const NOT_DEACTIVATABLE = 'This registration hasn\'t been approved, so it can\'t be deactivated. Approve or reject it from Registration Review.';
+
     #[OA\Get(
         path: '/api/borrowers',
         summary: 'List borrowers',
@@ -39,6 +57,10 @@ status except `pending` and `rejected`. Use it for the Members screen instead
 of `status`, which only takes one exact value at a time. `inactive` and
 `blacklisted` members are included: they are members in poor standing, not
 non-members.
+
+The list and `meta.stats` cover only borrowers in the caller's branches (all
+branches with `branches:view_all`; a borrower with no branch only with it). A
+`branch_id` outside the caller's branches answers 403.
 
 `meta.stats` follows `branch_id` and `search`, and deliberately ignores
 `status` and `members_only`.
@@ -59,7 +81,7 @@ DESC,
         security: [['sanctum' => []]],
         parameters: [
             new OA\Parameter(name: 'search', in: 'query', required: false, schema: new OA\Schema(type: 'string')),
-            new OA\Parameter(name: 'status', in: 'query', required: false, schema: new OA\Schema(type: 'string', enum: ['active', 'inactive', 'blacklisted', 'pending', 'rejected'])),
+            new OA\Parameter(name: 'status', in: 'query', required: false, schema: new OA\Schema(type: 'string', enum: ['active', 'inactive', 'blacklisted', 'pending', 'rejected', 'withdrawn', 'deceased'])),
             new OA\Parameter(name: 'members_only', in: 'query', required: false, description: 'Exclude pending and rejected registrations.', schema: new OA\Schema(type: 'boolean')),
             new OA\Parameter(name: 'branch_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')),
             new OA\Parameter(name: 'per_page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', default: 15, maximum: 100)),
@@ -117,10 +139,16 @@ DESC,
         $branchId = $filters['branch_id'] ?? null;
         $membersOnly = filter_var(request('members_only'), FILTER_VALIDATE_BOOLEAN);
 
+        $viewer = request()->user();
+        app(BranchAccess::class)->authorizeBranchFilter($viewer, $branchId);
+
         // Eager loaded, never lazily: the reviewer relations cost two queries
         // for the whole page rather than two per row. Both point at `users`, so
         // a page of rows all reviewed by the same admin still costs exactly two.
         $borrowers = Borrower::with('branch', 'approvedBy', 'rejectedBy')
+            // Only the caller's branches (BranchAccess); `meta.stats` below
+            // takes the same scope.
+            ->visibleTo($viewer)
             /*
              * One aggregate subquery for the page, not a documents relation per
              * row. It answers BorrowerResource's `has_valid_id`, which pairs
@@ -136,6 +164,10 @@ DESC,
             ->when($membersOnly, fn ($q) => $q->members())
             ->when(filled($branchId), fn ($q) => $q->forBranch($branchId))
             ->latest()
+            // Tiebreak on the key: members written by one CSV import share a
+            // `created_at`, and a partial order lets the drained pickers serve
+            // one twice and another never. See DeterministicPaginationTest.
+            ->orderByDesc('id')
             ->paginate(min(max((int) ($filters['per_page'] ?? 15), 1), 100));
 
         /**
@@ -165,22 +197,10 @@ DESC,
          * `members_only=1` the tabs do not sum to `meta.total`, because stats
          * still counts the pending and rejected rows the page excludes.
          */
-        $stats = Borrower::query()
-            ->when(filled($search), fn ($q) => $q->search($search))
-            ->when(filled($branchId), fn ($q) => $q->forBranch($branchId))
-            ->selectRaw('status, COUNT(*) as count')
-            ->groupBy('status')
-            ->pluck('count', 'status')
-            ->toArray();
+        $stats = Borrower::statusCounts($viewer, filled($branchId) ? (int) $branchId : null, filled($search) ? (string) $search : null);
 
         return BorrowerResource::collection($borrowers)
-            ->additional(['meta' => ['stats' => [
-                'active' => (int) ($stats['active'] ?? 0),
-                'inactive' => (int) ($stats['inactive'] ?? 0),
-                'blacklisted' => (int) ($stats['blacklisted'] ?? 0),
-                'pending' => (int) ($stats['pending'] ?? 0),
-                'rejected' => (int) ($stats['rejected'] ?? 0),
-            ]]]);
+            ->additional(['meta' => ['stats' => $stats]]);
     }
 
     #[OA\Post(
@@ -197,16 +217,18 @@ Create a new borrower profile.
 
 **Validation rules (enforced):**
 - `contact_number` must match `^(\+?\d{7,15}|0\d{9,10})$`
-- `email` must be unique across all borrowers
+- `email` must be unique across all borrowers on a staff create (a public registration's email is never refused; see below)
 - `pledge_amount` max `9,999,999.99`
 - `birthdate` must be after 1900-01-01 and before today
 
-**Duplicate detection:** the request is rejected with 422 if a borrower with a similar name already exists:
-1. **Exact match** — same normalized first+middle+last (case/whitespace insensitive) → always rejected
+**Duplicate detection:** a borrower matches when one with a similar name already exists:
+1. **Exact match** — same normalized first+middle+last (case/whitespace insensitive)
 2. **Fuzzy match** — Levenshtein distance ≤ 2 on normalized full name, *and* birthdate matches
 
-Pass `force=true` in the body to bypass the duplicate check (frontend "Create Anyway" flow).
-On a duplicate rejection, the error message in `errors.first_name[0]` contains the matched borrower's code and DOB.
+A signed-in (staff) create that matches is rejected with 422. A signed-in user holding `borrowers:create` may pass `force=true` in the body to bypass the duplicate check (frontend "Create Anyway" flow).
+On a duplicate rejection, the error message in `errors.first_name[0]` contains the matched borrower's code and DOB when the caller can see that borrower's branch, and a generic message otherwise.
+
+An anonymous (public) registration is **never** rejected as a duplicate or for a taken email, and its `force` is ignored: it is always checked, and a match (by name as above, or else by the same email, case and spaces ignored) is saved pending with a server-set link to the matched record (`possible_duplicate` on GET /borrowers/{id}, shown only to a reviewer who can see that record). The answer is the same 201 whether or not it matched.
 
 **Idempotency (public registration):** an anonymous caller may send a client-generated `registration_uuid`
 (UUID **v4**, e.g. the browser's `crypto.randomUUID()`). A retry is honoured — same 201 shape, same borrower
@@ -254,7 +276,7 @@ DESC,
                     new OA\Property(property: 'spouse_occupation', type: 'string'),
                     new OA\Property(property: 'branch_id', type: 'integer', example: 1, description: 'Required for authenticated (operator) creates; optional for anonymous submissions (admin assigns during review).'),
                     new OA\Property(property: 'registration_uuid', type: 'string', format: 'uuid', example: '9f1c1a5e-6f2a-4a2e-9f1c-1a5e6f2a4a2e', description: 'Client-generated idempotency key (UUID v4) for the public registration form. Resending the same key inside the 15-minute submission window, with the same first name, last name and birthdate, returns the borrower the first attempt created instead of a duplicate.'),
-                    new OA\Property(property: 'force', type: 'boolean', example: false, description: 'Bypass the duplicate-borrower check (use for "Create Anyway" confirmation)'),
+                    new OA\Property(property: 'force', type: 'boolean', example: false, description: 'Bypass the duplicate-borrower check (use for "Create Anyway" confirmation). Staff with borrowers:create only; ignored for anonymous callers.'),
                     new OA\Property(property: 'status', type: 'string', enum: ['active', 'inactive', 'blacklisted', 'pending'], description: 'Anonymous (public registration) requests must set this to "pending".'),
                 ],
             ),
@@ -262,6 +284,7 @@ DESC,
         responses: [
             new OA\Response(response: 201, description: 'Borrower created (authenticated: full BorrowerResource; anonymous: { id, submission_token, expires_at })'),
             new OA\Response(response: 401, description: 'Anonymous request with status other than `pending`'),
+            new OA\Response(response: 409, description: 'Kept colliding with other saves taking the next member code. Nothing was saved; submit again.'),
             new OA\Response(response: 403, description: 'Forbidden'),
             new OA\Response(
                 response: 422,
@@ -271,7 +294,7 @@ DESC,
                         'message' => 'The first name field has duplicate match.',
                         'errors' => [
                             'first_name' => [
-                                'A similar borrower already exists: Juan Dela Cruz (BRW-000042, born 1990-01-15). Pass force=true to create anyway.',
+                                'A similar member already exists: Juan Dela Cruz (BRW-000042, born 1990-01-15). Pass force=true to create anyway.',
                             ],
                         ],
                     ],
@@ -319,62 +342,12 @@ DESC,
     }
 
     /**
-     * Inserts the borrower, settling a retry race against the unique index.
-     *
-     * Two retries of one submission can both miss existingRegistration() and
-     * reach the insert. `borrowers.registration_uuid` is unique, so the index —
-     * not the read — is what decides which one wins; the loser reads the
-     * winner's row back rather than failing.
+     * Inserts the borrower through BorrowerRegistration::createBorrower(),
+     * the one member create, which the online application hand-off uses too.
      */
     private function createBorrower(StoreBorrowerRequest $request): Borrower
     {
-        $attributes = $request->safe()->except('force');
-
-        try {
-            // Wrap in a transaction so the borrower insert and the Borrower::created
-            // hook (which creates the ShareCapitalPledge) are atomic — if either fails,
-            // neither row is left behind.
-            return DB::transaction(function () use ($attributes) {
-                return Borrower::create($attributes);
-            });
-        } catch (UniqueConstraintViolationException $e) {
-            $uuid = $attributes['registration_uuid'] ?? null;
-
-            // Not an idempotency-key collision — `borrower_code` is the other
-            // unique column on this table and a clash there is a real fault.
-            if (! is_string($uuid) || ! Borrower::where('registration_uuid', $uuid)->exists()) {
-                throw $e;
-            }
-
-            $existing = $request->refreshExistingRegistration();
-
-            if ($existing) {
-                return $existing;
-            }
-
-            /*
-             * The key is held by a row this caller may not be given: an approved
-             * member, a rejected applicant, a submission older than the token
-             * window, or somebody else entirely. Returning it would turn a
-             * leaked key into a live upload token against another applicant's
-             * KYC files — the very thing the window and the identity binding in
-             * existingRegistration() exist to prevent.
-             *
-             * So the key is discarded and the submission is handled as what it
-             * is: a new registration that happened to quote a key it has no
-             * claim to. That keeps this branch INDISTINGUISHABLE from sending a
-             * key nobody has ever used — both produce a 201 carrying a brand-new
-             * id. An error naming `registration_uuid` would instead have
-             * confirmed to an anonymous caller that the key exists, which is an
-             * existence oracle over a value whose only defence is being
-             * unguessable.
-             */
-            unset($attributes['registration_uuid']);
-
-            return DB::transaction(function () use ($attributes) {
-                return Borrower::create($attributes);
-            });
-        }
+        return app(BorrowerRegistration::class)->createBorrower($request);
     }
 
     #[OA\Get(
@@ -397,7 +370,8 @@ DESC,
     {
         $this->authorize('borrowers:view');
 
-        $borrower->load('branch', 'coMakers.documents', 'documents', 'approvedBy', 'rejectedBy');
+        // `possibleDuplicateOf`: the registration review reads the link here.
+        $borrower->load('branch', 'coMakers.documents', 'documents', 'approvedBy', 'rejectedBy', 'possibleDuplicateOf');
 
         return new BorrowerResource($borrower);
     }
@@ -487,7 +461,7 @@ DESC,
 
         $purge->purge($borrower);
 
-        return response()->json(['message' => 'Borrower deleted successfully.']);
+        return response()->json(['message' => 'Member deleted successfully.']);
     }
 
     #[OA\Patch(
@@ -502,38 +476,72 @@ DESC,
             new OA\Response(response: 200, description: 'Borrower deactivated'),
             new OA\Response(response: 401, description: 'Unauthenticated'),
             new OA\Response(response: 403, description: 'Forbidden'),
+            new OA\Response(response: 422, description: 'A pending or rejected registration (approve or reject it from Registration Review), or a former member'),
         ],
     )]
     public function deactivate(Borrower $borrower): JsonResponse
     {
         $this->authorize('borrowers:update');
 
+        // Deactivating a registration would let /reactivate make it a member
+        // without Registration Review (Phase 6 D7).
+        if (in_array($borrower->status, self::UNREVIEWED_STATUSES, true)) {
+            throw ValidationException::withMessages(['status' => self::NOT_DEACTIVATABLE]);
+        }
+
+        if ($borrower->isFormerMember()) {
+            throw ValidationException::withMessages(['status' => MembershipStatus::endedMessage($borrower)]);
+        }
+
         $borrower->update(['status' => 'inactive']);
 
-        return response()->json(['message' => 'Borrower deactivated successfully.']);
+        return response()->json(['message' => 'Member deactivated successfully.']);
     }
 
     #[OA\Patch(
         path: '/api/borrowers/{id}/reactivate',
         summary: 'Reactivate borrower',
+        description: 'A withdrawn or deceased member (their membership ended) needs a `reason`; it is kept on the audit row, and the end date and reason are cleared. Any other member reactivates without one.',
         tags: ['Borrowers'],
         security: [['sanctum' => []]],
         parameters: [
             new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer')),
         ],
+        requestBody: new OA\RequestBody(required: false, content: new OA\JsonContent(properties: [
+            new OA\Property(property: 'reason', type: 'string', maxLength: 255, description: 'Required when the membership ended'),
+        ])),
         responses: [
             new OA\Response(response: 200, description: 'Borrower reactivated'),
             new OA\Response(response: 401, description: 'Unauthenticated'),
             new OA\Response(response: 403, description: 'Forbidden'),
+            new OA\Response(response: 422, description: 'A former member without a reason, or a pending or rejected registration (approve it from Registration Review)'),
         ],
     )]
-    public function reactivate(Borrower $borrower): JsonResponse
+    public function reactivate(Request $request, Borrower $borrower, MembershipStatus $membership): JsonResponse
     {
         $this->authorize('borrowers:update');
 
+        // A registration becomes a member only through Registration Review,
+        // which needs borrowers:approve, a valid ID and a branch (Phase 6 D7).
+        if (in_array($borrower->status, self::UNREVIEWED_STATUSES, true)) {
+            throw ValidationException::withMessages([
+                'status' => 'This registration hasn\'t been approved. Approve it from Registration Review.',
+            ]);
+        }
+
+        if ($borrower->isFormerMember()) {
+            $membership->reactivate($borrower, (string) $request->validate([
+                'reason' => ['required', 'string', 'max:255'],
+            ], [
+                'reason.required' => 'Give a reason to reactivate a withdrawn or deceased member.',
+            ])['reason']);
+
+            return response()->json(['message' => 'Member reactivated successfully.']);
+        }
+
         $borrower->update(['status' => 'active']);
 
-        return response()->json(['message' => 'Borrower reactivated successfully.']);
+        return response()->json(['message' => 'Member reactivated successfully.']);
     }
 
     #[OA\Patch(
@@ -548,26 +556,39 @@ Approve a borrower whose status is `pending` (public-registration review).
 - The share-capital pledge and `borrower_code` are already created at submission time, so no extra setup runs here.
 - Requires at least one valid ID (`type=valid_id` document) on file — returns 422 otherwise.
 - Returns 422 if the borrower is not currently `pending`. Use `/reactivate` to re-activate a previously-active member — keeping the two distinct preserves the audit distinction between "approved an application" and "reactivated a member".
+- `branch_id` (optional): the member's branch, one of the caller's (any branch with `branches:view_all`). Required (422) when the registration has no branch; when it already has one, it may only repeat it (422 otherwise), so approval never moves a member.
+- Returns 422 on `email` while the registration's email (case and spaces ignored) is on another member, whatever is acknowledged: change or clear it with PUT /borrowers/{id} first. It names that member only to a caller who can see them.
+- `acknowledge_possible_duplicate` (boolean): required as `true` when the registration was saved as a possible duplicate of a record on file (its `possible_duplicate`); otherwise 422 on `possible_duplicate`, in words, once every other check passes. It names the record only to a caller who can see it.
+- Returns 409, in words, when another write got there first: the registration was approved or rejected, or its branch changed, at the same moment, or a member was saved with its email. Reload and try again.
 DESC,
         tags: ['Borrowers'],
         security: [['sanctum' => []]],
         parameters: [
             new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer')),
         ],
+        requestBody: new OA\RequestBody(
+            required: false,
+            content: new OA\JsonContent(
+                properties: [
+                    new OA\Property(property: 'branch_id', type: 'integer', nullable: true, description: 'The member\'s branch, one of the caller\'s. Required when the registration has none; otherwise it must repeat the registration\'s branch.'),
+                    new OA\Property(property: 'acknowledge_possible_duplicate', type: 'boolean', example: true, description: 'The reviewer checked the record this registration may duplicate. Required as true when it has one.'),
+                ],
+            ),
+        ),
         responses: [
             new OA\Response(response: 200, description: 'Registration approved; updated borrower returned'),
             new OA\Response(response: 401, description: 'Unauthenticated'),
             new OA\Response(response: 403, description: 'Forbidden'),
-            new OA\Response(response: 422, description: 'Borrower is not in pending status, or has no valid ID on file'),
+            new OA\Response(response: 404, description: 'Not found, or in a branch the caller can\'t see'),
+            new OA\Response(response: 422, description: 'Borrower is not in pending status, has no valid ID on file, has no branch and none was chosen, the chosen branch isn\'t the caller\'s or differs from the registration\'s, its email is on another member, or it may be a duplicate and `acknowledge_possible_duplicate` wasn\'t true'),
+            new OA\Response(response: 409, description: 'Another write got there first: the registration was approved, rejected or moved to another branch at the same moment, or a member was saved with its email'),
         ],
     )]
-    public function approveRegistration(Request $request, Borrower $borrower): BorrowerResource
+    public function approveRegistration(ApproveRegistrationRequest $request, Borrower $borrower): BorrowerResource
     {
-        $this->authorize('borrowers:approve');
-
         if ($borrower->status !== 'pending') {
             throw ValidationException::withMessages([
-                'status' => 'Only borrowers with a pending registration can be approved.',
+                'status' => 'Only members with a pending registration can be approved.',
             ]);
         }
 
@@ -580,11 +601,48 @@ DESC,
             ]);
         }
 
-        $borrower->update([
-            'status' => 'active',
-            'approved_by' => $request->user()->id,
-            'approved_at' => now(),
-        ]);
+        // Phase 6 FX-1 (D7): a member always leaves review with a branch. A
+        // registration with none takes the reviewer's pick; one that has a
+        // branch keeps it, since approval is not a member move.
+        $branchId = $request->validated('branch_id');
+
+        if ($borrower->branch_id === null && $branchId === null) {
+            throw ValidationException::withMessages([
+                'branch_id' => 'Choose the branch this member belongs to before approving the registration.',
+            ]);
+        }
+
+        if ($borrower->branch_id !== null && $branchId !== null && (int) $branchId !== (int) $borrower->branch_id) {
+            throw ValidationException::withMessages([
+                'branch_id' => 'This registration already belongs to '.($borrower->branch?->name ?? 'another branch').'. Approve it there; moving a member is done from the member\'s record.',
+            ]);
+        }
+
+        // A member's email is theirs alone, as a staff create refuses a taken
+        // one, and the public form no longer refuses it (finish run round 2,
+        // decision 3): a registration whose email is on another member waits
+        // until it's changed or cleared, whatever the reviewer confirms.
+        $emailHolder = app(BorrowerDuplicateDetector::class)->memberWithEmail($borrower->email, $borrower->id);
+
+        if ($emailHolder !== null) {
+            throw ValidationException::withMessages([
+                'email' => PossibleDuplicatePresenter::emailOnFileRefusal($emailHolder, $request->user()),
+            ]);
+        }
+
+        // A public registration saved as a possible duplicate is approved only
+        // once the reviewer confirms they checked it. Asked last, so it never
+        // hides a check that would fail.
+        if ($borrower->possible_duplicate_of_id !== null && ! $request->boolean('acknowledge_possible_duplicate')) {
+            throw ValidationException::withMessages([
+                'possible_duplicate' => PossibleDuplicatePresenter::approvalRefusal($borrower, $request->user()),
+            ]);
+        }
+
+        // Written under the registration's lock and the member duplicate
+        // check's, where the status, branch and email are checked again
+        // (finish run round 4): 409 when another write got there first.
+        app(RegistrationReview::class)->approve($borrower, $branchId === null ? null : (int) $branchId, $request->user());
 
         $borrower->load('branch', 'approvedBy', 'rejectedBy');
 
@@ -602,6 +660,7 @@ Reject a borrower whose status is `pending` **without hard-deleting the row**, p
 - Deletes the share-capital pledge auto-created at submission (a rejected applicant is not a member).
 - Returns the updated borrower.
 - Returns 422 if the borrower is not currently `pending`, or if `reason` is missing.
+- Returns 409, in words, when another write got there first: the registration was approved or rejected, or its branch changed, at the same moment. Nothing is written, so an approved member is never rejected and keeps their pledge.
 DESC,
         tags: ['Borrowers'],
         security: [['sanctum' => []]],
@@ -622,26 +681,21 @@ DESC,
             new OA\Response(response: 401, description: 'Unauthenticated'),
             new OA\Response(response: 403, description: 'Forbidden'),
             new OA\Response(response: 422, description: 'Borrower is not in pending status, or reason is missing'),
+            new OA\Response(response: 409, description: 'Another write got there first: the registration was approved, rejected or moved to another branch at the same moment'),
         ],
     )]
     public function reject(RejectBorrowerRequest $request, Borrower $borrower): BorrowerResource
     {
         if ($borrower->status !== 'pending') {
             throw ValidationException::withMessages([
-                'status' => 'Only borrowers with a pending registration can be rejected.',
+                'status' => 'Only members with a pending registration can be rejected.',
             ]);
         }
 
-        $borrower->update([
-            'status' => 'rejected',
-            'rejection_reason' => $request->validated('reason'),
-            'rejected_by' => $request->user()->id,
-            'rejected_at' => now(),
-        ]);
-
-        // A rejected applicant is not a member: remove the share-capital pledge
-        // auto-created at submission so it doesn't linger in share-capital totals.
-        $borrower->shareCapitalPledge()->delete();
+        // Written under the registration's lock, the one an approval takes
+        // first, where the status and branch are checked again (finish run
+        // round 4): 409 when another write got there first.
+        app(RegistrationReview::class)->reject($borrower, (string) $request->validated('reason'), $request->user());
 
         $borrower->load('branch', 'approvedBy', 'rejectedBy');
 
@@ -664,7 +718,7 @@ DESC,
             ),
         ),
         responses: [
-            new OA\Response(response: 200, description: 'Bulk result'),
+            new OA\Response(response: 200, description: 'Bulk result. A pending or rejected registration, or a former member, is listed under `failed` with the reason in words and left unchanged.'),
             new OA\Response(response: 422, description: 'Validation error'),
         ],
     )]
@@ -674,7 +728,7 @@ DESC,
 
         $validated = request()->validate([
             'ids' => ['required', 'array', 'min:1', 'max:500'],
-            'ids.*' => ['integer', 'exists:borrowers,id'],
+            'ids.*' => ['integer', app(BranchAccess::class)->constrainExists(Rule::exists('borrowers', 'id'), request()->user())],
         ]);
 
         $deactivated = [];
@@ -683,7 +737,20 @@ DESC,
         foreach ($validated['ids'] as $id) {
             try {
                 /** @var Borrower $borrower */
-                $borrower = Borrower::findOrFail($id);
+                $borrower = Borrower::visibleTo(request()->user())->findOrFail($id);
+
+                if (in_array($borrower->status, self::UNREVIEWED_STATUSES, true)) {
+                    $failed[] = ['id' => $id, 'reason' => self::NOT_DEACTIVATABLE];
+
+                    continue;
+                }
+
+                if ($borrower->isFormerMember()) {
+                    $failed[] = ['id' => $id, 'reason' => MembershipStatus::endedMessage($borrower)];
+
+                    continue;
+                }
+
                 $borrower->update(['status' => 'inactive']);
                 $deactivated[] = $id;
             } catch (\Throwable $e) {
@@ -701,7 +768,7 @@ DESC,
                 $failed[] = [
                     'id' => $id,
                     'reason' => ErrorDigest::forSubject(
-                        $e, "Borrower {$id}", 'deactivated', 'See the application log.'
+                        $e, "Member {$id}", 'deactivated', 'See the application log.'
                     ),
                 ];
 
@@ -749,7 +816,7 @@ DESC,
 
         $validated = request()->validate([
             'ids' => ['required', 'array', 'min:1', 'max:500'],
-            'ids.*' => ['integer', 'exists:borrowers,id'],
+            'ids.*' => ['integer', app(BranchAccess::class)->constrainExists(Rule::exists('borrowers', 'id'), request()->user())],
         ]);
 
         $deleted = [];
@@ -757,7 +824,7 @@ DESC,
 
         foreach ($validated['ids'] as $id) {
             try {
-                $purge->purge(Borrower::findOrFail($id));
+                $purge->purge(Borrower::visibleTo(request()->user())->findOrFail($id));
 
                 $deleted[] = $id;
             } catch (\Throwable $e) {
@@ -781,7 +848,7 @@ DESC,
                 $failed[] = [
                     'id' => $id,
                     'reason' => ErrorDigest::forSubject(
-                        $e, "Borrower {$id}", 'deleted', 'See the application log.'
+                        $e, "Member {$id}", 'deleted', 'See the application log.'
                     ),
                 ];
 
@@ -841,8 +908,17 @@ DESC,
             $this->authorize('borrowers:update');
         }
 
+        // The bytes must read as a picture and the name must end in one
+        // (UploadFileTypes). Every refusal in words, one sentence (`bail`),
+        // never Laravel's default ("The photo field must be an image.").
         $request->validate([
-            'photo' => ['required', 'image', 'max:5120'],
+            'photo' => ['bail', 'required', 'image', 'extensions:'.UploadFileTypes::PHOTO_EXTENSIONS, 'max:5120'],
+        ], [
+            'photo.required' => 'Choose a photo to upload.',
+            'photo.uploaded' => 'The photo didn\'t upload. Try again with a picture of at most 5 MB.',
+            'photo.image' => 'The photo must be a picture, such as a JPG or PNG.',
+            'photo.extensions' => 'The photo\'s file name must end in '.UploadFileTypes::inWords(UploadFileTypes::PHOTO_EXTENSIONS).'.',
+            'photo.max' => 'The photo can be at most 5 MB.',
         ]);
 
         // Store the new photo BEFORE touching the old one so a failed upload
@@ -925,77 +1001,7 @@ DESC,
             $this->authorize('borrowers:update');
         }
 
-        // Mutual exclusion: legacy single-file shape vs new front/back shape
-        if ($request->hasFile('file') && $request->hasFile('front_file')) {
-            throw ValidationException::withMessages([
-                'file' => 'Use either `file` (legacy) or `front_file`/`back_file`, not both.',
-            ]);
-        }
-
-        $rules = [
-            'type' => ['required', 'string', 'max:100'],
-            'custom_type_name' => ['nullable', 'string', 'max:100', 'required_if:type,others'],
-            'id_number' => ['nullable', 'string', 'max:100'],
-            'file' => ['required_without:front_file', 'file', 'max:10240', 'mimes:jpg,jpeg,png,pdf'],
-            'front_file' => ['required_without:file', 'file', 'max:10240', 'mimes:jpg,jpeg,png,pdf'],
-            'back_file' => ['nullable', 'file', 'max:10240', 'mimes:jpg,jpeg,png,pdf'],
-        ];
-
-        $request->validate($rules);
-
-        $type = $request->input('type');
-        $customTypeName = $request->input('custom_type_name');
-        $idNumber = $request->input('id_number');
-        $isLegacy = $request->hasFile('file');
-        $storedPaths = [];
-        $documents = [];
-
-        try {
-            DB::transaction(function () use ($borrower, $request, $type, $customTypeName, $idNumber, $isLegacy, &$storedPaths, &$documents) {
-                if ($isLegacy) {
-                    $documents[] = $this->storeValidIdFile($borrower, $request->file('file'), $type, $customTypeName, $idNumber, null, $storedPaths);
-                } else {
-                    $documents[] = $this->storeValidIdFile($borrower, $request->file('front_file'), $type, $customTypeName, $idNumber, 'front', $storedPaths);
-                    if ($request->hasFile('back_file')) {
-                        $documents[] = $this->storeValidIdFile($borrower, $request->file('back_file'), $type, $customTypeName, $idNumber, 'back', $storedPaths);
-                    }
-                }
-            });
-        } catch (\Throwable $e) {
-            // Roll back any files written to disk before the DB failure
-            foreach ($storedPaths as $path) {
-                Storage::disk('private')->delete($path);
-            }
-            throw $e;
-        }
-
-        if ($isLegacy) {
-            return (new DocumentResource($documents[0]))
-                ->response()
-                ->setStatusCode(201);
-        }
-
-        return DocumentResource::collection($documents)
-            ->response()
-            ->setStatusCode(201);
-    }
-
-    private function storeValidIdFile(Borrower $borrower, UploadedFile $file, string $type, ?string $customTypeName, ?string $idNumber, ?string $side, array &$storedPaths): Document
-    {
-        $path = $file->store("documents/valid_id/borrower/{$borrower->id}", 'private');
-        $storedPaths[] = $path;
-
-        return $borrower->documents()->create([
-            'type' => 'valid_id',
-            'label' => $type,
-            'custom_type_name' => $customTypeName,
-            'id_number' => $idNumber,
-            'side' => $side,
-            'file_path' => $path,
-            'original_filename' => $file->getClientOriginalName(),
-            'mime_type' => $file->getMimeType(),
-            'file_size' => $file->getSize(),
-        ]);
+        return $this->validIdUploadResponse($request, $borrower);
     }
 
     #[OA\Get(
@@ -1038,31 +1044,7 @@ DESC,
     {
         $this->authorize('borrowers:view');
 
-        $documents = $borrower->documents()
-            ->where('type', 'valid_id')
-            ->orderBy('id')
-            ->get();
-
-        $groups = $documents->groupBy(fn (Document $doc) => $doc->label.'|'.($doc->id_number ?? ''));
-
-        $validIds = $groups->map(function ($group) {
-            $front = $group->firstWhere('side', 'front')
-                ?? $group->firstWhere('side', null)
-                ?? $group->first();
-            $back = $group->firstWhere('side', 'back');
-
-            return [
-                'id' => $front->id,
-                'type' => $front->label,
-                'custom_type_name' => $front->custom_type_name,
-                'id_number' => $front->id_number,
-                'front_url' => $front->url,
-                'back_url' => $back?->url,
-                'created_at' => $front->created_at,
-            ];
-        })->values();
-
-        return response()->json(['data' => $validIds]);
+        return $this->validIdListResponse($borrower);
     }
 
     #[OA\Delete(
@@ -1086,104 +1068,81 @@ DESC,
     {
         $this->authorize('borrowers:delete');
 
-        $anchor = Document::where('id', $validIdId)
-            ->where('documentable_type', Borrower::class)
-            ->where('documentable_id', $borrower->id)
-            ->where('type', 'valid_id')
-            ->firstOrFail();
-
-        $pair = Document::where('documentable_type', Borrower::class)
-            ->where('documentable_id', $borrower->id)
-            ->where('type', 'valid_id')
-            ->where('label', $anchor->label)
-            ->where(function ($q) use ($anchor) {
-                if ($anchor->id_number === null) {
-                    $q->whereNull('id_number');
-                } else {
-                    $q->where('id_number', $anchor->id_number);
-                }
-            })
-            ->get();
-
-        DB::transaction(function () use ($pair) {
-            foreach ($pair as $doc) {
-                Storage::disk('private')->delete($doc->file_path);
-                $doc->delete();
-            }
-        });
-
-        return response()->json(['message' => 'Valid ID deleted successfully.']);
+        return $this->validIdDeleteResponse($borrower, $validIdId);
     }
 
     #[OA\Get(
-        path: '/api/borrowers/{id}/ledger',
-        summary: 'Borrower transactional ledger',
-        description: 'Returns chronological ledger entries (loan releases as debits, repayments as credits) with running balance.',
+        path: '/api/borrowers/{id}/loan-summary',
+        summary: 'Member loan totals',
+        description: 'The Member Overview totals, computed by the server. `total_borrowed` is the principal of every released loan (released, ongoing, completed, defaulted) except restructured ones, whose rolled-over balance the successor loan already carries. `total_outstanding` is everything still owed on released, ongoing and defaulted loans (principal, interest and penalty on the periods plus the insurance premium owed, the parts of each loan\'s summary `outstanding_balance`); `outstanding_principal` is the principal alone; `overdue_amount` is what those loans owe on periods past their due date and grace period. `total_paid` adds up posted payments, insurance premium included; `insurance_paid` is the premium inside it. On a loan the CSV importer brought in, `total_paid` also holds what its file says was paid before the import, which no payment here records; `paid_before_import` is that part (0 when none). `counts` has every loan status; `current_loans` is released plus ongoing. Applications that never released count in `counts` only.',
         tags: ['Borrowers'],
         security: [['sanctum' => []]],
         parameters: [
             new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer')),
         ],
         responses: [
-            new OA\Response(response: 200, description: 'Ledger entries with running balance'),
-            new OA\Response(response: 401, description: 'Unauthenticated'),
+            new OA\Response(response: 200, description: 'The member loan totals, covering only the loans the caller can see (Loan::visibleTo)'),
+            new OA\Response(response: 403, description: 'Missing borrowers:view or loans:view'),
             new OA\Response(response: 404, description: 'Borrower not found'),
         ],
     )]
-    public function ledger(Borrower $borrower): JsonResponse
+    public function loanSummary(Request $request, Borrower $borrower, BorrowerLoanSummaryService $summaries): JsonResponse
     {
         $this->authorize('borrowers:view');
+        $this->authorize('loans:view');
 
-        // Build chronological list of loan releases (debits) and repayments (credits)
-        $entries = collect();
+        return response()->json(['data' => $summaries->summarize($borrower, $request->user())]);
+    }
 
-        $loans = $borrower->loans()
-            ->with(['repayments' => fn ($q) => $q->where('status', 'posted')])
-            ->whereIn('status', ['released', 'ongoing', 'completed'])
-            ->whereNotNull('released_at')
-            ->get();
+    #[OA\Get(
+        path: '/api/borrowers/{id}/ledger',
+        summary: 'Member ledger with running balance',
+        description: 'The rows of each loan\'s own Ledger (GET /loans/{id}/ledger), for every ever-released loan (released, ongoing, completed, defaulted, restructured) the caller may see, in date order and, within a day, loan by loan in release order. `balance` is the loans\' principal, interest and penalty balances added up, after this row. It leaves out the insurance premium owed, as the loan Ledger does, and share capital, so a release\'s debit is its principal plus the schedule\'s interest. `debit` and `credit` are what the row moved the balance by; a payment\'s `credit` is the principal, interest and penalty it applied. A voided payment and its void are left out as a pair, so between those two dates the balance reads as if the payment was never made. `meta.closing` is the sum of the loans\' Ledger closings; `meta.closing.balance` equals the last row\'s `balance`. Whole centavos throughout. Needs `borrowers:view` and `loans:view`; `scb` is left out for a caller without `share_capital:view`.',
+        tags: ['Borrowers'],
+        security: [['sanctum' => []]],
+        parameters: [
+            new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer')),
+        ],
+        responses: [
+            new OA\Response(response: 200, description: 'Ledger rows with running balance', content: new OA\JsonContent(properties: [
+                new OA\Property(property: 'data', type: 'array', items: new OA\Items(properties: [
+                    new OA\Property(property: 'id', type: 'integer', description: 'The row\'s position in this list'),
+                    new OA\Property(property: 'date', type: 'string', format: 'date'),
+                    new OA\Property(property: 'description', type: 'string', description: 'The loan Ledger row\'s description'),
+                    new OA\Property(property: 'reference', type: 'string', description: 'A payment\'s receipt number, otherwise the loan account number'),
+                    new OA\Property(property: 'debit', type: 'number', description: 'What this row raised the balance by'),
+                    new OA\Property(property: 'credit', type: 'number', description: 'What this row lowered the balance by'),
+                    new OA\Property(property: 'balance', type: 'number', description: 'After this row: principal, interest and penalty'),
+                    new OA\Property(property: 'loan_id', type: 'integer'),
+                    new OA\Property(property: 'loan_account_number', type: 'string', nullable: true),
+                    new OA\Property(property: 'display_number', type: 'string', nullable: true, description: 'The loan\'s number as shown (Loan::displayNumber()).'),
+                    new OA\Property(property: 'kind', type: 'string', enum: ['release', 'repayment', 'extension_payment', 'extension_charge', 'penalty_charge', 'adjustment'], description: 'The loan Ledger row\'s kind'),
+                    new OA\Property(property: 'repayment_id', type: 'integer', nullable: true),
+                    new OA\Property(property: 'amount_paid', type: 'number', description: 'Payment rows only: the whole amount the payment took'),
+                    new OA\Property(property: 'insurance', type: 'number', description: 'Payment rows only: the insurance premium it collected, outside the balance'),
+                    new OA\Property(property: 'scb', type: 'number', description: 'Payment rows only, for a caller with `share_capital:view`: the share capital it credited, outside the balance'),
+                ])),
+                new OA\Property(property: 'meta', type: 'object', properties: [
+                    new OA\Property(property: 'closing', type: 'object', properties: [
+                        new OA\Property(property: 'principal', type: 'number'),
+                        new OA\Property(property: 'interest', type: 'number'),
+                        new OA\Property(property: 'penalty', type: 'number'),
+                        new OA\Property(property: 'balance', type: 'number'),
+                    ]),
+                ]),
+            ])),
+            new OA\Response(response: 401, description: 'Unauthenticated'),
+            new OA\Response(response: 403, description: 'Missing borrowers:view or loans:view'),
+            new OA\Response(response: 404, description: 'Borrower not found'),
+        ],
+    )]
+    public function ledger(Borrower $borrower, MemberLedgerService $ledger): JsonResponse
+    {
+        $this->authorize('borrowers:view');
+        $this->authorize('loans:view');
 
-        foreach ($loans as $loan) {
-            // Loan release as debit entry
-            $entries->push([
-                'date' => $loan->released_at?->toDateString(),
-                'sort_key' => $loan->released_at?->toDateTimeString().'-0-'.$loan->id,
-                'description' => 'Loan released'.($loan->purpose ? ' — '.$loan->purpose : ''),
-                'reference' => $loan->loan_account_number ?? $loan->application_number,
-                'debit' => (float) $loan->principal_amount,
-                'credit' => 0.0,
-            ]);
+        ['rows' => $rows, 'closing' => $closing] = $ledger->forMember($borrower, request()->user());
 
-            // Each repayment as credit entry
-            foreach ($loan->repayments as $repayment) {
-                $entries->push([
-                    'date' => $repayment->payment_date?->toDateString(),
-                    'sort_key' => $repayment->payment_date?->toDateTimeString().'-1-'.$repayment->id,
-                    'description' => 'Payment received'.($repayment->method ? ' via '.ucwords(str_replace('_', ' ', $repayment->method)) : ''),
-                    'reference' => $repayment->receipt_number,
-                    'debit' => 0.0,
-                    'credit' => (float) $repayment->amount_paid,
-                ]);
-            }
-        }
-
-        // Sort chronologically and compute running balance
-        $sorted = $entries->sortBy('sort_key')->values();
-        $runningBalance = 0.0;
-        $withBalance = $sorted->map(function ($entry, $index) use (&$runningBalance) {
-            $runningBalance += $entry['debit'] - $entry['credit'];
-
-            return [
-                'id' => $index + 1,
-                'date' => $entry['date'],
-                'description' => $entry['description'],
-                'reference' => $entry['reference'],
-                'debit' => round($entry['debit'], 2),
-                'credit' => round($entry['credit'], 2),
-                'balance' => round($runningBalance, 2),
-            ];
-        });
-
-        return response()->json(['data' => $withBalance->toArray()]);
+        return response()->json(['data' => $rows, 'meta' => ['closing' => $closing]]);
     }
 }

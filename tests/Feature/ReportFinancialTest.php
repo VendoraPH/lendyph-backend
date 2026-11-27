@@ -40,7 +40,7 @@ class ReportFinancialTest extends TestCase
 
     // ── Cash Flow ────────────────────────────────────────────────────────
 
-    public function test_cash_flow_components_reconcile_and_by_branch_carries_loan_cash_only(): void
+    public function test_cash_flow_components_reconcile_and_by_branch_carries_share_capital_by_the_member_s_branch(): void
     {
         $satellite = Branch::factory()->create(['name' => 'Satellite Branch']);
         $product = $this->product();
@@ -116,55 +116,47 @@ class ReportFinancialTest extends TestCase
         $this->assertEqualsWithDelta(2500, $data['share_capital']['net_movement'], 0.01);
         $this->assertSame(2, $data['share_capital']['count']);
 
-        // ── by_branch is LOAN cash only. This is the assertion that matters:
-        // the branch rows reconcile with inflows.repayments.total, NOT with
-        // inflows.total, because share capital has no branch to belong to.
+        // ── by_branch is the loan cash plus the share capital paid in and out
+        // on its own, by the member's branch (decision 5c, 2026-11-02): the
+        // member is in Main, so Main's row carries the 4,000 and the 1,500,
+        // and the rows add up to the statement's totals.
         $branches = collect($data['by_branch'])->keyBy('branch_id');
         $this->assertCount(2, $branches);
 
         $mainRow = $branches[$this->branch->id];
         $this->assertEqualsWithDelta(3200, $mainRow['inflow_principal'], 0.01);
         $this->assertEqualsWithDelta(1800, $mainRow['inflow_interest'], 0.01);
-        $this->assertEqualsWithDelta(5000, $mainRow['inflow_total'], 0.01);
+        $this->assertEqualsWithDelta(5000, $mainRow['inflow_repayments'], 0.01);
+        $this->assertEqualsWithDelta(4000, $mainRow['inflow_share_capital'], 0.01);
+        $this->assertEqualsWithDelta(9000, $mainRow['inflow_total'], 0.01, '5,000 loan cash + 4,000 share capital.');
         $this->assertSame(1, $mainRow['repayment_count']);
-        $this->assertEqualsWithDelta(58200, $mainRow['outflow_total'], 0.01);
+        $this->assertEqualsWithDelta(58200, $mainRow['outflow_net_proceeds'], 0.01);
+        $this->assertEqualsWithDelta(1500, $mainRow['outflow_share_capital'], 0.01);
+        $this->assertEqualsWithDelta(59700, $mainRow['outflow_total'], 0.01, '58,200 cash out + 1,500 share capital.');
         $this->assertEqualsWithDelta(1800, $mainRow['total_deductions'], 0.01);
-        $this->assertEqualsWithDelta(-53200, $mainRow['net_movement'], 0.01);
+        $this->assertEqualsWithDelta(-50700, $mainRow['net_movement'], 0.01);
 
         $remoteRow = $branches[$satellite->id];
         $this->assertEqualsWithDelta(3000, $remoteRow['inflow_total'], 0.01);
+        $this->assertEqualsWithDelta(0, $remoteRow['inflow_share_capital'], 0.01);
         $this->assertEqualsWithDelta(29100, $remoteRow['outflow_total'], 0.01);
         $this->assertEqualsWithDelta(900, $remoteRow['total_deductions'], 0.01);
         $this->assertEqualsWithDelta(-26100, $remoteRow['net_movement'], 0.01);
 
-        $branchInflow = array_sum(array_column($data['by_branch'], 'inflow_total'));
         $this->assertEqualsWithDelta(
             $repayments['total'],
-            $branchInflow,
+            array_sum(array_column($data['by_branch'], 'inflow_repayments')),
             0.01,
-            'by_branch must sum to inflows.repayments.total — every peso of loan cash belongs to exactly one branch.',
+            'Every peso of loan cash belongs to exactly one branch.',
         );
-        $this->assertNotEqualsWithDelta(
-            $data['inflows']['total'],
-            $branchInflow,
-            0.01,
-            'by_branch must NOT sum to inflows.total: the 4,000 share capital credit is org-level and has no branch.',
-        );
-
-        $branchOutflow = array_sum(array_column($data['by_branch'], 'outflow_total'));
-        $this->assertEqualsWithDelta($data['outflows']['releases']['total'], $branchOutflow, 0.01);
-        $this->assertNotEqualsWithDelta(
-            $data['outflows']['total'],
-            $branchOutflow,
-            0.01,
-            'The 1,500 share capital debit is org-level and must stay out of by_branch.',
-        );
-
+        $this->assertEqualsWithDelta($data['inflows']['total'], array_sum(array_column($data['by_branch'], 'inflow_total')), 0.01);
+        $this->assertEqualsWithDelta($data['outflows']['releases']['total'], array_sum(array_column($data['by_branch'], 'outflow_net_proceeds')), 0.01);
+        $this->assertEqualsWithDelta($data['outflows']['total'], array_sum(array_column($data['by_branch'], 'outflow_total')), 0.01);
         $this->assertEqualsWithDelta(
-            -79300,
+            $data['net_movement'],
             array_sum(array_column($data['by_branch'], 'net_movement')),
             0.01,
-            "by_branch's net differs from the headline net by exactly the org-level share capital net of +2,500.",
+            "by_branch's net equals the headline net.",
         );
     }
 
@@ -249,40 +241,38 @@ class ReportFinancialTest extends TestCase
         $this->assertSame($this->branch->id, $filtered['by_branch'][0]['branch_id']);
         $this->assertEqualsWithDelta(50.0, $filtered['by_branch'][0]['collection_rate'], 0.01);
 
-        // Unfiltered, the ORG-level rate legitimately exceeds 100% — one branch
-        // paid down arrears billed outside the window. The per-branch rows stay
-        // correctly scoped even then, which is the actual guard.
+        // Unfiltered, the org-wide figures count Main's period only: the
+        // satellite had nothing due today, so its 30,000 is cash received, not
+        // collection against today's dues, and it has no branch row.
         $orgWide = $this->getJson("/api/reports/collection-efficiency?{$window}")->assertOk()->json('data');
         $this->assertEqualsWithDelta(11800, $orgWide['total_due'], 0.01);
-        $this->assertEqualsWithDelta(35900, $orgWide['total_collected'], 0.01);
-        $this->assertEqualsWithDelta(304.24, $orgWide['collection_rate'], 0.01);
+        $this->assertEqualsWithDelta(5900, $orgWide['total_collected'], 0.01);
+        $this->assertEqualsWithDelta(50.0, $orgWide['collection_rate'], 0.01);
+        $this->assertEqualsWithDelta(35900, $orgWide['total_received'], 0.01);
 
         $rows = collect($orgWide['by_branch'])->keyBy('branch_id');
         $this->assertCount(2, $rows);
         $this->assertEqualsWithDelta(11800, $rows[$this->branch->id]['total_due'], 0.01);
         $this->assertEqualsWithDelta(5900, $rows[$this->branch->id]['total_collected'], 0.01);
         $this->assertEqualsWithDelta(50.0, $rows[$this->branch->id]['collection_rate'], 0.01);
-        $this->assertEqualsWithDelta(0, $rows[$satellite->id]['total_due'], 0.01);
-        $this->assertEqualsWithDelta(30000, $rows[$satellite->id]['total_collected'], 0.01);
-        $this->assertEqualsWithDelta(
-            0.0,
-            $rows[$satellite->id]['collection_rate'],
-            0.01,
-            'Nothing billed means no rate to report, not a division by zero.',
-        );
+        // Every active branch has a row (decision 5c): nothing due, ₱0.00.
+        $this->assertEquals(0, $rows[$satellite->id]['total_due'], 'A branch with nothing due in the range reads ₱0.00.');
+        $this->assertEquals(0, $rows[$satellite->id]['total_collected']);
     }
 
-    public function test_collection_efficiency_by_period_bucket_may_legitimately_exceed_100_percent(): void
+    public function test_collection_efficiency_by_period_counts_each_months_own_periods_and_never_exceeds_100_percent(): void
     {
-        $loan = $this->releaseLoan();
-
         $monthOne = Carbon::today()->startOfMonth()->subMonths(2);
         $monthTwo = Carbon::today()->startOfMonth()->subMonth();
+
+        // Released before the payment below: a payment can't predate its release.
+        $loan = $this->releaseLoan(['released_at' => $monthOne->copy()]);
 
         // 11,800 billed in each of the two months...
         $this->setScheduleDueDate($loan, periodNumber: 1, dueDate: $monthOne->copy()->addDays(14));
         $this->setScheduleDueDate($loan, periodNumber: 2, dueDate: $monthTwo->copy()->addDays(14));
-        // ...and 20,000 paid in the SECOND month, settling both.
+        // ...and 20,000 paid in the SECOND month: the late first period's
+        // penalty, then its 11,800, then 7,800 towards the second.
         $this->postRepayment($loan, 20000, $monthTwo->copy()->addDays(19)->toDateString());
 
         $from = $monthOne->toDateString();
@@ -291,37 +281,30 @@ class ReportFinancialTest extends TestCase
         $data = $this->getJson("/api/reports/collection-efficiency?date_from={$from}&date_to={$to}")
             ->assertOk()->json('data');
 
-        // Over the whole window nothing is odd: 20,000 against 23,600 billed.
+        $this->assertEqualsWithDelta(400, $data['penalty_collected'], 0.01);
+        $this->assertEqualsWithDelta(20000, $data['total_received'], 0.01);
+
+        // Penalty never counts as collected: 19,600 of 23,600 billed.
         $this->assertEqualsWithDelta(23600, $data['total_due'], 0.01);
-        $this->assertEqualsWithDelta(20000, $data['total_collected'], 0.01);
-        $this->assertEqualsWithDelta(84.75, $data['collection_rate'], 0.01);
+        $this->assertEqualsWithDelta(19600, $data['total_collected'], 0.01);
+        $this->assertEqualsWithDelta(83.05, $data['collection_rate'], 0.01);
 
         $periods = collect($data['by_period'])->keyBy('period');
         $this->assertCount(2, $periods);
 
+        // Each month holds the periods that fell due in it: the arrears paid in
+        // month two count towards month one's period, so neither passes 100%.
         $first = $periods[$monthOne->format('Y-m')];
         $this->assertEqualsWithDelta(11800, $first['total_due'], 0.01);
-        $this->assertEqualsWithDelta(0, $first['total_collected'], 0.01);
-        $this->assertEqualsWithDelta(0.0, $first['collection_rate'], 0.01);
-        $this->assertEqualsWithDelta(11800, $first['uncollected'], 0.01);
+        $this->assertEqualsWithDelta(11800, $first['total_collected'], 0.01);
+        $this->assertEqualsWithDelta(100.0, $first['collection_rate'], 0.01);
+        $this->assertEqualsWithDelta(0, $first['uncollected'], 0.01);
 
         $second = $periods[$monthTwo->format('Y-m')];
         $this->assertEqualsWithDelta(11800, $second['total_due'], 0.01);
-        $this->assertEqualsWithDelta(20000, $second['total_collected'], 0.01);
-        $this->assertEqualsWithDelta(
-            169.49,
-            $second['collection_rate'],
-            0.01,
-            'A monthly bucket ABOVE 100% is correct here: the month collected its own 11,800 plus the previous '
-            ."month's arrears. This is a timing effect and must not be \"fixed\" by clamping the rate.",
-        );
-        $this->assertGreaterThan(100.0, $second['collection_rate']);
-        $this->assertEqualsWithDelta(
-            0,
-            $second['uncollected'],
-            0.01,
-            'uncollected floors at zero rather than going negative when a bucket over-collects.',
-        );
+        $this->assertEqualsWithDelta(7800, $second['total_collected'], 0.01);
+        $this->assertEqualsWithDelta(66.10, $second['collection_rate'], 0.01);
+        $this->assertEqualsWithDelta(4000, $second['uncollected'], 0.01);
     }
 
     // ── Loan Portfolio by Product ────────────────────────────────────────
@@ -1147,7 +1130,7 @@ class ReportFinancialTest extends TestCase
             'principal_amount' => $options['principal'] ?? 60000,
             'start_date' => $options['start_date'] ?? Carbon::today()->toDateString(),
             'account_officer_id' => isset($options['officer']) ? $options['officer']->id : null,
-            'deductions' => $options['deductions'] ?? [],
+            'deductions' => $options['deductions'] ?? null,
         ], $this->admin);
 
         $loanService->submitForReview($loan);

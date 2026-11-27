@@ -70,8 +70,6 @@ class CsvImportReader
      */
     public function read(string $path, string $shape): CsvReadResult
     {
-        $expectedWidth = CsvImportSchema::width($shape);
-
         if (! is_file($path) || ! is_readable($path)) {
             throw new CsvFileRejectedException('unreadable', "The file [{$path}] could not be opened for reading.");
         }
@@ -99,25 +97,25 @@ class CsvImportReader
                 throw new CsvFileRejectedException('empty', 'The file contains no rows.');
             }
 
-            $this->rejectUnexpectedWidth($buffered, $expectedWidth, $shape, $delimiter);
+            $width = $this->rejectUnexpectedWidth($buffered, $shape, $delimiter);
 
             $hasHeader = $this->looksLikeHeader($buffered[0], $shape);
             $header = null;
 
             if ($hasHeader) {
                 $header = $buffered[0];
-                $this->rejectMismatchedHeader($header, $shape);
+                $this->rejectMismatchedHeader($header, $shape, $width);
                 array_shift($buffered);
             }
 
-            $rowFactory = function () use ($handle, $delimiter, $buffered, $hasHeader, $notes): Generator {
-                yield from $this->streamRows($handle, $delimiter, $buffered, $hasHeader, $notes);
+            $rowFactory = function () use ($handle, $delimiter, $buffered, $hasHeader, $notes, $width): Generator {
+                yield from $this->streamRows($handle, $delimiter, $buffered, $hasHeader, $notes, $width);
             };
 
             return new CsvReadResult(
                 shape: $shape,
                 delimiter: $delimiter,
-                columnCount: $expectedWidth,
+                columnCount: $width,
                 hasHeader: $hasHeader,
                 header: $header,
                 rowFactory: $rowFactory,
@@ -296,9 +294,14 @@ class CsvImportReader
      * name. Nothing downstream can detect that, and no operator reviewing a
      * success report would either.
      *
+     * It also decides which of the shape's layouts the file is in
+     * (CsvImportSchema::acceptedWidths()): today's, or the earlier one without
+     * the appended columns. That width is returned, and every row of the file
+     * is held to it.
+     *
      * @param  list<list<string>>  $records
      */
-    private function rejectUnexpectedWidth(array $records, int $expectedWidth, string $shape, string $delimiter): void
+    private function rejectUnexpectedWidth(array $records, string $shape, string $delimiter): int
     {
         $widths = [];
 
@@ -321,10 +324,10 @@ class CsvImportReader
             ';' => 'semicolon', "\t" => 'tab', default => 'comma',
         };
 
-        if ($modalWidth !== $expectedWidth) {
+        if (! in_array($modalWidth, CsvImportSchema::acceptedWidths($shape), true)) {
             throw new CsvFileRejectedException(
                 'unexpected_column_count',
-                "This file has {$modalWidth} columns but the {$shape} import expects {$expectedWidth} "
+                "This file has {$modalWidth} columns but the {$shape} import expects {$this->expectedWidths($shape)} "
                 ."(read using a {$delimiterName} separator). No rows were imported, because a file whose columns "
                 .'are shifted would import every value into the wrong field. Check that you uploaded the '
                 ."{$shape} sheet and that no columns were added or removed.",
@@ -341,11 +344,32 @@ class CsvImportReader
             throw new CsvFileRejectedException(
                 'inconsistent_column_count',
                 "The rows in this file do not have a consistent number of columns — only {$modalCount} of the first "
-                ."{$sampled} rows have the expected {$expectedWidth} (read using a {$delimiterName} separator). "
+                ."{$sampled} rows have the expected {$modalWidth} (read using a {$delimiterName} separator). "
                 .'This usually means a value contains an unquoted separator. No rows were imported, because there '
                 .'is no way to tell which values belong to which columns.',
             );
         }
+
+        return $modalWidth;
+    }
+
+    /**
+     * The widths a shape accepts, in words: "26, or 22 in the earlier layout
+     * without Date Hired, …", or the one width a shape with a single layout has.
+     */
+    private function expectedWidths(string $shape): string
+    {
+        [$current, $earlier] = array_pad(CsvImportSchema::acceptedWidths($shape), 2, null);
+
+        if ($earlier === null) {
+            return (string) $current;
+        }
+
+        $appended = CsvImportSchema::appendedLabels($shape);
+        $last = array_pop($appended);
+        $named = $appended === [] ? $last : implode(', ', $appended).' and '.$last;
+
+        return "{$current}, or {$earlier} in the earlier layout without {$named}";
     }
 
     /**
@@ -372,13 +396,14 @@ class CsvImportReader
      * Detection alone is not enough. A file can have the right NUMBER of
      * columns in the wrong ORDER — two columns swapped in the source workbook
      * passes the width check and imports cleanly into the wrong fields. When
-     * the file tells us its column names, we hold it to them.
+     * the file tells us its column names, we hold it to them: every one of the
+     * columns its layout has, and only those.
      *
      * @param  list<string>  $header
      */
-    private function rejectMismatchedHeader(array $header, string $shape): void
+    private function rejectMismatchedHeader(array $header, string $shape, int $width): void
     {
-        $labels = CsvImportSchema::labels($shape);
+        $labels = array_slice(CsvImportSchema::labels($shape), 0, $width);
 
         foreach ($labels as $index => $expectedLabel) {
             $found = $header[$index] ?? '';
@@ -403,9 +428,10 @@ class CsvImportReader
      * @param  resource  $handle
      * @param  list<list<string>>  $buffered
      * @param  ArrayObject<int, string>  $notes
+     * @param  int  $width  The file's layout width, which every row is held to.
      * @return Generator<int, CsvRow>
      */
-    private function streamRows($handle, string $delimiter, array $buffered, bool $hasHeader, ArrayObject $notes): Generator
+    private function streamRows($handle, string $delimiter, array $buffered, bool $hasHeader, ArrayObject $notes, int $width): Generator
     {
         try {
             $recordNumber = $hasHeader ? 1 : 0;
@@ -415,7 +441,7 @@ class CsvImportReader
                 $recordNumber++;
                 $rowNumber++;
 
-                yield new CsvRow($recordNumber, $rowNumber, $record);
+                yield new CsvRow($recordNumber, $rowNumber, $record, $width);
             }
 
             while (($record = $this->readRecord($handle, $delimiter, false, $notes)) !== null) {
@@ -426,7 +452,7 @@ class CsvImportReader
                 $recordNumber++;
                 $rowNumber++;
 
-                yield new CsvRow($recordNumber, $rowNumber, $record);
+                yield new CsvRow($recordNumber, $rowNumber, $record, $width);
             }
         } finally {
             if (is_resource($handle)) {

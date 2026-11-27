@@ -353,7 +353,7 @@ class BorrowerBulkErrorDisclosureTest extends TestCase
             // act on, in prose written here rather than by a driver.
             $this->assertSame([$borrower->id], $response->json('failed.*.id'));
             $this->assertSame(
-                "Borrower {$borrower->id} could not be deactivated (database error 1406). See the application log.",
+                "Member {$borrower->id} could not be deactivated (database error 1406). See the application log.",
                 $response->json('failed.0.reason'),
             );
             $this->assertSame([], $response->json('deactivated'));
@@ -421,7 +421,7 @@ class BorrowerBulkErrorDisclosureTest extends TestCase
             $this->assertStringNotContainsString('insert into', $body);
 
             $this->assertSame(
-                "Borrower {$borrower->id} could not be deleted (database error 1406). See the application log.",
+                "Member {$borrower->id} could not be deleted (database error 1406). See the application log.",
                 $response->json('failed.0.reason'),
             );
             $this->assertSame([], $response->json('deleted'));
@@ -473,7 +473,7 @@ class BorrowerBulkErrorDisclosureTest extends TestCase
             $this->assertStringNotContainsString('loans', $body);
 
             $this->assertSame(
-                "Borrower {$borrowerId} could not be deleted (database error 1451). See the application log.",
+                "Member {$borrowerId} could not be deleted (database error 1451). See the application log.",
                 $response->json('failed.0.reason'),
             );
             $this->assertSame([], $response->json('deleted'));
@@ -525,7 +525,7 @@ class BorrowerBulkErrorDisclosureTest extends TestCase
             $this->assertNoBirthdateIn($everything, 'the response or the shared log');
 
             $this->assertSame(
-                "Borrower {$borrower->id} could not be deactivated (database error 1406). See the application log.",
+                "Member {$borrower->id} could not be deactivated (database error 1406). See the application log.",
                 $response->json('failed.0.reason'),
             );
             $this->assertStringContainsString('"driver_code":"1406"', implode("\n", $this->logEntries));
@@ -589,7 +589,7 @@ class BorrowerBulkErrorDisclosureTest extends TestCase
 
             // The endpoint still behaves: the failure is reported, safely.
             $this->assertSame(
-                "Borrower {$borrower->id} could not be deactivated (database error 1406). See the application log.",
+                "Member {$borrower->id} could not be deactivated (database error 1406). See the application log.",
                 $response->json('failed.0.reason'),
             );
         } finally {

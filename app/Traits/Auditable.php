@@ -65,6 +65,20 @@ trait Auditable
         return $keys === [] ? $values : Arr::except($values, $keys);
     }
 
+    /**
+     * The description for an automatic audit row, or null for none.
+     *
+     * A model opts in by declaring `describeAuditEvent(string $action): ?string`
+     * (asked for `created` and `updated`); it runs after the write, so
+     * `getChanges()` holds what was changed.
+     */
+    protected static function auditDescriptionFor(Model $model, string $action): ?string
+    {
+        return method_exists($model, 'describeAuditEvent')
+            ? $model->describeAuditEvent($action)
+            : null;
+    }
+
     public static function bootAuditable(): void
     {
         static::created(function (Model $model) {
@@ -72,7 +86,13 @@ trait Auditable
                 return;
             }
 
-            AuditLogService::log('created', $model, null, static::redactForAudit($model, $model->getAttributes()));
+            AuditLogService::log(
+                'created',
+                $model,
+                null,
+                static::redactForAudit($model, $model->getAttributes()),
+                static::auditDescriptionFor($model, 'created'),
+            );
         });
 
         static::updated(function (Model $model) {
@@ -86,6 +106,7 @@ trait Auditable
                     $model,
                     static::redactForAudit($model, $model->getOriginal()),
                     static::redactForAudit($model, $model->getChanges()),
+                    static::auditDescriptionFor($model, 'updated'),
                 );
             }
         });

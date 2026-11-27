@@ -111,18 +111,65 @@ it('exposes scb_amount and policy_exception in LoanResource', function () {
     expect($response->json('data.policy_exception_details'))->toBe('PE details here');
 });
 
-it('does not auto-create any SCB ledger entry on payment (frontend PR 106)', function () {
-    // Backend no longer auto-credits SCB on payment — the frontend handles it
-    // explicitly by posting to /api/share-capital/ledger with the computed excess.
+it('refuses a null scb_amount or policy_exception on edit rather than writing it', function (string $method, string $field) {
+    $product = LoanProduct::factory()->create([
+        'interest_rate' => 3.0,
+        'interest_method' => 'straight',
+        'term' => 6,
+        'frequency' => 'monthly',
+    ]);
+    $borrower = Borrower::factory()->create(['branch_id' => $this->branch->id]);
+
+    $loan = app(LoanService::class)->createLoan([
+        'borrower_id' => $borrower->id,
+        'loan_product_id' => $product->id,
+        'principal_amount' => 60000,
+        'start_date' => now()->toDateString(),
+        'scb_amount' => 500,
+        'policy_exception' => true,
+        'policy_exception_details' => 'PE details here',
+    ], $this->admin);
+
+    // Both columns are NOT NULL: a sent null must be a 422, never a write
+    // MySQL rejects.
+    $this->{$method}("/api/loans/{$loan->id}", [$field => null, 'purpose' => 'Edited'])
+        ->assertUnprocessable()
+        ->assertJsonValidationErrors([$field]);
+
+    $loan->refresh();
+    expect((float) $loan->scb_amount)->toBe(500.0)
+        ->and($loan->policy_exception)->toBeTrue()
+        ->and($loan->purpose)->not->toBe('Edited');
+
+    // Leaving the key out keeps the stored value; a real value still saves.
+    $this->{$method}("/api/loans/{$loan->id}", ['purpose' => 'Edited'])
+        ->assertOk()
+        ->assertJsonPath('data.purpose', 'Edited')
+        ->assertJsonPath('data.policy_exception', true);
+    expect((float) $loan->fresh()->scb_amount)->toBe(500.0);
+
+    $this->{$method}("/api/loans/{$loan->id}", [$field => $field === 'scb_amount' ? 250 : false])->assertOk();
+    expect($loan->fresh()->{$field})->toEqual($field === 'scb_amount' ? '250.00' : false);
+})->with(['PUT' => 'putJson', 'PATCH' => 'patchJson'])->with(['scb_amount', 'policy_exception']);
+
+it('auto-credits share capital on a qualifying payment, in the same transaction (fix/repayment-scb-atomic)', function () {
+    // Backend now credits SCB itself, atomically with the payment — this used to be
+    // frontend-driven (a second, independent POST to /api/share-capital/ledger that
+    // could fail or 403 and leave the payment credited-less). See RepaymentService::processRepayment().
     ['loan' => $loan, 'borrower' => $borrower] = makeReleasedLoan($this->branch->id, $this->admin, [
         'scb_amount' => 250,
     ]);
 
     $ledgerBefore = ShareCapitalLedger::where('borrower_id', $borrower->id)->count();
 
-    app(RepaymentService::class)->processRepayment($loan, 25000, now()->toDateString(), $this->admin);
+    $repayment = app(RepaymentService::class)->processRepayment($loan, 25000, now()->toDateString(), $this->admin);
 
-    expect(ShareCapitalLedger::where('borrower_id', $borrower->id)->count())->toBe($ledgerBefore);
+    expect(ShareCapitalLedger::where('borrower_id', $borrower->id)->count())->toBe($ledgerBefore + 1);
+
+    $credit = ShareCapitalLedger::where('repayment_id', $repayment->id)->sole();
+    expect((float) $credit->credit)->toEqual((float) $repayment->overpayment)
+        ->and((float) $credit->debit)->toEqual(0.0)
+        ->and($credit->borrower_id)->toBe($borrower->id);
 });
 
 it('does not cascade excess to future schedules when scb_amount > 0', function () {

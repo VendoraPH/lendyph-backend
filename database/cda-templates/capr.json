@@ -1,0 +1,929 @@
+{
+  "report_type": "capr",
+  "version": "2026.1",
+  "name": "Cooperative Annual Progress Report (CAPR) CY2026",
+  "effective_from": "2026-01-01",
+  "effective_until": null,
+  "cooperative_types": [],
+  "asset_classes": [],
+  "definition": {
+    "schema_version": 1,
+    "meta": {
+      "verified": false,
+      "source_doc": "CAPR CY2026 form (as understood in v1; to verify)"
+    },
+    "parts": [
+      "annual"
+    ],
+    "deadline": {
+      "basis": "year_end",
+      "days_setting": "annual_deadline_days"
+    },
+    "sections": [
+      {
+        "key": "general",
+        "title": "General information",
+        "kind": "fields",
+        "fields": [
+          {
+            "key": "cooperative_name",
+            "label": "Registered name",
+            "type": "text",
+            "required": true,
+            "source": {
+              "key": "coop.name"
+            }
+          },
+          {
+            "key": "cda_registration_no",
+            "label": "CDA registration number",
+            "type": "text",
+            "required": true,
+            "source": {
+              "key": "profile.field",
+              "params": {
+                "name": "cda_registration_no"
+              }
+            },
+            "overridable": true
+          },
+          {
+            "key": "cda_registration_date",
+            "label": "Date of registration",
+            "type": "date",
+            "source": {
+              "key": "profile.field",
+              "params": {
+                "name": "cda_registration_date"
+              }
+            }
+          },
+          {
+            "key": "tin",
+            "label": "TIN",
+            "type": "text",
+            "source": {
+              "key": "profile.field",
+              "params": {
+                "name": "tin"
+              }
+            }
+          },
+          {
+            "key": "cooperative_type",
+            "label": "Type of cooperative",
+            "type": "text",
+            "source": {
+              "key": "profile.field",
+              "params": {
+                "name": "cooperative_type"
+              }
+            }
+          },
+          {
+            "key": "cooperative_category",
+            "label": "Category",
+            "type": "text",
+            "source": {
+              "key": "profile.field",
+              "params": {
+                "name": "cooperative_category"
+              }
+            }
+          },
+          {
+            "key": "asset_class",
+            "label": "Asset size",
+            "type": "text",
+            "source": {
+              "key": "profile.field",
+              "params": {
+                "name": "asset_class"
+              }
+            }
+          },
+          {
+            "key": "address",
+            "label": "Principal office address",
+            "type": "text",
+            "source": {
+              "key": "coop.address"
+            }
+          },
+          {
+            "key": "contact",
+            "label": "Contact details",
+            "type": "text",
+            "source": {
+              "key": "coop.contact"
+            }
+          },
+          {
+            "key": "branches",
+            "label": "Number of branches",
+            "type": "number",
+            "decimals": 0,
+            "source": {
+              "key": "branches.count"
+            }
+          }
+        ]
+      },
+      {
+        "key": "membership",
+        "title": "Membership",
+        "kind": "fields",
+        "fields": [
+          {
+            "key": "members_total",
+            "label": "Total members",
+            "type": "number",
+            "decimals": 0,
+            "required": true,
+            "source": {
+              "key": "members.count",
+              "params": {
+                "as_of": "period_end"
+              }
+            },
+            "overridable": false
+          },
+          {
+            "key": "members_male",
+            "label": "Male",
+            "type": "number",
+            "decimals": 0,
+            "source": {
+              "key": "members.count",
+              "params": {
+                "gender": "male"
+              }
+            }
+          },
+          {
+            "key": "members_female",
+            "label": "Female",
+            "type": "number",
+            "decimals": 0,
+            "source": {
+              "key": "members.count",
+              "params": {
+                "gender": "female"
+              }
+            }
+          },
+          {
+            "key": "members_unspecified",
+            "label": "Sex not recorded",
+            "type": "number",
+            "decimals": 0,
+            "calc": {
+              "op": "sub",
+              "args": [
+                "members_total",
+                {
+                  "op": "add",
+                  "args": [
+                    "members_male",
+                    "members_female"
+                  ]
+                }
+              ]
+            }
+          },
+          {
+            "key": "members_regular",
+            "label": "Regular members",
+            "type": "number",
+            "decimals": 0,
+            "source": {
+              "key": "members.count",
+              "params": {
+                "member_type": "regular"
+              }
+            }
+          },
+          {
+            "key": "members_associate",
+            "label": "Associate members",
+            "type": "number",
+            "decimals": 0,
+            "source": {
+              "key": "members.count",
+              "params": {
+                "member_type": "associate"
+              }
+            }
+          },
+          {
+            "key": "members_new",
+            "label": "New members this year",
+            "type": "number",
+            "decimals": 0,
+            "source": {
+              "key": "members.new"
+            }
+          },
+          {
+            "key": "members_withdrawn",
+            "label": "Members who withdrew",
+            "type": "number",
+            "decimals": 0,
+            "source": {
+              "key": "members.ended",
+              "params": {
+                "reason": "withdrawn"
+              }
+            }
+          },
+          {
+            "key": "members_deceased",
+            "label": "Members who died",
+            "type": "number",
+            "decimals": 0,
+            "source": {
+              "key": "members.ended",
+              "params": {
+                "reason": "deceased"
+              }
+            }
+          },
+          {
+            "key": "members_missing_date",
+            "label": "Members with no membership date",
+            "type": "number",
+            "decimals": 0,
+            "source": {
+              "key": "members.missing",
+              "params": {
+                "field": "membership_date"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "key": "employment",
+        "title": "Employment",
+        "kind": "fields",
+        "fields": [
+          {
+            "key": "employees_regular",
+            "label": "Regular employees",
+            "type": "number",
+            "decimals": 0,
+            "required": true
+          },
+          {
+            "key": "employees_casual",
+            "label": "Casual or contractual employees",
+            "type": "number",
+            "decimals": 0
+          },
+          {
+            "key": "system_users",
+            "label": "Active system users (for reference)",
+            "type": "number",
+            "decimals": 0,
+            "source": {
+              "key": "users.count"
+            }
+          }
+        ]
+      },
+      {
+        "key": "officers",
+        "title": "Officers",
+        "kind": "table",
+        "source": {
+          "key": "officers.list"
+        },
+        "columns": [
+          {
+            "key": "name",
+            "label": "Name",
+            "format": "text"
+          },
+          {
+            "key": "position",
+            "label": "Position",
+            "format": "text"
+          },
+          {
+            "key": "sex",
+            "label": "Sex",
+            "format": "text"
+          },
+          {
+            "key": "term_start",
+            "label": "Term start",
+            "format": "date"
+          },
+          {
+            "key": "term_end",
+            "label": "Term end",
+            "format": "date"
+          }
+        ]
+      },
+      {
+        "key": "officer_summary",
+        "title": "Officers summary",
+        "kind": "fields",
+        "fields": [
+          {
+            "key": "officers_male",
+            "label": "Male officers",
+            "type": "number",
+            "decimals": 0,
+            "source": {
+              "key": "officers.count",
+              "params": {
+                "sex": "male"
+              }
+            }
+          },
+          {
+            "key": "officers_female",
+            "label": "Female officers",
+            "type": "number",
+            "decimals": 0,
+            "source": {
+              "key": "officers.count",
+              "params": {
+                "sex": "female"
+              }
+            }
+          },
+          {
+            "key": "chairperson",
+            "label": "Chairperson",
+            "type": "text",
+            "source": {
+              "key": "officers.current",
+              "params": {
+                "position": "chairperson"
+              }
+            }
+          },
+          {
+            "key": "general_manager",
+            "label": "General manager",
+            "type": "text",
+            "source": {
+              "key": "officers.current",
+              "params": {
+                "position": "general_manager"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "key": "loans",
+        "title": "Lending operations",
+        "kind": "fields",
+        "fields": [
+          {
+            "key": "loans_released_count",
+            "label": "Loans released (number)",
+            "type": "number",
+            "decimals": 0,
+            "source": {
+              "key": "loans.released",
+              "params": {
+                "measure": "count"
+              }
+            }
+          },
+          {
+            "key": "loans_released_amount",
+            "label": "Loans released (amount)",
+            "type": "money",
+            "source": {
+              "key": "loans.released",
+              "params": {
+                "measure": "amount"
+              }
+            }
+          },
+          {
+            "key": "loans_outstanding",
+            "label": "Loans receivable (principal)",
+            "type": "money",
+            "required": true,
+            "source": {
+              "key": "loans.outstanding",
+              "params": {
+                "measure": "principal"
+              }
+            }
+          },
+          {
+            "key": "loans_past_due",
+            "label": "Past due loans",
+            "type": "money",
+            "source": {
+              "key": "loans.past_due",
+              "params": {
+                "measure": "amount"
+              }
+            }
+          },
+          {
+            "key": "par_30",
+            "label": "Portfolio at risk (30 days)",
+            "type": "percent",
+            "source": {
+              "key": "loans.par",
+              "params": {
+                "days": 30
+              }
+            }
+          },
+          {
+            "key": "collection_efficiency",
+            "label": "Collection efficiency",
+            "type": "percent",
+            "source": {
+              "key": "loans.collection_efficiency"
+            }
+          }
+        ]
+      },
+      {
+        "key": "loans_by_product",
+        "title": "Loans by product",
+        "kind": "table",
+        "source": {
+          "key": "loans.by_product"
+        },
+        "columns": [
+          {
+            "key": "product",
+            "label": "Product",
+            "format": "text"
+          },
+          {
+            "key": "count",
+            "label": "Loans",
+            "format": "number"
+          },
+          {
+            "key": "amount",
+            "label": "Amount released",
+            "format": "money"
+          }
+        ]
+      },
+      {
+        "key": "provisioning",
+        "title": "Loan classification and allowance",
+        "kind": "fields",
+        "fields": [
+          {
+            "key": "provision_required",
+            "label": "Required allowance",
+            "type": "money",
+            "source": {
+              "key": "loans.provision_required"
+            }
+          },
+          {
+            "key": "allowance_booked",
+            "label": "Allowance booked (1200)",
+            "type": "money",
+            "source": {
+              "key": "loans.allowance_booked"
+            }
+          },
+          {
+            "key": "provision_gap",
+            "label": "Provision gap",
+            "type": "money",
+            "source": {
+              "key": "loans.provision_gap"
+            }
+          }
+        ]
+      },
+      {
+        "key": "loan_classification",
+        "title": "Loan classification",
+        "kind": "table",
+        "source": {
+          "key": "loans.classification"
+        },
+        "columns": [
+          {
+            "key": "label",
+            "label": "Classification",
+            "format": "text"
+          },
+          {
+            "key": "loan_count",
+            "label": "Loans",
+            "format": "number"
+          },
+          {
+            "key": "outstanding_principal",
+            "label": "Principal balance",
+            "format": "money"
+          },
+          {
+            "key": "rate_percent",
+            "label": "Rate",
+            "format": "percent"
+          },
+          {
+            "key": "required",
+            "label": "Required",
+            "format": "money"
+          }
+        ]
+      },
+      {
+        "key": "capital",
+        "title": "Capital structure",
+        "kind": "fields",
+        "fields": [
+          {
+            "key": "share_capital_paid_up",
+            "label": "Paid-up share capital",
+            "type": "money",
+            "required": true,
+            "source": {
+              "key": "share_capital.paid_up"
+            }
+          },
+          {
+            "key": "share_capital_holders",
+            "label": "Members holding share capital",
+            "type": "number",
+            "decimals": 0,
+            "source": {
+              "key": "share_capital.holders"
+            }
+          },
+          {
+            "key": "share_capital_subscribed",
+            "label": "Subscribed share capital",
+            "type": "money",
+            "required": true
+          },
+          {
+            "key": "share_capital_authorized",
+            "label": "Authorized share capital",
+            "type": "money",
+            "required": true
+          }
+        ]
+      },
+      {
+        "key": "deposits",
+        "title": "Savings and deposits",
+        "kind": "fields",
+        "fields": [
+          {
+            "key": "savings_regular",
+            "label": "Savings deposits",
+            "type": "money",
+            "source": {
+              "key": "savings.balance",
+              "params": {
+                "kind": "regular"
+              }
+            }
+          },
+          {
+            "key": "time_deposits",
+            "label": "Time deposits",
+            "type": "money",
+            "source": {
+              "key": "savings.balance",
+              "params": {
+                "kind": "time_deposit"
+              }
+            }
+          },
+          {
+            "key": "depositors",
+            "label": "Depositors",
+            "type": "number",
+            "decimals": 0,
+            "source": {
+              "key": "savings.depositors"
+            }
+          }
+        ]
+      },
+      {
+        "key": "financial",
+        "title": "Financial condition",
+        "kind": "fields",
+        "fields": [
+          {
+            "key": "year_closed",
+            "label": "Accounting year closed",
+            "type": "boolean",
+            "source": {
+              "key": "accounting.year_closed"
+            }
+          },
+          {
+            "key": "total_assets",
+            "label": "Total assets",
+            "type": "money",
+            "required": true,
+            "source": {
+              "key": "fs.total_assets"
+            }
+          },
+          {
+            "key": "total_liabilities",
+            "label": "Total liabilities",
+            "type": "money",
+            "required": true,
+            "source": {
+              "key": "fs.total_liabilities"
+            }
+          },
+          {
+            "key": "total_equity",
+            "label": "Total equity",
+            "type": "money",
+            "required": true,
+            "source": {
+              "key": "fs.total_equity"
+            }
+          },
+          {
+            "key": "total_income",
+            "label": "Total income",
+            "type": "money",
+            "source": {
+              "key": "fs.total_income"
+            }
+          },
+          {
+            "key": "total_expenses",
+            "label": "Total expenses",
+            "type": "money",
+            "source": {
+              "key": "fs.total_expenses"
+            }
+          },
+          {
+            "key": "net_surplus",
+            "label": "Net surplus",
+            "type": "money",
+            "source": {
+              "key": "fs.net_surplus"
+            }
+          },
+          {
+            "key": "statutory_funds",
+            "label": "Statutory funds (3070)",
+            "type": "money",
+            "source": {
+              "key": "accounting.balance",
+              "params": {
+                "code": "3070"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "key": "social",
+        "title": "Social responsibility",
+        "kind": "fields",
+        "fields": [
+          {
+            "key": "social_programs",
+            "label": "Social programs held",
+            "type": "number",
+            "decimals": 0,
+            "source": {
+              "key": "social_programs.summary",
+              "params": {
+                "measure": "count"
+              }
+            }
+          },
+          {
+            "key": "cdf_used",
+            "label": "Community Development Fund used",
+            "type": "money",
+            "source": {
+              "key": "social_programs.summary",
+              "params": {
+                "measure": "cdf_amount"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "key": "performance",
+        "title": "Performance",
+        "kind": "fields",
+        "fields": [
+          {
+            "key": "pesos_rating",
+            "label": "Enhanced PESOS rating",
+            "type": "text",
+            "source": {
+              "key": "pesos.result",
+              "params": {
+                "field": "rating"
+              }
+            }
+          },
+          {
+            "key": "fs_total_assets",
+            "label": "Total assets per the financial statements report",
+            "type": "money",
+            "source": {
+              "key": "report.field",
+              "params": {
+                "type": "financial_statements",
+                "field": "statements.total_assets"
+              }
+            }
+          }
+        ]
+      }
+    ],
+    "rules": [
+      {
+        "id": "registration_no_required",
+        "type": "required",
+        "field": "cda_registration_no",
+        "severity": "critical",
+        "category": "missing_required_data",
+        "component": "fields",
+        "fix_href": "/cda/settings",
+        "message": "The cooperative registration number is missing."
+      },
+      {
+        "id": "tin_format",
+        "type": "pattern",
+        "field": "tin",
+        "pattern": "tin",
+        "severity": "warning",
+        "category": "invalid_data",
+        "component": "fields",
+        "fix_href": "/cda/settings"
+      },
+      {
+        "id": "gender_sum",
+        "type": "sum_equals",
+        "parts": [
+          "members_male",
+          "members_female"
+        ],
+        "total": "members_total",
+        "severity": "warning",
+        "category": "member_data",
+        "component": "sources",
+        "fix_href": "/borrowers",
+        "message": "Some members have no sex recorded."
+      },
+      {
+        "id": "membership_dates",
+        "type": "check",
+        "check": "members.missing_field",
+        "params": {
+          "field": "membership_date"
+        },
+        "severity": "critical",
+        "category": "member_data",
+        "component": "sources",
+        "fix_href": "/borrowers"
+      },
+      {
+        "id": "employees_not_negative",
+        "type": "min",
+        "field": "employees_regular",
+        "value": 0,
+        "severity": "critical",
+        "category": "invalid_data",
+        "component": "fields"
+      },
+      {
+        "id": "required_positions",
+        "type": "check",
+        "check": "officers.required_positions",
+        "severity": "warning",
+        "category": "officer_data",
+        "component": "sources",
+        "fix_href": "/cda/officers"
+      },
+      {
+        "id": "trainings_complete",
+        "type": "check",
+        "check": "officers.training_incomplete",
+        "severity": "warning",
+        "category": "training",
+        "component": "sources",
+        "fix_href": "/cda/officers"
+      },
+      {
+        "id": "classification_captured",
+        "type": "check",
+        "check": "classification.captured",
+        "severity": "warning",
+        "category": "loan_data",
+        "component": "sources"
+      },
+      {
+        "id": "year_closed",
+        "type": "check",
+        "check": "accounting.year_closed",
+        "severity": "critical",
+        "category": "financial_data",
+        "component": "accounting",
+        "fix_href": "/accounting"
+      },
+      {
+        "id": "assets_match_fs",
+        "type": "compare",
+        "left": "total_assets",
+        "op": "eq",
+        "right": "report:financial_statements.statements.total_assets",
+        "severity": "critical",
+        "category": "accounting_mismatch",
+        "component": "accounting"
+      },
+      {
+        "id": "balance_sheet_balances",
+        "type": "compare",
+        "left": "total_assets",
+        "op": "eq",
+        "right": {
+          "op": "add",
+          "args": [
+            "total_liabilities",
+            "total_equity"
+          ]
+        },
+        "tolerance": 0,
+        "severity": "critical",
+        "category": "accounting_mismatch",
+        "component": "accounting"
+      },
+      {
+        "id": "profile_complete",
+        "type": "check",
+        "check": "profile.complete",
+        "severity": "warning",
+        "category": "missing_required_data",
+        "component": "fields",
+        "fix_href": "/cda/settings"
+      },
+      {
+        "id": "signed_capr_uploaded",
+        "type": "document",
+        "document_category": "capr",
+        "stage": "submit",
+        "final": true,
+        "severity": "critical",
+        "category": "compliance_document",
+        "component": "documents"
+      },
+      {
+        "id": "template_verified",
+        "type": "check",
+        "check": "template.verified",
+        "severity": "info",
+        "category": "invalid_data",
+        "component": "fields",
+        "message": "This form follows the CDA template as understood in v1 and is still to be checked against the official form."
+      }
+    ],
+    "documents": [
+      {
+        "key": "signed_capr",
+        "category": "capr",
+        "label": "Signed CAPR",
+        "stage": "submit",
+        "severity": "critical"
+      }
+    ],
+    "export": {
+      "pdf": {
+        "orientation": "portrait"
+      },
+      "excel": {
+        "mode": "generated",
+        "draft_cell": "CAPR!A1",
+        "cells": {
+          "CAPR!C5": "profile.cda_registration_no",
+          "CAPR!C6": "general.cooperative_name",
+          "CAPR!C10": "membership.members_total"
+        }
+      }
+    }
+  }
+}

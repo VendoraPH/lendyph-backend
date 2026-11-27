@@ -2,8 +2,10 @@
 
 namespace App\Http\Requests\Accounting;
 
+use App\Http\Requests\Concerns\RefusesAClosedBranch;
 use App\Services\Accounting\Money;
 use Illuminate\Foundation\Http\FormRequest;
+use Illuminate\Validation\Validator;
 
 /**
  * Settling part or all of an accrued expense.
@@ -20,6 +22,8 @@ use Illuminate\Foundation\Http\FormRequest;
  */
 class PayExpenseRequest extends FormRequest
 {
+    use RefusesAClosedBranch;
+
     public function authorize(): bool
     {
         return $this->user()->can('expenses:pay');
@@ -37,5 +41,11 @@ class PayExpenseRequest extends FormRequest
             // recorder; `exists` is the cheap first pass.
             'account_id' => ['required', 'integer', 'exists:accounting_accounts,id'],
         ];
+    }
+
+    /** Posts into the expense's branch, which a closed branch refuses (Phase 6 MB-BE2). */
+    public function after(): array
+    {
+        return [fn (Validator $validator) => $this->refuseAClosedBranch($validator, $this->route('expense')?->branch_id)];
     }
 }

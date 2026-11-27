@@ -1,0 +1,57 @@
+<?php
+
+namespace App\Http\Requests\Accounting;
+
+use App\Http\Requests\Concerns\RefusesAClosedBranch;
+use Illuminate\Foundation\Http\FormRequest;
+use Illuminate\Validation\Validator;
+
+/**
+ * Recording an unmatched statement line (money out) as an expense paid from
+ * the reconciled account.
+ *
+ * Needs `accounting:reconcile`, and the expense it writes needs the same
+ * `expenses:create` the Expenses screen does (Accounting round C,
+ * 2026-11-09). A reconciliation the caller can't see answers 404 (the route
+ * binding is scoped by branch, 2026-11-11).
+ */
+class ReconcileLineAsExpenseRequest extends FormRequest
+{
+    use RefusesAClosedBranch;
+
+    public function authorize(): bool
+    {
+        $user = $this->user();
+
+        return $user->can('accounting:reconcile')
+            && $user->can('expenses:create');
+    }
+
+    /** @return array<string, list<string>> */
+    public function rules(): array
+    {
+        return [
+            // Checked as an EXPENSE account by ExpenseRecorder.
+            'expense_account_id' => ['required', 'integer', 'exists:accounting_accounts,id'],
+            // 160, the column's width and the Expenses screen's own limit.
+            'payee' => ['required', 'string', 'max:160'],
+            'description' => ['nullable', 'string', 'max:500'],
+            // Go ahead even though the line matches an entry already in the
+            // books (otherwise a 422 on `line` offers that entry instead).
+            'record_anyway' => ['nullable', 'boolean'],
+        ];
+    }
+
+    protected function prepareForValidation(): void
+    {
+        if ($this->has('payee')) {
+            $this->merge(['payee' => trim((string) $this->input('payee'))]);
+        }
+    }
+
+    /** Posts into the reconciliation's branch, which a closed branch refuses (Phase 6 MB-BE2). */
+    public function after(): array
+    {
+        return [fn (Validator $validator) => $this->refuseAClosedBranch($validator, $this->route('reconciliation')?->branch_id)];
+    }
+}

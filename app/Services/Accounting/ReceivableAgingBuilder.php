@@ -65,9 +65,13 @@ final class ReceivableAgingBuilder
     /**
      * The aged report as of a date.
      *
-     * @return array{as_of: string, rows: list<array{bucket: string, amount: int, count: int}>, total: int, past_due_total: int}
+     * Each row's `share_percent` is its amount as a percentage of `total`, a
+     * string with two decimals rounded half up ("0.00" on an empty book), and
+     * `count_total` adds up the rows' counts: outstanding instalments, not loans.
+     *
+     * @return array{as_of: string, rows: list<array{bucket: string, amount: int, count: int, share_percent: string}>, total: int, past_due_total: int, count_total: int}
      */
-    public function build(string $asOf, ?int $branchId = null): array
+    public function build(string $asOf, int|array|null $branchId = null): array
     {
         $totals = $this->bucketTotals($asOf, $branchId);
 
@@ -82,6 +86,10 @@ final class ReceivableAgingBuilder
 
         $total = Money::sum(array_column($rows, 'amount'));
 
+        foreach ($rows as $index => $row) {
+            $rows[$index]['share_percent'] = self::sharePercent($row['amount'], $total);
+        }
+
         return [
             'as_of' => $asOf,
             'rows' => $rows,
@@ -89,7 +97,38 @@ final class ReceivableAgingBuilder
             // Everything except `current`. Being early is not a degree of
             // lateness, so it is subtracted rather than bucketed.
             'past_due_total' => $total - ($totals[self::CURRENT]['amount'] ?? 0),
+            'count_total' => array_sum(array_column($rows, 'count')),
         ];
+    }
+
+    /**
+     * `$amount` as a percentage of `$total`, two decimals, rounded half up.
+     *
+     * Integer long division, one decimal digit at a time, so no float touches
+     * it and no intermediate grows past ten times the total (an
+     * `$amount * 10000` would overflow on a large enough book).
+     */
+    public static function sharePercent(int $amount, int $total): string
+    {
+        if ($total <= 0 || $amount <= 0) {
+            return '0.00';
+        }
+
+        // Hundredths of a percent: the ratio to four decimal places.
+        $units = intdiv($amount, $total);
+        $remainder = $amount % $total;
+
+        for ($digit = 0; $digit < 4; $digit++) {
+            $remainder *= 10;
+            $units = $units * 10 + intdiv($remainder, $total);
+            $remainder %= $total;
+        }
+
+        if ($remainder * 2 >= $total) {
+            $units++;
+        }
+
+        return intdiv($units, 100).'.'.str_pad((string) ($units % 100), 2, '0', STR_PAD_LEFT);
     }
 
     /**
@@ -102,7 +141,7 @@ final class ReceivableAgingBuilder
      *
      * @return array<string, array{amount: int, count: int}>
      */
-    private function bucketTotals(string $asOf, ?int $branchId): array
+    private function bucketTotals(string $asOf, int|array|null $branchId): array
     {
         $remaining = AmortizationSchedule::remainingTotalSql();
 
@@ -113,7 +152,7 @@ final class ReceivableAgingBuilder
             // owes, and an aging report that dropped it would understate exactly
             // the receivables a provisioning policy cares most about.
             ->whereIn('loans.status', Loan::COLLECTIBLE_STATUSES)
-            ->when($branchId !== null, fn ($q) => $q->where('loans.branch_id', $branchId))
+            ->when($branchId !== null, fn ($q) => $q->whereIn('loans.branch_id', (array) $branchId))
             // A zero-balance row is not a receivable. Skipped rather than
             // bucketed at zero, so it cannot inflate `count` with finished
             // business — `buildAging` skips the same rows for the same reason,
@@ -121,7 +160,7 @@ final class ReceivableAgingBuilder
             ->whereRaw("{$remaining} > 0")
             ->groupBy('bucket')
             ->selectRaw(
-                $this->bucketCase().' as bucket, '
+                self::bucketCaseSql().' as bucket, '
                 // SUM over DECIMAL(,2) is exact decimal arithmetic in MySQL and
                 // comes back as a STRING through PDO. Left as a string all the
                 // way to Money::toCentavos() below, which parses digit by digit
@@ -196,17 +235,19 @@ final class ReceivableAgingBuilder
      * (loan_id, status, due_date) index on every row — and this is the heaviest
      * scan in the accounting module.
      *
-     * Takes five bindings, all the as-of date.
+     * Takes five bindings, all the as-of date. `$dueDate` is the SQL of the
+     * date being aged; LoanAgingBuilder passes each loan's oldest unpaid due
+     * date, so a loan and its instalments are bucketed by one CASE.
      */
-    private function bucketCase(): string
+    public static function bucketCaseSql(string $dueDate = '`amortization_schedules`.`due_date`'): string
     {
-        return <<<'SQL'
+        return <<<SQL
             CASE
-                WHEN `amortization_schedules`.`due_date` >= ? THEN 'current'
-                WHEN `amortization_schedules`.`due_date` >= DATE_SUB(?, INTERVAL 30 DAY) THEN '1_30'
-                WHEN `amortization_schedules`.`due_date` >= DATE_SUB(?, INTERVAL 60 DAY) THEN '31_60'
-                WHEN `amortization_schedules`.`due_date` >= DATE_SUB(?, INTERVAL 90 DAY) THEN '61_90'
-                WHEN `amortization_schedules`.`due_date` >= DATE_SUB(?, INTERVAL 120 DAY) THEN '91_120'
+                WHEN {$dueDate} >= ? THEN 'current'
+                WHEN {$dueDate} >= DATE_SUB(?, INTERVAL 30 DAY) THEN '1_30'
+                WHEN {$dueDate} >= DATE_SUB(?, INTERVAL 60 DAY) THEN '31_60'
+                WHEN {$dueDate} >= DATE_SUB(?, INTERVAL 90 DAY) THEN '61_90'
+                WHEN {$dueDate} >= DATE_SUB(?, INTERVAL 120 DAY) THEN '91_120'
                 ELSE 'over_120'
             END
             SQL;

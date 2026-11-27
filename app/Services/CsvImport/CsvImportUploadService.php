@@ -52,8 +52,8 @@ class CsvImportUploadService
      */
     public const DISK = 'private';
 
-    /** The two files a run carries, in the order the importer must consume them. */
-    public const KINDS = ['customers', 'loans'];
+    /** The files a run can carry, in the order the importer must consume them. */
+    public const KINDS = ['customers', 'loans', 'share_capital'];
 
     /**
      * Phases where a run still owns the importer's attention.
@@ -70,6 +70,7 @@ class CsvImportUploadService
         'awaiting_mapping',
         'importing_customers',
         'importing_loans',
+        'importing_share_capital',
     ];
 
     /**
@@ -84,6 +85,28 @@ class CsvImportUploadService
      * phase is added. Narrow this only with the same care as a schema change.
      */
     public const CLOSED_PHASES = ['completed', 'failed', 'cancelled'];
+
+    /**
+     * Where an open run is, in words, for the refusal of a second run: the
+     * phase itself is a key.
+     *
+     * @var array<string, string>
+     */
+    private const PHASE_WORDS = [
+        'uploading' => 'its files are still uploading',
+        'assembled' => 'its files are uploaded and waiting to be checked',
+        'staging' => 'its files are being checked',
+        'awaiting_mapping' => 'it is waiting for its loan products to be mapped',
+        'importing_customers' => 'it is importing members',
+        'importing_loans' => 'it is importing loans',
+        'importing_share_capital' => 'it is importing share capital',
+    ];
+
+    /** An open run's phase in words. */
+    public static function phaseWords(string $phase): string
+    {
+        return self::PHASE_WORDS[$phase] ?? 'it is '.str_replace('_', ' ', $phase);
+    }
 
     /**
      * Terminal phases whose files are released the moment the phase changes.
@@ -336,7 +359,7 @@ class CsvImportUploadService
 
             if ($open !== null) {
                 throw new HttpResponseException(response()->json([
-                    'message' => "Import run #{$open->id} is still in progress (phase: {$open->phase}). Finish or cancel it before starting another.",
+                    'message' => "Import #{$open->id} is still in progress: ".self::phaseWords($open->phase).'. Finish or cancel it before starting another.',
                     'run_id' => $open->id,
                     'phase' => $open->phase,
                     'cancellable' => in_array($open->phase, self::CANCELLABLE_PHASES, true),
@@ -348,13 +371,22 @@ class CsvImportUploadService
             $run = CsvImportRun::create([
                 'branch_id' => $data['branch_id'],
                 'as_of_date' => $data['as_of_date'] ?? now()->toDateString(),
+                // Read when each file is staged (CsvImportRun::dateOrdersFor()).
+                'date_orders' => $data['date_orders'] ?? null,
                 'phase' => 'uploading',
                 'initiated_by' => $actorId,
                 'initiated_ip' => $actorIp,
             ]);
 
+            // The files the client declared: the members file, the share capital
+            // file, or both, and the loans file only beside the members file
+            // (StoreCsvImportRunRequest).
             foreach (self::KINDS as $kind) {
-                $declared = $data['files'][$kind];
+                $declared = $data['files'][$kind] ?? null;
+
+                if ($declared === null) {
+                    continue;
+                }
 
                 $run->files()->create([
                     'kind' => $kind,
@@ -1251,9 +1283,17 @@ class CsvImportUploadService
 
         $files = $run->files()->orderBy('kind')->get();
 
-        if ($files->count() !== count(self::KINDS)) {
+        // A run carries its members file, its share capital file, or both, and
+        // a loans file only beside the members file: a loan row finds its
+        // member through the members file of the same import, so a run with
+        // loans and no members never gets as far as importing.
+        $kinds = $files->pluck('kind')->all();
+
+        if (! in_array('customers', $kinds, true) && (in_array('loans', $kinds, true) || ! in_array('share_capital', $kinds, true))) {
             throw new HttpResponseException(response()->json([
-                'message' => "Import run #{$run->id} is missing one of its files.",
+                'message' => in_array('loans', $kinds, true)
+                    ? "Import run #{$run->id} has no members file. A loans file needs its members file in the same import."
+                    : "Import run #{$run->id} has no members file or share capital file to import.",
             ], 422));
         }
 
@@ -1385,6 +1425,8 @@ class CsvImportUploadService
                 // the phase list — the thing that breaks the moment a phase is
                 // added, as `cancelled` just was.
                 'is_closed' => in_array($run->phase, self::CLOSED_PHASES, true),
+                // The reading each ordered date column gets, in words.
+                'date_orders' => $run->dateOrderLines(),
                 'initiated_by' => $run->initiated_by,
                 'created_at' => $run->created_at?->toIso8601String(),
             ],

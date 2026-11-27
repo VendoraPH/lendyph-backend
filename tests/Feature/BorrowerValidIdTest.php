@@ -27,6 +27,7 @@ class BorrowerValidIdTest extends TestCase
         $response = $this->postJson("/api/borrowers/{$borrower->id}/valid-ids", [
             'file' => $file,
             'type' => 'PhilSys ID',
+            'id_number' => '1234-5678-9012',
         ]);
 
         $response->assertCreated()

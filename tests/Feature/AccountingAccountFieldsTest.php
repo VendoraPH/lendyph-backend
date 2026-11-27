@@ -176,7 +176,7 @@ class AccountingAccountFieldsTest extends TestCase
         $note = 'Advances to field officers, settled against payroll.';
 
         $created = $this->postJson('/api/accounting/accounts', [
-            'code' => '1180',
+            'code' => '1185',
             'name' => 'Advances to Officers',
             'type' => 'asset',
             'parent_id' => $this->account('1000'),
@@ -391,7 +391,7 @@ class AccountingAccountFieldsTest extends TestCase
         // ever carried — and the ledger rows themselves would be untouched and
         // look perfectly ordinary.
         $this->putJson('/api/accounting/accounts/'.$this->account('1010'), [
-            'code' => '4090',
+            'code' => '4095',
             'type' => 'income',
         ])->assertStatus(422)->assertJsonValidationErrors('type');
 

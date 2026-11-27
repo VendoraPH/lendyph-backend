@@ -5,9 +5,12 @@ namespace Tests\Feature;
 use App\Models\Borrower;
 use App\Models\BorrowerSubmissionToken;
 use App\Models\Branch;
+use App\Models\Role;
 use App\Models\User;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
+use Spatie\Permission\PermissionRegistrar;
 use Tests\TestCase;
 
 class PublicRegistrationTest extends TestCase
@@ -76,6 +79,8 @@ class PublicRegistrationTest extends TestCase
             'employer_or_business' => 'Acme Corp',
             'monthly_income' => 25000,
             'pledge_amount' => 0,
+            'city' => 'Butuan',
+            'province' => 'Agusan del Norte',
         ]);
 
         $response->assertCreated()
@@ -143,6 +148,12 @@ class PublicRegistrationTest extends TestCase
             'last_name' => 'Saved',
             'email' => 'branch-saved@example.com',
             'contact_number' => '09171234588',
+            'birthdate' => '1990-05-12',
+            'civil_status' => 'single',
+            'gender' => 'female',
+            'address' => '12 Mabini St',
+            'city' => 'Butuan',
+            'province' => 'Agusan del Norte',
         ])->assertCreated();
 
         $borrowerId = $response->json('data.id');
@@ -167,6 +178,12 @@ class PublicRegistrationTest extends TestCase
             'last_name' => 'Probe',
             'contact_number' => '09171234500',
             'email' => 'admin-review@example.com',
+            'birthdate' => '1990-05-12',
+            'civil_status' => 'single',
+            'gender' => 'female',
+            'address' => '12 Mabini St',
+            'city' => 'Butuan',
+            'province' => 'Agusan del Norte',
         ])->assertCreated();
 
         $borrowerId = $created->json('data.id');
@@ -189,6 +206,12 @@ class PublicRegistrationTest extends TestCase
             'last_name' => 'Applicant',
             'email' => 'nobranch@example.com',
             'contact_number' => '09171234599',
+            'birthdate' => '1990-05-12',
+            'civil_status' => 'single',
+            'gender' => 'female',
+            'address' => '12 Mabini St',
+            'city' => 'Butuan',
+            'province' => 'Agusan del Norte',
         ]);
 
         $response->assertCreated()
@@ -211,6 +234,12 @@ class PublicRegistrationTest extends TestCase
             'last_name' => 'Created',
             'contact_number' => '09171234567',
             'email' => 'admin-create@example.com',
+            'birthdate' => '1990-05-12',
+            'civil_status' => 'single',
+            'gender' => 'female',
+            'address' => '12 Mabini St',
+            'city' => 'Butuan',
+            'province' => 'Agusan del Norte',
         ]);
 
         $response->assertCreated()
@@ -227,6 +256,12 @@ class PublicRegistrationTest extends TestCase
             'last_name' => 'Tester',
             'email' => 'photo-tester@example.com',
             'contact_number' => '09171234567',
+            'birthdate' => '1990-05-12',
+            'civil_status' => 'single',
+            'gender' => 'female',
+            'address' => '12 Mabini St',
+            'city' => 'Butuan',
+            'province' => 'Agusan del Norte',
         ])->assertCreated();
 
         $borrowerId = $create->json('data.id');
@@ -247,11 +282,23 @@ class PublicRegistrationTest extends TestCase
         $a = $this->postJson('/api/borrowers', [
             'status' => 'pending', 'branch_id' => $this->branch->id,
             'first_name' => 'A', 'last_name' => 'One', 'email' => 'a@x.com', 'contact_number' => '09171000001',
+            'birthdate' => '1990-05-12',
+            'civil_status' => 'single',
+            'gender' => 'female',
+            'address' => '12 Mabini St',
+            'city' => 'Butuan',
+            'province' => 'Agusan del Norte',
         ])->assertCreated();
 
         $b = $this->postJson('/api/borrowers', [
             'status' => 'pending', 'branch_id' => $this->branch->id,
             'first_name' => 'B', 'last_name' => 'Two', 'email' => 'b@x.com', 'contact_number' => '09171000002',
+            'birthdate' => '1991-06-13',
+            'civil_status' => 'single',
+            'gender' => 'female',
+            'address' => '12 Mabini St',
+            'city' => 'Butuan',
+            'province' => 'Agusan del Norte',
         ])->assertCreated();
 
         $bId = $b->json('data.id');
@@ -269,6 +316,12 @@ class PublicRegistrationTest extends TestCase
         $create = $this->postJson('/api/borrowers', [
             'status' => 'pending', 'branch_id' => $this->branch->id,
             'first_name' => 'Exp', 'last_name' => 'Tok', 'email' => 'exp@x.com', 'contact_number' => '09171000003',
+            'birthdate' => '1990-05-12',
+            'civil_status' => 'single',
+            'gender' => 'female',
+            'address' => '12 Mabini St',
+            'city' => 'Butuan',
+            'province' => 'Agusan del Norte',
         ])->assertCreated();
 
         $borrowerId = $create->json('data.id');
@@ -301,6 +354,12 @@ class PublicRegistrationTest extends TestCase
         $create = $this->postJson('/api/borrowers', [
             'status' => 'pending', 'branch_id' => $this->branch->id,
             'first_name' => 'Id', 'last_name' => 'Up', 'email' => 'idup@x.com', 'contact_number' => '09171000004',
+            'birthdate' => '1990-05-12',
+            'civil_status' => 'single',
+            'gender' => 'female',
+            'address' => '12 Mabini St',
+            'city' => 'Butuan',
+            'province' => 'Agusan del Norte',
         ])->assertCreated();
 
         $borrowerId = $create->json('data.id');
@@ -346,6 +405,7 @@ class PublicRegistrationTest extends TestCase
         $this->postJson("/api/borrowers/{$borrower->id}/valid-ids", [
             'type' => 'umid',
             'front_file' => UploadedFile::fake()->image('front.jpg'),
+            'id_number' => '1234-5678-9012',
         ])->assertCreated();
     }
 
@@ -354,6 +414,12 @@ class PublicRegistrationTest extends TestCase
         $create = $this->postJson('/api/borrowers', [
             'status' => 'pending', 'branch_id' => $this->branch->id,
             'first_name' => 'Both', 'last_name' => 'Auth', 'email' => 'both@x.com', 'contact_number' => '09171000005',
+            'birthdate' => '1990-05-12',
+            'civil_status' => 'single',
+            'gender' => 'female',
+            'address' => '12 Mabini St',
+            'city' => 'Butuan',
+            'province' => 'Agusan del Norte',
         ])->assertCreated();
 
         $borrowerId = $create->json('data.id');
@@ -372,39 +438,26 @@ class PublicRegistrationTest extends TestCase
 
     /**
      * Public registration is anonymous and the exact-match tier needs only
-     * first+middle+last name, so naming the match would let anyone confirm that a
-     * given person borrows here and read back their date of birth and borrower
-     * code. Probing leaves no trace either, since the row is only written when
-     * validation passes.
+     * first+middle+last name, so even refusing the match would let anyone
+     * confirm that a given person is on file and probe their birthdate (#356
+     * security review). The applicant gets the ordinary answer instead, and the
+     * match is kept for the reviewer (finish run round 2, decision 3;
+     * PublicRegistrationPossibleDuplicateTest).
      */
     public function test_anonymous_duplicate_does_not_disclose_the_matching_borrower(): void
     {
-        $existing = Borrower::factory()->create([
-            'branch_id' => $this->branch->id,
-            'first_name' => 'Juan',
-            'middle_name' => 'Dela',
-            'last_name' => 'Cruz',
-            'birthdate' => '1990-05-12',
-        ]);
+        $existing = $this->juanDelaCruz();
 
-        $response = $this->postJson('/api/borrowers', [
-            'status' => 'pending',
-            'branch_id' => $this->branch->id,
-            'first_name' => 'Juan',
-            'middle_name' => 'Dela',
-            'last_name' => 'Cruz',
-            'contact_number' => '09171234567',
-            'address' => '123 Mango St',
-        ]);
+        $response = $this->postJson('/api/borrowers', $this->applicant(['status' => 'pending']))
+            ->assertCreated()
+            ->assertJsonStructure(['success', 'data' => ['id', 'submission_token', 'expires_at']]);
 
-        $response->assertStatus(422);
+        $body = $response->getContent();
 
-        $message = implode(' ', $response->json('errors.first_name') ?? []);
-
-        $this->assertStringNotContainsString('1990-05-12', $message);
-        $this->assertStringNotContainsString($existing->borrower_code, $message);
-        $this->assertStringNotContainsString('Juan', $message);
-        $this->assertStringContainsString('contact your branch', $message);
+        $this->assertStringNotContainsString('1990-05-12', $body);
+        $this->assertStringNotContainsString($existing->borrower_code, $body);
+        $this->assertStringNotContainsString('Juan', $body);
+        $this->assertNotSame($existing->id, $response->json('data.id'));
     }
 
     public function test_authenticated_duplicate_still_names_the_match_for_operators(): void
@@ -436,6 +489,87 @@ class PublicRegistrationTest extends TestCase
     }
 
     /**
+     * "Create Anyway" (`force`) is a staff decision, made after seeing the
+     * match (re-scan, 2026-11-24): an anonymous caller's `force` is ignored,
+     * so the public form is always checked. A duplicate applicant is saved
+     * pending with its possible duplicate linked for the reviewer (finish run
+     * round 2, decision 3), and gets the same answer as anyone else.
+     */
+    public function test_an_anonymous_force_is_ignored_so_the_duplicate_check_still_applies(): void
+    {
+        $existing = $this->juanDelaCruz();
+
+        $response = $this->postJson('/api/borrowers', $this->applicant(['status' => 'pending', 'force' => true]))
+            ->assertCreated()
+            ->assertJsonStructure(['data' => ['id', 'submission_token', 'expires_at']]);
+
+        $this->assertStringNotContainsString($existing->borrower_code, $response->getContent());
+        $this->assertSame($existing->id, Borrower::findOrFail($response->json('data.id'))->possible_duplicate_of_id);
+
+        $unmatched = $this->postJson('/api/borrowers', $this->applicant(['status' => 'pending', 'force' => true, 'first_name' => 'Pedro', 'last_name' => 'Penduko']))
+            ->assertCreated()
+            ->assertJsonStructure(['data' => ['id', 'submission_token', 'expires_at']]);
+
+        $this->assertNull(Borrower::findOrFail($unmatched->json('data.id'))->possible_duplicate_of_id);
+    }
+
+    public function test_staff_holding_borrowers_create_may_still_create_anyway_and_no_one_else(): void
+    {
+        $this->juanDelaCruz();
+        $creator = $this->staffWith(['borrowers:view', 'borrowers:create']);
+
+        $this->actingAs($creator)->postJson('/api/borrowers', $this->applicant(['status' => 'active']))
+            ->assertStatus(422)->assertJsonValidationErrors('first_name');
+        $this->actingAs($creator)->postJson('/api/borrowers', $this->applicant(['status' => 'active', 'force' => true]))
+            ->assertCreated();
+
+        $this->actingAs($this->staffWith(['borrowers:view']))->postJson('/api/borrowers', $this->applicant(['status' => 'active', 'force' => true]))
+            ->assertForbidden();
+    }
+
+    private function juanDelaCruz(): Borrower
+    {
+        return Borrower::factory()->create([
+            'branch_id' => $this->branch->id,
+            'first_name' => 'Juan',
+            'middle_name' => 'Dela',
+            'last_name' => 'Cruz',
+            'birthdate' => '1990-05-12',
+        ]);
+    }
+
+    /** @return array<string, mixed> a complete registration for Juan Dela Cruz, born 1990-05-12 */
+    private function applicant(array $overrides = []): array
+    {
+        return [
+            'branch_id' => $this->branch->id,
+            'first_name' => 'Juan',
+            'middle_name' => 'Dela',
+            'last_name' => 'Cruz',
+            'birthdate' => '1990-05-12',
+            'gender' => 'male',
+            'civil_status' => 'married',
+            'contact_number' => '09171234567',
+            'address' => '123 Mango St',
+            'city' => 'Butuan',
+            'province' => 'Agusan del Norte',
+            ...$overrides,
+        ];
+    }
+
+    /** @param  list<string>  $permissions */
+    private function staffWith(array $permissions): User
+    {
+        $role = Role::create(['name' => 'registration_probe_'.Str::lower(Str::random(8)), 'guard_name' => 'web']);
+        $role->givePermissionTo($permissions);
+        $user = User::factory()->inBranches($this->branch)->create();
+        $user->assignRole($role);
+        app(PermissionRegistrar::class)->forgetCachedPermissions();
+
+        return $user;
+    }
+
+    /**
      * A database read — a backup artifact, the nightly db:backup, an injection
      * elsewhere — must not hand over live tokens for every borrower created in
      * the preceding 15 minutes.
@@ -449,6 +583,11 @@ class PublicRegistrationTest extends TestCase
             'last_name' => 'Bautista',
             'contact_number' => '09170001111',
             'address' => '5 Narra St',
+            'birthdate' => '1990-05-12',
+            'civil_status' => 'single',
+            'gender' => 'female',
+            'city' => 'Butuan',
+            'province' => 'Agusan del Norte',
         ])->assertCreated();
 
         $plainText = $response->json('data.submission_token');

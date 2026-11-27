@@ -31,6 +31,19 @@ class UserManagementTest extends TestCase
         );
     }
 
+    /**
+     * A user in Main Branch holding only `loans:view`, so an operator without
+     * `branches:view_all` can manage them: their permissions and branches sit
+     * inside the operator's (MasksUserExistence::callerReachesTarget()).
+     */
+    private function userWithinReachOf(): User
+    {
+        $starting = Role::create(['name' => 'starting_desk', 'guard_name' => 'web', 'is_system' => false]);
+        $starting->syncPermissions(['loans:view']);
+
+        return $this->userWithRole('starting_desk');
+    }
+
     public function test_list_users(): void
     {
         $response = $this->getJson('/api/users');
@@ -371,14 +384,14 @@ class UserManagementTest extends TestCase
             User::factory()->create(['branch_id' => $this->branch->id]),
             fn (User $user) => $user->assignRole($branchAdmin),
         );
-        $target = $this->userWithRole('viewer');
+        $target = $this->userWithinReachOf();
 
         $this->actingAs($operator)
             ->putJson("/api/users/{$target->id}", ['role' => 'loan_officer'])
             ->assertUnprocessable()
             ->assertJsonValidationErrors(['role']);
 
-        $this->assertSame('viewer', $target->fresh()->getRoleNames()->first());
+        $this->assertSame('starting_desk', $target->fresh()->getRoleNames()->first());
     }
 
     public function test_an_operator_can_grant_a_role_within_their_own_permissions(): void
@@ -394,7 +407,7 @@ class UserManagementTest extends TestCase
             User::factory()->create(['branch_id' => $this->branch->id]),
             fn (User $user) => $user->assignRole($branchAdmin),
         );
-        $target = $this->userWithRole('viewer');
+        $target = $this->userWithinReachOf();
 
         $this->actingAs($operator)
             ->putJson("/api/users/{$target->id}", ['role' => 'read_only_desk'])
@@ -465,6 +478,35 @@ class UserManagementTest extends TestCase
 
         $this->assertNotNull($log, 'No role_assigned audit entry was written.');
         $this->assertSame(['role' => 'cashier'], $log->new_values);
+        $this->assertSame('User ninacruz created with role "Cashier" (cashier)', $log->description);
+    }
+
+    public function test_the_audit_descriptions_name_roles_by_their_display_name_and_keep_the_keys(): void
+    {
+        Role::findByName('cashier', 'web')->update(['display_name' => 'Teller']);
+        $target = $this->userWithRole('viewer');
+
+        $this->postJson('/api/users', [
+            'first_name' => 'Lia',
+            'last_name' => 'Reyes',
+            'username' => 'liareyes',
+            'email' => 'lia@test.com',
+            'password' => 'password123',
+            'password_confirmation' => 'password123',
+            'branch_id' => $this->branch->id,
+            'role' => 'cashier',
+        ])->assertCreated();
+        $this->putJson("/api/users/{$target->id}", ['role' => 'cashier'])->assertOk();
+
+        $created = User::where('username', 'liareyes')->firstOrFail();
+        $assigned = AuditLog::where('action', 'role_assigned')->where('auditable_id', $created->id)->firstOrFail();
+        $changed = AuditLog::where('action', 'role_changed')->where('auditable_id', $target->id)->latest('id')->firstOrFail();
+
+        $this->assertSame('User liareyes created with role "Teller" (cashier)', $assigned->description);
+        $this->assertSame(['role' => 'cashier'], $assigned->new_values);
+        $this->assertSame("Role for {$target->username} changed from \"Viewer\" (viewer) to \"Teller\" (cashier)", $changed->description);
+        $this->assertSame(['role' => 'viewer'], $changed->old_values);
+        $this->assertSame(['role' => 'cashier'], $changed->new_values);
     }
 
     public function test_a_role_change_that_changes_nothing_writes_no_audit_entry(): void

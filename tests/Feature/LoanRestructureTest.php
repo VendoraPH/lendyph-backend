@@ -206,8 +206,10 @@ class LoanRestructureTest extends TestCase
         $this->assertSame(3, $newLoan->term);
         $this->assertSame('weekly', $newLoan->frequency);
         $this->assertSame('2026-09-01', $newLoan->start_date->toDateString());
+        // `term` is a length in the product's unit: three months, paid weekly,
+        // with a month counted as 30 days.
         $this->assertSame(
-            Carbon::parse('2026-09-01')->addWeeks(3)->toDateString(),
+            Carbon::parse('2026-09-01')->addDays(90)->toDateString(),
             $newLoan->maturity_date->toDateString(),
         );
 
@@ -217,6 +219,33 @@ class LoanRestructureTest extends TestCase
         $this->assertEqualsWithDelta(500.00, (float) $newLoan->deductions[1]['amount'], 0.01);
         $this->assertEqualsWithDelta(1916.00, (float) $newLoan->total_deductions, 0.01);
         $this->assertEqualsWithDelta(68884.00, (float) $newLoan->net_proceeds, 0.01);
+    }
+
+    public function test_waiving_every_fee_on_a_restructure_charges_no_deductions(): void
+    {
+        // The restructure form sends `[]` when the operator waives every fee,
+        // and its preview shows ₱0. The product's 2% + 1% must not come back.
+        $source = $this->createReleasedLoan();
+
+        $newLoan = $this->restructure($source, ['deductions' => []]);
+
+        $this->assertSame([], $newLoan->deductions);
+        $this->assertEqualsWithDelta(0.00, (float) $newLoan->total_deductions, 0.01);
+        $this->assertEqualsWithDelta(self::SOURCE_OUTSTANDING, (float) $newLoan->net_proceeds, 0.01);
+    }
+
+    public function test_a_restructure_that_omits_deductions_still_charges_the_product_fees(): void
+    {
+        $source = $this->createReleasedLoan();
+
+        $newLoan = $this->restructure($source);
+
+        // The factory product's 2% processing + 1% service on 70,800.
+        $this->assertSame(['Processing Fee', 'Service Fee'], array_column($newLoan->deductions, 'name'));
+        $this->assertEqualsWithDelta(1416.00, (float) $newLoan->deductions[0]['amount'], 0.01);
+        $this->assertEqualsWithDelta(708.00, (float) $newLoan->deductions[1]['amount'], 0.01);
+        $this->assertEqualsWithDelta(2124.00, (float) $newLoan->total_deductions, 0.01);
+        $this->assertEqualsWithDelta(68676.00, (float) $newLoan->net_proceeds, 0.01);
     }
 
     public function test_it_inherits_the_source_co_makers_when_none_are_sent(): void
@@ -413,6 +442,32 @@ class LoanRestructureTest extends TestCase
             ->assertJsonCount(0, 'data.amortization_schedules');
     }
 
+    public function test_a_closed_source_with_no_periods_left_answers_an_empty_schedule(): void
+    {
+        $source = $this->createReleasedLoan(['start_date' => now()->subMonths(8)->toDateString()]);
+        $this->pushToReleased($this->restructure($source));
+
+        $this->assertSame(0, AmortizationSchedule::where('loan_id', $source->id)->count());
+
+        // Released, then closed with nothing paid: an empty schedule is the
+        // answer. It used to be a 422 ("may not have been released yet"),
+        // which every restructured loan page logged as a failed request.
+        $this->getJson("/api/loans/{$source->id}/amortization-schedule")
+            ->assertOk()
+            ->assertJsonCount(0, 'data')
+            ->assertJsonPath('summary.periods_total', 0);
+    }
+
+    public function test_a_loan_that_was_never_released_still_has_no_schedule(): void
+    {
+        $source = $this->createReleasedLoan();
+        $draft = $this->restructure($source);
+
+        $this->getJson("/api/loans/{$draft->id}/amortization-schedule")
+            ->assertUnprocessable()
+            ->assertJsonPath('message', 'No amortization schedule found. Loan may not have been released yet.');
+    }
+
     public function test_a_partially_paid_period_survives_closure_with_payments_reconciling(): void
     {
         $source = $this->createReleasedLoan();
@@ -600,7 +655,9 @@ class LoanRestructureTest extends TestCase
             'principal_amount' => self::SOURCE_OUTSTANDING + 0.01,
         ]))
             ->assertUnprocessable()
-            ->assertJsonValidationErrors('principal_amount');
+            ->assertJsonValidationErrors([
+                'principal_amount' => "The restructured principal cannot exceed the loan's restructurable balance of ₱70,800.00.",
+            ]);
 
         // …but the full ₱70,800 IS accepted, even though the loan's
         // `outstanding_balance` reads ₱60,000: a restructure rolls the interest
@@ -685,6 +742,122 @@ class LoanRestructureTest extends TestCase
     }
 
     // ---------------------------------------------------------------------
+    // Submitting: loans:restructure is enough for a restructure application
+    // ---------------------------------------------------------------------
+
+    /**
+     * A role that can raise a restructure and do nothing else to a loan.
+     */
+    private function restructureOnlyUser(): User
+    {
+        $role = Role::create([
+            'name' => 'restructure_only',
+            'guard_name' => 'web',
+            'is_active' => true,
+            'is_system' => false,
+        ]);
+        $role->syncPermissions(['loans:view', 'loans:restructure']);
+
+        return tap(User::factory()->create(), fn (User $user) => $user->assignRole($role));
+    }
+
+    private function ordinaryDraft(): Loan
+    {
+        return Loan::factory()->create([
+            'status' => 'draft',
+            'branch_id' => $this->branch->id,
+            'created_by' => $this->admin->id,
+        ]);
+    }
+
+    public function test_a_restructure_only_role_can_submit_its_restructure_application(): void
+    {
+        $source = $this->createReleasedLoan();
+        $clerk = $this->restructureOnlyUser();
+        $this->assertFalse($clerk->can('loans:update'));
+
+        $this->actingAs($clerk);
+        $newLoan = $this->restructure($source);
+
+        $this->patchJson("/api/loans/{$newLoan->id}/submit")
+            ->assertOk()
+            ->assertJsonPath('data.status', 'for_review');
+
+        $this->assertSame('for_review', $newLoan->fresh()->status);
+        $this->assertSame(
+            $clerk->id,
+            (int) $newLoan->approvalSteps()->where('step_order', 0)->value('acted_by'),
+            'The chain records the clerk as the one who submitted it.',
+        );
+    }
+
+    public function test_a_restructure_only_role_cannot_submit_any_other_application(): void
+    {
+        $draft = $this->ordinaryDraft();
+
+        $this->actingAs($this->restructureOnlyUser());
+
+        $this->patchJson("/api/loans/{$draft->id}/submit")->assertForbidden();
+        $this->assertSame('draft', $draft->fresh()->status);
+    }
+
+    public function test_a_restructure_only_role_still_cannot_edit_a_loan(): void
+    {
+        $source = $this->createReleasedLoan();
+        $ordinary = $this->ordinaryDraft();
+        $clerk = $this->restructureOnlyUser();
+
+        $this->actingAs($clerk);
+        $newLoan = $this->restructure($source);
+
+        // Not another application, and not its own restructure application either.
+        foreach ([$ordinary, $newLoan] as $loan) {
+            $this->patchJson("/api/loans/{$loan->id}", ['purpose' => 'Edited'])->assertForbidden();
+            $this->putJson("/api/loans/{$loan->id}", ['purpose' => 'Edited'])->assertForbidden();
+        }
+
+        $this->assertNotSame('Edited', $ordinary->fresh()->purpose);
+        $this->assertNotSame('Edited', $newLoan->fresh()->purpose);
+    }
+
+    public function test_a_role_with_neither_permission_cannot_submit_a_restructure_application(): void
+    {
+        $source = $this->createReleasedLoan();
+        $newLoan = $this->restructure($source);
+
+        $this->actingAs($this->userWithRole('viewer'));
+
+        $this->patchJson("/api/loans/{$newLoan->id}/submit")->assertForbidden();
+        $this->assertSame('draft', $newLoan->fresh()->status);
+    }
+
+    public function test_loans_update_still_submits_both_kinds_of_application(): void
+    {
+        $source = $this->createReleasedLoan();
+        $newLoan = $this->restructure($source);
+        $ordinary = $this->ordinaryDraft();
+
+        $role = Role::create([
+            'name' => 'update_only_editor',
+            'guard_name' => 'web',
+            'is_active' => true,
+            'is_system' => false,
+        ]);
+        $role->syncPermissions(['loans:view', 'loans:update']);
+        $editor = tap(User::factory()->create(), fn (User $user) => $user->assignRole($role));
+        $this->assertFalse($editor->can('loans:restructure'));
+
+        $this->actingAs($editor);
+
+        $this->patchJson("/api/loans/{$newLoan->id}/submit")
+            ->assertOk()
+            ->assertJsonPath('data.status', 'for_review');
+        $this->patchJson("/api/loans/{$ordinary->id}/submit")
+            ->assertOk()
+            ->assertJsonPath('data.status', 'for_review');
+    }
+
+    // ---------------------------------------------------------------------
     // Read surfaces
     // ---------------------------------------------------------------------
 
@@ -761,7 +934,10 @@ class LoanRestructureTest extends TestCase
         $this->postJson("/api/loans/{$another->id}/restructure", $this->payloadFor($another, [
             'principal_amount' => 50000,
             'remarks' => 'Borrower cannot service the full amount',
-        ]))->assertForbidden();
+        ]))
+            ->assertForbidden()
+            ->assertJsonPath('message', 'Writing off part of the balance requires the Loans: Write off permission. '
+                .'Restructure the full outstanding balance of ₱70,800.00 instead.');
 
         $this->assertSame(0, Loan::where('source_loan_id', $another->id)->count());
     }
@@ -988,7 +1164,9 @@ class LoanRestructureTest extends TestCase
 
         $this->patchJson("/api/loans/{$newLoan->id}", ['principal_amount' => self::SOURCE_OUTSTANDING + 10000])
             ->assertUnprocessable()
-            ->assertJsonValidationErrors('principal_amount');
+            ->assertJsonValidationErrors([
+                'principal_amount' => "The restructured principal cannot exceed the loan's restructurable balance of ₱70,800.00.",
+            ]);
     }
 
     public function test_release_refuses_when_the_principal_no_longer_matches_the_approved_terms(): void
@@ -1144,14 +1322,22 @@ class LoanRestructureTest extends TestCase
         $this->assertSame($coMakerBorrower->last_name, $linked[0]->last_name);
     }
 
-    public function test_an_existing_co_maker_id_is_also_accepted(): void
+    public function test_a_bare_co_maker_record_id_is_now_rejected_on_restructure(): void
     {
+        // Restructure now reads `co_maker_ids` as member (borrower) ids only,
+        // exactly like POST /loans — a bare co-maker record id no longer
+        // resolves to anything.
         $source = $this->createReleasedLoan();
         $coMaker = CoMaker::factory()->create(['borrower_id' => $source->borrower_id]);
 
-        $newLoan = $this->restructure($source, ['co_maker_ids' => [$coMaker->id]]);
+        $this->postJson("/api/loans/{$source->id}/restructure", $this->payloadFor($source, [
+            'co_maker_ids' => [$coMaker->id],
+        ]))
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors('co_maker_ids.0');
 
-        $this->assertSame([$coMaker->id], $newLoan->coMakers()->pluck('co_makers.id')->all());
+        $this->assertSame(0, Loan::where('source_loan_id', $source->id)->count());
+        $this->assertSame(1, CoMaker::count(), 'no new co-maker record should have been created for a rejected id');
     }
 
     public function test_a_co_maker_id_matching_nothing_at_all_is_rejected(): void

@@ -4,10 +4,14 @@ namespace App\Services;
 
 use App\Models\Borrower;
 use App\Models\CsvImportRow;
+use App\Models\LindaQuestion;
+use App\Models\PortalUser;
+use App\Services\Amla\Foundation\AmlaMemberRecords;
 use App\Services\CsvImport\CsvImportRowRedactor;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Validation\ValidationException;
 
 /**
  * Deletes a borrower and everything that hangs off it.
@@ -37,6 +41,14 @@ use Illuminate\Support\Facades\Storage;
  */
 class BorrowerPurgeService
 {
+    public const HAS_PORTAL_ACCOUNT = 'This member has a member portal account, so the record can\'t be deleted. Turn off portal access instead.';
+
+    /**
+     * The refusal for a member whose records must be kept (AMLA design §4.17).
+     * Generic on purpose: it never says which records, so it tips nobody off.
+     */
+    public const RECORDS_KEPT = 'This member\'s records must be kept, so the record can\'t be deleted.';
+
     public function __construct(private readonly CsvImportRowRedactor $redactor) {}
 
     /**
@@ -52,6 +64,25 @@ class BorrowerPurgeService
      */
     public function purge(Borrower $borrower, bool $audit = true): void
     {
+        // A member portal account is kept for good (its sign-in history and the
+        // audit rows naming it), and `portal_users.borrower_id` restricts the
+        // delete. Refused in words before anything is touched (portal design
+        // §0, finding 9).
+        if (PortalUser::query()->where('borrower_id', $borrower->getKey())->exists()) {
+            throw ValidationException::withMessages([
+                'borrower' => [self::HAS_PORTAL_ACCOUNT],
+            ]);
+        }
+
+        // AMLA records (a profile, an event, an alert, a case, a report…) are
+        // kept forever and restrict the delete. Refused in words that don't
+        // say why, before anything is touched, never a 500 naming a table.
+        if (app(AmlaMemberRecords::class)->holdsMember((int) $borrower->getKey())) {
+            throw ValidationException::withMessages([
+                'borrower' => [self::RECORDS_KEPT],
+            ]);
+        }
+
         $disk = Storage::disk('private');
 
         /*
@@ -79,6 +110,10 @@ class BorrowerPurgeService
                     $paths[] = $document->file_path;
                 }
                 $coMaker->documents()->delete();
+
+                // A co-maker's valid IDs land in their own directory, which
+                // the cascade on `co_makers` would otherwise leave behind.
+                $directories[] = ValidIdService::directoryFor($coMaker);
             }
 
             foreach ($borrower->documents as $document) {
@@ -94,7 +129,7 @@ class BorrowerPurgeService
             // documents/valid_id/borrower/{id}/ and borrowers/photos/{id}/, and
             // deleting only the files leaves an empty tree behind that grows by
             // one directory per abandoned application.
-            $directories[] = "documents/valid_id/borrower/{$borrower->id}";
+            $directories[] = ValidIdService::directoryFor($borrower);
             $directories[] = "borrowers/photos/{$borrower->id}";
 
             /*
@@ -189,6 +224,8 @@ class BorrowerPurgeService
                 }),
             );
 
+            $this->removeFromLindaLog($borrower);
+
             // Both are restrictOnDelete; the pledge always exists.
             $borrower->shareCapitalLedger()->delete();
             $borrower->shareCapitalPledge()->delete();
@@ -214,5 +251,30 @@ class BorrowerPurgeService
                 $disk->deleteDirectory($directory);
             }
         });
+    }
+
+    /**
+     * Take the member's id out of every Linda log row whose answer listed
+     * them (Linda v1 plan, "Privacy and the log"). The rest of each row stays:
+     * it names no one else. Runs inside the purge's transaction, so a purge
+     * that fails leaves the log as it was. A row left listing nobody keeps an
+     * empty list.
+     */
+    private function removeFromLindaLog(Borrower $borrower): void
+    {
+        $memberId = (int) $borrower->getKey();
+
+        LindaQuestion::query()
+            ->whereJsonContains('member_ids', $memberId)
+            ->select(['id', 'member_ids'])
+            ->lazyById(500)
+            ->each(function (LindaQuestion $row) use ($memberId): void {
+                $remaining = array_values(array_filter(
+                    (array) $row->member_ids,
+                    fn (mixed $id): bool => (int) $id !== $memberId,
+                ));
+
+                LindaQuestion::query()->whereKey($row->getKey())->update(['member_ids' => json_encode($remaining)]);
+            });
     }
 }

@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Support\StaffRouteBinding;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
@@ -47,5 +48,29 @@ class ShareCapitalPledge extends Model
     public function scopeForMembers($query)
     {
         return $query->whereHas('borrower', fn ($q) => $q->members());
+    }
+
+    /**
+     * Pledges of members whose membership hasn't ended
+     * (Borrower::scopeCurrentMembers()): what auto-credit posts for. A
+     * withdrawn or deceased member's pledge is never credited again.
+     */
+    public function scopeForCurrentMembers($query)
+    {
+        return $query->whereHas('borrower', fn ($q) => $q->currentMembers());
+    }
+
+    /**
+     * Every `{pledge}` route parameter resolves only to a row whose member
+     * the signed-in user may see (Borrower::visibleTo), so another branch's
+     * row answers 404 before any validation runs. Without a signed-in user the
+     * binding is unscoped.
+     */
+    public function resolveRouteBindingQuery($query, $value, $field = null)
+    {
+        return StaffRouteBinding::scope(
+            parent::resolveRouteBindingQuery($query, $value, $field),
+            fn ($query, User $user) => $query->whereHas('borrower', fn ($q) => $q->visibleTo($user)),
+        );
     }
 }

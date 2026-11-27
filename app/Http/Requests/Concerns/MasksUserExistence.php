@@ -4,6 +4,7 @@ namespace App\Http\Requests\Concerns;
 
 use App\Models\User;
 use App\Services\AuditLogService;
+use App\Services\UserReach;
 use Illuminate\Database\Eloquent\ModelNotFoundException;
 use Throwable;
 
@@ -68,9 +69,9 @@ trait MasksUserExistence
      * would answer `{"message": ""}` and simply move the oracle.
      *
      * It relies on stock Laravel 404 rendering, which is why `withExceptions`
-     * in bootstrap/app.php is deliberately left empty. A custom renderer for
-     * NotFoundHttpException would have to reproduce this byte for byte or it
-     * re-opens the hole.
+     * in bootstrap/app.php renders nothing but AuthenticationException. A
+     * custom renderer for NotFoundHttpException would have to reproduce this
+     * byte for byte or it re-opens the hole.
      *
      * A caller who DOES hold the permission still gets the honest 404 from the
      * binding — they are allowed to know an id does not exist.
@@ -121,6 +122,19 @@ trait MasksUserExistence
     {
         $this->recordRefusal(self::REFUSAL_TARGET_REFUSED);
         $this->refuseAsMissingUser();
+    }
+
+    /**
+     * Whether a caller without `branches:view_all` may manage $target at all.
+     *
+     * The rule lives in App\Services\UserReach, which `GET /users` also uses
+     * for each row's `can_manage`, so the list and these requests agree.
+     * Callers with `view_all` are unaffected here; their boundary is
+     * canManageAccount().
+     */
+    protected function callerReachesTarget(User $actor, User $target): bool
+    {
+        return UserReach::of($actor)->reaches($target);
     }
 
     /**

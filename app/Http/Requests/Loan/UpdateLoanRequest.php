@@ -2,20 +2,51 @@
 
 namespace App\Http\Requests\Loan;
 
+use App\Http\Requests\Concerns\DateInputMessages;
+use App\Http\Requests\Concerns\ExcludesRejectedBorrowers;
+use App\Http\Requests\Concerns\RequiresActiveAccountOfficer;
+use App\Http\Requests\Concerns\ValidatesDeductionAmounts;
+use App\Http\Requests\Concerns\ValidatesLoanCollaterals;
+use App\Rules\NotAFormerMember;
+use Closure;
 use Illuminate\Foundation\Http\FormRequest;
+use Illuminate\Validation\Validator;
 
 class UpdateLoanRequest extends FormRequest
 {
+    use ExcludesRejectedBorrowers, RequiresActiveAccountOfficer, ValidatesDeductionAmounts, ValidatesLoanCollaterals;
+
+    /**
+     * A request that carries `collaterals`, whatever its value, is asking to
+     * attach and detach collateral, so it also needs `collaterals:update`: the
+     * same pair of permissions the attach and detach endpoints require.
+     */
     public function authorize(): bool
     {
-        return $this->user()->can('loans:update');
+        if (! $this->user()->can('loans:update')) {
+            return false;
+        }
+
+        return ! $this->exists('collaterals') || $this->user()->can('collaterals:update');
     }
 
     public function rules(): array
     {
         return [
             'co_maker_ids' => ['nullable', 'array'],
-            'co_maker_ids.*' => ['exists:co_makers,id'],
+            // MEMBER ids only — all the loan form's co-maker picker sends —
+            // never a co-maker record id: the two are separate sequences, so a
+            // number accepted as either can name two different people. See
+            // LoanService::coMakerIdsForMembers(). The same rule as the
+            // principal borrower on StoreLoanRequest, because a co-maker is
+            // jointly liable: a rejected registration must not become one.
+            // `bail`: an id outside the caller's branches stops at `exists`, so the
+            // former-member rule never names another branch's member.
+            'co_maker_ids.*' => ['bail', 'integer', $this->nonRejectedBorrowerRule(), new NotAFormerMember(NotAFormerMember::AS_CO_MAKER)],
+            // Sent by the edit form's account-officer picker. Without a rule the
+            // value never reached validated(), so a draft's officer could be
+            // changed on screen and silently not saved.
+            'account_officer_id' => ['nullable', 'integer', $this->activeAccountOfficerRule()],
             'principal_amount' => ['sometimes', 'numeric', 'min:1'],
             'purpose' => ['nullable', 'string', 'max:500'],
             // Only consumed when the principal of a RESTRUCTURE is being changed:
@@ -23,15 +54,56 @@ class UpdateLoanRequest extends FormRequest
             // no `remarks` column on loans, so it never reaches the row itself —
             // LoanService maps it onto `restructure_remarks`.
             'remarks' => ['nullable', 'string', 'max:1000'],
-            'interest_rate' => ['nullable', 'numeric', 'min:0', 'max:100'],
-            'start_date' => ['sometimes', 'date'],
-            'scb_amount' => ['nullable', 'numeric', 'min:0'],
-            'policy_exception' => ['nullable', 'boolean'],
+            'interest_rate' => ['sometimes', 'numeric', 'min:0', 'max:100', 'decimal:0,4'],
+            'start_date' => ['sometimes', 'date', 'date_format:Y-m-d'],
+            'scb_amount' => ['sometimes', 'numeric', 'min:0'],
+            'policy_exception' => ['sometimes', 'boolean'],
             'policy_exception_details' => ['nullable', 'string', 'max:2000'],
             'deductions' => ['nullable', 'array'],
             'deductions.*.name' => ['required_with:deductions', 'string', 'max:255'],
-            'deductions.*.amount' => ['required_with:deductions', 'numeric', 'min:0'],
+            'deductions.*.amount' => $this->deductionAmountRule(),
             'deductions.*.type' => ['required_with:deductions', 'in:fixed,percentage'],
+            // The loan's complete collateral list. Absent: collateral is left
+            // exactly as it is. A list, `[]` included, is what the loan should
+            // hold afterwards; LoanService::updateLoan() detaches the rest and
+            // attaches the new ones, each at the server's value (a sent
+            // `snapshot_value` is ignored). `null` is refused rather than read
+            // as either, because the two mean opposite things.
+            'collaterals' => ['sometimes', 'list'],
+            'collaterals.*.collateral_id' => [...$this->collateralIdRules(), 'distinct'],
+        ];
+    }
+
+    /**
+     * The member is fixed after creation, so a loan whose member has since
+     * withdrawn or died is refused here instead (C1 review, H1).
+     *
+     * @return list<Closure(Validator): void>
+     */
+    public function after(): array
+    {
+        return [
+            function (Validator $validator): void {
+                $member = $this->route('loan')?->borrower;
+
+                if ($member !== null && $member->isFormerMember()) {
+                    $validator->errors()->add('borrower_id', NotAFormerMember::messageFor($member));
+                }
+            },
+        ];
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    public function messages(): array
+    {
+        return [
+            ...DateInputMessages::calendar(['start_date' => 'start date']),
+            'co_maker_ids.*.exists' => 'Each co-maker must be an existing member who was not rejected.',
+            'account_officer_id.exists' => $this->activeAccountOfficerMessage(),
+            'collaterals.*.collateral_id.exists' => $this->notThisLoansBorrowerMessage(),
+            'collaterals.*.collateral_id.distinct' => 'Each collateral can be listed only once.',
         ];
     }
 }

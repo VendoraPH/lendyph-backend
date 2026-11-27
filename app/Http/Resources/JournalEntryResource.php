@@ -5,10 +5,17 @@ namespace App\Http\Resources;
 use App\Models\AccountingExpense;
 use App\Models\AccountingExpensePayment;
 use App\Models\AccountingJournal;
+use App\Models\GCashTransaction;
 use App\Models\Loan;
+use App\Models\LoanAdjustment;
 use App\Models\Repayment;
+use App\Models\ShareCapitalLedger;
 use App\Services\Accounting\AutomaticPoster;
+use App\Services\Accounting\ExpenseJournalGuard;
 use App\Services\Accounting\ExpenseRecorder;
+use App\Services\Branches\InterbranchTransferJournalGuard;
+use App\Services\GCashJournalGuard;
+use App\Services\Savings\SavingsJournalGuard;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\JsonResource;
 use Illuminate\Support\Str;
@@ -80,19 +87,24 @@ class JournalEntryResource extends JsonResource
     /**
      * The stable public name for each class that reaches `postable_type`.
      *
-     * These four are the only ones any production path writes:
+     * The lending and expense documents a production path writes:
      * {@see AutomaticPoster::loanRelease()} posts a
      * Loan (`loan_release`), `loanCollection()` a Repayment
      * (`loan_collection`), and {@see ExpenseRecorder}
      * an AccountingExpense (`expense`/`payable`) and an AccountingExpensePayment
      * (`payable`).
      *
-     * AutomaticPoster also exposes `loanFee()`, `creditLossProvision()`,
-     * `fundTransfer()` and `walletCharge()`, which each take an untyped
-     * `Model $postable` and so can put ANY class in this column. No lending
-     * flow calls them yet — but they are public, so an unmapped class is a
-     * case that has to answer something rather than throw. See
-     * {@see self::postableAlias()}.
+     * Phase 2 adds three documents: a balance adjustment
+     * (`loan_adjustment`, {@see AutomaticPoster::balanceAdjustment()}), a
+     * share capital entry (`share_capital_entry`,
+     * {@see AutomaticPoster::shareCapitalEntry()}) and a GCash transaction
+     * (`gcash_transaction`, {@see AutomaticPoster::gcashTransaction()}).
+     *
+     * AutomaticPoster also exposes `allowanceAdjustment()`, `loanFee()`,
+     * `creditLossProvision()`, `fundTransfer()` and `walletCharge()`, which
+     * each take an untyped `Model $postable` and so can put ANY class in this
+     * column, so an unmapped class is a case that has to answer something
+     * rather than throw. See {@see self::postableAlias()}.
      *
      * Adding an entry here is a contract change on both sides, which is why it
      * is a curated constant and not `class_basename()` for everything.
@@ -102,10 +114,18 @@ class JournalEntryResource extends JsonResource
         Repayment::class => 'repayment',
         AccountingExpense::class => 'expense',
         AccountingExpensePayment::class => 'expense_payment',
+        LoanAdjustment::class => 'loan_adjustment',
+        ShareCapitalLedger::class => 'share_capital_entry',
+        GCashTransaction::class => 'gcash_transaction',
     ];
 
     public function toArray(Request $request): array
     {
+        $notReversibleReason = SavingsJournalGuard::reasonNotReversible($this->resource)
+            ?? InterbranchTransferJournalGuard::reasonNotReversible($this->resource)
+            ?? GCashJournalGuard::reasonNotReversible($this->resource)
+            ?? ExpenseJournalGuard::reasonNotReversible($this->resource);
+
         return [
             'id' => $this->id,
             'journal_no' => (string) ($this->journal_no ?? ''),
@@ -117,12 +137,25 @@ class JournalEntryResource extends JsonResource
             'branch_name' => $this->whenLoaded('branch', fn () => $this->branch?->name),
             'status' => $this->status,
             'lines' => JournalLineResource::collection($this->whenLoaded('lines')),
-            // Centavos, server-computed from the persisted lines on post. Equal
-            // on anything that is not a draft.
-            'total_debit' => (int) $this->total_debit,
-            'total_credit' => (int) $this->total_credit,
+            // Centavos. Stored from the persisted lines on post, equal on
+            // anything that is not a draft; a draft stores none yet, so it reads
+            // its lines (self::totalOf()).
+            'total_debit' => $this->totalOf('debit'),
+            'total_credit' => $this->totalOf('credit'),
             'reverses_journal_id' => $this->reverses_journal_id,
+            'reverses_journal_no' => $this->reversesJournalNo(),
             'reversed_by_journal_id' => $this->reversed_by_journal_id,
+            // False only for an entry Savings posted, which is reversed from
+            // Savings (SavingsJournalGuard), one an interbranch transfer
+            // posted, which is reversed from the transfer
+            // (InterbranchTransferJournalGuard), a GCash Cash In or Cash
+            // Out, which nothing reverses (GCashJournalGuard), or an expense's
+            // or a payment's entry, which is reversed from Expenses & Payables,
+            // and the reversal of one (ExpenseJournalGuard); the screen hides
+            // Reverse and shows the reason. Status checks (draft, already
+            // reversed) stay as they were.
+            'reversible' => $notReversibleReason === null,
+            'not_reversible_reason' => $notReversibleReason,
             // The document that caused this entry. All three are null together
             // and legitimately so: a fund transfer IS the document rather than
             // being raised by one (FundTransferRecorder), a reversal points at
@@ -137,6 +170,37 @@ class JournalEntryResource extends JsonResource
             'posted_by' => $this->whenLoaded('poster', fn () => $this->poster?->full_name),
             'posted_at' => $this->posted_at,
         ];
+    }
+
+    /**
+     * A journal's total on one side, in centavos: the stored figure, or a
+     * draft's lines added up, so a draft never reads ₱0.00. Every caller loads
+     * the lines; a draft without them answers the stored figure rather than one
+     * query per row.
+     */
+    private function totalOf(string $side): int
+    {
+        if ($this->status === 'draft' && $this->relationLoaded('lines')) {
+            return $this->lines->sum(fn ($line): int => (int) $line->{$side});
+        }
+
+        return (int) $this->{"total_{$side}"};
+    }
+
+    /**
+     * The number of the entry this reversal undoes, so a reversal page needs
+     * no second request for it. Null, with no query, on anything that isn't a
+     * reversal. On a reversal it reads the eager-loaded `reverses` relation
+     * (every journal route loads it), and is absent rather than one query per
+     * row when a caller forgets to.
+     */
+    private function reversesJournalNo(): mixed
+    {
+        if ($this->reverses_journal_id === null) {
+            return null;
+        }
+
+        return $this->whenLoaded('reverses', fn (): ?string => $this->reverses?->journal_no);
     }
 
     /**

@@ -4,15 +4,25 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Api\Traits\CsvExportTrait;
 use App\Http\Controllers\Controller;
+use App\Http\Requests\Concerns\DateInputMessages;
+use App\Http\Resources\BorrowerReleasedResource;
+use App\Http\Resources\IncomeByLoanResource;
 use App\Http\Resources\LoanResource;
 use App\Http\Resources\RepaymentResource;
 use App\Models\AmortizationSchedule;
 use App\Models\Borrower;
 use App\Models\Loan;
+use App\Models\LoanProduct;
+use App\Models\User;
+use App\Services\BranchAccess;
+use App\Services\ContactVisibility;
+use App\Services\Dashboard\MetricCatalog;
 use App\Services\ReportService;
 use Carbon\Carbon;
+use Illuminate\Auth\Access\AuthorizationException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
+use Illuminate\Http\Resources\Json\JsonResource;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\ValidationException;
 use OpenApi\Attributes as OA;
@@ -21,6 +31,8 @@ use Symfony\Component\HttpFoundation\StreamedResponse;
 class ReportController extends Controller
 {
     use CsvExportTrait;
+
+    public const SHARE_CAPITAL_REFUSAL = 'The Share Capital report shows members\' share capital, so it needs the permission to view share capital as well as the permission to view reports.';
 
     public function __construct(private ReportService $reportService) {}
 
@@ -58,12 +70,13 @@ class ReportController extends Controller
     private function reportFilters(array $extra = []): array
     {
         $filters = request()->validate(array_merge([
-            'date' => ['nullable', 'date'],
-            'as_of_date' => ['nullable', 'date'],
-            'date_from' => ['nullable', 'date'],
+            'date' => ['nullable', 'date', 'date_format:Y-m-d'],
+            'as_of_date' => ['nullable', 'date', 'date_format:Y-m-d'],
+            'date_from' => ['nullable', 'date', 'date_format:Y-m-d'],
             'date_to' => array_values(array_filter([
                 'nullable',
                 'date',
+                'date_format:Y-m-d',
                 // Only a cross-field rule when there is a field to compare to.
                 request()->filled('date_from') ? 'after_or_equal:date_from' : null,
             ])),
@@ -79,12 +92,44 @@ class ReportController extends Controller
             // LoanController::index() for the original write-up.
             'branch_id' => ['nullable', 'integer', 'min:1'],
             'loan_id' => ['nullable', 'integer', 'min:1'],
+            // The executive dashboard's filters (Phase 6 EB-A): a loan
+            // product, the loan's account officer, and the collector (the
+            // user who recorded a payment). Each report applies the ones it
+            // can and lists them in `filters_applied` (MetricCatalog::REPORTS).
+            'product_id' => ['nullable', 'integer', 'min:1'],
+            'officer_id' => ['nullable', 'integer', 'min:1'],
+            'collector_id' => ['nullable', 'integer', 'min:1'],
             'per_page' => ['nullable', 'integer', 'min:1', 'max:1000'],
-        ], $extra));
+        ], $extra), DateInputMessages::calendar(['date' => 'day', 'as_of_date' => 'report date', 'date_from' => 'start date', 'date_to' => 'end date']));
 
         $this->assertSpanWithinCap($filters);
 
+        // Decision B2 (least privilege): a caller without `branches:view_all`
+        // reports on their own branches only. A `branch_id` outside them is
+        // refused (403); without one, every branch they hold is included
+        // (`branch_ids`, read by ReportService::branchScope()). Set here, so
+        // every report, its row details, its totals and its CSV export share
+        // one scope. Null for `branches:view_all`: the whole organisation.
+        $access = app(BranchAccess::class);
+        $access->authorizeBranchFilter(request()->user(), $filters['branch_id'] ?? null);
+        $filters['branch_ids'] = $access->for(request()->user());
+
         return $filters;
+    }
+
+    /**
+     * A report built from the shared filters, with what it did with the
+     * executive dashboard's filters (`filters_applied`, `filters_applied_to`;
+     * MetricCatalog::filtersApplied()) added to its payload.
+     *
+     * @param  callable(array<string, mixed>): array<string, mixed>  $build
+     * @return array<string, mixed>
+     */
+    private function reportData(string $report, callable $build): array
+    {
+        $filters = $this->reportFilters();
+
+        return [...$build($filters), ...MetricCatalog::filtersApplied($report, $filters)];
     }
 
     /**
@@ -158,7 +203,7 @@ class ReportController extends Controller
     #[OA\Get(
         path: '/api/reports/statement-of-account/{loan}',
         summary: 'Statement of Account',
-        description: 'All transactions, schedule, and balance for a specific loan',
+        description: 'All transactions, schedule, and balance for a specific loan. Each `amortization_schedule` row also carries the demand letter\'s arrears: `remaining` (`principal`, `interest`, `penalty` still owed, never below 0), `amount_due` (their sum), `days_overdue` (whole days past the due date, today in Asia/Manila; 0 when not yet due) and `is_overdue` (due before today with something still owed). `total_demanded` is every `is_overdue` row\'s `amount_due` plus, when there are any, the insurance premium still owed (a payment takes it first), and `demand_totals` (`principal`, `interest`, `penalty`, `amount_due`) the columns over those rows, with `insurance_owed` the premium included in `total_demanded`. `as_of` is today in the app timezone. `loan.status_label` is "Past Due" when a released or ongoing loan has a Past Due amount above 0, otherwise the app\'s label, and `loan.has_build_up` says whether the loan has a Share Capital Build-Up. `amortization_schedule[].total_due` and `schedule_totals.total_due` include penalty; `build_up_due` is the period\'s build-up and `total_payment` adds it. `total_paid` is the period\'s principal, interest and penalty paid, so `total_due` less `total_paid` is its `amount_remaining`, and `amount_paid` stays principal and interest. `schedule_note` is set when an applied balance adjustment, restructure or term extension restated the schedule, or an extension replaced a period; a row an extension closed or added carries its own `note`, null otherwise. `schedule_totals.balance` is the rows\' `amount_remaining` added up. `transactions[]` lists the loan\'s Ledger rows in its order, each with `kind` (the Ledger\'s), `type` (`release`, `charge`, `payment`, `adjustment`, or `paid_before_import`: on a loan the CSV importer brought in, what its file says was paid before the import, whose principal, interest and penalty parts add up to its credit and which has no receipt), `description` (alias `particulars`), `debit`, `credit` and `voided`: the release first (a debit of principal and interest), then, when the loan had a premium owed, `kind` `insurance_debit` (a debit of what is still owed plus what was collected), penalty charges, payments, waivers, extension interest and adjustments. A voided payment stays listed with `voided` true, its receipt\'s `amount_paid`, null `debit` and `credit` and zero parts, so it moves no balance and no total; its void has no line of its own. Each line has `payment_method` (label), `reference_number`, `principal_applied`, `interest_applied`, `penalty_applied`, `insurance_applied`, `build_up_applied`, `overpayment_applied` (the excess not credited to build-up, also totalled in `transaction_totals`; positive lowers the balance and negative raises it, except build-up and the overpayment, which lower none; on every line that is not voided credit minus debit equals its principal, interest, penalty and premium, and a payment\'s `amount_paid`, the full receipt, is its `credit` plus build-up and overpayment). `transaction_totals.debit` less `transaction_totals.credit` is `summary.outstanding_balance`, and `principal_balance`, closing on GET /loans/{id}/ledger `closing.principal`; `balance` is its alias for one release. `running_balance` keeps principal plus premium. A line that is not a payment has `amount_paid` 0 and its figure in `credit` when it lowered what is owed, `debit` when it raised it, and `transaction_totals.credit` is not `summary.total_paid`, which is the money received. `loan` also carries `product_name`, `released_at`, `member_address`, `branch_name`, `account_officer_name`, `payment_frequency`, `interest_type`, `term_label`, `rate_label` and `extensions_count`. `summary` also carries `principal_paid`, `interest_paid`, `penalty_paid`, `insurance_paid`, `build_up_paid` and `overpayment_paid` (the excess a payment could not credit), which add up to `total_paid`. On a loan the CSV importer brought in, `total_paid` and the principal, interest and penalty paid also hold `paid_before_import`: what its file says was paid before the import (the Ledger\'s "Paid before the loan was imported" line), which no receipt records; it is 0 on any other loan. `transaction_totals.amount_paid` adds up the posted receipts (the Receipt Amount column), so on an imported loan it is less than `total_paid`; `insurance_owed`, inside `outstanding_balance`, and `overdue_amount`: the principal, interest and penalty still unpaid on late periods (past the due date plus the loan\'s grace), equal to GET /loans/{id}/summary `overdue_amount`. Each schedule row also carries `amount_remaining`, its principal, interest and penalty still owed. Totals in whole centavos. `loan.member_address` and `borrower.address` are null for a caller without `borrowers:view` or who cannot see the member\'s branch.',
         tags: ['Reports'],
         security: [['sanctum' => []]],
         parameters: [
@@ -174,14 +219,14 @@ class ReportController extends Controller
         $this->authorize('reports:view');
 
         return response()->json([
-            'data' => $this->reportService->statementOfAccount($loan),
+            'data' => $this->withoutMemberContact($this->reportService->statementOfAccount($loan), $loan->borrower?->branch_id),
         ]);
     }
 
     #[OA\Get(
         path: '/api/reports/subsidiary-ledger/{borrower}',
         summary: 'Subsidiary Ledger',
-        description: 'All loans with balances and payment history for a borrower',
+        description: 'All loans with balances and payment history for a member. Each loan row\'s `total_outstanding` is everything still owed (the periods\' unpaid principal, interest and penalty plus the insurance premium owed) and `outstanding_principal` is the unpaid principal only, both in whole centavos and equal to GET /loans/{id}/summary. `outstanding_balance` is deprecated (unpaid principal plus premium owed, never interest or penalty); read `total_outstanding` or `outstanding_principal` instead. `display_status` is `past_due` for a released or ongoing loan past grace, else its status (`status` is unchanged). `overdue_amount` is what the loan\'s late periods (unpaid and past grace) still owe, the Past Due Loans report\'s per-loan figure and GET /loans/{id}/summary `overdue_amount`. Each loan row\'s `total_paid` is its posted receipts dated in the range plus, on a loan the CSV importer brought in, `paid_before_import` (what its file says was paid before the import) when the range holds the loan\'s release date, the day its Ledger dates that line. `loans_totals` adds up the `loans` table\'s columns (`principal_amount`, `total_paid`, `paid_before_import`, `outstanding_balance`, `total_outstanding`, `outstanding_principal`, `overdue_amount` in whole centavos, `payments_count` as a count), and `totals.paid_before_import` is the part of `totals.total_paid` paid before the import. `totals.total_outstanding` equals `loans_totals.total_outstanding`. For a caller without `borrowers:view`, `borrower.address` is null and `borrower.contact_number` is left out.',
         tags: ['Reports'],
         security: [['sanctum' => []]],
         parameters: [
@@ -191,7 +236,7 @@ class ReportController extends Controller
         ],
         responses: [
             new OA\Response(response: 200, description: 'Subsidiary ledger data'),
-            new OA\Response(response: 404, description: 'Borrower not found'),
+            new OA\Response(response: 404, description: 'Member not found'),
         ],
     )]
     public function subsidiaryLedger(Borrower $borrower): JsonResponse
@@ -199,14 +244,14 @@ class ReportController extends Controller
         $this->authorize('reports:view');
 
         return response()->json([
-            'data' => $this->reportService->subsidiaryLedger($borrower, $this->reportFilters()),
+            'data' => $this->withoutMemberContact($this->reportService->subsidiaryLedger($borrower, $this->reportFilters()), $borrower->branch_id),
         ]);
     }
 
     #[OA\Get(
         path: '/api/reports/releases',
         summary: 'List of Releases',
-        description: 'Paginated list of released loans with filters',
+        description: 'Paginated list of released loans with filters. `totals.total_outstanding` is everything owed and `totals.outstanding_principal` the unpaid principal, by the rule of GET /loans; `totals.total_outstanding_balance` is a deprecated alias, principal plus premium.',
         tags: ['Reports'],
         security: [['sanctum' => []]],
         parameters: [
@@ -231,7 +276,10 @@ class ReportController extends Controller
         return LoanResource::collection($this->reportService->listOfReleases($filters))
             // Totals over the full filtered set — the client caps its fetch at
             // one page and must not add the visible rows up itself.
-            ->additional(['totals' => $this->reportService->listOfReleasesTotals($filters)]);
+            ->additional([
+                'totals' => $this->reportService->listOfReleasesTotals($filters),
+                ...MetricCatalog::filtersApplied('releases', $filters),
+            ]);
     }
 
     #[OA\Get(
@@ -261,7 +309,10 @@ class ReportController extends Controller
         ]);
 
         return RepaymentResource::collection($this->reportService->listOfRepayments($filters))
-            ->additional(['totals' => $this->reportService->listOfRepaymentsTotals($filters)]);
+            ->additional([
+                'totals' => $this->reportService->listOfRepaymentsTotals($filters),
+                ...MetricCatalog::filtersApplied('repayments', $filters),
+            ]);
     }
 
     #[OA\Get(
@@ -275,21 +326,44 @@ class ReportController extends Controller
             new OA\Parameter(name: 'date_to', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')),
             new OA\Parameter(name: 'branch_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')),
             new OA\Parameter(name: 'per_page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', default: 15)),
+            new OA\Parameter(name: 'past_due_only', in: 'query', required: false, description: 'When 1, only periods past the due date plus the loan\'s grace (late); the totals follow the same filter. Without it every unpaid period due by today is listed.', schema: new OA\Schema(type: 'boolean')),
         ],
         responses: [
-            new OA\Response(response: 200, description: 'Paginated due/past-due schedules'),
+            new OA\Response(response: 200, description: 'Paginated due/past-due schedules', content: new OA\JsonContent(properties: [
+                new OA\Property(property: 'data', type: 'array', description: 'One row per unpaid period due by today. Besides the period\'s own figures, each row carries its loan\'s figures, the same on every row of that loan.', items: new OA\Items(properties: [
+                    new OA\Property(property: 'loan_total_outstanding', type: 'number', nullable: true, description: 'Everything the loan still owes: its periods\' unpaid principal, interest and penalty plus the insurance premium owed. Equals GET /loans `total_outstanding`. Null only where the server has no figure for the loan (show a dash); 0 is a real figure.'),
+                    new OA\Property(property: 'loan_past_due_amount', type: 'number', nullable: true, description: 'The principal, interest and penalty still unpaid on the loan\'s late periods (unpaid and past the due date plus the loan\'s grace). Equals GET /loans/{id}/summary `overdue_amount`; 0 while every period is within grace. Null only where the server has no figure for the loan (show a dash).'),
+                    new OA\Property(property: 'loan_last_payment_date', type: 'string', format: 'date', nullable: true, description: 'The `payment_date` of the loan\'s latest posted repayment; voided payments are ignored. Null when there is none.'),
+                ])),
+                new OA\Property(property: 'totals', type: 'object', properties: [
+                    new OA\Property(property: 'count', type: 'integer'),
+                    new OA\Property(property: 'overdue_count', type: 'integer'),
+                    new OA\Property(property: 'total_principal_due', type: 'number'),
+                    new OA\Property(property: 'total_interest_due', type: 'number'),
+                    new OA\Property(property: 'total_penalty', type: 'number'),
+                    new OA\Property(property: 'total_due', type: 'number', description: 'Principal, interest and penalty, as on each row.'),
+                    new OA\Property(property: 'total_paid', type: 'number', description: 'Principal, interest and penalty paid; `total_due` less this is `total_balance`.'),
+                    new OA\Property(property: 'total_balance', type: 'number'),
+                    new OA\Property(property: 'total_outstanding', type: 'number', description: 'Everything owed by the distinct loans the filter matches, each loan once.'),
+                    new OA\Property(property: 'past_due_amount', type: 'number', description: 'The late-and-past-grace amount owed by the distinct loans the filter matches, each loan once.'),
+                ]),
+                new OA\Property(property: 'meta', type: 'object'),
+            ])),
         ],
     )]
     public function listOfDuePastDue(): JsonResponse
     {
         $this->authorize('reports:view');
 
-        $filters = $this->reportFilters();
+        $filters = $this->reportFilters(['past_due_only' => ['nullable', 'boolean']]);
         $results = $this->reportService->listOfDuePastDue($filters);
         $today = Carbon::today();
+        $loanFigures = $this->reportService->duePastDueLoanFigures(
+            $results->getCollection()->pluck('loan_id')->all(),
+        );
 
         return response()->json([
-            'data' => $results->getCollection()->map(function ($s) use ($today) {
+            'data' => $results->getCollection()->map(function ($s) use ($today, $loanFigures) {
                 $dueDate = $s->due_date->copy()->startOfDay();
 
                 // `loan` is eager loaded whole by ReportService::listOfDuePastDue(),
@@ -309,6 +383,7 @@ class ReportController extends Controller
                     'id' => $s->id,
                     'loan_id' => $s->loan_id,
                     'loan_account_number' => $s->loan?->loan_account_number,
+                    'display_number' => $s->loan?->displayNumber(),
                     'borrower_name' => $s->loan?->borrower?->full_name,
                     'borrower_code' => $s->loan?->borrower?->borrower_code,
                     'branch_name' => $s->loan?->branch?->name,
@@ -339,15 +414,28 @@ class ReportController extends Controller
                     'principal_due' => (float) $s->principal_due,
                     'interest_due' => (float) $s->interest_due,
                     'penalty_amount' => (float) $s->penalty_amount,
-                    'total_due' => (float) $s->total_due,
+                    // Principal, interest and penalty, as the Statement's
+                    // schedule states it.
+                    'total_due' => $this->dueWithPenalty($s),
                     'principal_paid' => (float) $s->principal_paid,
                     'interest_paid' => (float) $s->interest_paid,
+                    'penalty_paid' => (float) $s->penalty_paid,
+                    // The row's Paid: the parts `total_due` is made of, as
+                    // `totals.total_paid` adds up, so `total_due` less this is
+                    // `amount_remaining`.
+                    'amount_paid' => round((float) $s->principal_paid + (float) $s->interest_paid + (float) $s->penalty_paid, 2),
                     'amount_remaining' => $amountRemaining,
                     'balance' => $amountRemaining,
                     'status' => $s->status,
+                    // The row's loan as a whole, the same on every row of
+                    // that loan. See ReportService::duePastDueLoanFigures().
+                    'loan_total_outstanding' => $loanFigures[$s->loan_id]['loan_total_outstanding'] ?? null,
+                    'loan_past_due_amount' => $loanFigures[$s->loan_id]['loan_past_due_amount'] ?? null,
+                    'loan_last_payment_date' => $loanFigures[$s->loan_id]['loan_last_payment_date'] ?? null,
                 ];
             }),
             'totals' => $this->reportService->listOfDuePastDueTotals($filters),
+            ...MetricCatalog::filtersApplied('due-past-due', $filters),
             'meta' => [
                 'current_page' => $results->currentPage(),
                 'last_page' => $results->lastPage(),
@@ -360,7 +448,7 @@ class ReportController extends Controller
     #[OA\Get(
         path: '/api/reports/loan-balance-summary',
         summary: 'Loan Balance Summary',
-        description: 'Aggregate portfolio, outstanding, and overdue amounts by branch',
+        description: 'Aggregate portfolio, outstanding, and overdue amounts by branch. `total_outstanding` is everything owed (principal, interest, penalty, premium) and `outstanding_principal` the unpaid principal, on the collectible loans (released, ongoing, defaulted) by the rule of GET /loans `meta.totals`, so they agree with the loan pages to the centavo, and with no date range `outstanding_principal` equals the Dashboard\'s `total_portfolio`. `by_branch[]` and `by_branch_totals` carry both too. Each `by_branch[]` row also carries `active_loan_count` (released and ongoing loans). `outstanding_balance` is a deprecated alias, principal plus premium, on the collectible loans, like the breakdown. PAR (`par_1` to `par_90`, `par_portfolio_principal`), the `outstanding` breakdown and `overdue` (periods past their bare due date) cover the same collectible loans, so `outstanding.principal` equals `outstanding_principal` and principal + interest + penalty + insurance equals `total_outstanding`.',
         tags: ['Reports'],
         security: [['sanctum' => []]],
         parameters: [
@@ -377,7 +465,7 @@ class ReportController extends Controller
         $this->authorize('reports:view');
 
         return response()->json([
-            'data' => $this->reportService->loanBalanceSummary($this->reportFilters()),
+            'data' => $this->reportData('loan-balance-summary', $this->reportService->loanBalanceSummary(...)),
         ]);
     }
 
@@ -391,13 +479,13 @@ class ReportController extends Controller
             new OA\Parameter(name: 'date_to', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')),
             new OA\Parameter(name: 'date', in: 'query', required: false, description: 'Legacy single-day parameter; superseded by date_from/date_to.', schema: new OA\Schema(type: 'string', format: 'date')),
         ],
-        responses: [new OA\Response(response: 200, description: 'Daily collection summary')],
+        responses: [new OA\Response(response: 200, description: 'Daily collection summary, counted by period: `total_collected` is the principal and interest paid on the periods due in the range, capped per period (penalty never counts), so `collection_rate` never exceeds 100. Also `collected_in_full`, `partially_collected`, `counts` {collected, partial, pending}, and the cash side: `penalty_collected` and `total_received` (posted receipts in the range, less the insurance premium they collected first; equals Cash Flow\'s `inflows.repayments.total` less `inflows.repayments.insurance`). `payment_count` is the number of those receipts.')],
     )]
     public function dailyCollection(): JsonResponse
     {
         $this->authorize('reports:view');
 
-        return response()->json(['data' => $this->reportService->dailyCollection($this->reportFilters())]);
+        return response()->json(['data' => $this->reportData('daily-collection', $this->reportService->dailyCollection(...))]);
     }
 
     #[OA\Get(
@@ -408,14 +496,71 @@ class ReportController extends Controller
         parameters: [
             new OA\Parameter(name: 'date_from', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')),
             new OA\Parameter(name: 'date_to', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')),
+            new OA\Parameter(name: 'loan_id', in: 'query', required: false, description: 'One loan only: its interest and penalty collected and its own fee income.', schema: new OA\Schema(type: 'integer', minimum: 1)),
         ],
-        responses: [new OA\Response(response: 200, description: 'Income breakdown')],
+        responses: [new OA\Response(response: 200, description: 'Income breakdown. `processing_fees`, `service_fee` and `other_fees` are the deductions recorded at release of the loans released in the period, classified as the release journal classifies them (4030, including hand-typed deductions with no recognised type; 4040; 4080); a loan with no record falls back to the product\'s processing fee rate. `total` adds them to `interest_income`, `processing_fees` and `penalty_income`.')],
     )]
     public function incomeReport(): JsonResponse
     {
         $this->authorize('reports:view');
 
-        return response()->json(['data' => $this->reportService->incomeReport($this->reportFilters())]);
+        return response()->json(['data' => $this->reportData('income', $this->reportService->incomeReport(...))]);
+    }
+
+    #[OA\Get(
+        path: '/api/reports/income/by-loan',
+        summary: 'Income by loan account',
+        description: 'What GET /api/reports/income adds up, by loan: one row per loan with a posted repayment or fee income '
+            .'in the period, ordered by `total_income` desc then `loan_id` asc, paginated over loans (`meta.total` counts '
+            .'loans). Each row\'s `total_income` is its interest, penalty, processing fee, service fee and other fees. '
+            .'`meta.totals` (also sent as `totals`) covers the whole filtered set: its `interest_income`, `penalty_income`, '
+            .'`processing_fee`, `service_fee`, `other_fees` and `total_income` equal the Income report\'s `interest_income`, '
+            .'`penalty_income`, `processing_fees`, `service_fee`, `other_fees` and `total`, and every row added up equals them '
+            .'too. `payments` equals the List of Repayments `totals.count`, for the same filters. The fees are the deductions '
+            .'recorded at release, as the release journal credits them: processing fees and hand-typed deductions with no '
+            .'recognised type to 4030, service fees to 4040 and catalog fees to 4080; taxes, notarial fees, '
+            .'insurance premium and share capital are never income.',
+        tags: ['Reports'],
+        security: [['sanctum' => []]],
+        parameters: [
+            new OA\Parameter(name: 'date_from', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')),
+            new OA\Parameter(name: 'date_to', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')),
+            new OA\Parameter(name: 'branch_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer', minimum: 1)),
+            new OA\Parameter(name: 'loan_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer', minimum: 1)),
+            new OA\Parameter(name: 'per_page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', default: 15, maximum: 1000, minimum: 1)),
+        ],
+        responses: [
+            new OA\Response(response: 200, description: 'Paginated per-loan income rows with totals', content: new OA\JsonContent(properties: [
+                new OA\Property(property: 'data', type: 'array', items: new OA\Items(ref: '#/components/schemas/IncomeByLoanRow')),
+                new OA\Property(property: 'links', type: 'object'),
+                new OA\Property(property: 'meta', type: 'object'),
+                new OA\Property(property: 'totals', type: 'object', properties: [
+                    new OA\Property(property: 'count', type: 'integer', description: 'Loans over the whole filtered set; equals `meta.total`.'),
+                    new OA\Property(property: 'payments', type: 'integer'),
+                    new OA\Property(property: 'interest_income', type: 'number'),
+                    new OA\Property(property: 'penalty_income', type: 'number'),
+                    new OA\Property(property: 'processing_fee', type: 'number'),
+                    new OA\Property(property: 'service_fee', type: 'number'),
+                    new OA\Property(property: 'other_fees', type: 'number'),
+                    new OA\Property(property: 'total_income', type: 'number'),
+                ]),
+            ])),
+            new OA\Response(response: 403, description: 'Missing reports:view'),
+            new OA\Response(response: 422, description: 'Validation error'),
+        ],
+    )]
+    public function incomeByLoan(): AnonymousResourceCollection
+    {
+        $this->authorize('reports:view');
+
+        $filters = $this->reportFilters();
+        $report = $this->reportService->incomeByLoanReport($filters);
+
+        return IncomeByLoanResource::collection($report['page'])->additional([
+            'totals' => $report['totals'],
+            'meta' => ['totals' => $report['totals']],
+            ...MetricCatalog::filtersApplied('income/by-loan', $filters),
+        ]);
     }
 
     #[OA\Get(
@@ -429,18 +574,19 @@ class ReportController extends Controller
             new OA\Parameter(name: 'as_of_date', in: 'query', required: false, description: 'Legacy as-of parameter; superseded by date_to.', schema: new OA\Schema(type: 'string', format: 'date')),
             new OA\Parameter(name: 'branch_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')),
         ],
-        responses: [new OA\Response(response: 200, description: 'Aging buckets')],
+        responses: [new OA\Response(response: 200, description: 'Aging buckets. Each bucket carries `share_percent`: its amount as a percentage of `total.amount`, from whole centavos, rounded half up to 2 places; null when the total is 0. `total.share_percent` is 100, or null when the total is 0.')],
     )]
     public function agingReport(): JsonResponse
     {
         $this->authorize('reports:view');
 
-        return response()->json(['data' => $this->reportService->agingReport($this->reportFilters())]);
+        return response()->json(['data' => $this->reportData('aging', $this->reportService->agingReport(...))]);
     }
 
     #[OA\Get(
         path: '/api/reports/borrowers',
         summary: 'Borrower report',
+        description: 'The Member Report\'s cards. `total_active_borrowers`: members with at least one collectible loan as of `date_to`. `new_borrowers`: members created in the period. `repeat_borrowers`: members with at least 2 ever-released loans. GET /api/reports/borrowers/list states the same counts and lists the members behind them.',
         tags: ['Reports'],
         security: [['sanctum' => []]],
         parameters: [
@@ -453,7 +599,105 @@ class ReportController extends Controller
     {
         $this->authorize('reports:view');
 
-        return response()->json(['data' => $this->reportService->borrowerReport($this->reportFilters())]);
+        return response()->json(['data' => $this->reportData('borrowers', $this->reportService->borrowerReport(...))]);
+    }
+
+    #[OA\Get(
+        path: '/api/reports/borrowers/list',
+        summary: 'Members behind the Member Report\'s cards',
+        description: 'Every member who is active, new or repeat, by name as displayed then id, paginated over members. `meta.counts` '
+            .'(`active`, `new`, `repeat`) equal the cards of GET /api/reports/borrowers for the same filters, and each row carries '
+            .'`is_active`, `is_new` and `is_repeat`. `outstanding` is everything still owed today '
+            .'on the loans `active_loans` counts, with the meaning of `total_outstanding`.',
+        tags: ['Reports'],
+        security: [['sanctum' => []]],
+        parameters: [
+            new OA\Parameter(name: 'date_from', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')),
+            new OA\Parameter(name: 'date_to', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')),
+            new OA\Parameter(name: 'branch_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer', minimum: 1)),
+            new OA\Parameter(name: 'per_page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', default: 15, maximum: 1000, minimum: 1)),
+            new OA\Parameter(name: 'page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', default: 1, minimum: 1)),
+        ],
+        responses: [
+            new OA\Response(response: 200, description: 'Paginated members with the cards\' counts', content: new OA\JsonContent(properties: [
+                new OA\Property(property: 'data', type: 'array', items: new OA\Items(properties: [
+                    new OA\Property(property: 'borrower_id', type: 'integer'),
+                    new OA\Property(property: 'borrower_code', type: 'string', nullable: true),
+                    new OA\Property(property: 'borrower_name', type: 'string'),
+                    new OA\Property(property: 'branch_name', type: 'string', nullable: true),
+                    new OA\Property(property: 'is_active', type: 'boolean'),
+                    new OA\Property(property: 'is_new', type: 'boolean'),
+                    new OA\Property(property: 'is_repeat', type: 'boolean'),
+                    new OA\Property(property: 'active_loans', type: 'integer'),
+                    new OA\Property(property: 'loans_released', type: 'integer'),
+                    new OA\Property(property: 'outstanding', type: 'number'),
+                    new OA\Property(property: 'last_release_date', type: 'string', format: 'date', nullable: true),
+                ], type: 'object')),
+                new OA\Property(property: 'links', type: 'object'),
+                new OA\Property(property: 'meta', type: 'object', properties: [
+                    new OA\Property(property: 'total', type: 'integer'),
+                    new OA\Property(property: 'counts', type: 'object', properties: [
+                        new OA\Property(property: 'active', type: 'integer'),
+                        new OA\Property(property: 'new', type: 'integer'),
+                        new OA\Property(property: 'repeat', type: 'integer'),
+                    ]),
+                ]),
+            ])),
+            new OA\Response(response: 403, description: 'Missing reports:view, or a branch outside the caller\'s'),
+            new OA\Response(response: 422, description: 'Validation error'),
+        ],
+    )]
+    public function borrowerList(): AnonymousResourceCollection
+    {
+        $this->authorize('reports:view');
+
+        $filters = $this->reportFilters();
+
+        return JsonResource::collection($this->reportService->memberList($filters))
+            ->additional(['meta' => ['counts' => $this->reportService->memberCounts($filters)]]);
+    }
+
+    #[OA\Get(
+        path: '/api/reports/borrowers/released',
+        summary: 'Borrowers with loans released',
+        description: 'The loans GET /api/reports/releases lists, grouped by borrower: one row per borrower, ordered by the '
+            .'borrower\'s name as displayed then `borrower_id` asc, paginated over borrowers (`meta.total` counts '
+            .'borrowers). `totals` covers the whole filtered set: its `loan_count` and `total_principal` equal the List of '
+            .'Releases `totals.count` and `totals.total_principal` for the same filters.',
+        tags: ['Reports'],
+        security: [['sanctum' => []]],
+        parameters: [
+            new OA\Parameter(name: 'date_from', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')),
+            new OA\Parameter(name: 'date_to', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')),
+            new OA\Parameter(name: 'branch_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer', minimum: 1)),
+            new OA\Parameter(name: 'per_page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', default: 15, maximum: 1000, minimum: 1)),
+        ],
+        responses: [
+            new OA\Response(response: 200, description: 'Paginated per-borrower release rows with totals', content: new OA\JsonContent(properties: [
+                new OA\Property(property: 'data', type: 'array', items: new OA\Items(ref: '#/components/schemas/BorrowerReleasedRow')),
+                new OA\Property(property: 'links', type: 'object'),
+                new OA\Property(property: 'meta', type: 'object'),
+                new OA\Property(property: 'totals', type: 'object', properties: [
+                    new OA\Property(property: 'count', type: 'integer', description: 'Borrowers over the whole filtered set; equals `meta.total`.'),
+                    new OA\Property(property: 'loan_count', type: 'integer'),
+                    new OA\Property(property: 'total_principal', type: 'number'),
+                ]),
+            ])),
+            new OA\Response(response: 403, description: 'Missing reports:view'),
+            new OA\Response(response: 422, description: 'Validation error'),
+        ],
+    )]
+    public function borrowersReleased(): AnonymousResourceCollection
+    {
+        $this->authorize('reports:view');
+
+        $filters = $this->reportFilters();
+
+        return BorrowerReleasedResource::collection($this->reportService->borrowersReleased($filters))
+            ->additional([
+                'totals' => $this->reportService->borrowersReleasedTotals($filters),
+                ...MetricCatalog::filtersApplied('borrowers/released', $filters),
+            ]);
     }
 
     #[OA\Get(
@@ -472,20 +716,20 @@ class ReportController extends Controller
     {
         $this->authorize('reports:view');
 
-        return response()->json(['data' => $this->reportService->disbursementReport($this->reportFilters())]);
+        return response()->json(['data' => $this->reportData('disbursements', $this->reportService->disbursementReport(...))]);
     }
 
     #[OA\Get(
         path: '/api/reports/cash-flow',
         summary: 'Cash Flow / Cash Position',
-        description: 'Cash in (posted repayments split by allocation, plus share capital credits) versus cash out (net proceeds released, plus share capital debits) for a period, with a per-branch breakdown. Deductions are reported separately as non-cash.',
+        description: 'Cash in (posted repayments split by allocation, the insurance premium they collected first as `inflows.repayments.insurance` and per branch `inflow_insurance`, both inside the totals, plus share capital paid in on its own) versus cash out (net proceeds released, plus share capital paid out on its own) for a period, with a per-branch breakdown. Deductions are reported separately as non-cash, share capital withheld at release under `non_cash.share_capital_at_release`. A payment\'s share capital build-up is already inside the repayment line (its overpayment), so its ledger credits and any void reversals are in no cash total: they are reported under `share_capital.build_up_from_payments` (net), `build_up_credit` and `build_up_debit`. The Share Capital report\'s credits for the same period and branch = `share_capital.credit` + `share_capital.build_up_credit` + `non_cash.share_capital_at_release`; its debits = `share_capital.debit` + `share_capital.build_up_debit`.',
         tags: ['Reports'],
         security: [['sanctum' => []]],
         parameters: [
             new OA\Parameter(name: 'date_from', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')),
             new OA\Parameter(name: 'date_to', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')),
             new OA\Parameter(name: 'date', in: 'query', required: false, description: 'Legacy single-day parameter; superseded by date_from/date_to.', schema: new OA\Schema(type: 'string', format: 'date')),
-            new OA\Parameter(name: 'branch_id', in: 'query', required: false, description: 'Scopes loan cash by the loan\'s branch and share capital by the member\'s branch, matching the Share Capital report. See share_capital.branch_scope (borrower_branch when filtered, organisation when not). Share capital stays out of by_branch either way.', schema: new OA\Schema(type: 'integer')),
+            new OA\Parameter(name: 'branch_id', in: 'query', required: false, description: 'Scopes loan cash by the loan\'s branch and share capital by the branch each entry posted in (an entry not yet attributed: its member\'s branch), matching the Share Capital report. See share_capital.branch_scope (posted_branch when filtered, organisation when not).', schema: new OA\Schema(type: 'integer')),
         ],
         responses: [new OA\Response(response: 200, description: 'Cash flow for the period')],
     )]
@@ -493,7 +737,7 @@ class ReportController extends Controller
     {
         $this->authorize('reports:view');
 
-        return response()->json(['data' => $this->reportService->cashFlow($this->reportFilters())]);
+        return response()->json(['data' => $this->reportData('cash-flow', $this->reportService->cashFlow(...))]);
     }
 
     #[OA\Get(
@@ -508,19 +752,19 @@ class ReportController extends Controller
             new OA\Parameter(name: 'date', in: 'query', required: false, description: 'Legacy single-day parameter; superseded by date_from/date_to.', schema: new OA\Schema(type: 'string', format: 'date')),
             new OA\Parameter(name: 'branch_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')),
         ],
-        responses: [new OA\Response(response: 200, description: 'Collection efficiency with branch and monthly breakdowns')],
+        responses: [new OA\Response(response: 200, description: 'Collection efficiency with branch and monthly breakdowns. Overall figures equal Daily Collection\'s for the same filters; each branch row and due-month bucket is counted by period the same way, so no rate exceeds 100.')],
     )]
     public function collectionEfficiency(): JsonResponse
     {
         $this->authorize('reports:view');
 
-        return response()->json(['data' => $this->reportService->collectionEfficiency($this->reportFilters())]);
+        return response()->json(['data' => $this->reportData('collection-efficiency', $this->reportService->collectionEfficiency(...))]);
     }
 
     #[OA\Get(
         path: '/api/reports/portfolio-by-product',
         summary: 'Loan Portfolio by Product',
-        description: 'Loan count, amount released, outstanding balance, average rate, overdue amount and PAR ratio per loan product. Date filters apply to release date, matching the Loan Balance Summary.',
+        description: 'Loan count, amount released, `total_outstanding` (everything owed) and `outstanding_principal` (unpaid principal) on the collectible loans, `outstanding` (a deprecated alias, principal plus premium, on every ever-released loan), average rate, and `overdue_amount`, PAR ratio and `at_risk_amount` on the collectible loans, per loan product. Date filters apply to release date, matching the Loan Balance Summary.',
         tags: ['Reports'],
         security: [['sanctum' => []]],
         parameters: [
@@ -534,13 +778,13 @@ class ReportController extends Controller
     {
         $this->authorize('reports:view');
 
-        return response()->json(['data' => $this->reportService->portfolioByProduct($this->reportFilters())]);
+        return response()->json(['data' => $this->reportData('portfolio-by-product', $this->reportService->portfolioByProduct(...))]);
     }
 
     #[OA\Get(
         path: '/api/reports/share-capital',
         summary: 'Share Capital Report',
-        description: 'Opening balance, period credits and debits, closing balance, monthly movement, per-member holdings and subscription totals. Omit date_from to report from inception. `by_member` requires the reports:export permission; without it the field is null and `by_member_omitted` explains why, while every aggregate figure is unchanged.',
+        description: 'Opening balance, period credits and debits, closing balance, monthly movement, per-member holdings and subscription totals. Omit date_from to report from inception. Needs reports:view and share_capital:view (Phase 6 decision 10); without share_capital:view it answers 403 in words. `by_member` also requires the reports:export permission; without it the field is null and `by_member_omitted` explains why, while every aggregate figure is unchanged.',
         tags: ['Reports'],
         security: [['sanctum' => []]],
         parameters: [
@@ -549,11 +793,21 @@ class ReportController extends Controller
             new OA\Parameter(name: 'as_of_date', in: 'query', required: false, description: 'Legacy as-of parameter; superseded by date_to.', schema: new OA\Schema(type: 'string', format: 'date')),
             new OA\Parameter(name: 'branch_id', in: 'query', required: false, description: 'The ledger has no branch column, so this filters on the member\'s branch.', schema: new OA\Schema(type: 'integer')),
         ],
-        responses: [new OA\Response(response: 200, description: 'Share capital movement and balances')],
+        responses: [
+            new OA\Response(response: 200, description: 'Share capital movement and balances'),
+            new OA\Response(response: 403, description: 'Missing reports:view or share_capital:view'),
+        ],
     )]
     public function shareCapital(): JsonResponse
     {
         $this->authorize('reports:view');
+
+        // Decision 10: every figure here is members' share capital, so the
+        // totals and the roster both need `share_capital:view`, as
+        // GET /share-capital/ledger does. Withholding them would leave nothing.
+        if (! request()->user()?->can('share_capital:view')) {
+            throw new AuthorizationException(self::SHARE_CAPITAL_REFUSAL);
+        }
 
         // `by_member` is the whole membership roster with each member's
         // balance. `reports:view` is held by every seeded role, so gate the
@@ -563,14 +817,14 @@ class ReportController extends Controller
         $includeMembers = (bool) request()->user()?->can('reports:export');
 
         return response()->json([
-            'data' => $this->reportService->shareCapital($this->reportFilters(), $includeMembers),
+            'data' => $this->reportData('share-capital', fn (array $filters): array => $this->reportService->shareCapital($filters, $includeMembers)),
         ]);
     }
 
     #[OA\Get(
         path: '/api/reports/performance',
         summary: 'Officer / Branch Performance',
-        description: 'Loans released and amounts collected for the period, alongside outstanding portfolio, overdue amount, PAR ratio and active borrowers as of today, grouped by account officer and mirrored by branch. Loans with no officer appear as an Unassigned row.',
+        description: '`total_outstanding` is everything owed and `outstanding_principal` the unpaid principal, on the collectible loans; `outstanding` is a deprecated alias, principal plus premium, on every ever-released loan; `overdue_amount` and PAR (`at_risk_amount`, `par_ratio`) cover the collectible loans too. Loans released and amounts collected for the period (`collected` leaves out the insurance premium payments collected, stated as `insurance_collected`), alongside outstanding portfolio, overdue amount, PAR ratio and active borrowers as of today, grouped by account officer and mirrored by branch. Loans with no officer appear as an Unassigned row.',
         tags: ['Reports'],
         security: [['sanctum' => []]],
         parameters: [
@@ -584,7 +838,7 @@ class ReportController extends Controller
     {
         $this->authorize('reports:view');
 
-        return response()->json(['data' => $this->reportService->performance($this->reportFilters())]);
+        return response()->json(['data' => $this->reportData('performance', $this->reportService->performance(...))]);
     }
 
     #[OA\Get(
@@ -604,13 +858,13 @@ class ReportController extends Controller
     {
         $this->authorize('reports:view');
 
-        return response()->json(['data' => $this->reportService->provisioning($this->reportFilters())]);
+        return response()->json(['data' => $this->reportData('provisioning', $this->reportService->provisioning(...))]);
     }
 
     #[OA\Get(
         path: '/api/reports/share-capital-statement/{borrower}',
         summary: 'Share Capital Statement',
-        description: 'One member\'s complete share capital ledger with a running balance, opening and closing balances and period totals. Unpaginated: this feeds a printable certificate.',
+        description: 'One member\'s complete share capital ledger with a running balance (`entries[].running_balance`), opening and closing balances and period totals (`totals.credits`, `totals.debits`, also as `total_credit` and `total_debit` beside `closing_balance`). Unpaginated: this feeds a printable certificate. For a caller without `borrowers:view`, `borrower.address` is null and `borrower.contact_number` is left out.',
         tags: ['Reports'],
         security: [['sanctum' => []]],
         parameters: [
@@ -628,7 +882,7 @@ class ReportController extends Controller
         $this->authorize('reports:view');
 
         return response()->json([
-            'data' => $this->reportService->shareCapitalStatement($borrower, $this->reportFilters()),
+            'data' => $this->withoutMemberContact($this->reportService->shareCapitalStatement($borrower, $this->reportFilters()), $borrower->branch_id),
         ]);
     }
 
@@ -645,24 +899,24 @@ class ReportController extends Controller
     {
         $this->authorize('reports:export');
 
-        $query = $this->reportService
-            ->releasesQuery($this->reportFilters([
-                'status' => ['nullable', 'string', Rule::in(Loan::EVER_RELEASED_STATUSES)],
-            ]))
-            ->with('borrower', 'loanProduct');
+        $filters = $this->reportFilters([
+            'status' => ['nullable', 'string', Rule::in(Loan::EVER_RELEASED_STATUSES)],
+        ]);
+        $query = $this->reportService->releasesQuery($filters)->with('borrower', 'loanProduct');
+        [$preamble, $headers] = $this->exportFilterNote('releases', $filters, (clone $query)->exists());
 
         return $this->streamCsv('releases.csv', [
-            'Loan #', 'Borrower', 'Product', 'Principal', 'Interest Rate', 'Term', 'Released', 'Status',
+            'Loan #', 'Member', 'Product', 'Principal', 'Interest Rate', 'Term', 'Released', 'Status',
         ], $query->lazy(500)->map(fn ($l) => [
-            $l->loan_account_number ?? $l->application_number,
+            $l->displayNumber(),
             $l->borrower?->full_name ?? '',
             $l->loanProduct?->name ?? '',
             $l->principal_amount,
             $l->interest_rate.'%',
-            $l->term.' months',
+            $l->term.' '.$l->term_unit->value,
             $l->released_at?->toDateString() ?? '',
             $l->status,
-        ]));
+        ]), $preamble, $headers);
     }
 
     #[OA\Get(
@@ -678,23 +932,73 @@ class ReportController extends Controller
 
         // Same builder as the preview, so the CSV cannot include voided
         // receipts the screen excluded.
-        $query = $this->reportService
-            ->repaymentsQuery($this->reportFilters([
-                'status' => ['nullable', 'string', 'in:posted,voided'],
-            ]))
-            ->with('loan.borrower');
+        $filters = $this->reportFilters([
+            'status' => ['nullable', 'string', 'in:posted,voided'],
+        ]);
+        $query = $this->reportService->repaymentsQuery($filters)->with('loan.borrower');
+        [$preamble, $headers] = $this->exportFilterNote('repayments', $filters, (clone $query)->exists());
 
         return $this->streamCsv('repayments.csv', [
-            'Receipt #', 'Borrower', 'Loan #', 'Date', 'Amount', 'Method', 'Status',
+            'Receipt #', 'Member', 'Loan #', 'Date', 'Amount', 'Insurance Premium', 'Method', 'Status',
         ], $query->lazy(500)->map(fn ($r) => [
             $r->receipt_number,
             $r->loan?->borrower?->full_name ?? '',
-            $r->loan?->loan_account_number ?? '',
+            $r->loan?->displayNumber() ?? '',
             $r->payment_date?->toDateString() ?? '',
             $r->amount_paid,
+            // The part of Amount that paid the insurance premium owed, first.
+            $r->insurance_applied,
             $r->method ?? 'cash',
             $r->status,
-        ]));
+        ]), $preamble, $headers);
+    }
+
+    /**
+     * How an export was narrowed by the executive dashboard's filters, so a
+     * filtered file never passes for the whole report: a first line in words
+     * ("Filtered by: loan product Salary Loan, collected by Ana Reyes") and an
+     * `X-Filters-Applied` header with the filter keys. Neither is sent when no
+     * such filter applied, so an unfiltered export is unchanged.
+     *
+     * A staff member is named only when the export has rows, which the caller
+     * can already see with that person on them (the loan's officer, the
+     * payment's recorder); otherwise "user #id", so an id can't be used to
+     * look up a name outside the caller's branches.
+     *
+     * @param  array<string, mixed>  $filters
+     * @return array{0: list<list<string>>, 1: array<string, string>}
+     */
+    private function exportFilterNote(string $report, array $filters, bool $hasRows): array
+    {
+        $applied = MetricCatalog::filtersApplied($report, $filters)['filters_applied'];
+
+        if ($applied === []) {
+            return [[], []];
+        }
+
+        $person = function (int $id) use ($hasRows): string {
+            $user = $hasRows ? User::query()->find($id, ['id', 'first_name', 'last_name']) : null;
+            $name = $user === null ? '' : trim($user->first_name.' '.$user->last_name);
+
+            return $name !== '' ? $name : "user #{$id}";
+        };
+
+        $parts = array_map(fn (string $filter): string => match ($filter) {
+            'product_id' => 'loan product '.(LoanProduct::query()->whereKey($filters['product_id'])->value('name') ?? "#{$filters['product_id']}"),
+            'officer_id' => 'account officer '.$person((int) $filters['officer_id']),
+            'collector_id' => 'collected by '.$person((int) $filters['collector_id']),
+        }, $applied);
+
+        return [[['Filtered by: '.implode(', ', $parts)]], ['X-Filters-Applied' => implode(',', $applied)]];
+    }
+
+    /**
+     * A Due/Past Due row's Total Due: principal, interest and penalty, on the
+     * preview and the export alike.
+     */
+    private function dueWithPenalty(AmortizationSchedule $schedule): float
+    {
+        return round((float) $schedule->total_due + (float) ($schedule->penalty_amount ?? 0), 2);
     }
 
     /**
@@ -747,19 +1051,19 @@ class ReportController extends Controller
         // loan statuses and the cutoff (`now()` vs `Carbon::today()`), so the
         // CSV did not match the screen it was exported from.
         $query = $this->reportService
-            ->duePastDueQuery($this->reportFilters())
+            ->duePastDueQuery($this->reportFilters(['past_due_only' => ['nullable', 'boolean']]))
             ->with('loan.borrower');
 
         $today = Carbon::today();
 
         return $this->streamCsv('due-past-due.csv', [
-            'Borrower', 'Loan #', 'Due Date', 'Days Overdue', 'Principal Due', 'Interest Due', 'Penalty', 'Total Due', 'Status',
+            'Member', 'Loan #', 'Due Date', 'Days Overdue', 'Principal Due', 'Interest Due', 'Penalty', 'Total Due', 'Status',
         ], $query->lazy(500)->map(function ($s) use ($today) {
             $dueDate = $s->due_date?->copy()->startOfDay();
 
             return [
                 $s->loan?->borrower?->full_name ?? '',
-                $s->loan?->loan_account_number ?? '',
+                $s->loan?->displayNumber() ?? '',
                 $dueDate?->toDateString() ?? '',
                 // Through the same helper as the preview. This column and the
                 // preview's `days_overdue` are asserted equal row for row by
@@ -770,9 +1074,38 @@ class ReportController extends Controller
                 $s->principal_due,
                 $s->interest_due,
                 $s->penalty_amount ?? 0,
-                $s->total_due,
+                $this->dueWithPenalty($s),
                 $s->status,
             ];
         }));
+    }
+
+    /**
+     * A report's member block as the caller may read it, by the round fz
+     * personal-data rule (ContactVisibility: `borrowers:view` and the member's
+     * own branch). Without it the contact number is left out, and the member's
+     * address (`borrower.address`, and the Statement of Account's
+     * `loan.member_address`) reads null.
+     *
+     * @param  array<string, mixed>  $report
+     * @return array<string, mixed>
+     */
+    private function withoutMemberContact(array $report, ?int $memberBranchId): array
+    {
+        if (app(ContactVisibility::class)->allows(request()->user(), $memberBranchId)) {
+            return $report;
+        }
+
+        unset($report['borrower']['contact_number']);
+
+        if (array_key_exists('address', $report['borrower'] ?? [])) {
+            $report['borrower']['address'] = null;
+        }
+
+        if (array_key_exists('member_address', $report['loan'] ?? [])) {
+            $report['loan']['member_address'] = null;
+        }
+
+        return $report;
     }
 }

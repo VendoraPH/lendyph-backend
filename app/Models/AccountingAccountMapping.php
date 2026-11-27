@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Services\Accounting\OpeningBalancePoster;
 use App\Services\Accounting\PostingRules;
 use App\Traits\Auditable;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
@@ -73,6 +74,66 @@ class AccountingAccountMapping extends Model
         'allowance_credit_losses',
         'accounts_payable',
         'borrower_advances',
+        'service_fee_income',
+        'notarial_fees_payable',
+        'insurance_premium_payable',
+        'share_capital',
+        'other_fee_income',
+        'documentary_stamp_tax_payable',
+        'withholding_tax_payable',
+        'other_taxes_payable',
+        'gcash_service_income',
+        'loan_adjustments',
+        'unearned_restructure_income',
+        'net_surplus',
+        'suspense',
+        'interbranch_clearing',
+        'savings_deposits',
+        'time_deposits',
+        'interest_expense_deposits',
+        'withholding_tax_deposits',
+    ];
+
+    /**
+     * Each role in words, as the Settings → Accounting screen labels it
+     * (`mapping-fields.ts` in the frontend). Messages name a role through
+     * {@see self::label()}, never by its stored key.
+     *
+     * @var array<string, string>
+     */
+    public const LABELS = [
+        'cash' => 'Cash',
+        'gcash' => 'GCash',
+        'maya' => 'Maya',
+        'bank' => 'Bank',
+        'loans_receivable' => 'Loans receivable',
+        'interest_receivable' => 'Interest receivable',
+        'penalty_receivable' => 'Penalty receivable',
+        'interest_income' => 'Interest income',
+        'penalty_income' => 'Penalty income',
+        'processing_fee_income' => 'Processing fee income',
+        'credit_loss_expense' => 'Credit loss expense',
+        'allowance_credit_losses' => 'Allowance for credit losses',
+        'accounts_payable' => 'Accounts payable',
+        'borrower_advances' => 'Member advances',
+        'service_fee_income' => 'Service fee income',
+        'notarial_fees_payable' => 'Notarial fees payable',
+        'insurance_premium_payable' => 'Insurance premium payable',
+        'share_capital' => 'Share capital',
+        'other_fee_income' => 'Other fee income',
+        'documentary_stamp_tax_payable' => 'Documentary stamp tax payable',
+        'withholding_tax_payable' => 'Withholding tax payable',
+        'other_taxes_payable' => 'Other taxes payable',
+        'gcash_service_income' => 'GCash service income',
+        'loan_adjustments' => 'Loan adjustments clearing',
+        'unearned_restructure_income' => 'Unearned restructure interest and penalty',
+        'net_surplus' => 'Retained earnings or net surplus',
+        'suspense' => 'Suspense',
+        'interbranch_clearing' => 'Interbranch clearing',
+        'savings_deposits' => 'Savings deposits',
+        'time_deposits' => 'Time deposits',
+        'interest_expense_deposits' => 'Interest expense on deposits',
+        'withholding_tax_deposits' => 'Withholding tax on deposits',
     ];
 
     /**
@@ -154,6 +215,73 @@ class AccountingAccountMapping extends Model
          * streams' postings in the same balance.
          */
         'borrower_advances' => ['type' => 'liability'],
+
+        /*
+         * Where each deduction withheld at release is credited, as the
+         * cooperative's accountant confirmed on 2026-10-03 (see
+         * PostingRules::DEDUCTION_ROLES). The notarial fee and the insurance
+         * premium are collected for someone else — the notary, the insurer —
+         * so they are owed onward, not earned: liabilities. Share capital is
+         * the member's own contribution: equity. The service fee and catalog
+         * fees are earned: income.
+         */
+        'service_fee_income' => ['type' => 'income'],
+        'notarial_fees_payable' => ['type' => 'liability'],
+        'insurance_premium_payable' => ['type' => 'liability'],
+        'share_capital' => ['type' => 'equity'],
+        'other_fee_income' => ['type' => 'income'],
+
+        /*
+         * Taxes withheld at release (decision 4b, 2026-11-02; see
+         * PostingRules::taxRoleFor()). A tax is a government levy the
+         * cooperative collects and remits, never its own income: liabilities.
+         */
+        'documentary_stamp_tax_payable' => ['type' => 'liability'],
+        'withholding_tax_payable' => ['type' => 'liability'],
+        'other_taxes_payable' => ['type' => 'liability'],
+
+        /*
+         * Phase 2 (approved 2026-11-08; see PostingRules):
+         *
+         * - `gcash_service_income`: the charge on a Cash In or Cash Out is
+         *   earned when the transaction posts, so income.
+         * - `loan_adjustments`: a balance adjustment clears through here, an
+         *   asset that should read zero once each one is reviewed.
+         * - `unearned_restructure_income`: interest and penalty a restructure
+         *   capitalised into the new loan's principal and has not earned yet.
+         *   A CONTRA asset, like the allowance: it subtracts from the loans it
+         *   is carried in, and an ordinary asset here would add to them.
+         * - `net_surplus`: where the year-end close moves the result, equity.
+         * - `suspense`: money received that cannot be identified yet, owed
+         *   until it is, so a liability.
+         */
+        'gcash_service_income' => ['type' => 'income'],
+        'loan_adjustments' => ['type' => 'asset'],
+        'unearned_restructure_income' => ['type' => 'asset', 'is_contra' => true],
+        'net_surplus' => ['type' => 'equity'],
+        'suspense' => ['type' => 'liability'],
+
+        /*
+         * Phase 6 (approved 2026-11-19, multi-branch decision 9): money moved
+         * between branches waits here, debited by the source branch on
+         * approval and credited by the destination on receipt. An asset, and
+         * never a money account: its balance is money on its way, not money
+         * on hand, so it must stay out of the dashboard cash figures.
+         */
+        'interbranch_clearing' => ['type' => 'asset'],
+
+        /*
+         * Savings & Deposits (Phase 3, approved 2026-11-10). Members' savings
+         * and time deposits are money the cooperative owes them back, so both
+         * are liabilities; interest paid on them is an expense, credited to
+         * the member when it is paid (cash basis); tax withheld from that
+         * interest is owed to the BIR. Mapped by the cooperative template and
+         * by `savings:prepare-books`.
+         */
+        'savings_deposits' => ['type' => 'liability'],
+        'time_deposits' => ['type' => 'liability'],
+        'interest_expense_deposits' => ['type' => 'expense'],
+        'withholding_tax_deposits' => ['type' => 'liability'],
     ];
 
     protected $fillable = [
@@ -208,6 +336,7 @@ class AccountingAccountMapping extends Model
         ?string $cashKind,
     ): ?array {
         $shape = self::ROLE_SHAPES[$role] ?? null;
+        $roleLabel = self::label($role);
 
         // A role with no declared shape is refused rather than waved through:
         // it means ROLES gained an entry that ROLE_SHAPES did not, and
@@ -216,15 +345,15 @@ class AccountingAccountMapping extends Model
         if ($shape === null) {
             return [
                 'field' => 'role',
-                'message' => "There is no defined account shape for the {$role} role, so it cannot be set.",
+                'message' => "There is no defined account shape for the {$roleLabel} role, so it cannot be set.",
             ];
         }
 
         if ($type !== $shape['type']) {
             return [
                 'field' => 'type',
-                'message' => "{$label} is {$type}, but the {$role} role has to resolve to "
-                    .self::article($shape['type'])." {$shape['type']} account. Posting through it would put the "
+                'message' => "{$label} is ".self::typeInWords($type).", but the {$roleLabel} role has to resolve to "
+                    .self::typeInWords($shape['type']).'. Posting through it would put the '
                     .'amount on the wrong statement, and the entry would still balance — so nothing would report '
                     .'the mistake.',
             ];
@@ -233,7 +362,7 @@ class AccountingAccountMapping extends Model
         if (($shape['is_contra'] ?? false) && ! $isContra) {
             return [
                 'field' => 'is_contra',
-                'message' => "{$label} is not a contra account. The {$role} role must resolve to one: a contra "
+                'message' => "{$label} is not a contra account. The {$roleLabel} role must resolve to one: a contra "
                     .'asset carries a credit balance and SUBTRACTS from the assets above it, so an ordinary asset '
                     .'here would make the net figure come out as gross plus the allowance instead of minus.',
             ];
@@ -252,30 +381,101 @@ class AccountingAccountMapping extends Model
         if ($kind === null && $cashKind !== null) {
             return [
                 'field' => 'cash_kind',
-                'message' => "{$label} is the {$role} account, which is not a money account — but it is marked "
-                    ."as a {$cashKind} account. `cash_kind` is what puts a balance into the dashboard cash "
-                    .'figures, so this would report the balance as money on hand.',
+                'message' => "{$label} is the {$roleLabel} account, which is not a money account — but it is marked "
+                    .'as '.self::cashKindInWords($cashKind).'. Being a money account is what puts a balance into the '
+                    .'dashboard cash figures, so this would report the balance as money on hand.',
             ];
         }
 
         if ($kind !== null && $cashKind !== $kind) {
-            $held = $cashKind === null ? 'is not a money account at all' : "is a {$cashKind} account";
+            $held = $cashKind === null ? 'is not a money account' : 'is '.self::cashKindInWords($cashKind);
 
             return [
                 'field' => 'cash_kind',
-                'message' => "{$label} {$held}, but the {$role} role has to resolve to one whose cash kind is "
-                    ."{$kind}. `cash_kind` is what puts an account on the Cash & Bank screen and into the "
-                    .'dashboard cash figures, so settlements through it would never appear in the money on hand.',
+                'message' => "{$label} {$held}, but the {$roleLabel} role has to resolve to "
+                    .self::cashKindInWords($kind).'. The kind of money account is what puts it on the Cash & Bank '
+                    .'screen and into the dashboard cash figures, so settlements through it would never appear in '
+                    .'the money on hand.',
             ];
         }
 
         return null;
     }
 
-    /** "an asset", "a liability". Only `liability` takes "a". */
-    private static function article(string $type): string
+    /**
+     * Why `$role` can't resolve to the account with this code, beyond its
+     * shape, or null. One rule so far: net surplus never resolves to 3050
+     * Opening Balance Equity. The year's result would be mixed into the
+     * opening balances, and a close or reopen would lock 3050 after its
+     * months while an opening balance locks 3050 before them
+     * (OpeningBalancePoster's lock order). The caller adds what to do next.
+     *
+     * @param  string  $label  "3050 Opening Balance Equity", for the message.
+     */
+    public static function reservedAccountReason(string $role, string $code, string $label): ?string
     {
-        return in_array($type[0] ?? '', ['a', 'e', 'i', 'o', 'u'], true) ? 'an' : 'a';
+        if ($role !== 'net_surplus' || $code !== OpeningBalancePoster::OPENING_EQUITY_CODE) {
+            return null;
+        }
+
+        return self::label($role)." can't post to {$label}, the opening balance equity account: "
+            ."the year's result would be mixed into the opening balances.";
+    }
+
+    /**
+     * A role in words. A role with no label reads as its key in words
+     * ("Some new role"), so a stored key never reaches the screen.
+     */
+    public static function label(string $role): string
+    {
+        return self::LABELS[$role] ?? ucfirst(strtolower(str_replace('_', ' ', $role)));
+    }
+
+    /**
+     * Several roles in words, in role-list order: "Loan adjustments clearing
+     * and Suspense", "Cash, Bank and Suspense".
+     *
+     * @param  iterable<string>  $roles
+     */
+    public static function labelList(iterable $roles): string
+    {
+        $roles = collect($roles)->unique()->sortBy(static function (string $role): int {
+            $position = array_search($role, self::ROLES, true);
+
+            return $position === false ? PHP_INT_MAX : $position;
+        });
+
+        return $roles->map(static fn (string $role): string => self::label($role))
+            ->values()
+            ->join(', ', ' and ');
+    }
+
+    /**
+     * An account type in words, with its article: "an asset account", "a
+     * liability account". Messages never show a bare stored type.
+     */
+    public static function typeInWords(string $type): string
+    {
+        $words = $type === '' ? 'unclassified' : $type;
+        $article = in_array($words[0], ['a', 'e', 'i', 'o', 'u'], true) ? 'an' : 'a';
+
+        return "{$article} {$words} account";
+    }
+
+    /**
+     * A money account's kind in words, with its article: "a cash account",
+     * "a GCash wallet". Messages never show a stored `cash_kind`.
+     */
+    public static function cashKindInWords(string $cashKind): string
+    {
+        return match ($cashKind) {
+            'cash' => 'a cash account',
+            'bank' => 'a bank account',
+            'gcash' => 'a GCash wallet',
+            'maya' => 'a Maya wallet',
+            'wallet' => 'an e-wallet',
+            default => 'a money account',
+        };
     }
 
     /**

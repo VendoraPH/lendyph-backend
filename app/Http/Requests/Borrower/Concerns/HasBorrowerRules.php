@@ -2,26 +2,57 @@
 
 namespace App\Http\Requests\Borrower\Concerns;
 
+use App\Models\Borrower;
+use Closure;
 use Illuminate\Validation\Rule;
 
 trait HasBorrowerRules
 {
+    /**
+     * A street address also fills a blank `address`, the column the legal
+     * documents print. A filled `address`, sent or stored, is never overwritten.
+     */
+    protected function prepareForValidation(): void
+    {
+        $street = $this->input('street_address');
+
+        if (! is_string($street) || trim($street) === '') {
+            return;
+        }
+
+        $stored = $this->route('borrower');
+        $address = $this->has('address') ? $this->input('address') : ($stored instanceof Borrower ? $stored->address : null);
+
+        if ($address === null || (is_string($address) && trim($address) === '')) {
+            $this->merge(['address' => $street]);
+        }
+    }
+
     /**
      * Field rules shared between StoreBorrowerRequest and UpdateBorrowerRequest.
      * Identity fields (first/last/branch) are intentionally left out so each
      * request can apply its own `required` vs `sometimes` modifier.
      *
      * @param  int|null  $ignoreId  Current borrower id when updating (for unique rules).
+     * @param  bool  $uniqueEmail  Whether a taken email is refused. Not on a public
+     *                             registration (finish run round 2, decision 3):
+     *                             refusing it told a stranger the email is on file,
+     *                             so BorrowerRegistration links the registration to
+     *                             the record holding it, and approval waits until
+     *                             the email is changed or cleared.
      * @return array<string, array<int, mixed>>
      */
-    protected function sharedBorrowerRules(?int $ignoreId = null): array
+    protected function sharedBorrowerRules(?int $ignoreId = null, bool $uniqueEmail = true): array
     {
         return [
             'middle_name' => ['nullable', 'string', 'max:255'],
             'suffix' => ['nullable', 'string', 'max:20'],
             // Applicants must be at least 18 (PH age of majority for lending).
             // `before_or_equal:-18 years` also rejects future dates implicitly.
-            'birthdate' => ['nullable', 'date', 'after:1900-01-01', 'before_or_equal:-18 years'],
+            // Member dates are written year-month-day: `date` alone accepts a
+            // number (19900115), which the model's date cast then stores as a
+            // Unix timestamp (1970-08-19).
+            'birthdate' => ['nullable', 'date', 'date_format:Y-m-d', 'after:1900-01-01', 'before_or_equal:-18 years', $this->birthdateNotAfterDateHired()],
             'civil_status' => ['nullable', 'string', 'in:single,married,widowed,separated,divorced'],
             'gender' => ['nullable', 'string', 'in:male,female'],
 
@@ -44,10 +75,10 @@ trait HasBorrowerRules
                 'nullable',
                 'email',
                 'max:255',
-                Rule::unique('borrowers', 'email')->ignore($ignoreId),
+                ...($uniqueEmail ? [Rule::unique('borrowers', 'email')->ignore($ignoreId)] : []),
             ],
             'employer_or_business' => ['nullable', 'string', 'max:255'],
-            'date_hired' => ['nullable', 'date', 'after:1900-01-01', 'before_or_equal:today'],
+            'date_hired' => ['nullable', 'date', 'date_format:Y-m-d', 'after:1900-01-01', 'before_or_equal:today', $this->dateHiredNotBeforeBirthdate()],
             'monthly_income' => ['nullable', 'numeric', 'min:0', 'max:99999999.99'],
             'pledge_amount' => ['nullable', 'numeric', 'min:0', 'max:9999999.99'],
 
@@ -59,7 +90,9 @@ trait HasBorrowerRules
 
             // `pending` is reserved for the public registration flow — every
             // other status is operator-only. StoreBorrowerRequest narrows this
-            // list when the request is anonymous.
+            // list when the request is anonymous, and UpdateBorrowerRequest
+            // removes it: approving, deactivating and reactivating have their
+            // own routes and checks.
             'status' => ['nullable', 'string', 'in:active,inactive,blacklisted,pending'],
 
             // Opt-out of the duplicate-borrower check. When omitted or false,
@@ -69,23 +102,119 @@ trait HasBorrowerRules
     }
 
     /**
+     * The fields every member form requires, on top of sharedBorrowerRules():
+     * the staff forms and the public registration ask for the same ones
+     * (audit finding 15). A create must send them. An update may leave one out
+     * but can't clear it.
+     *
+     * The street address lives in either `address` or `street_address`, and the
+     * forms send one or both, so one of the two is what's required.
+     *
+     * The CSV importer doesn't come through here: it imports a legacy member
+     * with a blank field on purpose (CustomerRowNormalizer).
+     *
+     * @param  array<string, array<int, mixed>>  $rules
+     * @return array<string, array<int, mixed>>
+     */
+    protected function requireMemberFields(array $rules, bool $creating): array
+    {
+        $presence = $creating ? [] : ['sometimes'];
+
+        foreach (['birthdate', 'civil_status', 'gender', 'contact_number', 'city', 'province'] as $field) {
+            $rules[$field] = [
+                ...$presence,
+                'required',
+                // A strict filter: array_diff() would cast each rule to a
+                // string, and a birthdate's comparison rule is a closure.
+                ...array_values(array_filter($rules[$field], fn (mixed $rule): bool => $rule !== 'nullable')),
+            ];
+        }
+
+        $rules['address'] = [...$presence, 'required_without:street_address', ...$rules['address']];
+        $rules['street_address'] = [...$presence, 'required_without:address', ...$rules['street_address']];
+
+        return $rules;
+    }
+
+    /**
      * @return array<string, string>
      */
     protected function borrowerMessages(): array
     {
         return [
+            'address.required_without' => 'The street address is required.',
+            'street_address.required_without' => 'The street address is required.',
             'contact_number.regex' => 'The contact number must be a valid phone format (e.g., 09171234567 or +639171234567).',
-            // Same reasoning as NoDuplicateBorrower: public registration is
-            // anonymous, so confirming that an address is already on file lets
-            // anyone enumerate who borrows here. Operators still get the direct
-            // message, since they need it to resolve the collision.
-            'email.unique' => $this->user()
-                ? 'A borrower with this email already exists.'
-                : 'This email cannot be used. Please contact your branch to continue.',
+            // Staff only: a public registration's email is never refused as
+            // taken (sharedBorrowerRules()).
+            'email.unique' => 'A member with this email already exists.',
             'pledge_amount.max' => 'The pledge amount may not exceed 9,999,999.99.',
+            'birthdate.date_format' => 'The birthdate must be a date written as year-month-day, such as 1990-01-15.',
             'birthdate.after' => 'The birthdate must be after January 1, 1900.',
             'birthdate.before_or_equal' => 'The applicant must be at least 18 years old.',
+            'date_hired.date_format' => 'The date hired must be a date written as year-month-day, such as 2020-06-01.',
             'date_hired.before_or_equal' => 'The date hired cannot be in the future.',
+            'membership_date.date_format' => 'The membership date must be a date written as year-month-day, such as 2026-01-15.',
         ];
+    }
+
+    /**
+     * A date hired can't fall before the member's birthdate, as the member
+     * form and the CSV import refuse it (CustomerRowNormalizer). It is
+     * compared with the birthdate as this request leaves it
+     * (self::sentOrStoredDate()). Only dates written year-month-day are
+     * compared, so a date written another way gets its own refusal and no
+     * second one here.
+     */
+    private function dateHiredNotBeforeBirthdate(): Closure
+    {
+        return function (string $attribute, mixed $value, Closure $fail): void {
+            $birthdate = $this->sentOrStoredDate('birthdate');
+
+            if (self::isCalendarDate($value) && self::isCalendarDate($birthdate) && $value < $birthdate) {
+                $fail('The date hired cannot be before the birthdate.');
+            }
+        };
+    }
+
+    /**
+     * The other side of the same rule: a birthdate can't fall after the date
+     * hired as this request leaves it, so an edit that sends only a new
+     * birthdate can't put the pair the wrong way round either.
+     */
+    private function birthdateNotAfterDateHired(): Closure
+    {
+        return function (string $attribute, mixed $value, Closure $fail): void {
+            $dateHired = $this->sentOrStoredDate('date_hired');
+
+            if (self::isCalendarDate($value) && self::isCalendarDate($dateHired) && $value > $dateHired) {
+                $fail('The birthdate cannot be after the date hired.');
+            }
+        };
+    }
+
+    /**
+     * A member date as this request leaves it: the value sent (null when it
+     * clears the field), or the member's on file when an edit leaves it out.
+     * Only the member requests validate the two dates; the portal's
+     * ProfileFields shares these rules but leaves both fields out.
+     */
+    private function sentOrStoredDate(string $field): mixed
+    {
+        if ($this->has($field)) {
+            return $this->input($field);
+        }
+
+        $stored = $this->route('borrower');
+
+        return $stored instanceof Borrower ? $stored->{$field}?->toDateString() : null;
+    }
+
+    /** A date written year-month-day that is on the calendar. */
+    private static function isCalendarDate(mixed $value): bool
+    {
+        return is_string($value)
+            && preg_match('/^(\d{4})-(\d{2})-(\d{2})$/', $value, $parts) === 1
+            && checkdate((int) $parts[2], (int) $parts[3], (int) $parts[1]);
     }
 }

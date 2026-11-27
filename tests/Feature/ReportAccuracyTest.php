@@ -82,6 +82,8 @@ class ReportAccuracyTest extends TestCase
     public function test_repayments_report_excludes_payments_outside_the_date_range(): void
     {
         $loan = $this->createReleasedLoan();
+        // Released before the older payment: a payment can't predate its release.
+        $loan->forceFill(['released_at' => Carbon::today()->subDays(10)])->save();
 
         $today = Carbon::today()->toDateString();
         $tenDaysAgo = Carbon::today()->subDays(10)->toDateString();
@@ -388,7 +390,7 @@ class ReportAccuracyTest extends TestCase
         $csv = $this->parseCsv($export->streamedContent());
 
         $this->assertSame([
-            'Borrower', 'Loan #', 'Due Date', 'Days Overdue', 'Principal Due', 'Interest Due', 'Penalty', 'Total Due', 'Status',
+            'Member', 'Loan #', 'Due Date', 'Days Overdue', 'Principal Due', 'Interest Due', 'Penalty', 'Total Due', 'Status',
         ], $csv[0]);
 
         $body = array_slice($csv, 1);
@@ -503,6 +505,8 @@ class ReportAccuracyTest extends TestCase
     public function test_daily_collection_honours_the_requested_date_range(): void
     {
         $loan = $this->createReleasedLoan();
+        // Released before the payment five days ago: a payment can't predate its release.
+        $loan->forceFill(['released_at' => Carbon::today()->subDays(5)])->save();
         // 11,800 falls due today.
         $this->moveScheduleDaysAgo($loan, periodNumber: 1, daysAgo: 0);
 
@@ -517,20 +521,25 @@ class ReportAccuracyTest extends TestCase
         $this->assertSame($today, $todayOnly->json('data.date_to'));
         $this->assertSame($today, $todayOnly->json('data.date'), 'date echoes the end of the range.');
         $this->assertEqualsWithDelta(11800, $todayOnly->json('data.total_due'), 0.01);
-        $this->assertEqualsWithDelta(5900, $todayOnly->json('data.total_collected'), 0.01, 'The payment five days ago is outside the window.');
-        $this->assertEqualsWithDelta(50.0, $todayOnly->json('data.collection_rate'), 0.01, 'collection_rate is a whole percent.');
-        $this->assertEqualsWithDelta(5900, $todayOnly->json('data.uncollected'), 0.01);
+        // Counted by period, as paid now: the 1,000 paid five days ago also went
+        // to today's period, so 6,900 of its 11,800 is collected.
+        $this->assertEqualsWithDelta(6900, $todayOnly->json('data.total_collected'), 0.01);
+        $this->assertEqualsWithDelta(58.47, $todayOnly->json('data.collection_rate'), 0.01, 'collection_rate is a whole percent.');
+        $this->assertEqualsWithDelta(4900, $todayOnly->json('data.uncollected'), 0.01);
+        $this->assertEqualsWithDelta(5900, $todayOnly->json('data.total_received'), 0.01, 'The cash taken five days ago is outside the window.');
 
         $earlierDay = $this->getJson("/api/reports/daily-collection?date_from={$fiveDaysAgo}&date_to={$fiveDaysAgo}")->assertOk();
         $this->assertSame($fiveDaysAgo, $earlierDay->json('data.date_from'));
         $this->assertSame($fiveDaysAgo, $earlierDay->json('data.date_to'));
         $this->assertSame($fiveDaysAgo, $earlierDay->json('data.date'));
-        $this->assertEqualsWithDelta(1000, $earlierDay->json('data.total_collected'), 0.01);
+        $this->assertEqualsWithDelta(0, $earlierDay->json('data.total_collected'), 0.01, 'Nothing fell due that day, so nothing is collected against it.');
+        $this->assertEqualsWithDelta(1000, $earlierDay->json('data.total_received'), 0.01);
         $this->assertEqualsWithDelta(0, $earlierDay->json('data.total_due'), 0.01);
         $this->assertEqualsWithDelta(0, $earlierDay->json('data.collection_rate'), 0.01);
 
         $wholeWindow = $this->getJson("/api/reports/daily-collection?date_from={$fiveDaysAgo}&date_to={$today}")->assertOk();
         $this->assertEqualsWithDelta(6900, $wholeWindow->json('data.total_collected'), 0.01);
+        $this->assertEqualsWithDelta(6900, $wholeWindow->json('data.total_received'), 0.01);
         $this->assertEqualsWithDelta(11800, $wholeWindow->json('data.total_due'), 0.01);
     }
 
@@ -603,10 +612,10 @@ class ReportAccuracyTest extends TestCase
     // ── Cross-report reconciliation ───────────────────────────
 
     /**
-     * Cash Flow and Daily Collection count the same money, so for one day they
-     * must land on the same figure. The comparison has to be against
-     * `inflows.repayments.total` and not `inflows.total`: Cash Flow also counts
-     * share capital, which Daily Collection knows nothing about.
+     * Cash Flow and Daily Collection's `total_received` count the same money,
+     * so for one day they must land on the same figure. The comparison has to
+     * be against `inflows.repayments.total` and not `inflows.total`: Cash Flow
+     * also counts share capital, which Daily Collection knows nothing about.
      */
     public function test_cash_flow_repayment_inflow_equals_daily_collection_for_the_same_day(): void
     {
@@ -627,17 +636,19 @@ class ReportAccuracyTest extends TestCase
         $daily = $this->getJson("/api/reports/daily-collection?date_from={$today}&date_to={$today}")->assertOk();
         $cashFlow = $this->getJson("/api/reports/cash-flow?date_from={$today}&date_to={$today}")->assertOk();
 
-        $this->assertEqualsWithDelta(5900, $daily->json('data.total_collected'), 0.01);
+        $this->assertEqualsWithDelta(5900, $daily->json('data.total_received'), 0.01);
+        // Daily Collection leaves out the insurance premium payments collected
+        // first; Cash Flow shows it as its own line inside the total.
         $this->assertEqualsWithDelta(
-            $daily->json('data.total_collected'),
-            $cashFlow->json('data.inflows.repayments.total'),
+            $daily->json('data.total_received'),
+            $cashFlow->json('data.inflows.repayments.total') - $cashFlow->json('data.inflows.repayments.insurance'),
             0.01,
             'The two reports count the same posted repayments over the same day and must never disagree.',
         );
 
         $this->assertEqualsWithDelta(7900, $cashFlow->json('data.inflows.total'), 0.01);
         $this->assertNotEqualsWithDelta(
-            $daily->json('data.total_collected'),
+            $daily->json('data.total_received'),
             $cashFlow->json('data.inflows.total'),
             0.01,
             'inflows.total also carries the 2,000 share capital credit, which is not loan collection.',
@@ -647,6 +658,8 @@ class ReportAccuracyTest extends TestCase
     public function test_collection_efficiency_matches_daily_collection_for_identical_filters(): void
     {
         $loan = $this->createReleasedLoan();
+        // Released before the payment five days ago: a payment can't predate its release.
+        $loan->forceFill(['released_at' => Carbon::today()->subDays(5)])->save();
         // 11,800 falls due today.
         $this->moveScheduleDaysAgo($loan, periodNumber: 1, daysAgo: 0);
 
@@ -681,8 +694,9 @@ class ReportAccuracyTest extends TestCase
         // identically wrong.
         $narrow = $this->getJson("/api/reports/collection-efficiency?{$windows['today']}")->assertOk()->json('data');
         $this->assertEqualsWithDelta(11800, $narrow['total_due'], 0.01);
-        $this->assertEqualsWithDelta(5900, $narrow['total_collected'], 0.01, 'The payment five days ago is out of window.');
-        $this->assertEqualsWithDelta(50.0, $narrow['collection_rate'], 0.01);
+        $this->assertEqualsWithDelta(6900, $narrow['total_collected'], 0.01, 'Counted by period: the 1,000 paid five days ago went to today\'s period.');
+        $this->assertEqualsWithDelta(58.47, $narrow['collection_rate'], 0.01);
+        $this->assertEqualsWithDelta(5900, $narrow['total_received'], 0.01, 'The cash taken five days ago is out of window.');
 
         $wide = $this->getJson("/api/reports/collection-efficiency?{$windows['five day window']}")->assertOk()->json('data');
         $this->assertEqualsWithDelta(11800, $wide['total_due'], 0.01);

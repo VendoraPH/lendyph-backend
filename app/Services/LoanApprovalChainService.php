@@ -6,9 +6,13 @@ use App\Models\ApprovalWorkflowSetting;
 use App\Models\Loan;
 use App\Models\LoanApprovalStep;
 use App\Models\User;
+use App\Services\Approvals\StepMinimum;
+use Brick\Math\BigDecimal;
 use Illuminate\Auth\Access\AuthorizationException;
 use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Database\Eloquent\ModelNotFoundException;
+use Illuminate\Http\Exceptions\HttpResponseException;
+use Illuminate\Support\Collection as SupportCollection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
 
@@ -29,7 +33,38 @@ use Illuminate\Validation\ValidationException;
  */
 class LoanApprovalChainService
 {
-    public function __construct(private LoanService $loanService) {}
+    /**
+     * Container key for the forward a submit carries, as
+     * `['loan_id' => …, 'user_id' => …]`. LoanService::submitForReview()
+     * resolves this service on its own and calls seed() with no room for it,
+     * so submitForwarding() leaves it here and always removes it afterwards;
+     * seed() uses it only for the loan it names.
+     */
+    public const SUBMIT_FORWARD_KEY = 'loan-approval-chain.submit-forward-to';
+
+    public function __construct(
+        private LoanService $loanService,
+        private Notifications $notifications,
+        private ApprovalAssignees $assignees,
+    ) {}
+
+    /**
+     * Submit a draft for review and forward its first pending step to a named
+     * user (`forward_to_user_id`, PATCH /loans/{loan}/submit). The user is
+     * checked in seed(), under the loan's lock, against the step that just
+     * became pending: a refusal is a 422 on `forward_to_user_id` and the loan
+     * stays a draft.
+     */
+    public function submitForwarding(Loan $loan, User $submitter, int $forwardToUserId): Loan
+    {
+        app()->instance(self::SUBMIT_FORWARD_KEY, ['loan_id' => (int) $loan->getKey(), 'user_id' => $forwardToUserId]);
+
+        try {
+            return $this->loanService->submitForReview($loan, $submitter);
+        } finally {
+            app()->forgetInstance(self::SUBMIT_FORWARD_KEY);
+        }
+    }
 
     /**
      * Snapshot the configured chain onto the loan as round 1.
@@ -54,7 +89,7 @@ class LoanApprovalChainService
         // promotion branch at the bottom of this method would silently skip.
         $submitter ??= auth()->user() ?? $loan->createdByUser;
 
-        $chain = $this->chainFor($loan);
+        $chain = $this->keptSteps($loan, $this->chainFor($loan), 'submit', $submitter);
 
         // Destructive re-seed, NOT idempotent: this drops any existing chain
         // for the loan, and being a query-builder delete it fires no model
@@ -72,6 +107,8 @@ class LoanApprovalChainService
                 'step_order' => $order,
                 'step_id' => $step['id'],
                 'name' => $step['name'],
+                // The built-in default chains carry no label.
+                'status_label' => $step['status'] ?? null,
                 'role' => $step['role'],
                 'kind' => $step['kind'],
                 'status' => $order === 0
@@ -92,9 +129,36 @@ class LoanApprovalChainService
         // Loan::isReleasable refuses to release and nothing can move.
         $pending = $steps->firstWhere('status', LoanApprovalStep::STATUS_PENDING);
 
-        if ($pending?->kind === LoanApprovalStep::KIND_RELEASE && $submitter !== null) {
-            $this->loanService->approve($loan, $submitter, null);
+        $forward = app()->bound(self::SUBMIT_FORWARD_KEY) ? app(self::SUBMIT_FORWARD_KEY) : null;
+
+        if (is_array($forward) && (int) ($forward['loan_id'] ?? 0) === (int) $loan->getKey()) {
+            app()->forgetInstance(self::SUBMIT_FORWARD_KEY);
+            $assignee = $this->assignForward($loan, $pending, (int) $forward['user_id'], $submitter);
+
+            AuditLogService::log(
+                action: 'loan_step_forwarded',
+                auditable: $loan,
+                newValues: [
+                    'round' => $pending->round,
+                    'step_order' => $pending->step_order,
+                    'step_id' => $pending->step_id,
+                    'role' => $pending->role,
+                    'forwarded_to' => $assignee->full_name,
+                    'forwarded_to_user_id' => (int) $assignee->id,
+                ],
+                description: "Loan {$loan->application_number} submitted and forwarded to {$assignee->full_name} at the \"{$pending->name}\" step.",
+                userId: $submitter?->id,
+            );
         }
+
+        // approveLocked(), not approve(): this runs inside submitForReview's
+        // transaction, which locked the loan's row as its first statement, and
+        // LoanWriteTransaction::run() must be the outermost.
+        if ($pending?->kind === LoanApprovalStep::KIND_RELEASE && $submitter !== null) {
+            $this->loanService->approveLocked($loan, $submitter, null);
+        }
+
+        $this->notifyApprovalNeeded($loan, $pending, $submitter);
 
         return $steps;
     }
@@ -106,11 +170,31 @@ class LoanApprovalChainService
      * send-back that targeted the submit step, re-submitting IS an approve on
      * that step. There is deliberately no separate re-submit verb, and no guard
      * on `kind` here.
+     *
+     * A sign-off that was wrong from the start is refused before the
+     * transaction opens (assertActionable()), with the 404, 422 or 403 it
+     * always was. Inside LoanWriteTransaction::run(), lockAndGuard() reads the
+     * loan and the step again under their locks: one another request signed,
+     * sent back or decided since this one read it is a 409, as is a deadlock
+     * or a lock wait timeout, and the chain is left exactly as that request
+     * left it.
      */
-    public function approve(Loan $loan, LoanApprovalStep $step, User $user, ?string $remarks = null): LoanApprovalStep
+    public function approve(Loan $loan, LoanApprovalStep $step, User $user, ?string $remarks = null, ?int $forwardToUserId = null, ?int $namedStepId = null): LoanApprovalStep
     {
-        return DB::transaction(function () use ($loan, $step, $user, $remarks) {
-            [$loan, $step] = $this->lockAndGuard($loan, $step, $user);
+        $this->assertNamedStepWaiting($loan, $namedStepId, false);
+        $this->assertActionable($loan, $step, $user);
+
+        return LoanWriteTransaction::run(function () use ($loan, $step, $user, $remarks, $forwardToUserId, $namedStepId) {
+            [$loan, $step] = $this->lockAndGuard($loan, $step, $user, $namedStepId);
+
+            // Re-submitting after a send-back: a restructure's figures are
+            // taken again from what its source owes now.
+            if ($step->kind === LoanApprovalStep::KIND_SUBMIT) {
+                $this->loanService->retakeRestructureTerms($loan, 'submission', $user);
+                $this->reseedAfter($loan, $step, $user);
+            } else {
+                $this->assertNoLeftOutStepApplies($loan, $step);
+            }
 
             $step->update([
                 'status' => LoanApprovalStep::STATUS_APPROVED,
@@ -127,15 +211,24 @@ class LoanApprovalChainService
 
             $next?->update(['status' => LoanApprovalStep::STATUS_PENDING]);
 
+            // Checked against the step that just became pending, under the
+            // locks, so the rule reads the chain as this sign-off left it. A
+            // refusal rolls the sign-off back with it.
+            $assignee = $forwardToUserId === null ? null : $this->assignForward($loan, $next, $forwardToUserId, $user);
+
             // The chain has cleared every approver — either the next step is
             // the release step, or a misconfigured chain has simply run out.
             // Either way hand over to the existing loan transition so
             // `loans.status`, not this table, remains what the rest of the
             // system reads. Without the null branch a chain whose last step is
             // not a `release` would dead-end: no pending step, no way forward.
+            //
+            // approveLocked(): this transaction already holds the loan's row.
             if ($next === null || $next->kind === LoanApprovalStep::KIND_RELEASE) {
-                $this->loanService->approve($loan, $user, $remarks);
+                $this->loanService->approveLocked($loan, $user, $remarks);
             }
+
+            $this->notifyApprovalNeeded($loan, $next, $user);
 
             AuditLogService::log(
                 action: 'loan_step_approved',
@@ -147,8 +240,10 @@ class LoanApprovalChainService
                     'role' => $step->role,
                     'kind' => $step->kind,
                     'remarks' => $remarks,
+                    ...($assignee === null ? [] : ['forwarded_to' => $assignee->full_name, 'forwarded_to_user_id' => (int) $assignee->id]),
                 ],
-                description: "Approval step \"{$step->name}\" signed off on loan {$loan->application_number} (round {$step->round}).",
+                description: "Approval step \"{$step->name}\" signed off on loan {$loan->application_number} (round {$step->round})"
+                    .($assignee === null ? '.' : ", forwarded to {$assignee->full_name} at the \"{$next->name}\" step."),
                 userId: $user->id,
             );
 
@@ -166,6 +261,9 @@ class LoanApprovalChainService
      * a different action (PATCH /loans/{id}/reject) and voiding is the escape
      * hatch for drafts.
      *
+     * Checked before the transaction and again under the locks, as approve()
+     * is: a step signed, sent back or decided since it was read is a 409.
+     *
      * @return Collection<int, LoanApprovalStep> the new round
      */
     public function sendBack(
@@ -174,9 +272,13 @@ class LoanApprovalChainService
         int $targetStepOrder,
         User $user,
         string $remarks,
+        ?int $namedStepId = null,
     ): Collection {
-        return DB::transaction(function () use ($loan, $step, $targetStepOrder, $user, $remarks) {
-            [$loan, $step] = $this->lockAndGuard($loan, $step, $user);
+        $this->assertNamedStepWaiting($loan, $namedStepId, false);
+        $this->assertActionable($loan, $step, $user);
+
+        return LoanWriteTransaction::run(function () use ($loan, $step, $targetStepOrder, $user, $remarks, $namedStepId) {
+            [$loan, $step] = $this->lockAndGuard($loan, $step, $user, $namedStepId);
 
             if ($targetStepOrder >= $step->step_order) {
                 throw ValidationException::withMessages([
@@ -224,6 +326,7 @@ class LoanApprovalChainService
                     'step_order' => $previous->step_order,
                     'step_id' => $previous->step_id,
                     'name' => $previous->name,
+                    'status_label' => $previous->status_label,
                     'role' => $previous->role,
                     'kind' => $previous->kind,
                     'status' => match (true) {
@@ -252,8 +355,91 @@ class LoanApprovalChainService
                 userId: $user->id,
             );
 
-            return $loan->approvalSteps()->where('round', $nextRound)->orderBy('step_order')->get();
+            $newRound = $loan->approvalSteps()->where('round', $nextRound)->orderBy('step_order')->get();
+
+            // The creator and the officer hear that it came back; the target
+            // step's role hears that it is theirs to act on, unless they were
+            // just told by the first notification.
+            $target = $newRound->firstWhere('step_order', $targetStepOrder);
+            $toldSentBack = $this->notifications->loanSentBack($loan, $target, $user, $remarks);
+            $this->notifyApprovalNeeded($loan, $target, $user, $toldSentBack);
+
+            return $newRound;
         });
+    }
+
+    /**
+     * Reopen the chain of an approved restructure that is going back for
+     * approval. Called only from inside LoanService::sendBackApproved()'s
+     * transaction, which holds the restructure's and its source's row locks
+     * and has already moved the loan back to `for_review`.
+     *
+     * Mirrors sendBack(), from the release step: that step is frozen as
+     * `sent_back` with who, when and why, and round N+1 opens with the submit
+     * step pending and every other step waiting. Nobody's sign-off carries
+     * over, so the restructure is re-submitted and approved again, and its
+     * figures are taken again at each of those steps. A restructure with no
+     * chain on record gets round 1 from the configured chain, submit pending.
+     *
+     * The creator and the officer hear that it came back, and the submit
+     * step's role that it is theirs, after the commit (Notifications).
+     *
+     * @return Collection<int, LoanApprovalStep> the new round
+     */
+    public function reopenApprovedRestructure(Loan $loan, User $user, string $reason): Collection
+    {
+        $round = $loan->approvalSteps()->max('round');
+        $currentRound = $round === null
+            ? collect()
+            : $loan->approvalSteps()->where('round', $round)->orderBy('step_order')->get();
+
+        $template = $currentRound->isEmpty()
+            ? collect($this->chainFor($loan))->map(fn (array $step, int $order): array => [
+                'step_order' => $order,
+                'step_id' => $step['id'],
+                'name' => $step['name'],
+                'status_label' => $step['status'] ?? null,
+                'role' => $step['role'],
+                'kind' => $step['kind'],
+            ])
+            : $currentRound->map(fn (LoanApprovalStep $step): array => $step->only([
+                'step_order', 'step_id', 'name', 'status_label', 'role', 'kind',
+            ]));
+
+        $submit = $template->firstWhere('kind', LoanApprovalStep::KIND_SUBMIT) ?? $template->sortBy('step_order')->first();
+        $targetStepOrder = (int) $submit['step_order'];
+
+        $currentRound
+            ->first(fn (LoanApprovalStep $step): bool => $step->kind === LoanApprovalStep::KIND_RELEASE
+                && $step->status !== LoanApprovalStep::STATUS_APPROVED)
+            ?->update([
+                'status' => LoanApprovalStep::STATUS_SENT_BACK,
+                'acted_by' => $user->id,
+                'acted_at' => now(),
+                'remarks' => $reason,
+                'sent_back_to_step_order' => $targetStepOrder,
+            ]);
+
+        $nextRound = $round === null ? 1 : (int) $round + 1;
+
+        foreach ($template as $step) {
+            LoanApprovalStep::create([
+                ...$step,
+                'loan_id' => $loan->id,
+                'round' => $nextRound,
+                'status' => (int) $step['step_order'] === $targetStepOrder
+                    ? LoanApprovalStep::STATUS_PENDING
+                    : LoanApprovalStep::STATUS_WAITING,
+            ]);
+        }
+
+        $newRound = $loan->approvalSteps()->where('round', $nextRound)->orderBy('step_order')->get();
+
+        $target = $newRound->firstWhere('step_order', $targetStepOrder);
+        $toldSentBack = $this->notifications->loanSentBack($loan, $target, $user, $reason);
+        $this->notifyApprovalNeeded($loan, $target, $user, $toldSentBack);
+
+        return $newRound;
     }
 
     /**
@@ -331,6 +517,54 @@ class LoanApprovalChainService
         );
     }
 
+    /**
+     * Cancel what is left of the chain of a loan being voided (Lead's call 4):
+     * every `waiting` and `pending` step of the live round reads `cancelled`,
+     * stamped with who voided it and when, so a voided loan never reads as
+     * waiting on an approver and no step of it can be acted on. A step already
+     * signed off keeps its signature, and an earlier round is history.
+     *
+     * Each step's change writes its own audit row (Auditable), and one
+     * `loan_chain_cancelled` row against the loan names the steps cancelled
+     * (`steps_closed`, which the Audit Trail reads as step names). A loan with
+     * nothing unfinished writes nothing. Called from inside
+     * LoanService::voidLoan()'s transaction, after the loan row is locked.
+     */
+    public function cancelOpenSteps(Loan $loan, ?User $actor): void
+    {
+        $round = $this->currentRound($loan);
+
+        $open = $loan->approvalSteps()
+            ->where('round', $round)
+            ->whereIn('status', [LoanApprovalStep::STATUS_WAITING, LoanApprovalStep::STATUS_PENDING])
+            ->orderBy('step_order')
+            ->get();
+
+        if ($open->isEmpty()) {
+            return;
+        }
+
+        foreach ($open as $step) {
+            $step->update([
+                'status' => LoanApprovalStep::STATUS_CANCELLED,
+                'acted_by' => $actor?->id,
+                'acted_at' => now(),
+            ]);
+        }
+
+        AuditLogService::log(
+            action: 'loan_chain_cancelled',
+            auditable: $loan,
+            newValues: [
+                'round' => $round,
+                'steps_closed' => $open->pluck('step_id')->all(),
+            ],
+            description: "Approval chain on loan {$loan->application_number} was cancelled when the loan was voided "
+                ."({$open->count()} step(s) cancelled).",
+            userId: $actor?->id,
+        );
+    }
+
     public function markReleased(Loan $loan, User $releaser): void
     {
         $step = $loan->approvalSteps()
@@ -365,17 +599,23 @@ class LoanApprovalChainService
     }
 
     /**
-     * Whether this user may act on this step, by role alone.
+     * Whether this user may act on this step: the WHO half of the question
+     * only — assertActionable adds the state half.
      *
      * Mirrors the client's canUserActOnStep: the role named on the step, with
-     * admin/super_admin able to act on anything. This is the ROLE half of the
-     * question only — assertActionable adds the state half.
+     * admin/super_admin able to act on anything. A step forwarded to a named
+     * user is that user's alone while ApprovalAssignees says they still hold
+     * it; otherwise it falls back to the role.
      *
      * The step's own role is matched against the user's role NAMES directly
      * rather than through `hasRole($string)`, because Spatie splits a string
      * containing `|` into alternatives and treats a ULID-shaped string as a
      * role ID. `loan_approval_steps.role` is free text copied from a settings
      * blob, so neither behaviour should be reachable from it.
+     *
+     * Only active roles count: a deactivated role grants nothing, so a user
+     * holding only that role can't act on its step until it's reactivated.
+     * admin and super_admin can't be deactivated (Role::PROTECTED_KEYS).
      */
     public function canAct(LoanApprovalStep $step, ?User $user): bool
     {
@@ -383,11 +623,197 @@ class LoanApprovalChainService
             return false;
         }
 
-        if ($user->hasRole(LoanApprovalStep::BYPASS_ROLES)) {
+        if ($this->bypasses($user)) {
             return true;
         }
 
-        return $user->roles->contains('name', $step->role);
+        // A step forwarded to a named user is theirs alone while they could
+        // still have been given it (ApprovalAssignees); once they can't, it is
+        // the role's again.
+        $assignee = $this->assignees->effectiveAssignee($step);
+
+        if ($assignee !== null) {
+            return (int) $assignee->getKey() === (int) $user->getKey();
+        }
+
+        return $user->activeRoles()->contains('name', $step->role);
+    }
+
+    /**
+     * Refuse a release by anyone but the user the loan's release step is
+     * forwarded to, while that user could still be given it. admin and
+     * super_admin may release it anyway; an unassigned release step changes
+     * nothing (`loans:release` decides, as before). Called by
+     * LoanController::release and ::sendBackApproved before their
+     * transactions: sending an approved restructure back is the release
+     * step's decision too.
+     *
+     * @throws AuthorizationException
+     */
+    public function assertMayRelease(Loan $loan, User $user): void
+    {
+        if ($this->bypasses($user)) {
+            return;
+        }
+
+        $step = $loan->approvalSteps()
+            ->where('round', $this->currentRound($loan))
+            ->where('kind', LoanApprovalStep::KIND_RELEASE)
+            ->where('status', LoanApprovalStep::STATUS_PENDING)
+            ->orderBy('step_order')
+            ->first();
+
+        $assignee = $step === null ? null : $this->assignees->effectiveAssignee($step, $loan);
+
+        if ($assignee !== null && (int) $assignee->getKey() !== (int) $user->getKey()) {
+            throw new AuthorizationException("This loan was forwarded to {$assignee->full_name} for release.");
+        }
+    }
+
+    /**
+     * The step a caller would forward to from where the loan is now, for
+     * GET /loans/{loan}/approval/forward-candidates.
+     *
+     *   - A draft: the step its submit would make pending, from the chain its
+     *     submit would snapshot (chainFor()). The caller must be able to
+     *     submit it (SubmitLoanRequest's rule).
+     *   - In review: the step after the pending one. The caller must be able
+     *     to act on the pending one (canAct()).
+     *
+     * Null when the pending step is the round's last. An unsaved step for a
+     * draft, never written.
+     *
+     * @return array{step: LoanApprovalStep, last_approve: bool}|null
+     *
+     * @throws AuthorizationException when the caller can't act
+     * @throws ValidationException when the loan is not a draft or in review
+     */
+    public function forwardTarget(Loan $loan, User $user): ?array
+    {
+        if ($loan->status === 'draft') {
+            $canSubmit = $user->can('loans:update') || ($loan->isRestructure() && $user->can('loans:restructure'));
+
+            if (! $canSubmit) {
+                throw new AuthorizationException('You can\'t submit this loan for approval.');
+            }
+
+            // The chain as seeding will leave it (steps whose minimum is above
+            // the loan's amount left out), so `last_approve` is right. Nothing
+            // is written or audited here.
+            $amount = $this->principalOf($loan);
+            $chain = array_values(array_filter($this->chainFor($loan), fn (array $step): bool => StepMinimum::applies($step, $amount)));
+            $next = $chain[1] ?? null;
+
+            if ($next === null) {
+                return null;
+            }
+
+            $step = new LoanApprovalStep([
+                'loan_id' => $loan->id,
+                'round' => 1,
+                'step_order' => 1,
+                'step_id' => $next['id'],
+                'name' => $next['name'],
+                'role' => $next['role'],
+                'kind' => $next['kind'],
+            ]);
+
+            $later = array_slice($chain, 2);
+
+            return [
+                'step' => $step,
+                'last_approve' => $step->kind === LoanApprovalStep::KIND_APPROVE
+                    && ! collect($later)->contains(fn (array $s) => in_array($s['kind'], [LoanApprovalStep::KIND_SUBMIT, LoanApprovalStep::KIND_APPROVE], true)),
+            ];
+        }
+
+        if ($loan->status !== 'for_review') {
+            throw ValidationException::withMessages([
+                'status' => ['Only a draft or a loan for approval can be forwarded.'],
+            ]);
+        }
+
+        $round = $this->currentRound($loan);
+        $current = $loan->approvalSteps()
+            ->where('round', $round)
+            ->where('status', LoanApprovalStep::STATUS_PENDING)
+            ->orderBy('step_order')
+            ->first();
+
+        if ($current === null || ! $this->canAct($current, $user)) {
+            throw new AuthorizationException('You can\'t act on this loan\'s current approval step.');
+        }
+
+        $next = $loan->approvalSteps()
+            ->where('round', $round)
+            ->where('step_order', '>', $current->step_order)
+            ->orderBy('step_order')
+            ->first();
+
+        return $next === null ? null : ['step' => $next, 'last_approve' => $this->assignees->isLastApproveStep($next)];
+    }
+
+    /**
+     * The users `$user` may forward `$step` to, sorted by name.
+     *
+     * @return SupportCollection<int, User>
+     */
+    public function forwardCandidates(Loan $loan, LoanApprovalStep $step, bool $lastApprove, User $user): SupportCollection
+    {
+        return $this->assignees->candidates($loan, $step, $lastApprove, $user);
+    }
+
+    /**
+     * Check `$userId` against the step that just became pending and store
+     * them as its assignee. Runs under the loan's lock (seed() and approve()).
+     *
+     * A user who isn't one of the step's candidates for this caller gets one
+     * fixed answer naming only the step: whether the id is unknown, inactive,
+     * lacks the role or the branch is never said, so the field can't be used
+     * to look up staff accounts.
+     *
+     * @throws ValidationException 422 on `forward_to_user_id`, in words
+     */
+    private function assignForward(Loan $loan, ?LoanApprovalStep $next, int $userId, ?User $actor): User
+    {
+        if ($next === null) {
+            throw ValidationException::withMessages([
+                'forward_to_user_id' => ['This is the last step of the approval chain, so there is nobody to forward it to.'],
+            ]);
+        }
+
+        $candidate = User::query()->with(['roles', 'permissions'])->find($userId);
+        if (! $this->assignees->canBeGiven($candidate, $loan, $next, $this->assignees->isLastApproveStep($next), $actor)) {
+            throw ValidationException::withMessages([
+                'forward_to_user_id' => ["This user can't be given the \"{$next->name}\" step. Pick someone from the list."],
+            ]);
+        }
+
+        $next->update(['assigned_to' => $candidate->id]);
+
+        return $candidate;
+    }
+
+    private function bypasses(User $user): bool
+    {
+        return $user->activeRoles()->contains(fn ($role) => in_array($role->name, LoanApprovalStep::BYPASS_ROLES, true));
+    }
+
+    /**
+     * Tell the holders of the step that just became pending that it is theirs.
+     * Only for a step that is still part of review (submit or approve): a
+     * pending release step means the loan is approved, which
+     * LoanService::approve() announces as `loan_approved`.
+     *
+     * @param  list<int>  $skipUserIds
+     */
+    private function notifyApprovalNeeded(Loan $loan, ?LoanApprovalStep $step, ?User $actor, array $skipUserIds = []): void
+    {
+        if ($step === null || $step->kind === LoanApprovalStep::KIND_RELEASE) {
+            return;
+        }
+
+        $this->notifications->approvalNeeded($loan, $step, $actor, $skipUserIds);
     }
 
     /**
@@ -401,35 +827,83 @@ class LoanApprovalChainService
     /**
      * Take the row locks, then run every guard against the LOCKED state.
      *
-     * The guards have to be inside the transaction and behind a lock, not in
-     * front of it. Without the lock two requests on the same pending step both
-     * read `pending` and both commit; the damaging pair is approve + send-back,
-     * which leaves a pending step in the old round AND a pending step in the
-     * new one, so the chain forks and the abandoned branch can still be walked
-     * all the way to `approved` while the UI shows the loan back in revision.
+     * The guards have to be inside the transaction and behind a lock, not only
+     * in front of it. Without the lock two requests on the same pending step
+     * both read `pending` and both commit; the damaging pair is approve +
+     * send-back, which leaves a pending step in the old round AND a pending
+     * step in the new one, so the chain forks and the abandoned branch can
+     * still be walked all the way to `approved` while the UI shows the loan
+     * back in revision.
      *
-     * The loan is locked before the step, always in that order, so two chain
-     * actions on one loan queue up instead of deadlocking.
+     * The loan is locked before the step, always in that order and as the
+     * first statements of the transaction (the order LoanWriteTransaction
+     * describes: the loan row, then the operation's own row), so two chain
+     * actions on one loan, or one and a direct approve or reject, queue up
+     * instead of deadlocking.
+     *
+     * The caller ran assertActionable() on what it read before the lock, so a
+     * loan that is no longer in review, or a step that is no longer the pending
+     * step of the current round, was moved by another request since: a 409,
+     * never the 422 a request that was wrong from the start gets.
      *
      * @return array{0: Loan, 1: LoanApprovalStep}
+     *
+     * @throws HttpResponseException 409 when the loan or the step changed since it was read
      */
-    private function lockAndGuard(Loan $loan, LoanApprovalStep $step, User $user): array
+    private function lockAndGuard(Loan $loan, LoanApprovalStep $step, User $user, ?int $namedStepId = null): array
     {
         $lockedLoan = Loan::whereKey($loan->getKey())->lockForUpdate()->first();
-
-        if ($lockedLoan === null) {
-            throw (new ModelNotFoundException)->setModel(Loan::class, [$loan->getKey()]);
-        }
-
         $lockedStep = LoanApprovalStep::whereKey($step->getKey())->lockForUpdate()->first();
 
-        if ($lockedStep === null) {
-            throw (new ModelNotFoundException)->setModel(LoanApprovalStep::class, [$step->getKey()]);
+        if ($lockedLoan !== null) {
+            $this->assertNamedStepWaiting($lockedLoan, $namedStepId, true);
+        }
+
+        if ($lockedLoan === null
+            || $lockedStep === null
+            || $lockedLoan->status !== 'for_review'
+            || $lockedStep->status !== LoanApprovalStep::STATUS_PENDING
+            || $lockedStep->round !== $this->currentRound($lockedLoan)
+        ) {
+            throw LoanWriteTransaction::conflict();
         }
 
         $this->assertActionable($lockedLoan, $lockedStep, $user);
 
         return [$lockedLoan, $lockedStep];
+    }
+
+    /**
+     * The late click (gap round B7): a screen that names the step it showed
+     * as pending (`step_id`, the step row's id) gets a 409 in words naming
+     * the step the loan is at now when that step isn't the one waiting any
+     * more, before any other guard, so a stale screen never acts on the next
+     * step. Read again under the loan's lock ($locking). No name, no check:
+     * older screens keep today's answers.
+     *
+     * @throws HttpResponseException 409
+     */
+    private function assertNamedStepWaiting(Loan $loan, ?int $namedStepId, bool $locking): void
+    {
+        if ($namedStepId === null) {
+            return;
+        }
+
+        $pending = LoanApprovalStep::query()
+            ->where('loan_id', $loan->getKey())
+            ->where('round', $this->currentRound($loan))
+            ->where('status', LoanApprovalStep::STATUS_PENDING)
+            ->orderBy('step_order')
+            ->when($locking, fn ($query) => $query->lockForUpdate())
+            ->first();
+
+        if ($pending !== null && (int) $pending->getKey() === $namedStepId) {
+            return;
+        }
+
+        throw LoanWriteTransaction::conflict($pending === null
+            ? 'That approval step isn\'t waiting any more: no step of this loan\'s approval chain is waiting. Reload it.'
+            : "That approval step isn't waiting any more: the loan is now at the \"{$pending->name}\" step. Reload it.");
     }
 
     /**
@@ -445,7 +919,7 @@ class LoanApprovalChainService
 
         if ($loan->status !== 'for_review') {
             throw ValidationException::withMessages([
-                'status' => ["Loan must be in 'for_review' status to act on its approval chain."],
+                'status' => ["Loan must be in 'for approval' status to act on its approval chain."],
             ]);
         }
 
@@ -465,9 +939,11 @@ class LoanApprovalChainService
         }
 
         if (! $this->canAct($step, $user)) {
-            throw new AuthorizationException(
-                "This step must be actioned by the \"{$step->role}\" role.",
-            );
+            $assignee = $this->assignees->effectiveAssignee($step, $loan);
+
+            throw new AuthorizationException($assignee === null
+                ? "This step must be actioned by the \"{$step->role}\" role."
+                : "This step was forwarded to {$assignee->full_name}.");
         }
     }
 
@@ -504,8 +980,11 @@ class LoanApprovalChainService
      * outside the enum would be a MySQL strict-mode error. Anything not
      * perfectly shaped falls back to the built-in default instead.
      *
+     * `status` is an optional label, so a missing, blank or non-string value
+     * becomes null rather than throwing the whole chain back to the default.
+     *
      * @param  array<int|string, mixed>  $steps
-     * @return list<array{id: string, name: string, role: string, kind: string}>
+     * @return list<array{id: string, name: string, role: string, kind: string, status: ?string}>
      */
     private function sanitiseChain(array $steps): array
     {
@@ -537,10 +1016,250 @@ class LoanApprovalChainService
                 'name' => (string) $step['name'],
                 'role' => (string) $step['role'],
                 'kind' => (string) $step['kind'],
+                'status' => is_string($step['status'] ?? null) && trim($step['status']) !== ''
+                    ? mb_substr($step['status'], 0, 100)
+                    : null,
+                StepMinimum::KEY => StepMinimum::normalise($step[StepMinimum::KEY] ?? null),
             ];
         }
 
+        // A minimum the save would have refused (on the Submit, first
+        // approval or Release step) keeps its step: never fewer approvals.
+        foreach (array_keys($clean) as $index) {
+            if (StepMinimum::refusalFor($clean, $index) !== null) {
+                $clean[$index][StepMinimum::KEY] = null;
+            }
+        }
+
         return $clean;
+    }
+
+    /**
+     * The steps of $chain that apply to this loan's principal (Phase 6 MB-BE6,
+     * multi-branch decision 10): a step whose `min_principal` is above the
+     * principal is left out, with one audit row in words. A chain that carries
+     * any minimum is copied onto the loan (`loans.approval_chain`) the first
+     * time it is seeded, so a re-submit sets it again from the same steps.
+     *
+     * @param  list<array<string, mixed>>  $chain
+     * @return list<array<string, mixed>>
+     */
+    private function keptSteps(Loan $loan, array $chain, string $when, ?User $actor): array
+    {
+        if (! collect($chain)->contains(fn (array $step): bool => ($step[StepMinimum::KEY] ?? null) !== null)) {
+            return $chain;
+        }
+
+        if ($when === 'submit') {
+            DB::table('loans')->where('id', $loan->getKey())->update(['approval_chain' => json_encode($chain)]);
+        }
+
+        $principal = $this->principalOf($loan);
+        $kept = array_values(array_filter($chain, fn (array $step): bool => StepMinimum::applies($step, $principal)));
+        $leftOut = array_values(array_filter($chain, fn (array $step): bool => ! StepMinimum::applies($step, $principal)));
+
+        if ($leftOut !== []) {
+            $phrases = array_map(fn (array $step): string => '"'.$step['name'].'"', $leftOut);
+            $minimums = array_map(fn (array $step): string => StepMinimum::pesos($step[StepMinimum::KEY]), $leftOut);
+
+            AuditLogService::log(
+                action: 'loan_approval_steps_left_out',
+                auditable: $loan,
+                newValues: [
+                    'principal' => $principal,
+                    'when' => $when,
+                    'left_out' => array_map(fn (array $step): array => [
+                        'step_id' => $step['id'],
+                        'name' => $step['name'],
+                        'role' => $step['role'],
+                        'min_principal' => $step[StepMinimum::KEY],
+                    ], $leftOut),
+                ],
+                description: count($leftOut) === 1
+                    ? "Loan {$loan->application_number}: step {$phrases[0]} left out, because the {$this->amountWords($loan)} of ".StepMinimum::pesos($principal)." is below its minimum of {$minimums[0]}."
+                    : "Loan {$loan->application_number}: steps ".implode(', ', array_map(fn (string $name, string $minimum): string => "{$name} (from {$minimum})", $phrases, $minimums))
+                        .' left out, because the '.$this->amountWords($loan).' of '.StepMinimum::pesos($principal).' is below their minimums.',
+                userId: $actor?->id,
+            );
+        }
+
+        return $kept;
+    }
+
+    /**
+     * The steps of the loan's own chain copy (`loans.approval_chain`) that its
+     * minimum left out of the current round, in chain order, for GET
+     * /loans/{loan}/approval-steps (`left_out_steps`). Each names the kept step
+     * it follows in the copy (`after_step_id`, null when none comes before it)
+     * and says why in words. Empty when nothing was left out, and for a loan
+     * with no copy (its chain carried no minimum) or no round yet.
+     *
+     * A step left out whose minimum the amount has reached since (raised after
+     * submitting; sign-off is refused until the loan is re-submitted, see
+     * assertNoLeftOutStepApplies()) is still listed, and says so.
+     *
+     * @param  SupportCollection<int, LoanApprovalStep>  $round
+     * @return list<array{step_id: string, after_step_id: ?string, name: string, min_principal: string, description: string}>
+     */
+    public function leftOutSteps(Loan $loan, SupportCollection $round): array
+    {
+        $chain = is_array($loan->approval_chain) ? $loan->approval_chain : [];
+
+        if ($chain === [] || $round->isEmpty()) {
+            return [];
+        }
+
+        $kept = $round->pluck('step_id')->map(fn (mixed $id): string => (string) $id)->all();
+        $amount = $this->principalOf($loan);
+        $measured = ($loan->source_loan_id !== null ? 'the amount restructured of ' : "this loan's ").StepMinimum::pesos($amount);
+
+        $leftOut = [];
+        $after = null;
+
+        foreach ($chain as $step) {
+            $id = (string) ($step['id'] ?? '');
+
+            if (in_array($id, $kept, true)) {
+                $after = $id;
+
+                continue;
+            }
+
+            $minimum = StepMinimum::normalise($step[StepMinimum::KEY] ?? null);
+
+            if ($minimum === null) {
+                continue;
+            }
+
+            $leftOut[] = [
+                'step_id' => $id,
+                'after_step_id' => $after,
+                'name' => (string) ($step['name'] ?? ''),
+                'min_principal' => $minimum,
+                'description' => StepMinimum::applies($step, $amount)
+                    ? 'Skipped when the approval chain was set, but '.$measured.' now meets the '.StepMinimum::pesos($minimum).' minimum.'
+                    : 'Skipped: the '.StepMinimum::pesos($minimum).' minimum is above '.$measured.'.',
+            ];
+        }
+
+        return $leftOut;
+    }
+
+    /**
+     * Re-submitting (a sign-off on the Submit step after a send-back) sets the
+     * rest of the round again from the loan's copied chain, at the principal
+     * it has now: a step whose minimum is now met comes back, one whose
+     * minimum is no longer met is left out. Every step after the Submit step
+     * is still waiting at this point, so no sign-off is lost. A loan with no
+     * copied chain (no minimums, or submitted before this change) keeps its
+     * round as it is.
+     */
+    private function reseedAfter(Loan $loan, LoanApprovalStep $submit, User $user): void
+    {
+        $chain = is_array($loan->approval_chain) ? $loan->approval_chain : null;
+
+        if ($chain === null) {
+            return;
+        }
+
+        $submitIndex = collect($chain)->search(fn (array $step): bool => $step['kind'] === LoanApprovalStep::KIND_SUBMIT);
+        $tail = array_slice($chain, $submitIndex === false ? 1 : $submitIndex + 1);
+
+        $later = $loan->approvalSteps()
+            ->where('round', $submit->round)
+            ->where('step_order', '>', $submit->step_order)
+            ->orderBy('step_order')
+            ->get();
+
+        $kept = $this->keptSteps($loan, $tail, 're-submit', $user);
+
+        if ($later->pluck('step_id')->all() === array_column($kept, 'id')) {
+            return;
+        }
+
+        $loan->approvalSteps()->whereKey($later->modelKeys())->delete();
+
+        foreach (array_values($kept) as $offset => $step) {
+            LoanApprovalStep::create([
+                'loan_id' => $loan->id,
+                'round' => $submit->round,
+                'step_order' => $submit->step_order + 1 + $offset,
+                'step_id' => $step['id'],
+                'name' => $step['name'],
+                'status_label' => $step['status'] ?? null,
+                'role' => $step['role'],
+                'kind' => $step['kind'],
+                'status' => LoanApprovalStep::STATUS_WAITING,
+            ]);
+        }
+
+        AuditLogService::log(
+            action: 'loan_approval_chain_reseeded',
+            auditable: $loan,
+            oldValues: ['round' => $submit->round, 'step_ids' => $later->pluck('step_id')->all()],
+            newValues: ['round' => $submit->round, 'step_ids' => array_column($kept, 'id'), 'principal' => $this->principalOf($loan)],
+            description: "Loan {$loan->application_number} re-submitted with {$this->amountWords($loan)} ".StepMinimum::pesos($this->principalOf($loan))
+                .': its approval steps after Submit are now '.implode(', ', array_map(fn (array $step): string => '"'.$step['name'].'"', $kept)).'.',
+            userId: $user->id,
+        );
+    }
+
+    /**
+     * A sign-off on any other step is refused while a step the loan's chain
+     * left out now applies: the principal was raised past its minimum after
+     * submitting. Sending the loan back to the Submit step sets the chain
+     * again (reseedAfter()).
+     */
+    private function assertNoLeftOutStepApplies(Loan $loan, LoanApprovalStep $step): void
+    {
+        $chain = is_array($loan->approval_chain) ? $loan->approval_chain : null;
+
+        if ($chain === null) {
+            return;
+        }
+
+        $inRound = $loan->approvalSteps()->where('round', $step->round)->pluck('step_id')->all();
+        $principal = $this->principalOf($loan);
+
+        foreach ($chain as $configured) {
+            if (! in_array($configured['id'], $inRound, true) && StepMinimum::applies($configured, $principal)) {
+                throw ValidationException::withMessages([
+                    'approval' => ['The '.$this->amountWords($loan).' is now '.StepMinimum::pesos($principal).", so the \"{$configured['name']}\" step (from "
+                        .StepMinimum::pesos($configured[StepMinimum::KEY]).') applies. Send the loan back to the Submit step so its approval chain is set again.'],
+                ]);
+            }
+        }
+    }
+
+    /**
+     * The amount a step's minimum is compared with, as stored now, read past
+     * the model so an edit made since the loan was loaded counts.
+     *
+     * A restructure is measured by the larger of its new principal and the
+     * amount restructured (`restructure_outstanding`): writing a large balance
+     * off into a small loan must not skip the step that balance needs
+     * (permission review, Medium; Arvin's standard pick).
+     */
+    private function principalOf(Loan $loan): string
+    {
+        $row = DB::table('loans')->where('id', $loan->getKey())
+            ->first(['principal_amount', 'source_loan_id', 'restructure_outstanding']);
+
+        $principal = BigDecimal::of((string) ($row?->principal_amount ?? '0'));
+
+        if ($row?->source_loan_id !== null && $row?->restructure_outstanding !== null) {
+            $principal = BigDecimal::max($principal, BigDecimal::of((string) $row->restructure_outstanding));
+        }
+
+        return (string) $principal->toScale(2);
+    }
+
+    /**
+     * What principalOf() measures, in words.
+     */
+    private function amountWords(Loan $loan): string
+    {
+        return $loan->source_loan_id !== null ? 'amount restructured' : 'principal';
     }
 
     /**

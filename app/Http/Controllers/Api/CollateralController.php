@@ -4,24 +4,41 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Http\Requests\Collateral\AttachCollateralRequest;
+use App\Http\Requests\Collateral\CollateralRegisterRequest;
 use App\Http\Requests\Collateral\StoreCollateralRequest;
 use App\Http\Requests\Collateral\UpdateCollateralRequest;
+use App\Http\Resources\CollateralRegisterGroupResource;
 use App\Http\Resources\CollateralResource;
+use App\Models\Borrower;
 use App\Models\Collateral;
 use App\Models\Loan;
-use App\Services\CollateralPledgeGuard;
+use App\Models\User;
+use App\Services\AuditLogService;
+use App\Services\BranchAccess;
+use App\Services\CollateralAttacher;
+use App\Services\CollateralRegister;
+use App\Services\CollateralWriteTransaction;
+use Illuminate\Database\Eloquent\Collection as EloquentCollection;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
-use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
 use OpenApi\Attributes as OA;
 
 class CollateralController extends Controller
 {
+    /**
+     * The loan statuses that fix a collateral's `amount`: signed off and not
+     * finished. `approved` has had its security approved and is about to be
+     * released against it; the rest still owe. Drafts and applications can
+     * still change, and a finished loan (completed, restructured, rejected,
+     * void) no longer rests on the figure.
+     */
+    private const AMOUNT_FIXED_BY_STATUSES = ['approved', ...Loan::COLLECTIBLE_STATUSES];
+
     #[OA\Get(
         path: '/api/collaterals',
         summary: 'List collaterals',
-        description: 'Filterable by borrower_id and collateral_type_id (alias `type`). Each row carries `active_loans`: the loans in an active status currently holding it, so the client never has to fan out over the loan list to work out what is pledged.',
+        description: 'Filterable by borrower_id and collateral_type_id (alias `type`). Each row carries `active_loans`: the loans in an active status currently holding it, so the client never has to fan out over the loan list to work out what is pledged. Each row also carries `effective_value` and `value_unknown`, its value as security, so the client never has to read a share capital ledger per member to value the list.',
         tags: ['Collaterals'],
         security: [['sanctum' => []]],
         parameters: [
@@ -29,7 +46,13 @@ class CollateralController extends Controller
             new OA\Parameter(name: 'type', in: 'query', required: false, description: 'Collateral type id', schema: new OA\Schema(type: 'integer')),
         ],
         responses: [
-            new OA\Response(response: 200, description: 'Collateral list'),
+            new OA\Response(
+                response: 200,
+                description: 'Collateral list',
+                content: new OA\JsonContent(properties: [
+                    new OA\Property(property: 'data', type: 'array', items: new OA\Items(ref: '#/components/schemas/Collateral')),
+                ]),
+            ),
             new OA\Response(response: 401, description: 'Unauthenticated'),
             new OA\Response(response: 403, description: 'Forbidden'),
         ],
@@ -68,13 +91,97 @@ class CollateralController extends Controller
         $borrowerId = $filters['borrower_id'] ?? null;
         $typeId = $filters['collateral_type_id'] ?? $filters['type'] ?? null;
 
+        // Only collateral of members in the caller's branches (BranchAccess).
         $collaterals = Collateral::with(['collateralType', 'activeLoans'])
+            ->whereHas('borrower', fn ($q) => $q->visibleTo(request()->user()))
             ->when(filled($borrowerId), fn ($q) => $q->where('borrower_id', $borrowerId))
             ->when(filled($typeId), fn ($q) => $q->where('collateral_type_id', $typeId))
             ->latest()
             ->get();
 
-        return CollateralResource::collection($collaterals);
+        return CollateralResource::valuedCollection($collaterals, request()->user());
+    }
+
+    #[OA\Get(
+        path: '/api/collaterals/register',
+        summary: 'Collateral register, grouped by member and paged',
+        description: 'The collateral book grouped by member, one page of GROUPS at a time. `search` and `collateral_type_id` filter collateral rows first; each group and its figures then cover only its filtered rows. '
+            .'`search` is a case-insensitive substring match over the member\'s name as displayed, the detail and the type name. '
+            .'Values are those of `effective_value`: a caller without `share_capital:view` sees share capital rows as `value_unknown`, which are counted in `unknown_count` and left out of every `total_value`. '
+            .'A caller without `borrowers:view` sees every member as "Member #{id}", and search and the `member` sort then work on that label, never the real name. '
+            .'Groups are ordered by `sort`/`direction`, then by member name ascending, then by member id ascending. `per_page` is clamped to 1..100.',
+        tags: ['Collaterals'],
+        security: [['sanctum' => []]],
+        parameters: [
+            new OA\Parameter(name: 'search', in: 'query', required: false, description: 'Max 100 characters.', schema: new OA\Schema(type: 'string', maxLength: 100)),
+            new OA\Parameter(name: 'collateral_type_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer', minimum: 1)),
+            new OA\Parameter(name: 'sort', in: 'query', required: false, schema: new OA\Schema(type: 'string', default: 'member', enum: CollateralRegister::SORTS)),
+            new OA\Parameter(name: 'direction', in: 'query', required: false, schema: new OA\Schema(type: 'string', default: 'asc', enum: ['asc', 'desc'])),
+            new OA\Parameter(name: 'page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', default: 1, minimum: 1)),
+            new OA\Parameter(name: 'per_page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', default: 15, minimum: 1, maximum: 100)),
+        ],
+        responses: [
+            new OA\Response(
+                response: 200,
+                description: 'One page of member groups',
+                content: new OA\JsonContent(properties: [
+                    new OA\Property(property: 'data', type: 'array', items: new OA\Items(ref: '#/components/schemas/CollateralRegisterGroup')),
+                    new OA\Property(property: 'links', type: 'object', properties: [
+                        new OA\Property(property: 'first', type: 'string', nullable: true),
+                        new OA\Property(property: 'last', type: 'string', nullable: true),
+                        new OA\Property(property: 'prev', type: 'string', nullable: true),
+                        new OA\Property(property: 'next', type: 'string', nullable: true),
+                    ]),
+                    new OA\Property(property: 'meta', type: 'object', properties: [
+                        new OA\Property(property: 'current_page', type: 'integer'),
+                        new OA\Property(property: 'from', type: 'integer', nullable: true),
+                        new OA\Property(property: 'last_page', type: 'integer'),
+                        new OA\Property(property: 'path', type: 'string'),
+                        new OA\Property(property: 'per_page', type: 'integer'),
+                        new OA\Property(property: 'to', type: 'integer', nullable: true),
+                        new OA\Property(property: 'total', type: 'integer', description: 'Member groups after filtering.'),
+                        new OA\Property(property: 'names_hidden', type: 'boolean', description: 'True when the caller lacks `borrowers:view`, so every `borrower_name` is "Member #{id}".'),
+                        new OA\Property(property: 'totals', type: 'object', properties: [
+                            new OA\Property(property: 'total_collaterals', type: 'integer', description: 'The whole book; ignores search and type.'),
+                            new OA\Property(property: 'tagged_to_active_loans', type: 'integer', description: 'The whole book; ignores search and type.'),
+                            new OA\Property(property: 'total_value', type: 'number', description: 'Known values of the filtered rows.'),
+                            new OA\Property(property: 'unknown_count', type: 'integer', description: 'Filtered rows whose value is unknown.'),
+                            new OA\Property(property: 'members', type: 'integer', description: 'Member groups after filtering; equals `meta.total`.'),
+                        ]),
+                    ]),
+                ]),
+            ),
+            new OA\Response(response: 401, description: 'Unauthenticated'),
+            new OA\Response(response: 403, description: 'Forbidden'),
+            new OA\Response(response: 422, description: 'Validation error'),
+        ],
+    )]
+    public function register(CollateralRegisterRequest $request): AnonymousResourceCollection
+    {
+        $viewer = $request->user();
+        $register = new CollateralRegister($viewer, $request->search(), $request->collateralTypeId());
+
+        $groups = $register->groups($request->sort(), $request->direction(), $request->perPage());
+
+        // Valued in one pass for the whole page and then dealt out to their
+        // members, so the page's share capital balances cost one query however
+        // many members it holds. Valuing group by group would be one per member.
+        $rows = CollateralResource::valuedCollection(
+            $register->rowsOf($groups->getCollection()->map(fn (object $group): int => (int) $group->borrower_id)->all()),
+            $viewer,
+        )->collection->groupBy(fn (CollateralResource $row): int => (int) $row->resource->borrower_id);
+
+        $groups->through(function (object $group) use ($rows): object {
+            $group->collaterals = CollateralResource::collection($rows->get((int) $group->borrower_id, collect())->values());
+
+            return $group;
+        });
+
+        return CollateralRegisterGroupResource::collection($groups)
+            ->additional(['meta' => [
+                'names_hidden' => $register->namesHidden(),
+                'totals' => $register->totals(),
+            ]]);
     }
 
     #[OA\Post(
@@ -95,7 +202,13 @@ class CollateralController extends Controller
             ),
         ),
         responses: [
-            new OA\Response(response: 201, description: 'Collateral created'),
+            new OA\Response(
+                response: 201,
+                description: 'Collateral created',
+                content: new OA\JsonContent(properties: [
+                    new OA\Property(property: 'data', ref: '#/components/schemas/Collateral'),
+                ]),
+            ),
             new OA\Response(response: 422, description: 'Validation error'),
         ],
     )]
@@ -104,7 +217,7 @@ class CollateralController extends Controller
         $collateral = Collateral::create($request->validated());
         $collateral->load(['collateralType', 'activeLoans']);
 
-        return (new CollateralResource($collateral))
+        return CollateralResource::valued($collateral, $request->user())
             ->response()
             ->setStatusCode(201);
     }
@@ -118,7 +231,13 @@ class CollateralController extends Controller
             new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer')),
         ],
         responses: [
-            new OA\Response(response: 200, description: 'Collateral details'),
+            new OA\Response(
+                response: 200,
+                description: 'Collateral details',
+                content: new OA\JsonContent(properties: [
+                    new OA\Property(property: 'data', ref: '#/components/schemas/Collateral'),
+                ]),
+            ),
             new OA\Response(response: 404, description: 'Not found'),
         ],
     )]
@@ -128,12 +247,13 @@ class CollateralController extends Controller
 
         $collateral->load(['collateralType', 'activeLoans']);
 
-        return new CollateralResource($collateral);
+        return CollateralResource::valued($collateral, request()->user());
     }
 
     #[OA\Put(
         path: '/api/collaterals/{id}',
         summary: 'Update collateral',
+        description: 'A changed `amount` is recorded as `collateral_value_changed` in the audit log against every loan holding the collateral. The pledges keep the `snapshot_value` they were attached at.',
         tags: ['Collaterals'],
         security: [['sanctum' => []]],
         parameters: [
@@ -141,8 +261,15 @@ class CollateralController extends Controller
         ],
         requestBody: new OA\RequestBody(required: true, content: new OA\JsonContent),
         responses: [
-            new OA\Response(response: 200, description: 'Collateral updated'),
-            new OA\Response(response: 422, description: 'Validation error, or a `borrower_id` change on a collateral attached to a loan'),
+            new OA\Response(
+                response: 200,
+                description: 'Collateral updated',
+                content: new OA\JsonContent(properties: [
+                    new OA\Property(property: 'data', ref: '#/components/schemas/Collateral'),
+                ]),
+            ),
+            new OA\Response(response: 409, description: 'Another change to this collateral was saved at the same time; nothing was written. Reload and try again'),
+            new OA\Response(response: 422, description: 'Validation error, a `borrower_id` change on a collateral attached to a loan, or an `amount` change (to the centavo) on a collateral held by a loan that is approved, released, ongoing or defaulted (on `amount`, naming the loan(s)). Re-sending the unchanged amount is not a change'),
         ],
     )]
     public function update(UpdateCollateralRequest $request, Collateral $collateral): CollateralResource
@@ -160,15 +287,20 @@ class CollateralController extends Controller
         // guard. attach() opens by locking this same `collaterals` row, so
         // whichever arrives second now waits and then sees the other's work.
         //
-        // The lock is the FIRST statement in the transaction so that the count
-        // inside the guard is the transaction's first PLAIN read: under
-        // REPEATABLE READ the consistent snapshot is fixed by that first plain
-        // SELECT, so counting after locking means counting a post-lock world.
+        // The lock is the FIRST statement in the transaction so that every
+        // PLAIN read after it, the count inside the guard included, is answered
+        // from a post-lock snapshot: under REPEATABLE READ the consistent
+        // snapshot is fixed by the first plain SELECT, so counting after
+        // locking means counting a post-lock world.
+        //
+        // An amount change then locks the loans holding the collateral, the
+        // collateral first and the loans after it, the order every collateral
+        // write takes (see CollateralAttacher).
         //
         // destroy() has the same check-then-act shape and is deliberately left
         // alone: `loan_collaterals.collateral_id` is restrictOnDelete, so a lost
         // race there fails on the foreign key instead of orphaning a pledge.
-        $collateral = DB::transaction(function () use ($collateral, $validated): Collateral {
+        $collateral = CollateralWriteTransaction::run(function () use ($collateral, $validated, $request): Collateral {
             $locked = Collateral::whereKey($collateral->getKey())->lockForUpdate()->first();
 
             if (! $locked) {
@@ -179,14 +311,118 @@ class CollateralController extends Controller
 
             $this->assertBorrowerIsNotBeingReassignedWhilePledged($locked, $validated);
 
-            $locked->update($validated);
+            $previousAmount = (float) $locked->amount;
+            $locked->fill($validated);
+
+            // Only a CHANGE to the amount counts, as for `borrower_id`: the edit
+            // form PUTs every field on every save, `amount` included, as 250000
+            // or "250000.00". And a change as the column will store it. The
+            // decimal:2 cast rounds half-up to the centavo exactly as MySQL's
+            // decimal(14, 2) does, so 300000.035 is the change to 300000.04
+            // that it will be, where float arithmetic (300000.035 * 100 =
+            // 30000003.4999…) would call it the 300000.03 already held.
+            $holders = $locked->isDirty('amount') ? $this->lockLoansHolding($locked) : null;
+
+            if ($holders !== null) {
+                $this->assertAmountIsNotFixedByAHolder($holders);
+            }
+
+            $locked->save();
+
+            if ($holders !== null) {
+                $this->recordValueChange($locked, $holders, $previousAmount, $request->user());
+            }
 
             return $locked;
         });
 
         $collateral->load(['collateralType', 'activeLoans']);
 
-        return new CollateralResource($collateral);
+        return CollateralResource::valued($collateral, $request->user());
+    }
+
+    /**
+     * Every loan holding this collateral, in any status, locked FOR UPDATE in
+     * id order.
+     *
+     * The pledges are read plainly, which is safe here: every write of a pledge
+     * of this collateral (attach, detach, the restructure copy) holds the
+     * collateral's row lock, which this transaction already has. The loans are
+     * locked so that none can move into or out of AMOUNT_FIXED_BY_STATUSES
+     * between the check and the write.
+     *
+     * @return EloquentCollection<int, Loan>
+     */
+    private function lockLoansHolding(Collateral $collateral): EloquentCollection
+    {
+        $loanIds = $collateral->loans()->allRelatedIds()->map(fn (mixed $id): int => (int) $id)->sort()->values()->all();
+
+        if ($loanIds === []) {
+            return new EloquentCollection;
+        }
+
+        return Loan::whereKey($loanIds)->orderBy('id')->lockForUpdate()->get();
+    }
+
+    /**
+     * Refuse an `amount` change while a loan in AMOUNT_FIXED_BY_STATUSES holds
+     * the collateral.
+     *
+     * That loan was approved against this figure. Its pledge carries its own
+     * `snapshot_value`, which this never touches, but the register and
+     * `effective_value` read the live `amount`, so moving it would have them
+     * disagree with the security the loan was approved on.
+     *
+     * @param  EloquentCollection<int, Loan>  $holders
+     *
+     * @throws ValidationException on `amount`, naming the loan(s)
+     */
+    private function assertAmountIsNotFixedByAHolder(EloquentCollection $holders): void
+    {
+        $fixedBy = $holders->filter(fn (Loan $loan): bool => in_array($loan->status, self::AMOUNT_FIXED_BY_STATUSES, true));
+
+        if ($fixedBy->isEmpty()) {
+            return;
+        }
+
+        $references = $fixedBy->map(fn (Loan $loan): string => CollateralAttacher::reference($loan))->implode(', ');
+
+        throw ValidationException::withMessages([
+            'amount' => $fixedBy->count() === 1
+                ? "This collateral secures loan {$references}, which is approved or not yet paid off, so its amount cannot be changed."
+                : "This collateral secures loans {$references}, which are approved or not yet paid off, so its amount cannot be changed.",
+        ]);
+    }
+
+    /**
+     * One `collateral_value_changed` row per loan holding the collateral,
+     * against that loan, so each loan's history shows its security being
+     * revalued. With no holder, the Collateral's own `updated` row already
+     * says who changed which collateral from what to what.
+     *
+     * @param  EloquentCollection<int, Loan>  $holders
+     */
+    private function recordValueChange(Collateral $collateral, EloquentCollection $holders, float $previousAmount, ?User $user): void
+    {
+        // Through the decimal:2 cast, so the row shows the stored centavo.
+        $amount = (float) $collateral->amount;
+
+        foreach ($holders as $loan) {
+            AuditLogService::log(
+                action: 'collateral_value_changed',
+                auditable: $loan,
+                oldValues: ['collateral_id' => $collateral->id, 'amount' => $previousAmount],
+                newValues: ['collateral_id' => $collateral->id, 'amount' => $amount],
+                description: sprintf(
+                    'Collateral #%d securing loan %s revalued from ₱%s to ₱%s',
+                    $collateral->id,
+                    CollateralAttacher::reference($loan),
+                    number_format($previousAmount, 2),
+                    number_format($amount, 2),
+                ),
+                userId: $user?->id,
+            );
+        }
     }
 
     /**
@@ -211,8 +447,8 @@ class CollateralController extends Controller
      *    attached to their loan — both steps individually sanctioned — and then
      *    voiding a payment on the first loan re-activates it, which is the very
      *    transition assertNoDoublePledge() had to be added for.
-     *  - The pivot also carries `snapshot_value`: an appraisal an operator
-     *    struck against a NAMED owner and signed off on. Moving the owner
+     *  - The pivot also carries `snapshot_value`: the value the collateral was
+     *    pledged at, struck against a NAMED owner. Moving the owner
      *    underneath it falsifies that figure's provenance as well as the
      *    pledge's, and neither is recoverable from the row afterwards.
      *
@@ -284,7 +520,13 @@ class CollateralController extends Controller
             new OA\Parameter(name: 'loanId', in: 'path', required: true, schema: new OA\Schema(type: 'integer')),
         ],
         responses: [
-            new OA\Response(response: 200, description: 'Attached collaterals with snapshot pivot and `active_loans` (which includes this loan when it is itself active)'),
+            new OA\Response(
+                response: 200,
+                description: 'Attached collaterals with snapshot pivot and `active_loans` (which includes this loan when it is itself active)',
+                content: new OA\JsonContent(properties: [
+                    new OA\Property(property: 'data', type: 'array', items: new OA\Items(ref: '#/components/schemas/Collateral')),
+                ]),
+            ),
             new OA\Response(response: 404, description: 'Loan not found'),
         ],
     )]
@@ -294,13 +536,13 @@ class CollateralController extends Controller
 
         $collaterals = $loan->collaterals()->with(['collateralType', 'activeLoans'])->get();
 
-        return CollateralResource::collection($collaterals);
+        return CollateralResource::valuedCollection($collaterals, request()->user());
     }
 
     #[OA\Post(
         path: '/api/loans/{loanId}/collaterals',
         summary: 'Attach a collateral to a loan',
-        description: 'Creates a row in `loan_collaterals` with the snapshot value at attach time. The collateral must belong to the loan\'s own borrower. Rejects re-attaching the same collateral, and rejects a collateral already pledged to another loan in an active status.',
+        description: 'Creates a row in `loan_collaterals` whose `snapshot_value` the server sets at attach time: the collateral\'s `amount`, or for a share capital collateral its member\'s share capital balance (at least 0), read during the attach\'s transaction. A sent `snapshot_value` is ignored. Recorded as `collateral_attached` in the audit log against the loan. Only while the loan is in draft or for_review status. The collateral must belong to the loan\'s own borrower. Rejects re-attaching the same collateral, and rejects a collateral already pledged to another loan in an active status.',
         tags: ['Collaterals'],
         security: [['sanctum' => []]],
         parameters: [
@@ -309,16 +551,23 @@ class CollateralController extends Controller
         requestBody: new OA\RequestBody(
             required: true,
             content: new OA\JsonContent(
-                required: ['collateral_id', 'snapshot_value'],
+                required: ['collateral_id'],
                 properties: [
                     new OA\Property(property: 'collateral_id', type: 'integer', example: 1),
-                    new OA\Property(property: 'snapshot_value', type: 'number', example: 250000),
+                    new OA\Property(property: 'snapshot_value', type: 'number', deprecated: true, description: 'Ignored. The server values the pledge.'),
                 ],
             ),
         ),
         responses: [
-            new OA\Response(response: 201, description: 'Collateral attached'),
-            new OA\Response(response: 422, description: 'Validation error, collateral belongs to a different borrower, already attached, or already pledged to another active loan (the message names the conflicting loan(s))'),
+            new OA\Response(
+                response: 201,
+                description: 'Collateral attached',
+                content: new OA\JsonContent(properties: [
+                    new OA\Property(property: 'data', ref: '#/components/schemas/Collateral'),
+                ]),
+            ),
+            new OA\Response(response: 409, description: 'Another change to this collateral was saved at the same time; nothing was written. Reload and try again'),
+            new OA\Response(response: 422, description: 'Validation error, the loan is not in draft or for_review status (on `status`), collateral belongs to a different borrower, already attached, or already pledged to another active loan (the message names the conflicting loan(s))'),
         ],
     )]
     public function attach(AttachCollateralRequest $request, Loan $loan): JsonResponse
@@ -327,77 +576,32 @@ class CollateralController extends Controller
 
         // Ownership has already been rejected once by AttachCollateralRequest,
         // which scopes `collateral_id` to this loan's borrower, so a request
-        // naming somebody else's asset never gets far enough to lock a row. It
-        // is re-asserted below all the same, because that check ran before this
-        // transaction and the owner can move underneath it.
+        // naming somebody else's asset never gets far enough to lock a row.
+        // CollateralAttacher re-asserts it under the row lock, because that
+        // check ran before this transaction and the owner can move underneath it.
         //
-        // The guards run INSIDE the transaction, opening with a row lock on the
-        // collateral — the same shape LoanService::restructure() uses on its
-        // source loan. Each is a read-then-insert, and the unique index on
-        // (loan_id, collateral_id) cannot cover the important one: two requests
-        // pledging one collateral to two DIFFERENT loans write two distinct
-        // rows, so nothing at the schema level stops them. Every contender for a
-        // given collateral serializes on that collateral's row.
-        //
-        // The lock is also the transaction's first statement, so every plain
-        // read below is answered from a post-lock snapshot rather than one taken
-        // before the row was pinned — the property CollateralPledgeGuard's
-        // docblock spells out.
-        $attached = DB::transaction(function () use ($loan, $validated): Collateral {
-            $collateral = Collateral::whereKey($validated['collateral_id'])->lockForUpdate()->first();
+        // The collateral lock is the transaction's first statement, so every
+        // plain read after it is answered from a post-lock snapshot — the
+        // property CollateralPledgeGuard's docblock spells out. The loan row is
+        // locked next, and its status read from that locked row. CollateralAttacher
+        // holds the guards; PUT /loans/{loan} runs the same ones for its list.
+        $attached = CollateralWriteTransaction::run(function () use ($loan, $validated, $request): Collateral {
+            $collateralId = (int) $validated['collateral_id'];
+            $locked = CollateralAttacher::lock([$collateralId]);
+            $lockedLoan = CollateralAttacher::lockEditableLoan($loan);
 
-            if (! $collateral) {
-                throw ValidationException::withMessages([
-                    'collateral_id' => 'This collateral no longer exists.',
-                ]);
-            }
-
-            // Ownership, re-asserted under the lock.
-            //
-            // AttachCollateralRequest already scoped `collateral_id` to this
-            // loan's borrower, but that ran BEFORE this transaction opened, and
-            // PUT /api/collaterals/{id} can move a collateral between members.
-            // Validated at T0, reassigned at T1, attached at T2 pledges to this
-            // loan a collateral now registered to somebody else. The row above
-            // was read FOR UPDATE, which always returns the latest committed
-            // version rather than the snapshot, so this comparison sees the
-            // reassignment; update() takes the same lock, so the two serialize
-            // whichever way they interleave.
-            //
-            // `$loan->borrower_id` needs no such care: UpdateLoanRequest exposes
-            // no `borrower_id`, so a loan's member is fixed at creation.
-            //
-            // Same message as the form request's, deliberately — see its
-            // messages() for why the two failure modes are not told apart.
-            if ((int) $collateral->borrower_id !== (int) $loan->borrower_id) {
-                throw ValidationException::withMessages([
-                    'collateral_id' => 'This collateral is not registered to this loan\'s borrower.',
-                ]);
-            }
-
-            if ($loan->collaterals()->where('collaterals.id', $collateral->id)->exists()) {
-                throw ValidationException::withMessages([
-                    'collateral_id' => 'This collateral is already attached to the loan.',
-                ]);
-            }
-
-            CollateralPledgeGuard::assertCollateralIsFree($collateral, $loan);
-
-            $loan->collaterals()->attach($collateral->id, [
-                'snapshot_value' => $validated['snapshot_value'],
-                'attached_at' => now(),
-            ]);
+            CollateralAttacher::attachLocked($lockedLoan, $locked->get($collateralId), $request->user());
 
             // Read back while still holding the lock, so the body describes
             // exactly the state that is about to commit — and so a concurrent
             // detach cannot make this return null between write and render.
-            return $loan->collaterals()
+            return $lockedLoan->collaterals()
                 ->with(['collateralType', 'activeLoans'])
-                ->where('collaterals.id', $collateral->id)
+                ->where('collaterals.id', $collateralId)
                 ->firstOrFail();
         });
 
-        return (new CollateralResource($attached))
+        return CollateralResource::valued($attached, $request->user())
             ->response()
             ->setStatusCode(201);
     }
@@ -409,8 +613,9 @@ class CollateralController extends Controller
      * no longer exists; it is kept in this shape because the shape of the bug is
      * worth remembering, not because it is still open.
      *
-     * CollateralPledgeGuard::assertCollateralIsFree(), which attach() calls,
-     * guards WRITES into `loan_collaterals`. It cannot see a loan TRANSITIONING
+     * CollateralPledgeGuard::assertCollateralIsFree(), which attach() runs
+     * through CollateralAttacher, guards WRITES into `loan_collaterals`. It
+     * cannot see a loan TRANSITIONING
      * into an active status while holding collateral another active loan also
      * holds, because that writes only to `loans` and touches no pivot row at
      * all. Every such transition now calls
@@ -433,7 +638,7 @@ class CollateralController extends Controller
      *     it is NOT one. `$previousStatus` at that line is an audit-log
      *     `oldValues` field, not a status write; the write beside it moves the
      *     source loan from `released`/`ongoing` INTO `restructured`, which is
-     *     outside Loan::ACTIVE_STATUSES. That transition FREES a collateral, it
+     *     outside Loan::PLEDGING_STATUSES. That transition FREES a collateral, it
      *     cannot create a second holder. Deliberately left unguarded.
      *
      * `active_loans` remains an ARRAY, and should stay one. It is what keeps the
@@ -445,7 +650,7 @@ class CollateralController extends Controller
     #[OA\Delete(
         path: '/api/loans/{loanId}/collaterals/{id}',
         summary: 'Detach a collateral from a loan',
-        description: 'Removes the `loan_collaterals` row, which frees the collateral for a later attach. A loan leaving an active status frees it too, without any write here — `active_loans` and the attach guard both read live loan status.',
+        description: 'Removes the `loan_collaterals` row, which frees the collateral for a later attach, and records it as `collateral_detached` in the audit log against the loan. Only while the loan is in draft or for_review status. A loan leaving an active status frees its collateral too, without any write here — `active_loans` and the attach guard both read live loan status.',
         tags: ['Collaterals'],
         security: [['sanctum' => []]],
         parameters: [
@@ -454,7 +659,9 @@ class CollateralController extends Controller
         ],
         responses: [
             new OA\Response(response: 200, description: 'Collateral detached'),
-            new OA\Response(response: 404, description: 'Not attached'),
+            new OA\Response(response: 404, description: 'Loan or collateral not found'),
+            new OA\Response(response: 409, description: 'Another change to this collateral was saved at the same time; nothing was written. Reload and try again'),
+            new OA\Response(response: 422, description: 'The loan is not in draft or for_review status (on `status`), or the collateral is not attached to it (on `collateral`)'),
         ],
     )]
     public function detach(Loan $loan, Collateral $collateral): JsonResponse
@@ -462,13 +669,14 @@ class CollateralController extends Controller
         $this->authorize('collaterals:update');
         $this->authorize('loans:update');
 
-        $detached = $loan->collaterals()->detach($collateral->id);
+        // The same lock order as attach(): the collateral row, then the loan
+        // row, whose status is read under that lock.
+        CollateralWriteTransaction::run(function () use ($loan, $collateral): void {
+            CollateralAttacher::lock([$collateral->id]);
+            $lockedLoan = CollateralAttacher::lockEditableLoan($loan);
 
-        if ($detached === 0) {
-            throw ValidationException::withMessages([
-                'collateral' => 'This collateral is not attached to the loan.',
-            ]);
-        }
+            CollateralAttacher::detachLocked($lockedLoan, $collateral->id, request()->user());
+        });
 
         return response()->json(['message' => 'Collateral detached successfully.']);
     }

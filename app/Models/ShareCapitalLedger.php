@@ -2,10 +2,12 @@
 
 namespace App\Models;
 
+use App\Services\BranchAttribution;
 use Carbon\Carbon;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Query\Builder as QueryBuilder;
 
 class ShareCapitalLedger extends Model
 {
@@ -15,26 +17,54 @@ class ShareCapitalLedger extends Model
 
     protected $fillable = [
         'borrower_id',
+        // The branch whose books the row posted in, stamped on creation
+        // (booted()); see BranchAttribution.
+        'branch_id',
+        'repayment_id',
+        'loan_id',
+        'savings_transaction_id',
+        // The auto-credit run that made the row, set only by the run (finish
+        // run round 7); null on entries by hand and on rows from earlier runs.
+        'auto_credit_run_id',
         'date',
         'description',
         'reference',
         'debit',
         'credit',
+        'method',
+        'reference_number',
         'created_by',
+        // Brought over from the cooperative's earlier books by Data Import's
+        // share capital file (ShareCapitalRowImporter): posts no journal.
+        'is_imported',
     ];
 
     protected function casts(): array
     {
         return [
             'date' => 'date',
+            'branch_id' => 'integer',
             'debit' => 'decimal:2',
             'credit' => 'decimal:2',
+            'is_imported' => 'boolean',
         ];
     }
 
     protected static function booted(): void
     {
+        // Two saves can build the same number, so their callers answer that:
+        // GeneratedNumberWrite for a single entry, a 409 at once for an
+        // auto-credit run or a bulk entry (ShareCapitalService). Inside a loan's
+        // money write the row carries its own reference instead
+        // (RepaymentService, ShareCapitalReleaseCredit).
+        //
+        // Each row also keeps the branch whose books it posts in (Phase 6
+        // decision 16), stamped here so every writer is covered, the payment
+        // and void build-up rows RepaymentService writes included. A branch
+        // the caller set is kept.
         static::creating(function (ShareCapitalLedger $entry) {
+            $entry->branch_id ??= BranchAttribution::shareCapitalPostingBranch($entry);
+
             if (empty($entry->reference)) {
                 $dateStr = Carbon::parse($entry->date ?? now())->format('Ymd');
                 $lastRef = static::where('reference', 'like', "SC-{$dateStr}-%")
@@ -46,9 +76,93 @@ class ShareCapitalLedger extends Model
         });
     }
 
+    /**
+     * Each member's share capital balance, for any number of members in one query.
+     *
+     * The balance is `SUM(credit) - SUM(debit)` across the member's whole
+     * ledger: no date filter and no clamp, so it can be negative. That is the
+     * figure RepaymentService::reverseShareCapitalCredit() judges a void against
+     * and the Share Capital report shows; this is the same expression, grouped,
+     * so a list can value every member it holds with one aggregate instead of
+     * one per row.
+     *
+     * Every id asked about is in the result. A member with no ledger rows has a
+     * balance of 0, not an unknown one.
+     *
+     * @param  array<int, int>  $borrowerIds
+     * @return array<int, float> balance rounded to centavos, keyed by borrower_id
+     */
+    public static function balancesFor(array $borrowerIds): array
+    {
+        $borrowerIds = array_values(array_unique($borrowerIds));
+
+        if ($borrowerIds === []) {
+            return [];
+        }
+
+        $balances = array_fill_keys($borrowerIds, 0.0);
+
+        $sums = static::balancesQuery()
+            ->whereIn('borrower_id', $borrowerIds)
+            ->pluck('balance', 'borrower_id');
+
+        foreach ($sums as $borrowerId => $balance) {
+            $balances[(int) $borrowerId] = round((float) $balance, 2);
+        }
+
+        return $balances;
+    }
+
+    /**
+     * The balance definition balancesFor() reads, as a query: one row per
+     * member with ledger entries, `borrower_id` and `balance`.
+     *
+     * Exposed so a query that has to sort or total by the balance, like the
+     * Collateral Register, can join it as a derived table instead of writing
+     * a second definition of "balance" that could drift from this one. Narrow
+     * it with a `where` on `borrower_id`; a member with no rows is absent, and
+     * their balance is 0.
+     */
+    public static function balancesQuery(): QueryBuilder
+    {
+        return static::query()
+            ->toBase()
+            ->groupBy('borrower_id')
+            ->selectRaw('borrower_id, COALESCE(SUM(credit) - SUM(debit), 0) as balance');
+    }
+
     public function borrower(): BelongsTo
     {
         return $this->belongsTo(Borrower::class);
+    }
+
+    /** The branch whose books this row posted in (null on a row not yet attributed). */
+    public function branch(): BelongsTo
+    {
+        return $this->belongsTo(Branch::class);
+    }
+
+    public function repayment(): BelongsTo
+    {
+        return $this->belongsTo(Repayment::class);
+    }
+
+    /**
+     * The loan whose release withheld this share capital, for a row written
+     * by ShareCapitalReleaseCredit. Null on every other row.
+     */
+    public function loan(): BelongsTo
+    {
+        return $this->belongsTo(Loan::class);
+    }
+
+    /**
+     * The savings row this credit came from, for a transfer from the member's
+     * savings to their share capital (gap round S3). Null on every other row.
+     */
+    public function savingsTransaction(): BelongsTo
+    {
+        return $this->belongsTo(SavingsTransaction::class);
     }
 
     public function createdByUser(): BelongsTo

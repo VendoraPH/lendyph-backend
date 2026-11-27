@@ -57,7 +57,7 @@ class BorrowerMatcher
         if (count($candidates) > 1) {
             return BorrowerMatch::ambiguous(
                 array_map(static fn (Borrower $b): int => $b->id, $candidates),
-                count($candidates).' existing borrowers share this name and birthdate, so the account number could not be assigned automatically.',
+                count($candidates).' existing members share this name and birthdate, so the account number could not be assigned automatically.',
             );
         }
 
@@ -70,7 +70,7 @@ class BorrowerMatcher
         if ($birthdate === null) {
             return BorrowerMatch::ambiguous(
                 [$borrower->id],
-                "Borrower {$borrower->borrower_code} has the same name, but this row has no birthdate, so there is no way to confirm they are the same person.",
+                "Member {$borrower->borrower_code} has the same name, but this row has no birthdate, so there is no way to confirm they are the same person.",
             );
         }
 
@@ -155,7 +155,7 @@ class BorrowerMatcher
             $fresh = $borrower->fresh();
 
             if ($fresh === null) {
-                return BorrowerMatch::ambiguous([$borrower->id], 'The matched borrower was removed while the import was running.');
+                return BorrowerMatch::ambiguous([$borrower->id], 'The matched member was removed while the import was running.');
             }
 
             return $fresh->external_account_no === $accountNo

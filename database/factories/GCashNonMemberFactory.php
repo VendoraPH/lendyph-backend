@@ -20,4 +20,13 @@ class GCashNonMemberFactory extends Factory
             'remarks' => null,
         ];
     }
+
+    /** A walk-in registered without an ID document; the ID is optional. */
+    public function withoutId(): static
+    {
+        return $this->state(fn () => [
+            'id_type' => null,
+            'id_number' => null,
+        ]);
+    }
 }

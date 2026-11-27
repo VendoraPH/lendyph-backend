@@ -67,4 +67,20 @@ class AccountingExpensePayment extends Model
     {
         return $this->belongsTo(AccountingJournal::class, 'journal_id');
     }
+
+    /**
+     * Whether the payment's journal stands reversed, by Expenses & Payables'
+     * Reverse payment or by hand on the Journals screen before that was
+     * refused (finish run round 5): the cash it paid out is back in the books,
+     * so it no longer counts as paid. The chain rule is the expense's
+     * (AccountingJournal::endsReversed()); a payment with no journal isn't
+     * reversed. AccountingExpense::paidSql() is its SQL twin.
+     */
+    public function isReversed(): bool
+    {
+        return AccountingJournal::endsReversed(
+            $this->journal_id === null ? null : $this->journal,
+            static fn (AccountingJournal $journal): ?AccountingJournal => $journal->reversedBy,
+        );
+    }
 }

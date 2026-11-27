@@ -128,6 +128,16 @@ class TimezoneShift
         // csv_import_* tables below.
         'accounting_account_mappings' => ['created_at', 'updated_at'],
         'accounting_accounts' => ['created_at', 'updated_at'],
+        // Added 2026-11-11 with the monthly late penalty, well after the
+        // cutover. `effective_on` is a DATE.
+        'amortization_principal_changes' => ['created_at'],
+        // Added 2026-11-09 with the allowance posting (Phase 2), well after the
+        // cutover completed (2026-08-06 on every deployment). `as_of` is a DATE.
+        'accounting_allowance_postings' => ['created_at', 'updated_at'],
+        // The year-end close (Phase 2, round C), added 2026-11-09: the same
+        // reasoning, well after the cutover.
+        'accounting_year_close_entries' => ['created_at', 'updated_at'],
+        'accounting_year_closes' => ['closed_at', 'created_at', 'reopened_at', 'updated_at'],
         // The accounting write modules, added 2026-09-18 — same reasoning as
         // the two above and as the csv_import_* tables below: created well
         // after the cutover completed (2026-08-06 on every deployment), and the
@@ -143,6 +153,12 @@ class TimezoneShift
         // payment to the wrong day.
         'accounting_expense_payments' => ['created_at', 'updated_at'],
         'accounting_expenses' => ['created_at', 'updated_at'],
+        // Added 2026-11-09 with the opening balances screen (Phase 2), well
+        // after the cutover completed (2026-08-06 on every deployment), so
+        // neither table can hold a row written by the old UTC application.
+        // `as_of` is a DATE, so it is not listed.
+        'accounting_opening_balance_lines' => ['created_at', 'updated_at'],
+        'accounting_opening_balances' => ['created_at', 'finalised_at', 'updated_at'],
         // `closed_at` and `reopened_at` ARE real instants — the moments someone
         // signed a month off and took that back — and WOULD be shift candidates
         // on a table old enough to need it. This one is not.
@@ -160,6 +176,22 @@ class TimezoneShift
         'accounting_journal_lines' => ['created_at', 'updated_at'],
         'accounting_journals' => ['created_at', 'posted_at', 'updated_at'],
         'borrower_submission_tokens' => ['created_at', 'expires_at', 'updated_at'],
+        // Added 2026-11-08 with credit scoring (Phase 2), well after the cutover
+        // completed (2026-08-06 on every deployment), so none of these tables can
+        // hold a row written by the old UTC application. Same reasoning as the
+        // csv_import_* tables below. `business_start_date` is a DATE, so it is
+        // not listed.
+        'credit_application_profiles' => ['created_at', 'notice_acknowledged_at', 'updated_at'],
+        'credit_decisions' => ['created_at', 'decided_at'],
+        'credit_policy_flags' => ['cleared_at', 'created_at', 'first_triggered_at', 'last_seen_at', 'updated_at'],
+        'credit_risk_alerts' => ['created_at', 'updated_at'],
+        'credit_score_dirty_members' => ['created_at', 'flagged_at', 'updated_at'],
+        'credit_score_factors' => ['created_at'],
+        'credit_score_members' => ['calculated_at', 'checked_at', 'created_at', 'updated_at'],
+        'credit_scorecard_revisions' => ['created_at', 'updated_at'],
+        'credit_scores' => ['calculated_at', 'created_at'],
+        'credit_scoring_cursors' => ['created_at', 'updated_at', 'watermark'],
+        'credit_scoring_settings' => ['created_at', 'updated_at'],
         // The CSV migration importer's own bookkeeping. These tables were created
         // on 2026-08-29, three weeks after the cutover completed (2026-08-06 on
         // every deployment), and the shift is one-shot — the `timezone_shifts`
@@ -181,8 +213,223 @@ class TimezoneShift
         // browser-local localStorage until now and never had a server row at
         // all. Same reasoning as the csv_import_* tables above.
         'loan_approval_steps' => ['acted_at', 'created_at', 'updated_at'],
+        // Added 2026-11-03 with the staff in-app notifications, well after the
+        // cutover completed (2026-08-06 on every deployment), so neither table
+        // can hold a row written by the old UTC application. Same reasoning as
+        // the csv_import_* tables above.
+        'loan_past_due_notices' => ['notified_at'],
+        'notifications' => ['created_at', 'read_at', 'updated_at'],
         'password_reset_tokens' => ['created_at'],
         'personal_access_tokens' => ['created_at', 'expires_at', 'last_used_at', 'updated_at'],
+        // Added 2026-11-02 for the daily portfolio snapshot, well after the
+        // cutover completed (2026-08-06 on every deployment), so this table
+        // cannot hold a row written by the old UTC application. Same reasoning
+        // as the csv_import_* tables above.
+        'portfolio_daily_snapshots' => ['created_at'],
+        // Added 2026-11-19 with the executive dashboard's snapshot lines and
+        // run log (Phase 6 EB-B), well after the cutover, so neither table can
+        // hold a row written by the old UTC application.
+        'portfolio_snapshot_lines' => ['created_at'],
+        'portfolio_snapshot_runs' => ['finished_at', 'started_at'],
+        // Added 2026-11-08 with payment reminders (Phase 2), well after the
+        // cutover completed (2026-08-06 on every deployment), so none of these
+        // tables can hold a row written by the old UTC application. Same
+        // reasoning as the csv_import_* tables above. `due_date` and
+        // `fire_date` are DATEs and the send times are TIMEs, so neither is
+        // listed.
+        'borrower_notification_preferences' => ['created_at', 'email_invalid_at', 'email_verified_at', 'mobile_invalid_at', 'mobile_verified_at', 'updated_at'],
+        'reminder_branch_settings' => ['created_at', 'updated_at'],
+        'reminder_events' => ['created_at'],
+        'reminder_messages' => ['created_at', 'delivered_at', 'redacted_at', 'scheduled_at', 'sent_at', 'updated_at'],
+        'reminder_pauses' => ['created_at', 'paused_at', 'resumed_at', 'until', 'updated_at'],
+        'reminder_queue_items' => ['claimed_at', 'created_at', 'next_attempt_at', 'scheduled_at', 'sending_started_at', 'updated_at'],
+        'reminder_rules' => ['created_at', 'updated_at'],
+        'reminder_settings' => ['created_at', 'updated_at'],
+        'reminder_staff_notices' => ['created_at'],
+        'reminder_templates' => ['created_at', 'updated_at'],
+        // Added 2026-10-01, well after the cutover completed (2026-08-06 on
+        // every deployment), so this table cannot hold a row written by the old
+        // UTC application. Same reasoning as the csv_import_* tables above.
+        'repayment_allocations' => ['created_at', 'updated_at'],
+        // Added 2026-11-10 with Savings & Deposits (Phase 3), well after the
+        // cutover completed, so none of these tables can hold a row written by
+        // the old UTC application. Their business dates are DATEs.
+        'savings_account_notes' => ['created_at'],
+        'savings_accounts' => ['created_at', 'updated_at'],
+        'savings_approvals' => ['created_at', 'decided_at', 'expires_at', 'requested_at', 'updated_at'],
+        'savings_holds' => ['created_at', 'updated_at'],
+        'savings_idempotency_keys' => ['created_at'],
+        'savings_interest_runs' => ['checked_at', 'created_at', 'posted_at', 'reversed_at', 'updated_at'],
+        'savings_notice_log' => ['created_at'],
+        'savings_product_rates' => ['created_at'],
+        'savings_products' => ['created_at', 'updated_at'],
+        'savings_settings' => ['created_at', 'updated_at'],
+        'savings_tax_rules' => ['created_at'],
+        'savings_transactions' => ['created_at', 'requested_at'],
+        // Auto-credit into savings (gap round S3), added 2026-11-13.
+        'savings_auto_credit_instructions' => ['created_at', 'updated_at'],
+        'savings_auto_credit_postings' => ['created_at'],
+        'savings_auto_credit_runs' => ['created_at'],
+        'savings_auto_credit_skips' => ['created_at'],
+        // Share capital auto-credit's skipped list (finish run round 7), added
+        // 2026-11-26, well after the cutover, for the same reason.
+        'auto_credit_run_skips' => ['created_at'],
+        // Added 2026-11-11 with CDA Reports (Phase 3), well after the
+        // cutover, for the same reason. Their business dates are DATEs.
+        'cda_document_versions' => ['created_at'],
+        'cda_documents' => ['created_at', 'updated_at'],
+        'cda_mediation_cases' => ['created_at', 'deleted_at', 'updated_at'],
+        'cda_notices_sent' => ['sent_at'],
+        'cda_officer_trainings' => ['created_at', 'updated_at'],
+        'cda_officers' => ['created_at', 'deleted_at', 'updated_at'],
+        'cda_regulatory_profiles' => ['created_at', 'updated_at'],
+        'cda_report_snapshots' => ['created_at', 'finalized_at', 'superseded_at', 'updated_at'],
+        'cda_report_templates' => ['activated_at', 'created_at', 'updated_at'],
+        'cda_report_values' => ['created_at', 'refreshed_at', 'updated_at'],
+        'cda_reporting_periods' => ['created_at', 'updated_at', 'year_end_captured_at'],
+        'cda_reports' => ['approved_at', 'created_at', 'finalized_at', 'refreshed_at', 'stale_at', 'submitted_for_review_at', 'updated_at', 'validated_at'],
+        'cda_settings' => ['created_at', 'updated_at'],
+        // Gap round B6 (2026-11-13): the review chain's steps and custom
+        // calendar items. Their due and filing dates are DATEs.
+        'cda_compliance_requirements' => ['created_at', 'updated_at'],
+        'cda_report_approval_steps' => ['acted_at', 'closed_at', 'created_at', 'updated_at'],
+        'cda_social_programs' => ['created_at', 'updated_at'],
+        'cda_submissions' => ['created_at', 'updated_at'],
+        'time_deposits' => ['created_at', 'updated_at'],
+        // Penalty configurations (Phase 4), added 2026-11-12, well after the
+        // cutover. The products pivot has no timestamps.
+        'penalty_config_conditions' => ['created_at', 'updated_at'],
+        'penalty_configs' => ['created_at', 'updated_at'],
+        // Added 2026-11-11 with the Member Portal (Phase 3), well after the
+        // cutover, for the same reason. `portal_requests.expires_on` is a DATE.
+        'portal_announcement_reads' => ['read_at'],
+        'portal_announcements' => ['created_at', 'expires_at', 'publish_at', 'updated_at'],
+        'portal_codes' => ['created_at', 'expires_at', 'step_expires_at', 'used_at'],
+        'portal_idempotency_keys' => ['created_at'],
+        'portal_login_events' => ['created_at', 'reported_at'],
+        'portal_otp_challenges' => ['created_at', 'expires_at', 'verified_at'],
+        'portal_request_events' => ['created_at'],
+        'portal_requests' => ['created_at', 'decided_at', 'requested_at', 'updated_at'],
+        'portal_settings' => ['created_at', 'updated_at'],
+        'portal_terms_versions' => ['created_at', 'published_at', 'updated_at'],
+        'portal_users' => [
+            'activated_at', 'created_at', 'disabled_at', 'ecomm_consent_at', 'hard_locked_at', 'invited_at', 'last_login_at',
+            'locked_until', 'lockouts_cleared_at', 'password_changed_at', 'terms_accepted_at', 'updated_at',
+        ],
+        // Added 2026-11-16 with Linda, well after the cutover, for the same
+        // reason. `linda_questions.period_from` and `period_to` are DATEs.
+        'linda_questions' => ['asked_at', 'created_at', 'updated_at'],
+        'linda_settings' => ['created_at', 'updated_at'],
+        // Loan origination (Phase 6, LO-B1), added 2026-11-19, well after the
+        // cutover, for the same reason.
+        'origination_applications' => [
+            'created_at', 'decided_at', 'erased_at', 'last_saved_at', 'started_at', 'submitted_at', 'updated_at',
+        ],
+        'origination_assessments' => ['created_at'],
+        'origination_consents' => ['accepted_at', 'created_at'],
+        'origination_document_versions' => ['scanned_at', 'uploaded_at'],
+        'origination_documents' => ['created_at', 'updated_at', 'verified_at'],
+        'origination_links' => ['created_at', 'expires_at', 'updated_at'],
+        'origination_notes' => ['created_at'],
+        'origination_notices' => ['created_at', 'published_at'],
+        'origination_product_settings' => ['created_at', 'updated_at'],
+        'origination_rule_revisions' => ['created_at'],
+        'origination_settings' => ['created_at', 'updated_at'],
+        'origination_status_history' => ['created_at'],
+        // Added 2026-11-19 with the public application (LO-B2), for the same reason.
+        'origination_otp_challenges' => ['closed_at', 'created_at', 'expires_at', 'verified_at'],
+        'origination_sessions' => ['created_at', 'ended_at', 'expires_at', 'last_used_at', 'submitted_at'],
+        // Added 2026-11-19 with loan origination staff processing (LO-B3), for
+        // the same reason.
+        'origination_applicant_messages' => ['created_at'],
+        // Added 2026-11-19 with the AMLA foundation (Phase 6), well after the
+        // cutover, for the same reason. `amla_calendar_entries.date` is a DATE.
+        'amla_calendar_entries' => ['created_at', 'removed_at'],
+        'amla_calendar_years' => ['confirmed_at', 'created_at'],
+        'amla_change_requests' => ['created_at', 'decided_at', 'updated_at'],
+        'amla_log_entries' => ['created_at'],
+        'amla_settings_versions' => ['created_at', 'effective_at'],
+        // Added 2026-11-20 with AMLA CDD and risk (AMLA-B4), for the same
+        // reason. Review and expiry dates are DATEs.
+        'amla_id_verifications' => ['created_at'],
+        'amla_profile_changes' => ['created_at'],
+        'amla_profiles' => ['created_at', 'edd_required_since', 'updated_at'],
+        'amla_reviews' => ['created_at'],
+        'amla_risk_assessments' => ['created_at'],
+        'amla_risk_rule_versions' => ['created_at', 'effective_at'],
+        // Phase 6 AMLA-B2 (2026-11-20): transaction events, harvest cursors,
+        // failures and coverage checks, well after the cutover.
+        // `amla_events.occurred_on` and `amla_coverage_checks.day` are DATEs.
+        'amla_coverage_checks' => ['created_at'],
+        'amla_event_failures' => ['created_at', 'last_attempted_at', 'resolved_at'],
+        'amla_events' => ['created_at', 'recorded_at', 'reversed_at'],
+        'amla_harvest_cursors' => ['created_at', 'started_at', 'updated_at', 'watermark'],
+        // Added 2026-11-21 with AMLA screening and orders (AMLA-B5), for the same
+        // reason. `amla_orders.received_on` and `return_due_on` are DATEs.
+        'amla_order_holds' => ['created_at'],
+        'amla_order_release_requests' => ['created_at', 'decided_at', 'updated_at'],
+        'amla_orders' => ['created_at', 'released_at', 'updated_at'],
+        'amla_screening_cursors' => ['created_at', 'updated_at', 'watermark'],
+        'amla_screening_matches' => ['created_at', 'decided_at', 'updated_at'],
+        'amla_watchlist_entries' => ['created_at'],
+        'amla_watchlist_versions' => ['created_at', 'rescreened_at', 'superseded_at'],
+        // Phase 6 AMLA-B3 (2026-11-21): detection rules, CTR candidates, alerts
+        // and the detection cursor, well after the cutover. `occurred_on`,
+        // `window_start` and `window_end` are DATEs.
+        'amla_alert_events' => ['created_at', 'reversal_rerun_at'],
+        'amla_alerts' => ['cleared_at', 'closed_at', 'created_at'],
+        'amla_ctr_candidates' => ['created_at', 'event_reversed_at'],
+        'amla_detection_locks' => ['created_at'],
+        'amla_event_screenings' => ['created_at'],
+        'amla_rule_versions' => ['created_at', 'effective_at'],
+        // Phase 6 AMLA-B6 (2026-11-22): cases, filings, the AMLA inbox and
+        // High-risk downgrades, well after the cutover. Determination,
+        // deadline, submission and occurred-on dates are DATEs. Alerts gain
+        // `closed_at` here too.
+        'amla_alert_actions' => ['created_at'],
+        'amla_case_actions' => ['created_at'],
+        'amla_case_alerts' => ['created_at'],
+        'amla_case_evidence' => ['created_at'],
+        'amla_case_notes' => ['created_at'],
+        'amla_cases' => ['closed_at', 'created_at', 'decided_at', 'updated_at'],
+        'amla_inbox_items' => ['created_at', 'read_at'],
+        'amla_report_formats' => ['created_at'],
+        'amla_report_submissions' => ['created_at'],
+        'amla_reports' => ['approved_at', 'created_at', 'updated_at'],
+        'amla_risk_downgrades' => ['created_at', 'decided_at', 'updated_at'],
+        // Phase 6 AMLA-B7 (2026-11-23): report exports and set-aside asks, well
+        // after the cutover.
+        'amla_ctr_set_asides' => ['created_at', 'decided_at', 'updated_at'],
+        'amla_exports' => ['created_at', 'file_deleted_at'],
+        // Added 2026-11-19 with the executive dashboard's alert thresholds
+        // (Phase 6 EB-C), well after the cutover, for the same reason.
+        'dashboard_settings' => ['created_at', 'updated_at'],
+        // A column added to a table the shift covers. Listed here, not in
+        // COLUMNS, because it was added after the one-shot shift ran, and
+        // because the shift reads COLUMNS on a fresh database before this
+        // column exists. The rest of `documents` stays in COLUMNS.
+        'documents' => ['portal_shared_at'],
+        // Phase 6 MB-BE1 (2026-11-19): closure requests, well after the
+        // cutover. `effective_on` is a DATE.
+        'branch_closures' => ['created_at', 'decided_at', 'updated_at'],
+        // Phase 6 MB-BE5 (2026-11-20): interbranch transfers, well after the
+        // cutover.
+        'interbranch_transfers' => ['approved_at', 'cancelled_at', 'created_at', 'received_at', 'rejected_at', 'reversed_at', 'updated_at'],
+        // Receipt share links (finish run round 2, 2026-11-24), well after the
+        // cutover.
+        'receipt_share_links' => ['created_at', 'expires_at', 'revoked_at', 'updated_at'],
+        // Prints of the disclosure statement and the promissory note (finish
+        // run round 3, reprint after a change, 2026-11-25), well after the
+        // cutover.
+        'loan_document_prints' => ['printed_at'],
+        // Menu Visibility's switches and administrator overrides (finish run
+        // round 6, 2026-11-25), well after the cutover.
+        'menu_visibility_overrides' => ['created_at', 'expires_at', 'updated_at'],
+        'menu_visibility_switches' => ['created_at', 'updated_at'],
+        // When an approved adjustment was cancelled (finish run round 6,
+        // 2026-11-25), a column added well after the cutover to a table the
+        // shift covers, as `documents.portal_shared_at` is.
+        'loan_adjustments' => ['cancelled_at'],
         // The shift's own bookkeeping, written after the cutover by definition.
         'timezone_shifts' => ['completed_at', 'cutover_at', 'started_at'],
     ];

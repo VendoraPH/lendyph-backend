@@ -1,0 +1,124 @@
+{
+  "report_type": "mediation",
+  "version": "2026.1",
+  "name": "Mediation and Conciliation Report CY2026",
+  "effective_from": "2026-01-01",
+  "effective_until": null,
+  "cooperative_types": [],
+  "asset_classes": [],
+  "definition": {
+    "schema_version": 1,
+    "meta": {
+      "verified": false,
+      "source_doc": "Mediation and conciliation report format (owner to supply; to verify)"
+    },
+    "parts": [
+      "h1",
+      "h2"
+    ],
+    "deadline": {
+      "basis": "half_end",
+      "days_setting": "mediation_deadline_days"
+    },
+    "sections": [
+      {
+        "key": "cases",
+        "title": "Cases",
+        "kind": "table",
+        "source": {
+          "key": "mediation.cases"
+        },
+        "columns": [
+          {
+            "key": "case_number",
+            "label": "Case number",
+            "format": "text"
+          },
+          {
+            "key": "filed_on",
+            "label": "Filed",
+            "format": "date"
+          },
+          {
+            "key": "nature",
+            "label": "Nature",
+            "format": "text"
+          },
+          {
+            "key": "status",
+            "label": "Status",
+            "format": "text"
+          },
+          {
+            "key": "resolved_on",
+            "label": "Resolved",
+            "format": "date"
+          }
+        ]
+      },
+      {
+        "key": "summary",
+        "title": "Summary",
+        "kind": "fields",
+        "fields": [
+          {
+            "key": "cases_total",
+            "label": "Cases handled",
+            "type": "number",
+            "decimals": 0,
+            "source": {
+              "key": "mediation.summary"
+            }
+          },
+          {
+            "key": "cases_resolved",
+            "label": "Resolved",
+            "type": "number",
+            "decimals": 0,
+            "source": {
+              "key": "mediation.summary",
+              "params": {
+                "status": "resolved"
+              }
+            }
+          },
+          {
+            "key": "cases_pending",
+            "label": "Pending",
+            "type": "number",
+            "decimals": 0,
+            "source": {
+              "key": "mediation.summary",
+              "params": {
+                "status": "pending"
+              }
+            }
+          },
+          {
+            "key": "cases_escalated",
+            "label": "Escalated",
+            "type": "number",
+            "decimals": 0,
+            "source": {
+              "key": "mediation.summary",
+              "params": {
+                "status": "escalated"
+              }
+            }
+          }
+        ]
+      }
+    ],
+    "rules": [
+      {
+        "id": "template_verified",
+        "type": "check",
+        "check": "template.verified",
+        "severity": "info",
+        "category": "invalid_data",
+        "component": "fields",
+        "message": "This form follows the CDA template as understood in v1 and is still to be checked against the official form."
+      }
+    ]
+  }
+}

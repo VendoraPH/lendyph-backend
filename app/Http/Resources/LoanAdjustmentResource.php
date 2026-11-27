@@ -14,6 +14,7 @@ class LoanAdjustmentResource extends JsonResource
             'adjustment_number' => $this->adjustment_number,
             'loan_id' => $this->loan_id,
             'loan_account_number' => $this->loan?->loan_account_number,
+            'loan_display_number' => $this->loan?->displayNumber(),
             'adjustment_type' => $this->adjustment_type,
             'description' => $this->description,
             'old_values' => $this->old_values,
@@ -30,6 +31,17 @@ class LoanAdjustmentResource extends JsonResource
             ] : null),
             'approved_at' => $this->approved_at?->toDateTimeString(),
             'applied_at' => $this->applied_at?->toDateTimeString(),
+            // Cancelling an approved adjustment before it is applied (finish
+            // run round 6): offered while it is approved, to a holder of
+            // loan_adjustments:approve. The loan's branch is already proven:
+            // the row was read through it.
+            'can_cancel' => $this->status === 'approved' && (bool) $request->user()?->can('loan_adjustments:approve'),
+            'cancelled_by_user' => $this->whenLoaded('cancelledByUser', fn () => $this->cancelledByUser ? [
+                'id' => $this->cancelledByUser->id,
+                'name' => $this->cancelledByUser->full_name,
+            ] : null),
+            'cancelled_at' => $this->cancelled_at?->toDateTimeString(),
+            'cancellation_reason' => $this->cancellation_reason,
             'created_at' => $this->created_at?->toDateTimeString(),
         ];
     }

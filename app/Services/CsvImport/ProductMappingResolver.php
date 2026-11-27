@@ -2,9 +2,14 @@
 
 namespace App\Services\CsvImport;
 
+use App\Enums\InterestRateFrequency;
+use App\Enums\TermUnit;
 use App\Models\CsvImportFile;
 use App\Models\CsvImportRun;
 use App\Models\LoanProduct;
+use App\Services\LoanTermSchedule;
+use Brick\Math\BigDecimal;
+use Brick\Math\Exception\MathException;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 
@@ -287,6 +292,7 @@ class ProductMappingResolver
             'csv_rate' => 'interest_rate',
             'csv_term' => 'term_in_months',
             'csv_interest_type' => 'interest_type',
+            'csv_frequency' => 'payment_frequency',
         ];
 
         $selects = [];
@@ -546,7 +552,7 @@ class ProductMappingResolver
             }
         }
 
-        $breaches = self::boundsBreaches($product, $row->csv_amount, $row->csv_term, $row->csv_rate);
+        $breaches = self::boundsBreaches($product, $row->csv_amount, $row->csv_term, $row->csv_rate, $row->csv_frequency);
 
         foreach ($breaches as $breach) {
             $acc[$breach]++;
@@ -588,10 +594,15 @@ class ProductMappingResolver
      * @param  mixed  $term  the CSV's stated Term in Months — NOT the period
      *                       count LoanScheduleReconstructor derives, which is
      *                       what `loans.term` becomes
+     * @param  mixed  $rate  the CSV's rate, stored as is in the period
+     *                       CsvRatePeriod gives for the payment frequency
+     * @param  mixed  $paymentFrequency  the row's normalised payment frequency;
+     *                                   the rate check is skipped when it is
+     *                                   unknown
      * @return list<string> breached bound names, empty when the loan is inside
      *                      every bound or too malformed to compare
      */
-    public static function boundsBreaches(LoanProduct $product, mixed $amountCentavos, mixed $term, mixed $rate): array
+    public static function boundsBreaches(LoanProduct $product, mixed $amountCentavos, mixed $term, mixed $rate, mixed $paymentFrequency): array
     {
         $breaches = [];
 
@@ -612,30 +623,67 @@ class ProductMappingResolver
 
         if ($term !== null && preg_match('/^-?\d+$/', (string) $term) === 1) {
             $months = (int) $term;
+            // The file's term is in months; a days product's bounds are in days.
+            $length = $product->term_unit === TermUnit::Days
+                ? $months * LoanTermSchedule::DAYS_PER_MONTH
+                : $months;
             $minTerm = (int) ($product->min_term ?? 1);
             $maxTerm = (int) ($product->max_term ?? $product->term);
 
-            if ($months < $minTerm) {
+            if ($length < $minTerm) {
                 $breaches[] = 'term_below_min';
             }
 
-            if ($maxTerm > 0 && $months > $maxTerm) {
+            if ($maxTerm > 0 && $length > $maxTerm) {
                 $breaches[] = 'term_above_max';
             }
         }
 
-        if ($rate !== null && is_numeric((string) $rate)) {
-            $value = (float) $rate;
-            $minRate = (float) ($product->min_interest_rate ?? $product->interest_rate);
-            $maxRate = (float) $product->interest_rate;
+        array_push($breaches, ...self::rateBreaches($product, $rate, $paymentFrequency));
 
-            if ($value < $minRate) {
-                $breaches[] = 'rate_below_min';
-            }
+        return $breaches;
+    }
 
-            if ($value > $maxRate) {
-                $breaches[] = 'rate_above_max';
-            }
+    /**
+     * The rate bounds, compared in like periods.
+     *
+     * The CSV rate is quoted per CsvRatePeriod's period for the row's payment
+     * frequency; the product's range is quoted per its own
+     * `interest_rate_frequency`. Rate per day is rate ÷ period days, so the two
+     * are compared by cross-multiplication, exactly:
+     * csv × productDays against bound × csvDays. No division, no rounding.
+     *
+     * An unknown period, or a rate or bound that isn't a number, is
+     * uncomparable and reports nothing, as for a malformed row.
+     *
+     * @return list<string>
+     */
+    private static function rateBreaches(LoanProduct $product, mixed $rate, mixed $paymentFrequency): array
+    {
+        $csvDays = CsvRatePeriod::days(CsvRatePeriod::forPaymentFrequency($paymentFrequency));
+        $productFrequency = $product->interest_rate_frequency;
+        $productDays = CsvRatePeriod::days($productFrequency instanceof InterestRateFrequency ? $productFrequency->value : $productFrequency);
+
+        if ($rate === null || ! is_numeric((string) $rate) || $csvDays === null || $productDays === null) {
+            return [];
+        }
+
+        try {
+            $csvPerDay = BigDecimal::of(trim((string) $rate))->multipliedBy($productDays);
+            $minPerDay = BigDecimal::of((string) ($product->min_interest_rate ?? $product->interest_rate))->multipliedBy($csvDays);
+            $maxPerDay = BigDecimal::of((string) $product->interest_rate)->multipliedBy($csvDays);
+        } catch (MathException) {
+            return [];
+        }
+
+        $breaches = [];
+
+        if ($csvPerDay->isLessThan($minPerDay)) {
+            $breaches[] = 'rate_below_min';
+        }
+
+        if ($csvPerDay->isGreaterThan($maxPerDay)) {
+            $breaches[] = 'rate_above_max';
         }
 
         return $breaches;

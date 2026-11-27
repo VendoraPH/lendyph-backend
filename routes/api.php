@@ -10,11 +10,13 @@ use App\Http\Controllers\Api\AccountingReconciliationController;
 use App\Http\Controllers\Api\AccountingReportController;
 use App\Http\Controllers\Api\AccountingSettingsController;
 use App\Http\Controllers\Api\AccountingStatementController;
+use App\Http\Controllers\Api\AmortizationCalculatorController;
 use App\Http\Controllers\Api\ApprovalWorkflowController;
 use App\Http\Controllers\Api\AuditLogController;
 use App\Http\Controllers\Api\AuthController;
 use App\Http\Controllers\Api\AutoCreditController;
 use App\Http\Controllers\Api\AutoPayController;
+use App\Http\Controllers\Api\BinhsCalculatorController;
 use App\Http\Controllers\Api\BorrowerController;
 use App\Http\Controllers\Api\BranchController;
 use App\Http\Controllers\Api\BrandingController;
@@ -36,20 +38,31 @@ use App\Http\Controllers\Api\GCashTierController;
 use App\Http\Controllers\Api\GCashTransactionController;
 use App\Http\Controllers\Api\HealthController;
 use App\Http\Controllers\Api\LoanAdjustmentController;
+use App\Http\Controllers\Api\LoanApprovalEditController;
 use App\Http\Controllers\Api\LoanApprovalStepController;
 use App\Http\Controllers\Api\LoanController;
+use App\Http\Controllers\Api\LoanLedgerController;
+use App\Http\Controllers\Api\LoanPrintLogController;
 use App\Http\Controllers\Api\LoanProductController;
+use App\Http\Controllers\Api\MenuVisibilityController;
+use App\Http\Controllers\Api\NotificationController;
 use App\Http\Controllers\Api\PromissoryNoteController;
+use App\Http\Controllers\Api\PublicReceiptController;
+use App\Http\Controllers\Api\ReceiptShareLinkController;
 use App\Http\Controllers\Api\RepaymentController;
 use App\Http\Controllers\Api\ReportController;
+use App\Http\Controllers\Api\Reports\ProfitSharingReportController;
 use App\Http\Controllers\Api\RoleController;
 use App\Http\Controllers\Api\ShareCapitalLedgerController;
 use App\Http\Controllers\Api\ShareCapitalPledgeController;
+use App\Http\Controllers\Api\StaffController;
 use App\Http\Controllers\Api\UserController;
 use App\Http\Middleware\AllowAuthOrSubmissionToken;
 use App\Http\Middleware\CheckTokenExpiry;
 use App\Http\Middleware\EnsureUserIsActive;
 use App\Http\Middleware\OptionalSanctumAuth;
+use App\Http\Middleware\ReceiptShare\EnsureReceiptShareLinksEnabled;
+use App\Http\Middleware\ReceiptShare\PublicReceiptHeaders;
 use App\Http\Middleware\RequirePasswordChange;
 use Illuminate\Support\Facades\Route;
 
@@ -111,6 +124,51 @@ Route::post('/borrowers/{borrower}/photo', [BorrowerController::class, 'uploadPh
 Route::post('/borrowers/{borrower}/valid-ids', [BorrowerController::class, 'uploadValidId'])
     ->middleware([AllowAuthOrSubmissionToken::class, 'throttle:registration-uploads', CheckTokenExpiry::class, EnsureUserIsActive::class, RequirePasswordChange::class]);
 
+/*
+ * Member Portal, member side (routes/api/portal/*.php), in file-name order,
+ * OUTSIDE the staff group below: these routes take a portal token (or none)
+ * and never a staff token, and the staff group never takes a portal token.
+ * Each file sets the `/portal` prefix and its own middleware
+ * (App\Http\Middleware\Portal\PortalStack). An empty folder adds nothing.
+ */
+$portalPartials = glob(__DIR__.'/api/portal/*.php') ?: [];
+sort($portalPartials);
+
+foreach ($portalPartials as $portalPartial) {
+    require $portalPartial;
+}
+
+/*
+ * Loan origination, public side (routes/api/public-apply/*.php), in file-name
+ * order, OUTSIDE the staff group below, the way routes/api/portal/ is: these
+ * routes never take a staff token. They load before the staff group, and the
+ * first route registered wins, so the `/public-apply` prefix and the
+ * `public-apply.` name are forced here: a file that forgets its prefix can
+ * never answer a staff path such as GET /loans/{loan}. The name keeps them out
+ * of the shared `api` limiter (AppServiceProvider). Each file sets its own
+ * middleware. An empty folder adds nothing.
+ */
+Route::prefix('public-apply')->name('public-apply.')->group(function (): void {
+    $publicApplyPartials = glob(__DIR__.'/api/public-apply/*.php') ?: [];
+    sort($publicApplyPartials);
+
+    foreach ($publicApplyPartials as $publicApplyPartial) {
+        require $publicApplyPartial;
+    }
+});
+
+/*
+ * A shared receipt (finish run round 2, decision 6), OUTSIDE the staff group:
+ * no sign-in, and a staff or member token sent along is ignored. Named
+ * `public-receipts.*` so the shared `api` limiter exempts it for its own
+ * `receipt-share-view` limiter (ReceiptShareServiceProvider). The headers and
+ * the switch run ahead of the limiter (bootstrap/app.php), so while
+ * RECEIPT_SHARE_LINKS_ENABLED is off it answers 404, never 429.
+ */
+Route::get('/public/receipts/{token}', PublicReceiptController::class)
+    ->middleware([PublicReceiptHeaders::class, EnsureReceiptShareLinksEnabled::class, 'throttle:receipt-share-view'])
+    ->name('public-receipts.show');
+
 // Protected routes
 //
 // RequirePasswordChange runs LAST of the three, and the order is the point.
@@ -133,6 +191,13 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
     Route::post('/auth/change-password', [AuthController::class, 'changePassword']);
     Route::post('/auth/refresh', [AuthController::class, 'refresh']);
 
+    // In-app notifications: the signed-in user's own, staff only. Literal
+    // segments before `{id}`; ids are UUIDs.
+    Route::get('/notifications', [NotificationController::class, 'index']);
+    Route::get('/notifications/unread-count', [NotificationController::class, 'unreadCount']);
+    Route::post('/notifications/read-all', [NotificationController::class, 'markAllRead']);
+    Route::post('/notifications/{id}/read', [NotificationController::class, 'markRead'])->whereUuid('id');
+
     // Users
     // Two constraints, both load-bearing, from different changes.
     //
@@ -154,6 +219,14 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
     Route::patch('/users/{user}/reactivate', [UserController::class, 'reactivate'])->name('users.reactivate')->whereNumber('user');
     Route::post('/users/{user}/reset-password', [UserController::class, 'resetPassword'])->name('users.reset-password')->whereNumber('user');
 
+    // Staff — the account-officer pickers' list: active users as {id, full_name},
+    // for anyone holding loans:create, loans:update or loans:restructure. NOT
+    // user management, so its name must stay outside `users.*`: that predicate
+    // drives the denied-caller ceiling in AppServiceProvider's `api` limiter, and
+    // a loan officer (who holds no users:* permission) would be cut to 10/min on
+    // the picker.
+    Route::get('/staff', [StaffController::class, 'index'])->name('staff.index');
+
     // Branches
     Route::apiResource('branches', BranchController::class)->except(['destroy']);
 
@@ -172,6 +245,7 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
     Route::get('/borrowers/{borrower}/valid-ids', [BorrowerController::class, 'listValidIds']);
     Route::delete('/borrowers/{borrower}/valid-ids/{validIdId}', [BorrowerController::class, 'deleteValidId']);
     Route::get('/borrowers/{borrower}/ledger', [BorrowerController::class, 'ledger']);
+    Route::get('/borrowers/{borrower}/loan-summary', [BorrowerController::class, 'loanSummary']);
 
     // Co-makers
     Route::get('/borrowers/{borrower}/co-makers', [CoMakerController::class, 'index']);
@@ -179,6 +253,16 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
     Route::get('/co-makers/{coMaker}', [CoMakerController::class, 'show']);
     Route::put('/co-makers/{coMaker}', [CoMakerController::class, 'update']);
     Route::delete('/co-makers/{coMaker}', [CoMakerController::class, 'destroy']);
+
+    // Co-maker valid IDs — the borrower valid-ID contract on a second owner
+    // (App\Services\ValidIdService). Unlike the borrower upload, all three sit
+    // INSIDE this group: co-makers are added by staff, so there is no
+    // public-registration path and no submission token is accepted.
+    // `whereNumber` makes a non-numeric id a 404 rather than a TypeError 500
+    // from the `int $validIdId` parameter.
+    Route::post('/co-makers/{coMaker}/valid-ids', [CoMakerController::class, 'uploadValidId']);
+    Route::get('/co-makers/{coMaker}/valid-ids', [CoMakerController::class, 'listValidIds']);
+    Route::delete('/co-makers/{coMaker}/valid-ids/{validIdId}', [CoMakerController::class, 'deleteValidId'])->whereNumber('validIdId');
 
     // Documents
     Route::get('/borrowers/{borrower}/documents', [DocumentController::class, 'index']);
@@ -198,26 +282,47 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
         Route::get('/recent-transactions', [DashboardController::class, 'recentTransactions']);
     });
 
-    // Fees
+    // Fees (the formula check first, so `fees/{fee}` never catches it)
+    Route::post('/fees/formula-check', [FeeController::class, 'formulaCheck']);
     Route::apiResource('fees', FeeController::class);
 
     // Loan Products
     Route::apiResource('loan-products', LoanProductController::class);
 
     // Loans
+    // The loan form's figures (collateral total, security, schedule), before
+    // the resource routes so `preview` is never read as a loan id.
+    Route::post('/loans/preview', [LoanController::class, 'formPreview']);
+    // The Amortization Calculator: a what-if schedule with no product or loan.
+    Route::post('/loans/amortization-calculator', AmortizationCalculatorController::class)->middleware('throttle:calculator');
+    // The Amortization (BINHS) page's schedules and its loan prefill.
+    Route::post('/loans/amortization-calculator/binhs', BinhsCalculatorController::class)->middleware('throttle:calculator');
     Route::apiResource('loans', LoanController::class);
     Route::patch('/loans/{loan}/submit', [LoanController::class, 'submit']);
     Route::patch('/loans/{loan}/approve', [LoanController::class, 'approve']);
     Route::patch('/loans/{loan}/reject', [LoanController::class, 'reject']);
     Route::get('/loans/{loan}/release-preview', [LoanController::class, 'releasePreview']);
     Route::patch('/loans/{loan}/release', [LoanController::class, 'release']);
+    // An approved, unreleased restructure back to its approval chain (`loans:release`).
+    Route::patch('/loans/{loan}/send-back-approved', [LoanController::class, 'sendBackApproved'])->whereNumber('loan');
+    // What a release would deduct, for anyone who can see the loan (`loans:view`).
+    Route::get('/loans/{loan}/deductions-preview', [LoanController::class, 'deductionsPreview'])->whereNumber('loan');
+    // The printables' print and PDF actions leave an audit row (`loans:view`).
+    Route::post('/loans/{loan}/print-log', LoanPrintLogController::class)->whereNumber('loan');
+    // The release dialog's "Add Co-Maker": approved loans only, `loans:release`.
+    Route::post('/loans/{loan}/co-makers', [LoanController::class, 'addCoMaker'])->whereNumber('loan');
     Route::patch('/loans/{loan}/void', [LoanController::class, 'void']);
+    Route::get('/loans/{loan}/extension-preview', [LoanController::class, 'extensionPreview'])->whereNumber('loan');
     Route::post('/loans/{loan}/extend', [LoanController::class, 'extend']);
     Route::post('/loans/{loan}/restructure', [LoanController::class, 'restructure']);
     Route::get('/loans/{loan}/ledger-entries', [LoanController::class, 'ledgerEntries']);
+    // The Ledger with server running balances (LoanLedgerService), `loans:view`.
+    Route::get('/loans/{loan}/ledger', [LoanLedgerController::class, 'show'])->whereNumber('loan');
     Route::patch('/loans/{loan}/auto-pay', [LoanController::class, 'toggleAutoPay']);
+    Route::patch('/loans/{loan}/account-officer', [LoanController::class, 'assignAccountOfficer'])->whereNumber('loan');
     Route::get('/loans/{loan}/amortization-preview', [LoanController::class, 'amortizationPreview']);
     Route::get('/loans/{loan}/amortization-schedule', [LoanController::class, 'amortizationSchedule']);
+    Route::get('/loans/{loan}/amortization-balances', [LoanController::class, 'amortizationBalances'])->whereNumber('loan');
 
     // Multi-step BOD approval chain.
     //
@@ -230,6 +335,13 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
     Route::get('/loans/{loan}/approval-steps', [LoanApprovalStepController::class, 'index']);
     Route::patch('/loans/{loan}/approval-steps/{approvalStep}/approve', [LoanApprovalStepController::class, 'approve'])->scopeBindings();
     Route::patch('/loans/{loan}/approval-steps/{approvalStep}/send-back', [LoanApprovalStepController::class, 'sendBack'])->scopeBindings();
+    // Who the next step can be forwarded to (`forward_to_user_id` on submit and approve).
+    Route::get('/loans/{loan}/approval/forward-candidates', [LoanApprovalStepController::class, 'forwardCandidates'])->whereNumber('loan');
+    // The Chairman/Chairwoman's edit while the loan waits at their step
+    // (`loans:edit_in_approval`, LoanApprovalEditService).
+    Route::get('/loans/{loan}/approval-edit', [LoanApprovalEditController::class, 'show'])->whereNumber('loan');
+    Route::post('/loans/{loan}/approval-edit/preview', [LoanApprovalEditController::class, 'preview'])->whereNumber('loan');
+    Route::patch('/loans/{loan}/approval-edit', [LoanApprovalEditController::class, 'update'])->whereNumber('loan');
 
     // Repayments
     Route::get('/repayments', [RepaymentController::class, 'listAll']);
@@ -239,6 +351,13 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
     Route::get('/loans/{loan}/summary', [RepaymentController::class, 'summary']);
     Route::get('/repayments/{repayment}', [RepaymentController::class, 'show']);
     Route::patch('/repayments/{repayment}/void', [RepaymentController::class, 'void']);
+    // Receipt share links (finish run round 2, decision 6): payments:view and
+    // the payment's branch; 404 on all three while the server switch is off.
+    Route::middleware(EnsureReceiptShareLinksEnabled::class)->whereNumber('repayment')->group(function (): void {
+        Route::get('/repayments/{repayment}/share-link', [ReceiptShareLinkController::class, 'show']);
+        Route::post('/repayments/{repayment}/share-link', [ReceiptShareLinkController::class, 'store']);
+        Route::patch('/repayments/{repayment}/share-link/revoke', [ReceiptShareLinkController::class, 'revoke']);
+    });
 
     // Loan Documents
     Route::get('/loans/{loan}/disclosure', [DisclosureController::class, 'show']);
@@ -247,10 +366,12 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
     // Loan Adjustments
     Route::get('/loans/{loan}/adjustments', [LoanAdjustmentController::class, 'index']);
     Route::post('/loans/{loan}/adjustments', [LoanAdjustmentController::class, 'store']);
+    Route::get('/loans/{loan}/balance-adjustment-preview', [LoanAdjustmentController::class, 'balanceAdjustmentPreview']);
     Route::get('/loan-adjustments/{loanAdjustment}', [LoanAdjustmentController::class, 'show']);
     Route::patch('/loan-adjustments/{loanAdjustment}/approve', [LoanAdjustmentController::class, 'approve']);
     Route::patch('/loan-adjustments/{loanAdjustment}/reject', [LoanAdjustmentController::class, 'reject']);
     Route::patch('/loan-adjustments/{loanAdjustment}/apply', [LoanAdjustmentController::class, 'apply']);
+    Route::patch('/loan-adjustments/{loanAdjustment}/cancel', [LoanAdjustmentController::class, 'cancel']);
 
     // Reports
     Route::prefix('reports')->group(function () {
@@ -262,8 +383,11 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
         Route::get('/loan-balance-summary', [ReportController::class, 'loanBalanceSummary']);
         Route::get('/daily-collection', [ReportController::class, 'dailyCollection']);
         Route::get('/income', [ReportController::class, 'incomeReport']);
+        Route::get('/income/by-loan', [ReportController::class, 'incomeByLoan']);
         Route::get('/aging', [ReportController::class, 'agingReport']);
         Route::get('/borrowers', [ReportController::class, 'borrowerReport']);
+        Route::get('/borrowers/list', [ReportController::class, 'borrowerList']);
+        Route::get('/borrowers/released', [ReportController::class, 'borrowersReleased']);
         Route::get('/disbursements', [ReportController::class, 'disbursementReport']);
 
         // Financial reports (Part B)
@@ -273,6 +397,8 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
         Route::get('/share-capital', [ReportController::class, 'shareCapital']);
         Route::get('/performance', [ReportController::class, 'performance']);
         Route::get('/provisioning', [ReportController::class, 'provisioning']);
+        // Finish run round 2, decision 17: the whole cooperative (ProfitSharingReportRequest).
+        Route::get('/profit-sharing', ProfitSharingReportController::class);
 
         // Feeds the printable Share Capital Certificate — unpaginated, unlike
         // GET /api/share-capital/ledger which caps per_page at 100.
@@ -304,6 +430,9 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
     // Collaterals
     Route::get('/collaterals', [CollateralController::class, 'index']);
     Route::post('/collaterals', [CollateralController::class, 'store']);
+    // Must precede /{collateral}, which is not constrained to digits and would
+    // otherwise capture "register" as an id and answer 404.
+    Route::get('/collaterals/register', [CollateralController::class, 'register']);
     Route::get('/collaterals/{collateral}', [CollateralController::class, 'show']);
     Route::put('/collaterals/{collateral}', [CollateralController::class, 'update']);
     Route::delete('/collaterals/{collateral}', [CollateralController::class, 'destroy']);
@@ -325,6 +454,8 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
     // Share Capital Ledger
     Route::get('/share-capital/ledger', [ShareCapitalLedgerController::class, 'index']);
     Route::post('/share-capital/ledger', [ShareCapitalLedgerController::class, 'store']);
+    Route::get('/share-capital/members', [ShareCapitalLedgerController::class, 'members']);
+    Route::get('/share-capital/cash-reference/next', [ShareCapitalLedgerController::class, 'nextCashReference']);
 
     // Share Capital Pledges
     Route::get('/pledges', [ShareCapitalPledgeController::class, 'index']);
@@ -344,6 +475,7 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
     // GCash Transactions
     Route::prefix('gcash')->group(function () {
         Route::get('/transactions', [GCashTransactionController::class, 'index']);
+        Route::get('/transactions/preview', [GCashTransactionController::class, 'preview']);
         Route::post('/transactions', [GCashTransactionController::class, 'store']);
         Route::patch('/transactions/{transaction}/paid', [GCashTransactionController::class, 'markPaid']);
         Route::get('/non-members', [GCashNonMemberController::class, 'index']);
@@ -417,7 +549,7 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
         // that cannot rely on that. See CsvImportController::resolveChunkBytes().
         Route::match(['put', 'post'], '/{run}/files/{kind}/chunks/{index}', [CsvImportController::class, 'uploadChunk'])
             ->whereNumber('run')
-            ->whereIn('kind', ['customers', 'loans'])
+            ->whereIn('kind', ['customers', 'loans', 'share_capital'])
             ->whereNumber('index')
             ->name('chunk');
 
@@ -533,12 +665,11 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
          * people's is not. Add to the bottom of this block, not into it.
          *
          * The BIR books of account. One path per book so the books screen can
-         * pick by tab without a switch statement per call site; both answer the
-         * same `{data: AccountingBook}` shape, because `book-report.tsx`
+         * pick by tab without a switch statement per call site; all four answer
+         * the same `{data: AccountingBook}` shape, because `book-report.tsx`
          * renders every book through ONE component keyed by `BookKind`. The
-         * cash receipts and cash disbursements books are the other half of the
-         * set and are not routed yet — they need the automatic posting engine
-         * to tell a receipt from a disbursement by source.
+         * cash books tell a receipt from a disbursement by which way each entry
+         * moved money (BookBuilder::movedMoney()).
          *
          * Note these are the FIRST accounting routes with a static segment
          * under a sub-prefix. They cannot collide with `/accounts/{account}`
@@ -548,6 +679,8 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
          */
         Route::get('/books/general-journal', [AccountingBookController::class, 'generalJournal']);
         Route::get('/books/general-ledger', [AccountingBookController::class, 'generalLedger']);
+        Route::get('/books/cash-receipts', [AccountingBookController::class, 'cashReceipts']);
+        Route::get('/books/cash-disbursements', [AccountingBookController::class, 'cashDisbursements']);
 
         /*
          * Aged receivables. Gated on `accounting:view` like the reports above,
@@ -600,8 +733,10 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
          * Recording an expense posts its journal in the same transaction, which
          * is why there is no separate "post" verb here and why `PUT` accepts
          * only the descriptive fields — the figures ARE the posted entry, and a
-         * posted entry is immutable. Correcting one means reversing the journal
-         * and recording it again.
+         * posted entry is immutable. Correcting one means reversing the expense
+         * (its payments first) and recording it again. Reverse payment needs
+         * `expenses:pay` and `journals:reverse`; Reverse expense,
+         * `expenses:update` and `journals:reverse`.
          *
          * `/pay` is a separate permission from `update` on purpose: settling a
          * payable takes money out of a cash account, and that is the step
@@ -618,6 +753,13 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
         Route::get('/expenses/{expense}', [AccountingExpenseController::class, 'show'])->whereNumber('expense');
         Route::put('/expenses/{expense}', [AccountingExpenseController::class, 'update'])->whereNumber('expense');
         Route::post('/expenses/{expense}/pay', [AccountingExpenseController::class, 'pay'])->whereNumber('expense');
+        // Reversals from Expenses & Payables (finish run round 5), never by
+        // hand on the Journals screen (ExpenseJournalGuard). A payment
+        // resolves only among its own expense's payments.
+        Route::post('/expenses/{expense}/reverse', [AccountingExpenseController::class, 'reverse'])->whereNumber('expense');
+        Route::post('/expenses/{expense}/payments/{payment}/reverse', [AccountingExpenseController::class, 'reversePayment'])
+            ->whereNumber(['expense', 'payment'])
+            ->scopeBindings();
 
         /*
          * Reconciliation, all on `accounting:reconcile` — the same permission
@@ -627,6 +769,9 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
          * needs a posting permission.
          */
         Route::get('/reconciliations', [AccountingReconciliationController::class, 'index']);
+        // The accounts a reconciliation can start on, on accounting:reconcile
+        // alone (no chart_of_accounts:view). A literal, before the wildcard.
+        Route::get('/reconciliations/accounts', [AccountingReconciliationController::class, 'accounts']);
         Route::post('/reconciliations', [AccountingReconciliationController::class, 'store']);
         Route::get('/reconciliations/{reconciliation}', [AccountingReconciliationController::class, 'show'])
             ->whereNumber('reconciliation');
@@ -670,11 +815,111 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
          */
         Route::get('/statements/cash-flow', [AccountingStatementController::class, 'cashFlow']);
         Route::get('/statements/equity-changes', [AccountingStatementController::class, 'equityChanges']);
+
+        /*
+         * Accounting module partials (routes/accounting/*.php), in file-name
+         * order, after every route above so none of these can shadow one. Each
+         * is required inside this group, so its paths are relative to
+         * /accounting and it inherits the authenticated middleware. An empty
+         * folder adds nothing.
+         */
+        $accountingPartials = glob(__DIR__.'/accounting/*.php') ?: [];
+        sort($accountingPartials);
+
+        foreach ($accountingPartials as $accountingPartial) {
+            require $accountingPartial;
+        }
     });
+
+    /*
+     * Module partials, each required inside this authenticated group at the
+     * place its routes have always sat, so registration order (which Laravel
+     * matches in) is unchanged. A module adds its routes to its own file and
+     * never edits this one. RouteSnapshotTest pins the result.
+     */
+    require __DIR__.'/api/credit-scoring.php';
+    require __DIR__.'/api/reminders.php';
+    require __DIR__.'/api/penalties.php';
+    require __DIR__.'/api/linda.php';
+
+    /*
+     * Savings & Deposits partials (routes/api/savings/*.php), in file-name
+     * order: each savings slice adds its own file and never edits this one.
+     * Each file sets its own prefix (`/savings`, `/reports/savings`). An empty
+     * folder adds nothing.
+     */
+    $savingsPartials = glob(__DIR__.'/api/savings/*.php') ?: [];
+    sort($savingsPartials);
+
+    foreach ($savingsPartials as $savingsPartial) {
+        require $savingsPartial;
+    }
+
+    /*
+     * CDA Reports partials (routes/api/cda/*.php), in file-name order: each
+     * CDA slice adds its own file and never edits this one. Each file sets
+     * its own prefix (`/cda`, or a member route). An empty folder adds
+     * nothing.
+     */
+    $cdaPartials = glob(__DIR__.'/api/cda/*.php') ?: [];
+    sort($cdaPartials);
+
+    foreach ($cdaPartials as $cdaPartial) {
+        require $cdaPartial;
+    }
+
+    /*
+     * Member Portal, staff side (routes/api/portal-admin/*.php), in file-name
+     * order: each portal slice adds its own file and never edits this one.
+     * Each file sets the `/portal-admin` prefix. An empty folder adds nothing.
+     */
+    $portalAdminPartials = glob(__DIR__.'/api/portal-admin/*.php') ?: [];
+    sort($portalAdminPartials);
+
+    foreach ($portalAdminPartials as $portalAdminPartial) {
+        require $portalAdminPartial;
+    }
 
     // Branding (organization logo + identity printed on reports and documents)
     Route::get('/settings/branding', [BrandingController::class, 'show']);
     Route::put('/settings/branding', [BrandingController::class, 'update']);
     Route::post('/settings/branding/logo', [BrandingController::class, 'uploadLogo']);
     Route::delete('/settings/branding/logo', [BrandingController::class, 'deleteLogo']);
+
+    /*
+     * Menu Visibility (finish run round 6): the hidden modules for every
+     * signed-in user's screens, and Settings → Menu Visibility behind
+     * `menu_visibility:manage` and the administrator override (a bcrypt hash
+     * on the server, 15 minutes per sign-in). The override counts each try
+     * before its password is checked (OverrideLockout). Never blocked by a
+     * hidden module (MenuModules::ALWAYS_OPEN).
+     */
+    Route::get('/menu-visibility/hidden', [MenuVisibilityController::class, 'hidden']);
+    Route::post('/menu-visibility/override', [MenuVisibilityController::class, 'grantOverride']);
+    Route::delete('/menu-visibility/override', [MenuVisibilityController::class, 'endOverride']);
+    Route::get('/menu-visibility', [MenuVisibilityController::class, 'show']);
+    Route::put('/menu-visibility', [MenuVisibilityController::class, 'update']);
+
+    /*
+     * Phase 6 module partials, in this order and each in file-name order:
+     * AMLA (routes/api/amla/), branches (routes/api/branches/), the executive
+     * dashboard (routes/api/dashboard/) and loan origination, staff side
+     * (routes/api/loan-origination/). Each slice adds its own file and never
+     * edits this one. Each file sets its own prefix. An empty folder adds
+     * nothing.
+     *
+     * They come after every route above, but that alone protects nothing:
+     * Laravel's RouteCollection replaces a route with the same method, domain
+     * and URI in place, so a file here that re-declared a staff route would
+     * silently take over its controller and checks. Phase6WiringTest loads
+     * every route and fails on any repeated method, domain and URI.
+     */
+    foreach (['amla', 'branches', 'dashboard', 'loan-origination'] as $phase6Module) {
+        $phase6Partials = glob(__DIR__.'/api/'.$phase6Module.'/*.php') ?: [];
+        sort($phase6Partials);
+
+        foreach ($phase6Partials as $phase6Partial) {
+            require $phase6Partial;
+        }
+    }
 });

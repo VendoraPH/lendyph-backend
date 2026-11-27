@@ -2,6 +2,8 @@
 
 namespace App\Models;
 
+use App\Services\BranchAccess;
+use App\Support\StaffRouteBinding;
 use App\Traits\Auditable;
 use Database\Factories\UserFactory;
 use Illuminate\Database\Eloquent\Attributes\Hidden;
@@ -11,7 +13,9 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Foundation\Auth\User as Authenticatable;
 use Illuminate\Notifications\Notifiable;
+use Illuminate\Support\Collection;
 use Laravel\Sanctum\HasApiTokens;
+use Spatie\Permission\Contracts\Permission;
 use Spatie\Permission\Traits\HasRoles;
 
 #[Hidden(['password', 'remember_token'])]
@@ -19,6 +23,19 @@ class User extends Authenticatable
 {
     /** @use HasFactory<UserFactory> */
     use Auditable, HasApiTokens, HasFactory, HasRoles, Notifiable;
+
+    /**
+     * Roles and permissions are seeded on the `web` guard, and are read on it
+     * whatever guard signed the request in.
+     *
+     * Pinned because Spatie otherwise picks the guard from
+     * `auth.defaults.guard` among the guards whose provider is `users`, and
+     * `auth:sanctum` makes that default `sanctum` for the request. While the
+     * `sanctum` guard had no provider it never matched, so `web` won by
+     * accident; once it names `users` (portal design §0, finding 1) every
+     * permission would be looked up on `sanctum`, where none exists.
+     */
+    protected string $guard_name = 'web';
 
     /**
      * Never written to `audit_logs`. See Auditable::redactForAudit().
@@ -119,16 +136,55 @@ class User extends Authenticatable
     }
 
     /**
+     * The description on this user's automatic audit rows when their primary
+     * branch is set or changes (Phase 6 MB-BE6, multi-branch D9), in words:
+     * `User jdoe created with primary branch Main Branch.` and `Primary branch
+     * for jdoe changed from Main Branch to Organisation-wide.` Other changes
+     * keep no description, as before. The branch history reads these rows.
+     */
+    public function describeAuditEvent(string $action): ?string
+    {
+        if ($action === 'created') {
+            return sprintf('User %s created with primary branch %s.', $this->username, self::primaryBranchWords($this->branch_id));
+        }
+
+        if ($action !== 'updated' || ! array_key_exists('branch_id', $this->getChanges())) {
+            return null;
+        }
+
+        return sprintf(
+            'Primary branch for %s changed from %s to %s.',
+            $this->username,
+            self::primaryBranchWords($this->getOriginal('branch_id')),
+            self::primaryBranchWords($this->branch_id),
+        );
+    }
+
+    /**
+     * A primary branch in words: its name, or "Organisation-wide" for none.
+     */
+    public static function primaryBranchWords(mixed $branchId): string
+    {
+        if ($branchId === null || $branchId === '') {
+            return 'Organisation-wide';
+        }
+
+        return Branch::query()->whereKey((int) $branchId)->value('name') ?? 'Branch #'.(int) $branchId;
+    }
+
+    /**
      * Every branch this user is assigned to. The source of truth.
      *
      * Always a superset of `branch()` — `users.branch_id` is maintained as one
      * member of this set, never as something outside it.
      *
-     * Assignment is DISPLAY-ONLY. Nothing reads it to decide what a user may
-     * see or do, there are no policies and no global scopes, and that is a
-     * deliberate property rather than an oversight:
-     * tests/Feature/BranchAssignmentIsDisplayOnlyTest.php fails loudly if
-     * anyone starts scoping on it without designing that first.
+     * Assignment decides which branches' data the user sees unless they hold
+     * `branches:view_all` (decision 5b). App\Services\BranchAccess reads it,
+     * falling back to `users.branch_id` when this set is empty, and the HTTP
+     * layer applies it through local `visibleTo()` scopes, route-model
+     * bindings and visibility-aware `exists` rules. Never a global scope, so
+     * jobs and commands see every branch. Covered by
+     * tests/Feature/BranchAccessTest.php and BranchAccessRouteSweepTest.php.
      *
      * @return BelongsToMany<Branch, $this>
      */
@@ -164,6 +220,51 @@ class User extends Authenticatable
     }
 
     /**
+     * Users who share at least one branch with $viewer (BranchAccess), for the
+     * users and staff lists. `branches:view_all` sees everyone; a viewer with
+     * no branch sees no one.
+     *
+     * A listed user's branches are read the way BranchAccess reads the
+     * viewer's: the pivot, or the legacy `users.branch_id` column. Local scope
+     * only, never global.
+     */
+    public function scopeVisibleTo($query, self $viewer)
+    {
+        $branchIds = app(BranchAccess::class)->for($viewer);
+
+        if ($branchIds === null) {
+            return $query;
+        }
+
+        return $query->where(function ($q) use ($branchIds) {
+            $q->whereHas('branches', fn ($b) => $b->whereIn('branches.id', $branchIds))
+                ->orWhereIn('users.branch_id', $branchIds);
+        });
+    }
+
+    /**
+     * Every `{user}` route parameter resolves only to a user the signed-in
+     * caller may see (scopeVisibleTo), or to the caller themselves, so another
+     * branch's account answers 404 on show, update and every action, the same
+     * answer as an id that does not exist. Without a signed-in user the
+     * binding is unscoped.
+     */
+    public function resolveRouteBindingQuery($query, $value, $field = null)
+    {
+        return StaffRouteBinding::scope(
+            parent::resolveRouteBindingQuery($query, $value, $field),
+            // `branches:view_all` sees everyone. Checked here rather than left
+            // to scopeVisibleTo(), whose unrestricted case adds no condition
+            // and would leave only the "is the caller" half of the OR below.
+            fn ($query, self $viewer) => app(BranchAccess::class)->for($viewer) === null
+                ? $query
+                : $query->where(fn ($q) => $q
+                    ->whereKey($viewer->getKey())
+                    ->orWhere(fn ($visible) => $visible->visibleTo($viewer))),
+        );
+    }
+
+    /**
      * Whether this user may act on $target through the user-management API.
      *
      * Only one boundary exists: a `super_admin` account may not be touched by
@@ -181,5 +282,63 @@ class User extends Authenticatable
     public function canManageAccount(self $target): bool
     {
         return ! $target->hasRole('super_admin') || $this->hasRole('super_admin');
+    }
+
+    /**
+     * This user's roles that are switched on.
+     *
+     * A deactivated role grants nothing, but its users keep the assignment, so
+     * reactivating the role gives them their access back with no reassigning.
+     * Every permission read goes through this: Spatie's checks (Gate, the
+     * `can`/`permission` middleware, hasPermissionTo()) reach roles through
+     * hasPermissionViaRole(), and getAllPermissions() (the signed-in user's
+     * permission list, the role and permission grant guards) through
+     * getPermissionsViaRoles().
+     *
+     * `is_active` is NOT NULL with a default of true, so only an explicit
+     * false switches a role off; a role created in this request without the
+     * column set is active, as its row is.
+     *
+     * admin and super_admin (Role::PROTECTED_KEYS) always count. They can't be
+     * deactivated through the API, and the Gate::before bypass, the approval
+     * bypass and canManageAccount() check them with hasRole(), which ignores
+     * `is_active`; a row switched off by hand mustn't make those checks and
+     * the permission checks disagree.
+     *
+     * @return Collection<int, Role>
+     */
+    public function activeRoles(): Collection
+    {
+        return $this->loadMissing('roles')->roles
+            ->filter(fn (Role $role) => $role->is_active !== false
+                || in_array($role->name, Role::PROTECTED_KEYS, true))
+            ->values();
+    }
+
+    /**
+     * Spatie asks whether the user holds any role carrying `$permission`;
+     * only active roles count.
+     */
+    protected function hasPermissionViaRole(Permission $permission): bool
+    {
+        $grantingRoleIds = $permission->roles->map(fn ($role) => (int) $role->getKey())->all();
+
+        return $this->activeRoles()->contains(
+            fn (Role $role) => in_array((int) $role->getKey(), $grantingRoleIds, true),
+        );
+    }
+
+    /**
+     * The permissions the user's active roles carry. Direct permissions are
+     * added by getAllPermissions() as before.
+     */
+    public function getPermissionsViaRoles(): Collection
+    {
+        $this->loadMissing('roles', 'roles.permissions');
+
+        return $this->activeRoles()
+            ->flatMap(fn (Role $role) => $role->permissions)
+            ->sort()
+            ->values();
     }
 }

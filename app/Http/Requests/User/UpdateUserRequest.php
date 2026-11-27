@@ -6,6 +6,8 @@ use App\Http\Requests\Concerns\MasksUserExistence;
 use App\Http\Requests\Concerns\ResolvesBranchAssignment;
 use App\Models\User;
 use App\Rules\AssignableRole;
+use App\Rules\BranchTakesNew;
+use App\Services\BranchAccess;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\Validator;
@@ -37,7 +39,7 @@ class UpdateUserRequest extends FormRequest
      *
      * @var list<string>
      */
-    private const NON_COLUMN_RULES = ['role', 'branch_ids', 'branch_ids.*'];
+    private const NON_COLUMN_RULES = ['role', 'branch_ids', 'branch_ids.*', 'primary_branch_id'];
 
     /**
      * `users:view` as well as `users:update`, and the second one is not
@@ -74,7 +76,9 @@ class UpdateUserRequest extends FormRequest
             'username' => ['sometimes', 'string', 'alpha_dash', 'max:50', Rule::unique('users')->ignore($userId)],
             'email' => ['sometimes', 'email', 'max:255', Rule::unique('users')->ignore($userId)],
             'mobile_number' => ['nullable', 'string', 'max:20'],
-            'branch_id' => ['sometimes', 'exists:branches,id'],
+            // Within the caller's own branches unless they hold
+            // `branches:view_all` (BranchAccess).
+            'branch_id' => ['bail', 'sometimes', $this->assignableBranchRule(), BranchTakesNew::openOnly($this->user())],
             /**
              * `min:1` rather than allowing `[]`. Clearing every branch is not
              * an edit this endpoint has ever offered — `branch_id` is
@@ -84,7 +88,12 @@ class UpdateUserRequest extends FormRequest
              * later; it is not a side effect of adding a second branch.
              */
             'branch_ids' => ['sometimes', 'array', 'min:1'],
-            'branch_ids.*' => ['integer', 'exists:branches,id'],
+            'branch_ids.*' => ['bail', 'integer', $this->assignableBranchRule(), BranchTakesNew::openOnly($this->user())],
+            // The chosen primary branch (Phase 6 MB-BE6): one of the user's
+            // branches after this save, or null for Organisation-wide, which
+            // needs a user who sees all branches (validatePrimaryBranch()).
+            // Never a closed branch (primaryBranchRule()).
+            'primary_branch_id' => ['sometimes', 'nullable', 'integer', $this->primaryBranchRule()],
             'role' => ['sometimes', 'string', 'exists:roles,name', new AssignableRole($this->user())],
         ];
     }
@@ -122,9 +131,12 @@ class UpdateUserRequest extends FormRequest
                     return;
                 }
 
-                if (! $actor->canManageAccount($target)) {
+                if (! $actor->canManageAccount($target) || ! $this->callerReachesTarget($actor, $target)) {
                     $this->denyAsMissingUser();
                 }
+
+                $this->guardBranchChange($validator, $actor, $target);
+                $this->validatePrimaryBranch($validator, $target);
 
                 // Compares against the FIRST role only, which is exact for every
                 // user this application can produce — `store` assigns one and
@@ -150,7 +162,7 @@ class UpdateUserRequest extends FormRequest
                     return;
                 }
 
-                if (! $this->changesAnyColumn($target) && ! $this->changesBranchAssignment($target)) {
+                if (! $this->changesAnyColumn($target) && ! $this->changesBranchAssignment($target) && ! $this->changesPrimaryBranch($target)) {
                     $validator->errors()->add(
                         'changes',
                         'Nothing to update. Change at least one field before saving.',
@@ -236,5 +248,35 @@ class UpdateUserRequest extends FormRequest
         sort($current);
 
         return $incoming !== $current;
+    }
+
+    /**
+     * A caller without `branches:view_all` never changes their own branches,
+     * which would let them widen what they see (BranchAccess). Which branches
+     * they may hand out at all is `assignableBranchRule()`; a target working
+     * in a branch they don't hold is already refused by callerReachesTarget().
+     */
+    private function guardBranchChange(Validator $validator, User $actor, User $target): void
+    {
+        $callerBranches = app(BranchAccess::class)->for($actor);
+
+        if ($callerBranches === null || (int) $target->id !== (int) $actor->id) {
+            return;
+        }
+
+        if ($this->changesBranchAssignment($target)) {
+            $validator->errors()->add(
+                'branch_ids',
+                'You cannot change your own branches. Another administrator has to do it for you.',
+            );
+        }
+
+        // Their primary branch too (Phase 6 MB-BE6, permission review).
+        if ($this->changesPrimaryBranch($target)) {
+            $validator->errors()->add(
+                'primary_branch_id',
+                'You cannot change your own primary branch. Another administrator has to do it for you.',
+            );
+        }
     }
 }

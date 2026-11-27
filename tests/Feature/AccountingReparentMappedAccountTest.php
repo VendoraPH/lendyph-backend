@@ -70,7 +70,7 @@ class AccountingReparentMappedAccountTest extends TestCase
             ->assertUnprocessable()
             ->json('errors.parent_id.0');
 
-        $this->assertStringContainsString('loans_receivable', $message);
+        $this->assertStringContainsString('Loans receivable', $message);
         $this->assertStringContainsString('Point that role somewhere else', $message);
     }
 

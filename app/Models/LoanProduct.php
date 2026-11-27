@@ -2,22 +2,36 @@
 
 namespace App\Models;
 
+use App\Enums\InterestRateFrequency;
+use App\Enums\TermUnit;
 use App\Traits\Auditable;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class LoanProduct extends Model
 {
     use Auditable, HasFactory;
 
+    /**
+     * The database defaults, so a product built in memory reads the same as
+     * one loaded back.
+     */
+    protected $attributes = [
+        'term_unit' => 'months',
+        'interest_rate_frequency' => 'monthly',
+    ];
+
     protected $fillable = [
         'name',
         'description',
         'interest_rate',
+        'interest_rate_frequency',
         'min_interest_rate',
         'interest_method',
         'term',
+        'term_unit',
         'min_term',
         'max_term',
         'frequency',
@@ -60,12 +74,39 @@ class LoanProduct extends Model
             'max_amount' => 'decimal:2',
             'frequencies' => 'array',
             'custom_fees' => 'array',
+            'term_unit' => TermUnit::class,
+            'interest_rate_frequency' => InterestRateFrequency::class,
         ];
     }
 
     public function loans(): HasMany
     {
         return $this->hasMany(Loan::class);
+    }
+
+    /**
+     * The penalty configurations covering this product, active or not. At most
+     * one is active (PenaltyConfigService); see activePenaltyConfigs().
+     *
+     * @return BelongsToMany<PenaltyConfig, $this>
+     */
+    public function penaltyConfigs(): BelongsToMany
+    {
+        return $this->belongsToMany(PenaltyConfig::class, 'penalty_config_products')
+            ->using(PenaltyConfigProduct::class);
+    }
+
+    /**
+     * The active configuration covering this product, as a list of at most
+     * one, for eager loading (PenaltyTerms::activeConfigFor()).
+     *
+     * @return BelongsToMany<PenaltyConfig, $this>
+     */
+    public function activePenaltyConfigs(): BelongsToMany
+    {
+        return $this->penaltyConfigs()
+            ->where('penalty_configs.status', PenaltyConfig::STATUS_ACTIVE)
+            ->orderBy('penalty_configs.id');
     }
 
     public function scopeActive($query)

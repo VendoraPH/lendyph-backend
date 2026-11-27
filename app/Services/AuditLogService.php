@@ -3,7 +3,11 @@
 namespace App\Services;
 
 use App\Models\AuditLog;
+use App\Models\PortalUser;
+use App\Models\User;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Support\Facades\Schema;
+use LogicException;
 
 class AuditLogService
 {
@@ -17,6 +21,41 @@ class AuditLogService
      * the trait already calls into covers every auditable model there is.
      */
     private static bool $modelAuditingSuppressed = false;
+
+    /**
+     * `audit_logs` columns added after the schema production started from:
+     * the portal actor (2026_11_11_700100) and the record's branch
+     * (2026_11_23_100000).
+     */
+    private const LATER_COLUMNS = ['actor_type', 'portal_user_id', 'branch_id'];
+
+    /**
+     * Whether a migrate run is in progress (MigrationsStarted until
+     * MigrationsEnded, wired in AppServiceProvider). Only then may a write
+     * leave out one of LATER_COLUMNS; any other write names all three, so a
+     * missing column still fails loudly and costs no lookup.
+     */
+    private static bool $migrating = false;
+
+    /**
+     * Which of LATER_COLUMNS the table has during a migrate run, read once
+     * (null: not read yet) and again after each migration through
+     * forgetColumns().
+     *
+     * @var list<string>|null
+     */
+    private static ?array $laterColumnsPresent = null;
+
+    /** `audit_logs.actor_type` for a row a member's own action wrote. */
+    public const ACTOR_MEMBER = 'member';
+
+    /**
+     * `audit_logs.actor_type` for a row an online loan applicant's own action
+     * wrote (origination decision 10). An applicant has no account, so the
+     * row names nobody: no `user_id`, no `portal_user_id`, and its values
+     * hold ids only.
+     */
+    public const ACTOR_APPLICANT = 'applicant';
 
     /**
      * Run a callback with the Auditable trait's automatic rows turned off,
@@ -102,6 +141,28 @@ class AuditLogService
      * `user_id` and `ip_address` are what identify a background write, and both
      * are already overridable.
      */
+    /**
+     * The longest header value an audit row keeps.
+     */
+    public const HEADER_MAX_LENGTH = 512;
+
+    /**
+     * A request header as an audit row may store it: valid UTF-8 and capped.
+     *
+     * Headers are whatever the client sent. `User-Agent: x\xFF` stored raw made
+     * MySQL refuse the audit insert, and callers that audit after an earlier
+     * write had committed (user role and branch changes, the account-officer
+     * change) were left with the change saved and its audit row missing.
+     */
+    public static function cleanHeader(?string $value): ?string
+    {
+        if ($value === null) {
+            return null;
+        }
+
+        return mb_substr(mb_scrub($value, 'UTF-8'), 0, self::HEADER_MAX_LENGTH, 'UTF-8');
+    }
+
     public static function log(
         string $action,
         ?Model $auditable = null,
@@ -110,17 +171,128 @@ class AuditLogService
         ?string $description = null,
         ?int $userId = null,
         ?string $ipAddress = null,
+        ?PortalUser $member = null,
+        bool $asSystem = false,
+        bool $asApplicant = false,
     ): AuditLog {
-        return AuditLog::create([
-            'user_id' => $userId ?? auth()->id(),
+        if ($auditable !== null && app()->runningUnitTests() && ! AuditLogModules::isMapped($auditable->getMorphClass())) {
+            throw new LogicException(sprintf(
+                'Audit rows for %s have no Audit Trail module. Map the class in AuditLogModules::MODULE_MAP (to `system` if it belongs nowhere else).',
+                $auditable->getMorphClass(),
+            ));
+        }
+
+        [$staffId, $member] = $asSystem || $asApplicant ? [null, null] : self::actor($userId, $member);
+
+        $row = [
+            'user_id' => $staffId,
             'action' => $action,
             'auditable_type' => $auditable ? $auditable->getMorphClass() : null,
             'auditable_id' => $auditable?->getKey(),
             'old_values' => $oldValues,
             'new_values' => $newValues,
             'ip_address' => $ipAddress ?? request()->ip(),
-            'user_agent' => request()->userAgent(),
+            'user_agent' => self::cleanHeader(request()->userAgent()),
             'description' => $description,
-        ]);
+        ];
+
+        // The promotion upgrades from main in one run, so a migration's audit
+        // row can land before these columns exist. It leaves them out, and a
+        // null keeps its meaning: staff, or System when user_id is null.
+        if (self::hasLaterColumn('actor_type')) {
+            $row['actor_type'] = match (true) {
+                $asApplicant => self::ACTOR_APPLICANT,
+                $member !== null => self::ACTOR_MEMBER,
+                default => null,
+            };
+        }
+
+        if (self::hasLaterColumn('portal_user_id')) {
+            $row['portal_user_id'] = $member?->getKey();
+        }
+
+        if (self::hasLaterColumn('branch_id')) {
+            // The audited record's branch (Phase 6 MB-BE6), never the actor's.
+            $row['branch_id'] = AuditBranch::of($auditable);
+        }
+
+        return AuditLog::create($row);
+    }
+
+    /**
+     * A migrate run has started: writes may leave out later columns the table
+     * doesn't have yet.
+     */
+    public static function migrationsStarted(): void
+    {
+        self::$migrating = true;
+        self::$laterColumnsPresent = null;
+    }
+
+    /**
+     * The migrate run has ended: every write names all of LATER_COLUMNS again.
+     */
+    public static function migrationsEnded(): void
+    {
+        self::$migrating = false;
+        self::$laterColumnsPresent = null;
+    }
+
+    /**
+     * Read the table's columns again on the next write. Called after each
+     * migration (AppServiceProvider), since a migration may add one.
+     */
+    public static function forgetColumns(): void
+    {
+        self::$laterColumnsPresent = null;
+    }
+
+    private static function hasLaterColumn(string $column): bool
+    {
+        if (! self::$migrating) {
+            return true;
+        }
+
+        self::$laterColumnsPresent ??= array_values(array_intersect(
+            self::LATER_COLUMNS,
+            Schema::getColumnListing((new AuditLog)->getTable()),
+        ));
+
+        return in_array($column, self::$laterColumnsPresent, true);
+    }
+
+    /**
+     * Who a row names (portal design §5): a staff user in `user_id`, or a
+     * member as `actor_type` member with their `portal_user_id`, or neither
+     * (System).
+     *
+     * The signed-in caller counts only when it is a staff User: under the
+     * portal guard `auth()->id()` is a portal user's id, and writing it into
+     * `user_id` (a key to `users`) would name an unrelated staff member (§0,
+     * finding 5). A signed-in PortalUser is the member actor; a public portal
+     * route (code redemption) names the member explicitly. An explicit
+     * `$userId` keeps winning, as before. `$asSystem` writes neither, for a
+     * consequence the system applies on its own (a lockout, access ended with
+     * the membership), whoever's request set it off.
+     *
+     * @return array{0: ?int, 1: ?PortalUser}
+     */
+    private static function actor(?int $userId, ?PortalUser $member): array
+    {
+        if ($userId !== null) {
+            return [$userId, null];
+        }
+
+        if ($member !== null) {
+            return [null, $member];
+        }
+
+        $caller = auth()->user();
+
+        return match (true) {
+            $caller instanceof User => [(int) $caller->getKey(), null],
+            $caller instanceof PortalUser => [null, $caller],
+            default => [null, null],
+        };
     }
 }

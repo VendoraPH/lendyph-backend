@@ -80,6 +80,14 @@ class PruneAbandonedRegistrations extends Command
             ->whereNotExists(fn ($q) => $q->select(DB::raw(1))
                 ->from('gcash_transactions')
                 ->whereColumn('gcash_transactions.borrower_id', 'borrowers.id'))
+            /*
+             * Nor one with a credit decision: decisions are append-only and
+             * `credit_decisions.borrower_id` restricts, so the purge would
+             * throw after the upload directories were gone.
+             */
+            ->whereNotExists(fn ($q) => $q->select(DB::raw(1))
+                ->from('credit_decisions')
+                ->whereColumn('credit_decisions.borrower_id', 'borrowers.id'))
             ->get();
 
         $expiredTokens = BorrowerSubmissionToken::query()

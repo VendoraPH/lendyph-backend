@@ -3,6 +3,7 @@
 namespace App\Services\Accounting;
 
 use App\Models\AccountingPeriod;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Validation\ValidationException;
 
@@ -62,16 +63,32 @@ class PeriodGuard
             return;
         }
 
-        $closedAt = $period->closed_at?->format('j M Y');
+        $closedAt = $period->closed_at?->format('M j, Y');
         $when = $closedAt === null ? '' : " on {$closedAt}";
+        $dated = Carbon::parse($date)->format('M j, Y');
 
         throw ValidationException::withMessages([
             'date' => [
-                "{$what} is dated {$date}, which falls in {$period->name} — a period that was closed{$when}. "
+                "{$what} is dated {$dated}, which falls in {$period->name} — a period that was closed{$when}. "
                 .'Nothing can be posted into a closed period. Reopen it on the Period Closing screen if the entry '
                 .'genuinely belongs there, or date the entry in an open period.',
             ],
         ]);
+    }
+
+    /**
+     * The closed period covering a date, read under the same shared lock as
+     * assertOpen(), or null when the date can be posted on. For a caller that
+     * words its own refusal (an expense reversal names the date it would
+     * post on).
+     *
+     * @param  string  $date  A calendar date, `Y-m-d`.
+     */
+    public function closedPeriodCovering(string $date): ?AccountingPeriod
+    {
+        $period = $this->periodFor($date);
+
+        return $period !== null && $period->isClosed() ? $period : null;
     }
 
     /**

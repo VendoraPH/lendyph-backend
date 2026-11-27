@@ -33,7 +33,7 @@ class ReportTest extends TestCase
                 'loan', 'borrower', 'transactions', 'amortization_schedule', 'summary',
             ]]);
 
-        $this->assertCount(1, $response->json('data.transactions'));
+        $this->assertSame(['release', 'repayment'], array_column($response->json('data.transactions'), 'kind'));
         $this->assertGreaterThan(0, $response->json('data.summary.total_paid'));
     }
 

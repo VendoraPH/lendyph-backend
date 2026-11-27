@@ -6,6 +6,7 @@ use App\Traits\Auditable;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Support\Collection;
 use OpenApi\Attributes as OA;
 
 /**
@@ -26,13 +27,18 @@ use OpenApi\Attributes as OA;
         new OA\Property(property: 'index', type: 'integer', example: 0, description: 'Position in the chain (`step_order`)'),
         new OA\Property(property: 'step_id', type: 'string', example: 'loan-processor', description: 'Config slug, snapshotted at seed time'),
         new OA\Property(property: 'name', type: 'string', example: 'Loan Processor'),
+        new OA\Property(property: 'status_label', type: 'string', nullable: true, example: 'Credit Review', description: 'Label configured for this step (approval workflow `steps.*.status`), snapshotted at submit. A display label only; `status` is the progress state.'),
         new OA\Property(property: 'role', type: 'string', example: 'loan_processor'),
         new OA\Property(property: 'kind', type: 'string', enum: ['submit', 'approve', 'release']),
-        new OA\Property(property: 'status', type: 'string', enum: ['waiting', 'pending', 'approved', 'sent_back']),
+        new OA\Property(property: 'status', type: 'string', enum: ['waiting', 'pending', 'approved', 'sent_back', 'cancelled'], description: '`cancelled`: the step was still waiting or pending when the loan was voided'),
         new OA\Property(property: 'remarks', type: 'string', nullable: true),
         new OA\Property(property: 'acted_at', type: 'string', format: 'date-time', nullable: true),
         new OA\Property(property: 'acted_by', type: 'string', nullable: true, description: 'Display NAME of the actor, rendered directly by the UI'),
         new OA\Property(property: 'acted_by_id', type: 'integer', nullable: true),
+        new OA\Property(property: 'assigned_to', type: 'object', nullable: true, description: 'The named user the step was forwarded to, `{id, name}`, or null when it is for its role. Only they (or admin and super_admin) may act on it while they still hold it; otherwise it falls back to the role.', properties: [
+            new OA\Property(property: 'id', type: 'integer'),
+            new OA\Property(property: 'name', type: 'string'),
+        ]),
         new OA\Property(property: 'can_act', type: 'boolean', description: 'Whether the REQUESTING user may act on this step right now'),
     ],
 )]
@@ -47,6 +53,9 @@ class LoanApprovalStep extends Model
     public const STATUS_APPROVED = 'approved';
 
     public const STATUS_SENT_BACK = 'sent_back';
+
+    /** An unfinished step of a loan that was voided (LoanApprovalChainService::cancelOpenSteps()). */
+    public const STATUS_CANCELLED = 'cancelled';
 
     public const KIND_SUBMIT = 'submit';
 
@@ -68,7 +77,9 @@ class LoanApprovalStep extends Model
         'step_order',
         'step_id',
         'name',
+        'status_label',
         'role',
+        'assigned_to',
         'kind',
         'status',
         'acted_by',
@@ -83,6 +94,7 @@ class LoanApprovalStep extends Model
             'round' => 'integer',
             'step_order' => 'integer',
             'sent_back_to_step_order' => 'integer',
+            'assigned_to' => 'integer',
             'acted_at' => 'datetime',
         ];
     }
@@ -95,5 +107,26 @@ class LoanApprovalStep extends Model
     public function actedByUser(): BelongsTo
     {
         return $this->belongsTo(User::class, 'acted_by');
+    }
+
+    /**
+     * The named user the step was forwarded to (ApprovalAssignees).
+     */
+    public function assignee(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'assigned_to');
+    }
+
+    /**
+     * The live revision round of one loan's chain: the `current_steps` of
+     * GET /loans/{id}/approval-steps, and the round Loan::currentApprover()
+     * reads. One definition so the two cannot drift apart.
+     *
+     * @param  Collection<int, self>  $steps  every step of one loan, in Loan::approvalSteps() order
+     * @return Collection<int, self>
+     */
+    public static function currentRound(Collection $steps): Collection
+    {
+        return $steps->where('round', $steps->max('round'))->values();
     }
 }

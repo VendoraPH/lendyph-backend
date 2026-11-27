@@ -2,9 +2,16 @@
 
 namespace App\Services;
 
+use App\Http\Requests\Fee\Concerns\GuardsAgainstProductFeeOverlap;
+use App\Http\Requests\LoanProduct\Concerns\GuardsAgainstFeeCatalogOverlap;
 use App\Models\Fee;
 use App\Models\Loan;
+use App\Models\LoanProduct;
 use App\Services\Accounting\AutomaticPoster;
+use App\Services\Fees\FeeExpression;
+use App\Services\Fees\FeeExpressionException;
+use App\Services\Fees\FeeFormulaInputs;
+use App\Services\Fees\FeeFormulaResult;
 use Illuminate\Database\Eloquent\Collection as EloquentCollection;
 use Illuminate\Http\Exceptions\HttpResponseException;
 use Illuminate\Validation\ValidationException;
@@ -118,6 +125,37 @@ final class LoanReleaseFeeService
     }
 
     /**
+     * The fee items applyOnRelease() would add to `$loan`, saved or not.
+     *
+     * The same two steps the release takes (applicableFees(), then
+     * unchargedItems()), so the loan form's preview (LoanService::formPreview())
+     * can quote what a release of the loan it is filling in would charge
+     * without a second copy of the product match or the conditions. An unsaved
+     * loan carries what the form states: its product, principal, start and
+     * maturity dates, and its deduction items, none of which came from a fee
+     * rule, so every applicable fee is uncharged.
+     *
+     * @return list<array<string, mixed>>
+     */
+    public function itemsFor(Loan $loan): array
+    {
+        return $this->unchargedItems($loan, $this->applicableFees($loan));
+    }
+
+    /**
+     * What a release refuses fees with when they overrun the principal:
+     * assertWithinPrincipal()'s message, for the form's preview to show in
+     * place of a 422.
+     */
+    public static function overrunMessage(float $charged, float $total, float $principal): string
+    {
+        return 'Configured fees of ₱'.number_format($charged, 2).' bring total deductions to ₱'
+            .number_format($total, 2).', which exceeds the ₱'
+            .number_format($principal, 2)
+            .' principal. Review the fee rules in Settings before releasing this loan.';
+    }
+
+    /**
      * What release WOULD do to this loan's deductions, without doing it.
      *
      * Runs the identical calculation the release takes, including the guard
@@ -143,11 +181,18 @@ final class LoanReleaseFeeService
      * JSON column on the loan and come back as numbers from BOTH endpoints
      * already, so there is nothing to reconcile.
      *
+     * ## `overlap_warnings` is advisory only
+     *
+     * Purely additive, and preview-only — never surfaced from
+     * {@see self::applyOnRelease()}, so it changes nothing about what a
+     * release charges or how much; see {@see self::overlapWarnings()}.
+     *
      * @return array{
      *     deductions: list<array<string, mixed>>,
      *     total_deductions: string,
      *     net_proceeds: string,
      *     fee_fingerprint: string,
+     *     overlap_warnings: list<array{fee_id: int, fee_name: string, message: string}>,
      * }
      */
     public function preview(Loan $loan): array
@@ -166,7 +211,60 @@ final class LoanReleaseFeeService
             'total_deductions' => number_format($total, 2, '.', ''),
             'net_proceeds' => number_format($net, 2, '.', ''),
             'fee_fingerprint' => $this->fingerprint($fees),
+            'overlap_warnings' => $this->overlapWarnings($loan, $fees),
         ];
+    }
+
+    /**
+     * Advisory-only: which of `$fees` would double-charge the SAME
+     * conceptual fee this loan's `LoanProduct` columns already collect.
+     *
+     * ## Why this exists alongside the write-time guards
+     *
+     * {@see GuardsAgainstProductFeeOverlap}
+     * and {@see GuardsAgainstFeeCatalogOverlap}
+     * stop a NEW colliding configuration from being saved. Neither
+     * retroactively re-checks a `Fee` row that predates the guard, or a
+     * product column raised before the guard shipped. This is the backstop
+     * for that gap: surfaced on the preview a cashier already reads before
+     * releasing, so an already-saved collision is still visible at the one
+     * moment someone can still do something about it.
+     *
+     * Deliberately NOT called from {@see self::applyOnRelease()} — it
+     * reports on the configuration, not on the money, and
+     * {@see LoanReleaseFeeService} charges both mechanisms by design (see
+     * the class docblock). This only tells the cashier about it first.
+     *
+     * @param  EloquentCollection<int, Fee>  $fees  this loan's applicable fees, as returned by {@see self::applicableFees()}
+     * @return list<array{fee_id: int, fee_name: string, message: string}>
+     */
+    private function overlapWarnings(Loan $loan, EloquentCollection $fees): array
+    {
+        $product = LoanProduct::find($loan->loan_product_id);
+
+        if (! $product) {
+            return [];
+        }
+
+        $detector = app(FeeOverlapDetector::class);
+        $warnings = [];
+
+        foreach ($fees as $fee) {
+            $collides = $detector->collidingProducts($fee->name, $fee->applicable_product_ids)
+                ->contains('id', $product->id);
+
+            if (! $collides) {
+                continue;
+            }
+
+            $warnings[] = [
+                'fee_id' => $fee->id,
+                'fee_name' => $fee->name,
+                'message' => "'{$fee->name}' duplicates this product's own fee and will be charged in addition to it.",
+            ];
+        }
+
+        return $warnings;
     }
 
     /**
@@ -244,8 +342,9 @@ final class LoanReleaseFeeService
      *
      * ## What goes into it, and what deliberately does not
      *
-     * `id`, `name`, `type` and `value` of each APPLICABLE fee, in id order.
-     * Those are precisely the fields that decide what this loan is charged and
+     * `id`, `name`, `type` and `value` of each APPLICABLE fee, in id order,
+     * plus a formula fee's bounds, per-month flag and written formula
+     * (`formula_expression`, when it has one). Those are precisely the fields that decide what this loan is charged and
      * what the cashier read on the screen.
      *
      * `conditions` and `applicable_product_ids` are absent by design. Neither
@@ -271,12 +370,27 @@ final class LoanReleaseFeeService
         $rows = [];
 
         foreach ($fees as $fee) {
-            $rows[] = [
+            $row = [
                 (int) $fee->id,
                 (string) $fee->name,
                 (string) $fee->type,
                 (string) $fee->value,
             ];
+
+            // A formula fee's bounds and per-month flag move its amount too.
+            // Only formula rows carry them, so every other fee's fingerprint is
+            // the one it always had.
+            if ($fee->type === 'formula') {
+                array_push($row, (bool) $fee->per_month, (string) $fee->min_amount, (string) $fee->max_amount);
+
+                // So does a written formula. Added only when there is one, so
+                // a recipe formula fee's fingerprint is the one it always had.
+                if (filled($fee->formula_expression)) {
+                    $row[] = (string) $fee->formula_expression;
+                }
+            }
+
+            $rows[] = $row;
         }
 
         return hash('sha256', json_encode($rows, JSON_THROW_ON_ERROR));
@@ -341,7 +455,7 @@ final class LoanReleaseFeeService
             return true;
         }
 
-        $termDays = $this->termDays($loan);
+        $termDays = self::termDays($loan);
         $principal = (float) $loan->principal_amount;
 
         $checks = [
@@ -374,16 +488,13 @@ final class LoanReleaseFeeService
      *
      * ## Why not `loans.term`
      *
-     * Because `term` is not a number of days and is not a number of months
-     * either. It is a PERIOD COUNT whose unit follows `frequency`: see
-     * {@see LoanService::computeMaturityDate()}, where `term` is fed to
-     * `addDays()`, `addWeeks()`, `addMonths()` or a multiple of 14 or 15 days
-     * depending on the frequency, and {@see Loan::isOneMonthTerm()}, which
-     * spells the same warning out. `term: 30` on a daily loan is thirty days;
-     * on a monthly loan it is thirty months. Any `term * k` conversion is
-     * therefore wrong for four of the six frequencies, and the two it is right
-     * for are the ones where a calendar month is not a fixed number of days
-     * anyway.
+     * Because `term` is not always a number of days. It is a length in
+     * `term_unit`: `term: 30` is thirty days on a days term and thirty months
+     * on a months term. A months term paid monthly or at maturity runs in
+     * CALENDAR months, anchored to the start's day and capped at a shorter
+     * month's end ({@see LoanTermSchedule}), and a calendar month is not a
+     * fixed number of days. Any `term * k` conversion is therefore wrong for
+     * those loans.
      *
      * The date pair is the only unambiguous source, and it is the pair the
      * borrower actually signed. Both columns are `date` casts, so both are
@@ -398,7 +509,7 @@ final class LoanReleaseFeeService
      * (Neither column is nullable for a loan originated here; CSV-imported
      * loans never pass through release at all.)
      */
-    private function termDays(Loan $loan): ?int
+    public static function termDays(Loan $loan): ?int
     {
         if ($loan->start_date === null || $loan->maturity_date === null) {
             return null;
@@ -444,6 +555,8 @@ final class LoanReleaseFeeService
         $items = [];
 
         $principal = (float) $loan->principal_amount;
+        $months = FeeAmount::termMonths($loan->term, $loan->term_unit);
+        $inputs = null;
 
         foreach ($fees as $fee) {
             $id = (int) $fee->id;
@@ -459,11 +572,30 @@ final class LoanReleaseFeeService
             // where it was meant to be summed.
             $rate = (float) $fee->value;
 
-            $amount = $fee->type === 'percentage'
-                ? round($principal * $rate / 100, 2)
-                : round($rate, 2);
+            // FeeAmount, the calculation every fee amount comes from. Null for a
+            // per-month formula fee on a loan whose term isn't known yet (an
+            // unsaved form preview): it applies once the term is, as a term-day
+            // condition waits for the maturity date.
+            //
+            // A formula written as an expression is worked out from this
+            // loan's figures, and the item keeps them (the snapshot), so a
+            // later edit of the fee never changes what this loan was charged.
+            $snapshot = [];
 
-            if ($amount <= 0.0) {
+            if ($fee->type === 'formula' && filled($fee->formula_expression)) {
+                $inputs ??= FeeFormulaInputs::fromLoan($loan);
+                $result = $this->expressionResult($fee, $inputs);
+                $amount = $result?->amountAsFloat();
+                $snapshot = [
+                    'formula_expression' => (string) $fee->formula_expression,
+                    'formula_inputs' => $inputs->snapshot(),
+                    'raw_amount' => $result?->rawAmount,
+                ];
+            } else {
+                $amount = FeeAmount::forFee($fee, $principal, $months);
+            }
+
+            if ($amount === null || $amount <= 0.0) {
                 continue;
             }
 
@@ -471,15 +603,41 @@ final class LoanReleaseFeeService
                 'name' => $fee->name,
                 'amount' => $amount,
                 'type' => $fee->type,
-                // The RATE for a percentage fee, the peso figure for a fixed
-                // one — the same convention computeDeductions() uses, so a
-                // later recompute reads a fee item the way it reads its own.
+                // The RATE for a percentage or formula fee, the peso figure for
+                // a fixed one — the same convention computeDeductions() uses, so
+                // a later recompute reads a fee item the way it reads its own.
                 'original_value' => $rate,
+                ...FeeAmount::formulaFields((string) $fee->type, [...$fee->only(['per_month', 'min_amount', 'max_amount']), ...$snapshot]),
                 self::ITEM_FEE_KEY => $id,
             ];
         }
 
         return $items;
+    }
+
+    /**
+     * An expression fee on this loan ({@see FeeAmount::forExpression()}), or
+     * null while an input it uses isn't known.
+     *
+     * A divisor that works out to zero, or a result below ₱0.00, is a 422 on
+     * `fees` naming the fee, at release and at every preview that quotes it
+     * (release, deductions and form previews, and the disclosure), so the
+     * cashier is told which fee to fix in Settings.
+     *
+     * @throws ValidationException
+     */
+    private function expressionResult(Fee $fee, FeeFormulaInputs $inputs): ?FeeFormulaResult
+    {
+        try {
+            return FeeAmount::forExpression(
+                FeeExpression::parse((string) $fee->formula_expression),
+                $inputs,
+                $fee->min_amount,
+                $fee->max_amount,
+            );
+        } catch (FeeExpressionException $e) {
+            throw ValidationException::withMessages(['fees' => [$e->messageForFee((string) $fee->name)]]);
+        }
     }
 
     /**
@@ -532,12 +690,7 @@ final class LoanReleaseFeeService
         }
 
         throw ValidationException::withMessages([
-            'fees' => [
-                'Configured fees of ₱'.number_format($charged, 2).' bring total deductions to ₱'
-                .number_format($total, 2).', which exceeds the ₱'
-                .number_format((float) $loan->principal_amount, 2)
-                .' principal. Review the fee rules in Settings before releasing this loan.',
-            ],
+            'fees' => [self::overrunMessage($charged, $total, (float) $loan->principal_amount)],
         ]);
     }
 

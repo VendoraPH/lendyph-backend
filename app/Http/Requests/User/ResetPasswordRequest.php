@@ -57,7 +57,7 @@ class ResetPasswordRequest extends FormRequest
                     return;
                 }
 
-                if (! $actor->canManageAccount($target)) {
+                if (! $actor->canManageAccount($target) || ! $this->callerReachesTarget($actor, $target)) {
                     $this->denyAsMissingUser();
                 }
             },

@@ -51,6 +51,10 @@ function publicApplicant(string $firstName, int $serial, string $lastName = 'App
         'contact_number' => '0917'.str_pad((string) $serial, 7, '0', STR_PAD_LEFT),
         'email' => Str::lower($firstName).$serial.'@example.com',
         'address' => '123 Mango St',
+        'gender' => 'female',
+        'civil_status' => 'single',
+        'city' => 'Butuan',
+        'province' => 'Agusan del Norte',
     ];
 }
 
@@ -121,6 +125,7 @@ it('lets two applicants register back to back from the same address', function (
                 "/api/borrowers/{$borrowerId}/valid-ids",
                 [
                     'type' => $type,
+                    'id_number' => "{$type}-{$serial}",
                     'front_file' => UploadedFile::fake()->image("{$type}-front.jpg"),
                     'back_file' => UploadedFile::fake()->image("{$type}-back.jpg"),
                 ],
@@ -251,6 +256,12 @@ it('does not throttle an authenticated operator creating borrowers in bulk', fun
             'last_name' => 'Operator',
             'contact_number' => '0917'.str_pad((string) (100 + $i), 7, '0', STR_PAD_LEFT),
             'email' => "bulk{$i}@example.com",
+            'birthdate' => '1990-05-'.str_pad((string) $i, 2, '0', STR_PAD_LEFT),
+            'civil_status' => 'single',
+            'gender' => 'female',
+            'address' => '12 Mabini St',
+            'city' => 'Butuan',
+            'province' => 'Agusan del Norte',
         ])->assertCreated();
     }
 });
@@ -296,6 +307,12 @@ it('does not throttle a bearer-authenticated operator creating borrowers in bulk
             'last_name' => 'Operator',
             'contact_number' => '0918'.str_pad((string) (100 + $i), 7, '0', STR_PAD_LEFT),
             'email' => "bearer{$i}@example.com",
+            'birthdate' => '1990-06-'.str_pad((string) $i, 2, '0', STR_PAD_LEFT),
+            'civil_status' => 'single',
+            'gender' => 'female',
+            'address' => '12 Mabini St',
+            'city' => 'Butuan',
+            'province' => 'Agusan del Norte',
         ])->assertCreated();
     }
 });

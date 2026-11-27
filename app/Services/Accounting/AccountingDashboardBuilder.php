@@ -5,74 +5,204 @@ namespace App\Services\Accounting;
 use App\Models\AccountingAccount;
 use App\Models\AccountingAccountMapping;
 use App\Models\AccountingJournal;
+use App\Models\AccountingPeriod;
+use App\Services\PortfolioOutstanding;
+use App\Services\Savings\Reports\GlControl;
 use Carbon\CarbonImmutable;
+use Illuminate\Database\Query\Builder;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\DB;
 
 /**
  * The accounting dashboard's figures, as `AccountingDashboard` in
  * `src/types/accounting.ts`.
  *
- * ## Every figure here comes from the trial balance
+ * ## Where each figure comes from
  *
- * Not one of these is its own aggregate, and that is the whole design. The
- * dashboard's headline numbers sit beside a balance sheet built by regrouping
- * the trial balance client-side, so a second aggregate — however carefully
- * written — would eventually disagree with it over a reversal, a group account,
- * or a date boundary. Two figures that disagree and are both plausible are
- * worse than one figure that is wrong, because there is no way to tell which to
- * trust. {@see TrialBalanceBuilder} is therefore the only source, and
- * `is_balanced` below is literally the trial balance's own verdict.
+ * - The positions at `as_of` (cash, receivables, the statement totals,
+ *   `is_balanced`) come from {@see TrialBalanceBuilder}, and the receivable
+ *   figures from {@see ReceivablePosition} over the same rows, so the cards
+ *   can't disagree with the trial balance or the balance sheet built from it.
+ * - `total_equity` is {@see BalanceSheetBuilder::totalEquity()} over the same
+ *   rows (posted equity plus earnings not yet closed), the balance sheet's own
+ *   figure, so assets equal liabilities plus equity on the dashboard too.
+ * - The period, month to date and each month's profit are
+ *   {@see IncomeStatementBuilder::build()} for that range, the income
+ *   statement's own figures, so whatever the statement leaves out (the
+ *   year-end closing entries) the dashboard leaves out too. Month-end cash is
+ *   one query grouped by month.
+ * - `past_due` reads the LOAN records by the grace rule
+ *   ({@see PortfolioOutstanding}, the Past Due Loans page's figure). Loan
+ *   records keep no history, so it is always as of today, and says so.
+ * - `unposted_journals` counts draft HEADERS: drafts are not in the books, so
+ *   there is no balance to read them from.
+ * - `period` and each month of `months` also carry `interest_income`,
+ *   `penalty_income` and `fee_income` (Phase 6 EB-D2, ask 4): the income
+ *   statement's own lines for the accounts mapped to the `interest_income`
+ *   and `penalty_income` roles and the three loan fee roles (processing,
+ *   service and other fees), so they cover exactly the range and branches of
+ *   `net_income`. They are cash basis (`income_basis`), and differ from the
+ *   Income report's collected interest by payments that posted no journal and
+ *   by deferred interest recognised from 1210: shown beside it, never added
+ *   to it. An account mapped to two roles counts once, under the first.
+ * - `cash_total` is every money account (cash, bank and e-wallets), the
+ *   three cash cards added once here so the browser never adds them; null
+ *   until the books are ready (BooksState).
+ * - `fee_income` is processing, service and other fees: other fees (4080)
+ *   also take savings excess-withdrawal fees, so it reads "Fee income (loan
+ *   and savings fees)". `income_roles_shared` lists any role whose account is
+ *   already counted under another figure, which therefore reads ₱0.00.
+ * - `books_state` is {@see BooksState}: "Requires configuration" until the
+ *   opening balances are finalised, "Books not set up" without a chart.
  *
- * The one exception is `unposted_journals`, which counts draft HEADERS. Drafts
- * are excluded from the trial balance by definition, so there is nothing there
- * to count them from, and a count of entries is not a balance.
- *
- * Money is centavos throughout.
+ * Money is integer centavos throughout.
  */
 final class AccountingDashboardBuilder
 {
-    public function __construct(private TrialBalanceBuilder $trialBalance) {}
+    /** How many journals `recent_journals` lists. */
+    public const RECENT_JOURNALS = 10;
 
-    /** @return array<string, mixed> */
-    public function build(string $asOf, ?int $branchId = null): array
+    /** How long a past day's savings GL control is cached, in minutes. */
+    public const SAVINGS_GL_CACHE_MINUTES = 5;
+
+    /** How many months `months` covers, ending with as_of's month. */
+    public const TREND_MONTHS = 12;
+
+    /**
+     * The income figures read by posting role, in the order an account mapped
+     * to two of them is counted (once, under the first).
+     *
+     * @var array<string, list<string>>
+     */
+    public const INCOME_ROLES = [
+        'interest_income' => ['interest_income'],
+        'penalty_income' => ['penalty_income'],
+        'fee_income' => ['processing_fee_income', 'service_fee_income', 'other_fee_income'],
+    ];
+
+    public const INTEREST_INCOME_LABEL = 'Interest income (cash basis)';
+
+    public const FEE_INCOME_LABEL = 'Fee income (loan and savings fees)';
+
+    /** @var array<int, string>|null account id => the income figure it counts in, for one build */
+    private ?array $incomeAccounts = null;
+
+    public function __construct(
+        private TrialBalanceBuilder $trialBalance,
+        private IncomeStatementBuilder $incomeStatement,
+        private PortfolioOutstanding $portfolio,
+        private GlControl $savingsControl,
+    ) {}
+
+    /**
+     * @param  int|list<int>|null  $branchId
+     * @return array<string, mixed>
+     */
+    public function build(string $asOf, int|array|null $branchId = null, ?string $from = null): array
     {
         $trialBalance = $this->trialBalance->build($asOf, $branchId);
-
-        // Month-to-date is a DIFFERENCE between two positions, not a third
-        // query. Income and expense accounts accumulate from the start of the
-        // year, so "this month" is where they stand now less where they stood
-        // at the close of last month — both read from the same builder, so the
-        // subtraction cannot drift from the statement it appears beside.
-        $priorMonthEnd = CarbonImmutable::parse($asOf)->startOfMonth()->subDay()->toDateString();
-        $priorMonth = $this->trialBalance->build($priorMonthEnd, $branchId);
+        $asOfDate = CarbonImmutable::parse($asOf)->startOfDay();
+        $monthStart = $asOfDate->startOfMonth()->toDateString();
+        $from ??= $monthStart;
 
         $chart = AccountingAccount::query()->get()->keyBy('id');
-        $signed = $this->signedByAccount($trialBalance['rows'], $chart);
+        $this->incomeAccounts = self::incomeAccounts();
+        $signed = ReceivablePosition::signedByAccount($trialBalance['rows'], $chart);
+        $receivables = ReceivablePosition::fromTrialBalance($trialBalance['rows'], $chart);
 
-        $incomeMtd = $this->totalFor($trialBalance['rows'], 'income') - $this->totalFor($priorMonth['rows'], 'income');
-        $expensesMtd = $this->totalFor($trialBalance['rows'], 'expense') - $this->totalFor($priorMonth['rows'], 'expense');
+        $months = $this->months($asOfDate, $asOf, $branchId);
+
+        // Month to date is the last month's statement: the first of as_of's
+        // month to as_of. The period reuses it when it covers the same range.
+        $monthToDate = $months[array_key_last($months)];
+        $period = $from === $monthStart
+            ? ['from' => $from, 'to' => $monthToDate['to'], ...array_intersect_key($monthToDate, array_flip(['income', 'expenses', 'net_income', ...array_keys(self::INCOME_ROLES)]))]
+            : $this->period($from, $asOf, $branchId);
+        $period = [...$period, 'income_basis' => 'cash', 'interest_income_label' => self::INTEREST_INCOME_LABEL, 'fee_income_label' => self::FEE_INCOME_LABEL];
+
+        $currentPeriod = $this->currentPeriod($asOfDate->toDateString());
+        $cashOnHand = $this->sumByCashKind($signed, $chart, ['cash']);
+        $cashInBank = $this->sumByCashKind($signed, $chart, ['bank']);
+        $eWallets = $this->sumByCashKind($signed, $chart, ['gcash', 'maya', 'wallet']);
+        $booksState = BooksState::current();
 
         return [
             'as_of' => $asOf,
-            'cash_on_hand' => $this->sumByCashKind($signed, $chart, ['cash']),
-            'cash_in_bank' => $this->sumByCashKind($signed, $chart, ['bank']),
-            'e_wallets' => $this->sumByCashKind($signed, $chart, ['gcash', 'maya', 'wallet']),
-            'loans_receivable_net' => $this->netReceivable($signed, $chart),
+            'books_state' => $booksState,
+            'cash_on_hand' => $cashOnHand,
+            'cash_in_bank' => $cashInBank,
+            'e_wallets' => $eWallets,
+            // A position, so null until the books are ready: without the
+            // opening balances it would read the cash moved since, not held.
+            'cash_total' => $booksState['state'] === BooksState::READY ? $cashOnHand + $cashInBank + $eWallets : null,
+            'loans_receivable_net' => $receivables['net'],
+            'loans_receivable_gross' => $receivables['gross'],
+            'allowance_for_credit_losses' => $receivables['allowance'],
+            'unearned_restructure_income' => $receivables['unearned_income'],
+            'adjustments_clearing' => $receivables['adjustments_clearing'],
+            'adjustments_clearing_needs_review' => $receivables['adjustments_clearing'] !== 0,
             'total_assets' => $this->totalFor($trialBalance['rows'], 'asset'),
             'total_liabilities' => $this->totalFor($trialBalance['rows'], 'liability'),
-            'total_equity' => $this->totalFor($trialBalance['rows'], 'equity'),
-            'income_mtd' => $incomeMtd,
-            'expenses_mtd' => $expensesMtd,
-            'net_income_mtd' => $incomeMtd - $expensesMtd,
+            'total_equity' => BalanceSheetBuilder::totalEquity($trialBalance['rows']),
+            'income_mtd' => $monthToDate['income'],
+            'expenses_mtd' => $monthToDate['expenses'],
+            'net_income_mtd' => $monthToDate['net_income'],
             'unposted_journals' => $this->draftCount($branchId),
             'is_balanced' => $trialBalance['is_balanced'],
-            // NULL, honestly. Accounting periods are a table this application
-            // does not have yet — there is no `accounting_periods`, nothing
-            // closes the books, and every date is therefore open. Answering
-            // with the current month would be an invention, and the field the
-            // invention feeds is the one that tells an accountant whether their
-            // entry can still be edited.
-            'open_period' => null,
+            'open_period' => $currentPeriod !== null && $currentPeriod['status'] === 'open' ? $currentPeriod['name'] : null,
+            'current_period' => $currentPeriod,
+            'period' => $period,
+            'income_roles_shared' => self::sharedIncomeRoles(),
+            'cash_accounts' => $this->cashAccounts($signed, $chart),
+            'past_due' => $this->pastDue($branchId),
+            'months' => array_map(
+                static fn (array $month): array => array_diff_key($month, ['to' => true]),
+                $months,
+            ),
+            'recent_journals' => $this->recentJournals($asOf, $branchId),
+            ...$this->savingsGl($asOf, $branchId),
+        ];
+    }
+
+    /**
+     * The savings GL control (the Savings task's TASK 62) as of `as_of`, in
+     * the dashboard's branch scope: `savings_gl_differs` is true when any
+     * branch's savings or time deposit subledger differs from GL 2050 or 2060,
+     * and `savings_gl_control` carries the day and the total difference in ₱
+     * (a two-decimal string). Both are null while savings is not in use.
+     *
+     * Today reads the savings accounts' own balances instead of every savings
+     * row; another day sums the whole history, so it is cached for
+     * SAVINGS_GL_CACHE_MINUTES per day and scope.
+     *
+     * @param  int|list<int>|null  $branchId
+     * @return array{savings_gl_differs: bool|null, savings_gl_control: array{as_of: string, difference: string, differences: int}|null}
+     */
+    private function savingsGl(string $asOf, int|array|null $branchId): array
+    {
+        if (! $this->savingsControl->hasSavings()) {
+            return ['savings_gl_differs' => null, 'savings_gl_control' => null];
+        }
+
+        $day = CarbonImmutable::parse($asOf)->toDateString();
+        $scope = is_int($branchId) ? [$branchId] : $branchId;
+
+        $control = $day === now()->toDateString()
+            ? $this->savingsControl->build($day, $scope, null, true)
+            : Cache::remember(
+                'accounting_dashboard.savings_gl.'.$day.'.'.($scope === null ? 'all' : implode('-', $scope)),
+                now()->addMinutes(self::SAVINGS_GL_CACHE_MINUTES),
+                fn () => $this->savingsControl->build($day, $scope),
+            );
+
+        return [
+            'savings_gl_differs' => ! $control['is_balanced'],
+            'savings_gl_control' => [
+                'as_of' => $control['as_of'],
+                'difference' => $control['totals']['difference'],
+                'differences' => $control['differences'],
+            ],
         ];
     }
 
@@ -91,50 +221,15 @@ final class AccountingDashboardBuilder
      */
     private function totalFor(array $rows, string $type): int
     {
-        $debitNormal = $type === 'asset' || $type === 'expense';
         $total = 0;
 
         foreach ($rows as $row) {
-            if ($row['type'] !== $type) {
-                continue;
+            if ($row['type'] === $type) {
+                $total += BalanceSheetBuilder::netFor($row);
             }
-
-            $total += $debitNormal
-                ? (int) $row['debit'] - (int) $row['credit']
-                : (int) $row['credit'] - (int) $row['debit'];
         }
 
         return $total;
-    }
-
-    /**
-     * Trial-balance rows re-signed into each account's own normal direction.
-     *
-     * Derived from the rows rather than by calling
-     * {@see TrialBalanceBuilder::signedBalances()}, which would run the same
-     * aggregate a second time for figures already in hand.
-     *
-     * @param  list<array<string, mixed>>  $rows
-     * @param  Collection<int, AccountingAccount>  $chart
-     * @return array<int, int>
-     */
-    private function signedByAccount(array $rows, Collection $chart): array
-    {
-        $signed = [];
-
-        foreach ($rows as $row) {
-            $account = $chart->get($row['account_id']);
-
-            if ($account === null) {
-                continue;
-            }
-
-            $signed[(int) $row['account_id']] = $account->normal_balance === 'debit'
-                ? (int) $row['debit'] - (int) $row['credit']
-                : (int) $row['credit'] - (int) $row['debit'];
-        }
-
-        return $signed;
     }
 
     /**
@@ -165,76 +260,278 @@ final class AccountingDashboardBuilder
     }
 
     /**
-     * Gross loans receivable less the allowance for credit losses.
+     * Each money account and its balance at as_of, in code order.
      *
-     * The gross figure is the WHOLE receivable group, not just the account the
-     * `loans_receivable` role points at. Moving a loan from current to past due
-     * is a journal between two sibling accounts (1110 -> 1120 in the default
-     * chart), so counting only the mapped one would make the portfolio appear
-     * to shrink every time a borrower fell behind — a number that drops for the
-     * wrong reason, on the card an operator glances at first.
-     *
-     * So: if the mapped account sits under a group heading, every postable
-     * account under that heading counts. If it does not — an organisation that
-     * mapped the role to a standalone account — only that account counts, which
-     * is the most that can be claimed without guessing.
-     *
-     * The allowance is credit-normal (contra-asset), so its signed balance is
-     * POSITIVE and is subtracted. Reading it as a negative asset and adding it
-     * would report gross plus allowance, which overstates the portfolio by
-     * twice the provision.
+     * The same accounts as the Cash & Bank screen: every non-heading account
+     * carrying a `cash_kind`, inactive ones included (a deactivated wallet that
+     * still holds money is still money), with 0 for one that never moved.
      *
      * @param  array<int, int>  $signed
      * @param  Collection<int, AccountingAccount>  $chart
+     * @return list<array{account_id: int, account_code: string, account_name: string, cash_kind: string, balance: int}>
      */
-    private function netReceivable(array $signed, Collection $chart): int
+    private function cashAccounts(array $signed, Collection $chart): array
     {
-        $mapping = AccountingAccountMapping::resolved();
-
-        $gross = 0;
-
-        foreach ($this->receivableAccountIds($chart, $mapping) as $accountId) {
-            $gross += $signed[$accountId] ?? 0;
-        }
-
-        $allowanceId = $mapping['allowance_credit_losses'] ?? null;
-        $allowance = $allowanceId === null ? 0 : ($signed[$allowanceId] ?? 0);
-
-        return $gross - $allowance;
+        return $chart
+            ->filter(static fn (AccountingAccount $account): bool => $account->cash_kind !== null && ! $account->is_group)
+            ->sortBy([['code', 'asc'], ['id', 'asc']])
+            ->map(static fn (AccountingAccount $account): array => [
+                'account_id' => (int) $account->id,
+                'account_code' => (string) $account->code,
+                'account_name' => (string) $account->name,
+                'cash_kind' => (string) $account->cash_kind,
+                'balance' => $signed[(int) $account->id] ?? 0,
+            ])
+            ->values()
+            ->all();
     }
 
     /**
-     * @param  Collection<int, AccountingAccount>  $chart
-     * @param  array<string, int>  $mapping
-     * @return list<int>
+     * Income, expenses and net income from `$from` to `$to`, inclusive: the
+     * income statement's totals for the same range, with its interest,
+     * penalty and fee income lines by posting role.
+     *
+     * @param  int|list<int>|null  $branchId
+     * @return array{from: string, to: string, income: int, expenses: int, net_income: int, interest_income: int, penalty_income: int, fee_income: int}
      */
-    private function receivableAccountIds(Collection $chart, array $mapping): array
+    private function period(string $from, string $to, int|array|null $branchId): array
     {
-        $mappedId = $mapping['loans_receivable'] ?? null;
+        $statement = $this->incomeStatement->build($from, $to, $branchId);
 
-        if ($mappedId === null) {
-            return [];
+        return [
+            'from' => $from,
+            'to' => CarbonImmutable::parse($to)->toDateString(),
+            'income' => (int) $statement['total_income'],
+            'expenses' => (int) $statement['total_expenses'],
+            'net_income' => (int) $statement['net_income'],
+            ...$this->incomeByRole($statement['income']),
+        ];
+    }
+
+    /**
+     * The income statement's income lines added up by posting role.
+     *
+     * @param  list<array{account_id: int, amount: int}>  $lines
+     * @return array{interest_income: int, penalty_income: int, fee_income: int}
+     */
+    private function incomeByRole(array $lines): array
+    {
+        $figures = array_fill_keys(array_keys(self::INCOME_ROLES), 0);
+        $accounts = $this->incomeAccounts ??= self::incomeAccounts();
+
+        foreach ($lines as $line) {
+            $figure = $accounts[(int) $line['account_id']] ?? null;
+
+            if ($figure !== null) {
+                $figures[$figure] += (int) $line['amount'];
+            }
         }
 
-        $mapped = $chart->get($mappedId);
+        return $figures;
+    }
 
-        if ($mapped === null) {
-            return [];
+    /**
+     * Each account mapped to an income role, with the figure it counts in.
+     * An account mapped to two roles counts under the first (INCOME_ROLES
+     * order), so it is never counted twice.
+     *
+     * @return array<int, string>
+     */
+    private static function incomeAccounts(): array
+    {
+        $mapping = AccountingAccountMapping::resolved();
+        $accounts = [];
+
+        foreach (self::INCOME_ROLES as $figure => $roles) {
+            foreach ($roles as $role) {
+                if (isset($mapping[$role]) && ! isset($accounts[$mapping[$role]])) {
+                    $accounts[$mapping[$role]] = $figure;
+                }
+            }
         }
 
-        $parent = $mapped->parent_id === null ? null : $chart->get($mapped->parent_id);
+        return $accounts;
+    }
 
-        if ($parent === null || ! $parent->is_group) {
-            return [(int) $mapped->id];
+    /**
+     * The roles whose account is already counted under another figure (an
+     * account set for both interest and penalty income, say), so that figure
+     * reads ₱0.00: listed rather than hidden.
+     *
+     * @return list<array{role: string, figure: string, counted_in: string, account_id: int}>
+     */
+    private static function sharedIncomeRoles(): array
+    {
+        $mapping = AccountingAccountMapping::resolved();
+        $accounts = self::incomeAccounts();
+        $shared = [];
+
+        foreach (self::INCOME_ROLES as $figure => $roles) {
+            foreach ($roles as $role) {
+                $accountId = $mapping[$role] ?? null;
+
+                if ($accountId !== null && $accounts[$accountId] !== $figure) {
+                    $shared[] = ['role' => $role, 'figure' => $figure, 'counted_in' => $accounts[$accountId], 'account_id' => $accountId];
+                }
+            }
         }
 
-        return $chart
-            ->where('parent_id', $parent->id)
-            ->where('is_group', false)
-            ->pluck('id')
-            ->map(static fn ($id): int => (int) $id)
-            ->values()
+        return $shared;
+    }
+
+    /**
+     * The 12 months ending with as_of's month, oldest first.
+     *
+     * Each month's income and expenses are the income statement for that
+     * month (one small grouped query each, on the dated index), so a month
+     * never counts what the statement leaves out. Month-end cash is one query
+     * grouped by month over the money accounts, accumulated here, so the months
+     * before the window carry in as the opening cash. The last month stops at
+     * as_of, the same cut-off as the cash cards.
+     *
+     * @param  int|list<int>|null  $branchId
+     * @return list<array{month: string, income: int, expenses: int, net_income: int, interest_income: int, penalty_income: int, fee_income: int, cash: int, to: string}>
+     */
+    private function months(CarbonImmutable $asOfDate, string $asOf, int|array|null $branchId): array
+    {
+        $firstMonth = $asOfDate->startOfMonth()->subMonthsNoOverflow(self::TREND_MONTHS - 1);
+
+        // The two columns are summed apart and signed here: they're unsigned,
+        // so MySQL refuses a subtraction inside the aggregate that goes below 0.
+        $cashByMonth = [];
+        $this->lines($branchId)
+            ->whereNotNull('a.cash_kind')
+            ->where('j.date', '<=', $asOf)
+            ->groupByRaw("DATE_FORMAT(j.date, '%Y-%m'), a.normal_balance")
+            ->selectRaw("DATE_FORMAT(j.date, '%Y-%m') as month, a.normal_balance, sum(l.debit) as debit, sum(l.credit) as credit")
+            ->get()
+            ->each(function (object $row) use (&$cashByMonth): void {
+                $cashByMonth[$row->month] = ($cashByMonth[$row->month] ?? 0)
+                    + AccountRules::signedBalance((string) $row->normal_balance, (int) $row->debit, (int) $row->credit);
+            });
+
+        $firstKey = $firstMonth->format('Y-m');
+        $cash = 0;
+        foreach ($cashByMonth as $month => $movement) {
+            if ($month < $firstKey) {
+                $cash += $movement;
+            }
+        }
+
+        $months = [];
+
+        for ($offset = 0; $offset < self::TREND_MONTHS; $offset++) {
+            $month = $firstMonth->addMonthsNoOverflow($offset);
+            $key = $month->format('Y-m');
+            $to = $offset === self::TREND_MONTHS - 1 ? $asOfDate->toDateString() : $month->endOfMonth()->toDateString();
+            $profit = $this->period($month->toDateString(), $to, $branchId);
+            $cash += $cashByMonth[$key] ?? 0;
+
+            $months[] = [
+                'month' => $key,
+                'income' => $profit['income'],
+                'expenses' => $profit['expenses'],
+                'net_income' => $profit['net_income'],
+                'interest_income' => $profit['interest_income'],
+                'penalty_income' => $profit['penalty_income'],
+                'fee_income' => $profit['fee_income'],
+                'cash' => $cash,
+                'to' => $to,
+            ];
+        }
+
+        return $months;
+    }
+
+    /**
+     * Past due by the grace rule, from the loan records: the Past Due Loans
+     * page's figure, for the same branches. Pesos there, converted once here.
+     *
+     * Always as of TODAY, whatever as_of says: a loan record keeps no history,
+     * so "past due on 31 January" can't be read back from it.
+     *
+     * @param  int|list<int>|null  $branchId
+     * @return array{as_of: string, amount: int, count: int}
+     */
+    private function pastDue(int|array|null $branchId): array
+    {
+        $totals = $this->portfolio->totals($branchId === null ? null : array_values((array) $branchId));
+
+        return [
+            'as_of' => now()->toDateString(),
+            'amount' => Money::toCentavos((float) $totals['overdue_amount']) ?? 0,
+            'count' => (int) $totals['overdue_count'],
+        ];
+    }
+
+    /**
+     * The accounting period covering as_of, open or closed, or null.
+     *
+     * @return array{id: int, code: string, name: string, start_date: string, end_date: string, status: string}|null
+     */
+    private function currentPeriod(string $date): ?array
+    {
+        $period = AccountingPeriod::query()->covering($date)->chronological()->first();
+
+        if ($period === null) {
+            return null;
+        }
+
+        return [
+            'id' => (int) $period->id,
+            'code' => (string) $period->code,
+            'name' => (string) $period->name,
+            'start_date' => CarbonImmutable::parse($period->start_date)->toDateString(),
+            'end_date' => CarbonImmutable::parse($period->end_date)->toDateString(),
+            'status' => (string) $period->status,
+        ];
+    }
+
+    /**
+     * The latest posted or reversed journals dated on or before as_of, in the
+     * caller's scope (the journal register's rule), newest first.
+     *
+     * @param  int|list<int>|null  $branchId
+     * @return list<array{id: int, journal_no: string, date: string, source: string, description: string, branch_name: string|null, amount: int}>
+     */
+    private function recentJournals(string $asOf, int|array|null $branchId): array
+    {
+        return DB::table('accounting_journals as j')
+            ->leftJoin('branches as b', 'b.id', '=', 'j.branch_id')
+            ->whereIn('j.status', AccountingJournal::HISTORICAL_STATUSES)
+            ->where('j.date', '<=', $asOf)
+            ->when($branchId !== null, fn ($q) => $q->whereIn('j.branch_id', (array) $branchId))
+            ->orderByDesc('j.date')
+            ->orderByDesc('j.journal_no')
+            ->orderByDesc('j.id')
+            ->limit(self::RECENT_JOURNALS)
+            ->get(['j.id', 'j.journal_no', 'j.date', 'j.source', 'j.description', 'b.name as branch_name', 'j.total_debit'])
+            ->map(static fn (object $row): array => [
+                'id' => (int) $row->id,
+                'journal_no' => (string) ($row->journal_no ?? ''),
+                'date' => CarbonImmutable::parse($row->date)->toDateString(),
+                'source' => (string) $row->source,
+                'description' => (string) $row->description,
+                'branch_name' => $row->branch_name === null ? null : (string) $row->branch_name,
+                'amount' => (int) $row->total_debit,
+            ])
             ->all();
+    }
+
+    /**
+     * Journal lines that count, the trial balance's rule: posted and reversed
+     * journals, postable accounts, in the caller's branch scope.
+     *
+     * @param  int|list<int>|null  $branchId
+     */
+    private function lines(int|array|null $branchId): Builder
+    {
+        return DB::table('accounting_journal_lines as l')
+            ->join('accounting_journals as j', 'j.id', '=', 'l.accounting_journal_id')
+            ->join('accounting_accounts as a', 'a.id', '=', 'l.accounting_account_id')
+            ->whereIn('j.status', AccountingJournal::HISTORICAL_STATUSES)
+            ->where('a.is_group', false)
+            ->when($branchId !== null, fn ($q) => $q->whereIn('j.branch_id', (array) $branchId));
     }
 
     /**
@@ -245,11 +542,11 @@ final class AccountingDashboardBuilder
      * sitting on someone's desk, and it is precisely the one an as-of filter
      * would hide.
      */
-    private function draftCount(?int $branchId): int
+    private function draftCount(int|array|null $branchId): int
     {
         return AccountingJournal::query()
             ->where('status', 'draft')
-            ->when($branchId !== null, fn ($q) => $q->where('branch_id', $branchId))
+            ->when($branchId !== null, fn ($q) => $q->whereIn('branch_id', (array) $branchId))
             ->count();
     }
 }

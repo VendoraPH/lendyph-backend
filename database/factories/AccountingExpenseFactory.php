@@ -15,11 +15,31 @@ use Illuminate\Database\Eloquent\Factories\Factory;
  * and would be testing the poster for the third time. The tests that care about
  * the journal — which is most of them — build their expenses through the API.
  *
+ * What an owed expense has paid is counted from its payments
+ * (AccountingExpense::paidAmount()), so an owed row created with an
+ * `amount_paid` above zero gets one payment for it, from Cash on Hand and with
+ * no journal, as the factory posts none: a payment with no journal counts.
+ *
  * Amounts are INTEGER CENTAVOS.
  */
 class AccountingExpenseFactory extends Factory
 {
     protected $model = AccountingExpense::class;
+
+    public function configure(): static
+    {
+        return $this->afterCreating(function (AccountingExpense $expense): void {
+            if ($expense->payment_account_id !== null || $expense->amount_paid <= 0) {
+                return;
+            }
+
+            $expense->payments()->create([
+                'date' => $expense->date->toDateString(),
+                'amount' => $expense->amount_paid,
+                'payment_account_id' => AccountingAccount::query()->where('code', '1010')->value('id'),
+            ]);
+        });
+    }
 
     public function definition(): array
     {
@@ -39,7 +59,7 @@ class AccountingExpenseFactory extends Factory
         ];
     }
 
-    /** Settled in full, the way a cash expense is the moment it is recorded. */
+    /** Settled in full, by one payment (see configure()). */
     public function paid(): static
     {
         return $this->state(fn (array $attributes): array => [

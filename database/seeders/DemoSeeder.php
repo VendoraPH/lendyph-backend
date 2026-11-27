@@ -5,12 +5,15 @@ namespace Database\Seeders;
 use App\Models\Borrower;
 use App\Models\Branch;
 use App\Models\Fee;
+use App\Models\GCashTier;
 use App\Models\LoanProduct;
 use App\Models\ShareCapitalLedger;
 use App\Models\User;
 use App\Services\LoanService;
 use App\Services\RepaymentService;
+use Closure;
 use Illuminate\Database\Seeder;
+use Illuminate\Support\Carbon;
 use RuntimeException;
 
 class DemoSeeder extends Seeder
@@ -20,7 +23,7 @@ class DemoSeeder extends Seeder
      * Run with: php artisan db:seed --class=DemoSeeder
      *
      * Creates: 2 loan products, 8 borrowers, 5 loans (various statuses),
-     * repayments, co-makers, fees, share capital pledges + ledger entries,
+     * repayments, co-makers, fees, GCash fee tiers, share capital pledges + ledger entries,
      * and 3 users with different roles.
      */
     public function run(): void
@@ -130,9 +133,43 @@ class DemoSeeder extends Seeder
         ]);
 
         // ── Fees ──
-        Fee::firstOrCreate(['name' => 'Processing Fee'], ['type' => 'percentage', 'value' => 2.0]);
-        Fee::firstOrCreate(['name' => 'Service Fee'], ['type' => 'percentage', 'value' => 1.0]);
+        //
+        // "Processing Fee" and "Service Fee" catalog rows used to live here
+        // too, sharing their names with `$salaryLoan`/`$businessLoan`'s own
+        // `processing_fee`/`service_fee` columns above. That is the exact
+        // double-charge configuration FeeOverlapDetector now rejects — both
+        // mechanisms would charge, per LoanReleaseFeeService's own docblock
+        // — and it added nothing a demo needs: the product columns already
+        // demonstrate that charging path on their own. Dropped rather than
+        // kept as a "look, it's blocked" example, because `firstOrCreate()`
+        // here bypasses the FormRequest guard entirely (see
+        // GuardsAgainstProductFeeOverlap's docblock) and would keep seeding
+        // the anti-pattern into every demo database regardless.
+        //
+        // "Notarial Fee" stays: both seeded products have `notarial_fee: 0`
+        // (neither sets it above), so this is the catalog used as the SOLE
+        // source for that charge — a legitimate pattern, not a collision.
         Fee::firstOrCreate(['name' => 'Notarial Fee'], ['type' => 'fixed', 'value' => 500]);
+
+        // A genuinely distinct example: no product column shares this name
+        // (nor does the separate, release-time "Insurance Premium" deduction
+        // LoanService::applyInsuranceOnRelease() writes — picking that name
+        // here would trade one naming collision for another), so this
+        // demonstrates the catalog's real purpose: a charge that has nothing
+        // to do with a loan product at all.
+        Fee::firstOrCreate(['name' => 'Credit Investigation Fee'], ['type' => 'fixed', 'value' => 300]);
+
+        // ── GCash fee tiers ──
+        // Cash In and Cash Out refuse any amount no tier covers, so without these
+        // a fresh local database cannot record a GCash transaction at all. Only
+        // seeded when none exist, so tiers edited in GCash Settings survive a re-seed.
+        if (! GCashTier::exists()) {
+            collect([
+                ['min_amount' => 1, 'max_amount' => 1000, 'cash_in_rate' => 10, 'cash_out_rate' => 10],
+                ['min_amount' => 1000.01, 'max_amount' => 5000, 'cash_in_rate' => 25, 'cash_out_rate' => 25],
+                ['min_amount' => 5000.01, 'max_amount' => 50000, 'cash_in_rate' => 50, 'cash_out_rate' => 50],
+            ])->each(fn (array $tier, int $i) => GCashTier::create([...$tier, 'display_order' => $i + 1]));
+        }
 
         // ── Borrowers ──
         $borrowers = collect([
@@ -176,18 +213,25 @@ class DemoSeeder extends Seeder
         }
 
         // ── Loans in various statuses ──
-        // Loan 1: Released + ongoing (Rosario, salary loan, 3 months ago)
-        $loan1 = $loanService->createLoan([
-            'borrower_id' => $borrowers[0]->id,
-            'loan_product_id' => $salaryLoan->id,
-            'principal_amount' => 50000,
-            'interest_rate' => 3.0,
-            'start_date' => now()->subMonths(3)->toDateString(),
-            'purpose' => 'Business expansion',
-        ], $admin);
-        $loanService->submitForReview($loan1);
-        $loanService->approve($loan1, $admin, 'Good track record');
-        $loanService->release($loan1, $admin);
+        // Loan 1: Released + ongoing (Rosario, salary loan, 3 months ago).
+        // Released on its start date, so its two payments below come after
+        // the release, as the API requires of a real payment.
+        $loan1Start = now()->subMonths(3);
+        $loan1 = $this->onDate($loan1Start, function () use ($loanService, $borrowers, $salaryLoan, $loan1Start, $admin) {
+            $loan = $loanService->createLoan([
+                'borrower_id' => $borrowers[0]->id,
+                'loan_product_id' => $salaryLoan->id,
+                'principal_amount' => 50000,
+                'interest_rate' => 3.0,
+                'start_date' => $loan1Start->toDateString(),
+                'purpose' => 'Business expansion',
+            ], $admin);
+            $loanService->submitForReview($loan);
+            $loanService->approve($loan, $admin, 'Good track record');
+            $loanService->release($loan, $admin);
+
+            return $loan;
+        });
 
         // Make 2 payments to transition to ongoing
         $repaymentService = app(RepaymentService::class);
@@ -267,6 +311,28 @@ class DemoSeeder extends Seeder
             );
         }
 
-        $this->command->info('Demo data seeded: 3 users, 2 products, 3 fees, 8 borrowers, 5 loans, 6 pledges, 8 ledger entries.');
+        $this->command->info('Demo data seeded: 3 users, 2 products, 2 fees, 8 borrowers, 5 loans, 6 pledges, 8 ledger entries.');
+    }
+
+    /**
+     * Run `$callback` with the clock set to `$date`, then put the clock back
+     * as it was, so a demo loan can be created and released on its own start
+     * date rather than today.
+     *
+     * @template TResult
+     *
+     * @param  Closure(): TResult  $callback
+     * @return TResult
+     */
+    private function onDate(Carbon $date, Closure $callback): mixed
+    {
+        $previous = Carbon::getTestNow();
+        Carbon::setTestNow($date);
+
+        try {
+            return $callback();
+        } finally {
+            Carbon::setTestNow($previous);
+        }
     }
 }

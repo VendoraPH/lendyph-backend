@@ -11,6 +11,7 @@ use App\Models\LoanProduct;
 use App\Models\User;
 use App\Services\LoanService;
 use Database\Seeders\RoleAndPermissionSeeder;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Testing\TestResponse;
 use Spatie\Permission\Models\Permission;
 use Spatie\Permission\Models\Role;
@@ -29,6 +30,13 @@ use Tests\Traits\SetupLendyPH;
 class LoanApprovalChainTest extends TestCase
 {
     use SetupLendyPH;
+
+    /** Everything loan_processor holds: the chain's first step plus preparing the application. */
+    private const LOAN_PROCESSOR_PERMISSIONS = [
+        'loans:view', 'loans:update', 'loans:create',
+        'borrowers:view', 'fees:view', 'collaterals:view', 'collaterals:update',
+        'share_capital:view',
+    ];
 
     protected function setUp(): void
     {
@@ -114,22 +122,27 @@ class LoanApprovalChainTest extends TestCase
     public function test_the_chain_roles_hold_only_what_they_need_before_the_accounting_branch_lands(): void
     {
         // Board roles sign; they do not prepare. Their authority comes from
-        // holding the role named on the step, not from a permission.
-        foreach (['bod1', 'bod7'] as $roleName) {
-            $this->assertSame(
-                ['loans:view'],
+        // holding the role named on the step, not from a permission. They see
+        // every branch (`branches:view_all`, decision 5b), which grants no
+        // action. The Chair's role (`bod1`) alone also edits a loan while it
+        // waits at its step (`loans:edit_in_approval`, finish run round 2).
+        foreach (['bod1' => ['loans:edit_in_approval'], 'bod7' => []] as $roleName => $own) {
+            $this->assertEqualsCanonicalizing(
+                ['branches:view_all', 'loans:view', ...$own],
                 Role::where('name', $roleName)->firstOrFail()->permissions->pluck('name')->all(),
-                "{$roleName} holds more than loans:view.",
+                "{$roleName} holds more than loans:view and branches:view_all, and the Chair's own edit.",
             );
         }
 
         // loan_processor is the FIRST step of both default chains, and
         // LoanController@submit checks `loans:update` — with view alone it
-        // could not start the chain it exists to start.
+        // could not start the chain it exists to start. It also prepares the
+        // application, so it creates the loan, reads what the new-loan form
+        // shows and attaches the member's collateral (2026_10_03_100000).
         $this->assertEqualsCanonicalizing(
-            ['loans:view', 'loans:update'],
+            self::LOAN_PROCESSOR_PERMISSIONS,
             Role::where('name', 'loan_processor')->firstOrFail()->permissions->pluck('name')->all(),
-            'loan_processor needs exactly view + update: never loans:approve, which would hand it the single-shot endpoint.',
+            'loan_processor needs exactly its preparer set: never loans:approve, which would hand it the single-shot endpoint.',
         );
     }
 
@@ -151,23 +164,25 @@ class LoanApprovalChainTest extends TestCase
 
         $manager = Role::where('name', 'manager')->firstOrFail()->fresh('permissions');
 
+        // Plus `branches:view_all` (decision 5b): a manager oversees every
+        // branch.
         $this->assertEqualsCanonicalizing(
-            array_merge(['loans:view'], $accounting),
+            array_merge(['loans:view', 'branches:view_all'], $accounting),
             $manager->permissions->pluck('name')->all(),
         );
 
         // Board roles get no accounting access at all, and the accounting
         // branch's preparer/approver split must not be widened from here.
-        foreach (['bod1', 'bod7'] as $roleName) {
-            $this->assertSame(
-                ['loans:view'],
+        foreach (['bod1' => ['loans:edit_in_approval'], 'bod7' => []] as $roleName => $own) {
+            $this->assertEqualsCanonicalizing(
+                ['branches:view_all', 'loans:view', ...$own],
                 Role::where('name', $roleName)->firstOrFail()->fresh('permissions')->permissions->pluck('name')->all(),
                 "{$roleName} was granted accounting access it must not have.",
             );
         }
 
         $this->assertEqualsCanonicalizing(
-            ['loans:view', 'loans:update'],
+            self::LOAN_PROCESSOR_PERMISSIONS,
             Role::where('name', 'loan_processor')->firstOrFail()->fresh('permissions')->permissions->pluck('name')->all(),
             'loan_processor was granted accounting access it must not have.',
         );
@@ -850,6 +865,152 @@ class LoanApprovalChainTest extends TestCase
 
         $this->assertSame('pending', $release['status']);
         $this->assertTrue($release['can_act'], 'The Release action would not render after a direct approval.');
+    }
+
+    public function test_submitting_a_loan_copies_each_step_status_label_into_the_chain(): void
+    {
+        $this->labelledNormalChain();
+
+        $loan = $this->submittedLoan();
+
+        $steps = $loan->approvalSteps()->get();
+
+        $this->assertSame(
+            ['Submitted', 'Credit Review', null, 'Ready for Release'],
+            $steps->pluck('status_label')->all(),
+        );
+        // The progress enum is a separate column and is not replaced by the label.
+        $this->assertSame(['approved', 'pending', 'waiting', 'waiting'], $steps->pluck('status')->all());
+    }
+
+    public function test_send_back_carries_the_status_labels_into_the_new_round(): void
+    {
+        $this->labelledNormalChain();
+
+        $loan = $this->submittedLoan();
+        $this->approveAs('manager', $loan);
+
+        $bod = $this->pendingStep($loan);
+
+        $this->actingAs($this->userWithRole('bod1'))
+            ->patchJson("/api/loans/{$loan->id}/approval-steps/{$bod->id}/send-back", [
+                'target_step_order' => 1,
+                'remarks' => 'Collateral appraisal is out of date.',
+            ])
+            ->assertOk();
+
+        $roundTwo = $loan->approvalSteps()->where('round', 2)->orderBy('step_order')->get();
+
+        $this->assertCount(4, $roundTwo);
+        $this->assertSame(
+            ['Submitted', 'Credit Review', null, 'Ready for Release'],
+            $roundTwo->pluck('status_label')->all(),
+        );
+    }
+
+    public function test_editing_the_settings_later_does_not_rewrite_an_in_flight_loans_status_labels(): void
+    {
+        $this->labelledNormalChain();
+
+        $loan = $this->submittedLoan();
+
+        ApprovalWorkflowSetting::updateOrCreate(
+            ['type' => ApprovalWorkflowSetting::TYPE_NORMAL],
+            ['steps' => [
+                ['id' => 'loan-processor', 'name' => 'Loan Processor', 'role' => 'loan_processor', 'kind' => 'submit', 'status' => 'Changed'],
+                ['id' => 'manager', 'name' => 'Manager', 'role' => 'manager', 'kind' => 'approve', 'status' => 'Changed Too'],
+                ['id' => 'bod1', 'name' => 'BOD Chairman', 'role' => 'bod1', 'kind' => 'approve', 'status' => 'Board Vote'],
+                ['id' => 'bookkeeper', 'name' => 'General Bookkeeper', 'role' => 'general_bookkeeper', 'kind' => 'release', 'status' => 'Changed Three'],
+            ]],
+        );
+
+        $this->assertSame(
+            ['Submitted', 'Credit Review', null, 'Ready for Release'],
+            $loan->approvalSteps()->get()->pluck('status_label')->all(),
+        );
+    }
+
+    public function test_a_status_label_that_reads_like_a_progress_state_changes_nothing_but_the_label(): void
+    {
+        ApprovalWorkflowSetting::updateOrCreate(
+            ['type' => ApprovalWorkflowSetting::TYPE_NORMAL],
+            ['steps' => [
+                ['id' => 'loan-processor', 'name' => 'Loan Processor', 'role' => 'loan_processor', 'kind' => 'submit', 'status' => 'pending'],
+                ['id' => 'manager', 'name' => 'Manager', 'role' => 'manager', 'kind' => 'approve', 'status' => 'approved'],
+                ['id' => 'bod1', 'name' => 'BOD Chairman', 'role' => 'bod1', 'kind' => 'approve', 'status' => 'released'],
+                ['id' => 'bookkeeper', 'name' => 'General Bookkeeper', 'role' => 'general_bookkeeper', 'kind' => 'release', 'status' => 'approved'],
+            ]],
+        );
+
+        $loan = $this->submittedLoan();
+
+        $this->assertSame('for_review', $loan->status);
+
+        $steps = $loan->approvalSteps()->get();
+        $this->assertSame(['approved', 'pending', 'waiting', 'waiting'], $steps->pluck('status')->all());
+        $this->assertSame(['pending', 'approved', 'released', 'approved'], $steps->pluck('status_label')->all());
+
+        $current = $this->actingAs($this->userWithRole('manager'))
+            ->getJson("/api/loans/{$loan->id}/approval-steps")
+            ->assertOk()
+            ->json('data.current_steps');
+
+        $this->assertSame(['approved', 'pending', 'waiting', 'waiting'], array_column($current, 'status'));
+        $this->assertSame([false, true, false, false], array_column($current, 'can_act'));
+    }
+
+    public function test_a_hand_edited_label_is_nulled_when_not_text_and_cut_to_100_characters(): void
+    {
+        DB::table('approval_workflow_settings')->insert([
+            'type' => ApprovalWorkflowSetting::TYPE_NORMAL,
+            'steps' => json_encode([
+                ['id' => 'loan-processor', 'name' => 'Loan Processor', 'role' => 'loan_processor', 'kind' => 'submit', 'status' => ['nested' => 'label']],
+                ['id' => 'manager', 'name' => 'Manager', 'role' => 'manager', 'kind' => 'approve', 'status' => 12345],
+                ['id' => 'bod1', 'name' => 'BOD Chairman', 'role' => 'bod1', 'kind' => 'approve', 'status' => str_repeat('b', 150)],
+                ['id' => 'bookkeeper', 'name' => 'General Bookkeeper', 'role' => 'general_bookkeeper', 'kind' => 'release', 'status' => '   '],
+            ]),
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        $loan = $this->submittedLoan();
+
+        $steps = $loan->approvalSteps()->get();
+
+        // The configured chain was used, not the default fallback.
+        $this->assertSame(['loan-processor', 'manager', 'bod1', 'bookkeeper'], $steps->pluck('step_id')->all());
+        $this->assertSame([null, null, str_repeat('b', 100), null], $steps->pluck('status_label')->all());
+    }
+
+    public function test_the_approval_steps_endpoint_returns_each_steps_status_label(): void
+    {
+        $this->labelledNormalChain();
+
+        $loan = $this->submittedLoan();
+
+        $current = $this->getJson("/api/loans/{$loan->id}/approval-steps")
+            ->assertOk()
+            ->assertJsonStructure(['data' => ['current_steps' => [['status_label']]]])
+            ->json('data.current_steps');
+
+        $this->assertSame(
+            ['Submitted', 'Credit Review', null, 'Ready for Release'],
+            array_column($current, 'status_label'),
+        );
+        $this->assertSame(['Loan Processor', 'Manager', 'BOD Chairman', 'General Bookkeeper'], array_column($current, 'name'));
+    }
+
+    private function labelledNormalChain(): void
+    {
+        ApprovalWorkflowSetting::updateOrCreate(
+            ['type' => ApprovalWorkflowSetting::TYPE_NORMAL],
+            ['steps' => [
+                ['id' => 'loan-processor', 'name' => 'Loan Processor', 'role' => 'loan_processor', 'kind' => 'submit', 'status' => 'Submitted'],
+                ['id' => 'manager', 'name' => 'Manager', 'role' => 'manager', 'kind' => 'approve', 'status' => 'Credit Review'],
+                ['id' => 'bod1', 'name' => 'BOD Chairman', 'role' => 'bod1', 'kind' => 'approve'],
+                ['id' => 'bookkeeper', 'name' => 'General Bookkeeper', 'role' => 'general_bookkeeper', 'kind' => 'release', 'status' => 'Ready for Release'],
+            ]],
+        );
     }
 
     private function submittedLoan(bool $policyException = false): Loan

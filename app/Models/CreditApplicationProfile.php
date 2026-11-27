@@ -1,0 +1,90 @@
+<?php
+
+namespace App\Models;
+
+use App\Traits\Auditable;
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
+
+/**
+ * The optional lending details staff record for one loan application:
+ * other and business income, household expenses, outside debt, stability
+ * details, verified references, income verification, and when the member
+ * acknowledged the credit assessment notice. Every field is optional; a blank
+ * field takes its factor out of the score rather than costing points.
+ *
+ * `monthly_income` is set only by an online application's hand-off: the
+ * monthly income its assessment counted, verified or declared
+ * (`income_verification` says which). Credit Scoring then scores that loan on
+ * it instead of the member record's income (Capacity::from()); staff don't
+ * enter it.
+ */
+class CreditApplicationProfile extends Model
+{
+    use Auditable;
+
+    public const INCOME_VERIFICATIONS = ['verified', 'failed'];
+
+    /**
+     * The application details: what staff enter (or a hand-off records) and
+     * what the score reads. The notice fields are not details.
+     */
+    public const DETAIL_FIELDS = [
+        'monthly_income', 'other_income', 'business_income', 'household_expenses', 'outside_debt_payments', 'outside_lenders_count',
+        'employment_status', 'business_start_date', 'years_at_residence', 'verified_references_count', 'income_verification',
+    ];
+
+    /**
+     * Whether the profile holds at least one detail.
+     */
+    public function hasDetails(): bool
+    {
+        foreach (self::DETAIL_FIELDS as $field) {
+            if ($this->getAttribute($field) !== null) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    protected $fillable = [
+        'loan_id',
+        'monthly_income',
+        'other_income',
+        'business_income',
+        'household_expenses',
+        'outside_debt_payments',
+        'outside_lenders_count',
+        'employment_status',
+        'business_start_date',
+        'years_at_residence',
+        'verified_references_count',
+        'income_verification',
+        'notice_version',
+        'notice_acknowledged_at',
+        'created_by',
+        'updated_by',
+    ];
+
+    protected function casts(): array
+    {
+        return [
+            'monthly_income' => 'decimal:2',
+            'other_income' => 'decimal:2',
+            'business_income' => 'decimal:2',
+            'household_expenses' => 'decimal:2',
+            'outside_debt_payments' => 'decimal:2',
+            'outside_lenders_count' => 'integer',
+            'business_start_date' => 'date',
+            'years_at_residence' => 'decimal:2',
+            'verified_references_count' => 'integer',
+            'notice_acknowledged_at' => 'datetime',
+        ];
+    }
+
+    public function loan(): BelongsTo
+    {
+        return $this->belongsTo(Loan::class);
+    }
+}

@@ -1,5 +1,6 @@
 <?php
 
+use App\Models\PortalUser;
 use App\Models\User;
 
 return [
@@ -42,6 +43,22 @@ return [
             'driver' => 'session',
             'provider' => 'users',
         ],
+
+        // The staff API's guard. Declared so its provider is `users`: left
+        // undeclared, Sanctum registers it with no provider and then accepts a
+        // token belonging to ANY model, so a member's portal token would pass
+        // `auth:sanctum` on every staff route (portal design §0, finding 1).
+        'sanctum' => [
+            'driver' => 'sanctum',
+            'provider' => 'users',
+        ],
+
+        // The Member Portal's guard: portal_users tokens only. Never accepted
+        // on a staff route, and a staff token is never accepted here.
+        'portal' => [
+            'driver' => 'sanctum',
+            'provider' => 'portal_users',
+        ],
     ],
 
     /*
@@ -65,6 +82,11 @@ return [
         'users' => [
             'driver' => 'eloquent',
             'model' => env('AUTH_MODEL', User::class),
+        ],
+
+        'portal_users' => [
+            'driver' => 'eloquent',
+            'model' => PortalUser::class,
         ],
 
         // 'users' => [
@@ -119,11 +141,19 @@ return [
     | Token Timeout (Minutes)
     |--------------------------------------------------------------------------
     |
-    | This value defines the number of minutes of inactivity before a
-    | Sanctum token is considered expired. Set to 0 to disable.
+    | How long an API token lives, in minutes: a normal sign-in's token and a
+    | refreshed token expire this long after they are issued, and a remembered
+    | token is revoked after this long unused. It must be a whole number above
+    | 0. The app refuses to boot otherwise (App\Services\TokenTimeout), because
+    | 0 would mint tokens that are already expired and a token that never
+    | expires is not supported.
+    |
+    | Cast because env() hands back a string whenever the variable is set, and
+    | Carbon's addMinutes() refuses one: a box that set AUTH_TOKEN_TIMEOUT
+    | would fail every login with a 500 instead of changing the timeout.
     |
     */
 
-    'token_timeout' => env('AUTH_TOKEN_TIMEOUT', 30),
+    'token_timeout' => (int) env('AUTH_TOKEN_TIMEOUT', 30),
 
 ];

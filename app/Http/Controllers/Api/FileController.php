@@ -5,6 +5,8 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Models\Borrower;
 use App\Models\Document;
+use App\Services\Cda\Registers\DocumentDownloads;
+use App\Services\DownloadFilename;
 use App\Services\SignedFileLink;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
@@ -46,6 +48,8 @@ class FileController extends Controller
     public function document(Request $request, Document $document): StreamedResponse
     {
         $this->assertLinkIsStillLive($request);
+        abort_if(! $document->file_path || ! Storage::disk('private')->exists($document->file_path), 404);
+        app(DocumentDownloads::class)->authorizeAndRecord($request, $document);
 
         return $this->stream($document->file_path, $document->original_filename);
     }
@@ -84,10 +88,11 @@ class FileController extends Controller
 
         // Inline so the browser renders it in an <img> or preview pane rather
         // than downloading it.
-        return $disk->response($path, $downloadName, [
+        return $disk->response($path, null, [
             // These are personal identity documents — never let a shared cache
             // hold on to one.
             'Cache-Control' => 'private, max-age=0, no-store',
+            'Content-Disposition' => DownloadFilename::inlineDisposition($downloadName, $path),
         ]);
     }
 }

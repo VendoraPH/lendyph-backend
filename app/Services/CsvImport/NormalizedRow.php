@@ -67,7 +67,7 @@ final class NormalizedRow
      * would trade readability for nothing. Position is load-bearing in exactly
      * one place, and that place is a list.
      *
-     * @return array{shape: string, row: int, values: list<string|null>, warnings: list<array{field: string, code: string, message: string}>, errors: list<array{field: string, code: string, message: string}>}
+     * @return array{shape: string, row: int, values: list<string|null>, warnings: list<array{field: string, code: string, message: string, message_if_not_imported?: string}>, errors: list<array{field: string, code: string, message: string}>}
      */
     public function toPayload(): array
     {
@@ -106,12 +106,16 @@ final class NormalizedRow
             );
         }
 
-        if (count($raw) !== count($keys)) {
+        // A row staged before columns were appended to its shape holds only
+        // the earlier ones (an import still running across the release). They
+        // are a prefix of today's, so the rest read as blank: not set.
+        if (! in_array(count($raw), CsvImportSchema::acceptedWidths($shape), true)) {
             throw new InvalidArgumentException(
                 'A staged '.$shape.' payload must hold exactly '.count($keys).' values, got '.count($raw).'.'
             );
         }
 
+        $raw = array_pad($raw, count($keys), null);
         $values = [];
 
         foreach ($keys as $index => $key) {
@@ -169,13 +173,14 @@ final class NormalizedRow
                 (string) ($note['field'] ?? ''),
                 (string) ($note['code'] ?? ''),
                 (string) ($note['message'] ?? ''),
+                isset($note['message_if_not_imported']) ? (string) $note['message_if_not_imported'] : null,
             ),
             array_filter($notes, 'is_array'),
         ));
     }
 
     /**
-     * @return list<array{field: string, code: string, message: string}>
+     * @return list<array{field: string, code: string, message: string, message_if_not_imported?: string}>
      */
     public function warningsToArray(): array
     {

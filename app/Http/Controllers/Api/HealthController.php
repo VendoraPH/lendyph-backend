@@ -11,7 +11,7 @@ class HealthController extends Controller
     #[OA\Get(
         path: '/api/health',
         summary: 'Health check',
-        description: 'Returns the API health status and which commit this deployment is serving.',
+        description: 'Returns the API health status, which commit this deployment is serving, and whether the GD image extension the CDA report logo needs is loaded.',
         tags: ['System'],
         responses: [
             new OA\Response(
@@ -24,6 +24,7 @@ class HealthController extends Controller
                         new OA\Property(property: 'commit', type: 'string', nullable: true, example: 'cabc7af'),
                         new OA\Property(property: 'branch', type: 'string', nullable: true, example: 'main'),
                         new OA\Property(property: 'env', type: 'string', example: 'production'),
+                        new OA\Property(property: 'gd', type: 'boolean', example: true, description: 'Whether the GD extension is loaded (the CDA report logo needs it)'),
                     ],
                 ),
             ),
@@ -35,6 +36,7 @@ class HealthController extends Controller
             'status' => 'ok',
             'timestamp' => now()->toIso8601String(),
             ...(new DeploymentIdentity(base_path()))->toArray(),
+            'gd' => extension_loaded('gd'),
         ]);
     }
 }

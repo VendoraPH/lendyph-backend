@@ -3,6 +3,7 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Services\BranchAccess;
 use App\Services\DashboardService;
 use Illuminate\Http\JsonResponse;
 use OpenApi\Attributes as OA;
@@ -11,13 +12,25 @@ class DashboardController extends Controller
 {
     public function __construct(private DashboardService $dashboardService) {}
 
+    /**
+     * The caller's branches (decision B2): every dashboard figure counts only
+     * their branches' loans and payments. Null for `branches:view_all`.
+     *
+     * @return list<int>|null
+     */
+    private function branchIds(): ?array
+    {
+        return app(BranchAccess::class)->for(request()->user());
+    }
+
     #[OA\Get(
         path: '/api/dashboard/stats',
         summary: 'Dashboard KPI stats',
+        description: '`total_collected` (month to date, and the `collected` sparkline) counts what posted payments collected for the loans, leaving out the insurance premium a payment collected first; that premium is `insurance_collected`, held for the insurer. Every figure covers the caller\'s branches only (`branches:view_all`: every branch). The `active_loans` sparkline counts released and ongoing loans, like the card. The `overdue` sparkline\'s past points come from the organisation-wide daily snapshots, so they are null for a caller without `branches:view_all`; its last point is always the caller\'s live `overdue_count`.',
         tags: ['Dashboard'],
         security: [['sanctum' => []]],
         responses: [
-            new OA\Response(response: 200, description: 'Dashboard KPI metrics with sparklines'),
+            new OA\Response(response: 200, description: 'Dashboard KPI metrics with sparklines. `total_portfolio` is the gross loan portfolio: the unpaid principal of the collectible loans (released, ongoing, defaulted) in the caller\'s branches, so a paid-off loan adds nothing and a defaulted loan counts. It equals GET /api/reports/loan-balance-summary `outstanding_principal` with no date range, from the same query. `sparklines.portfolio` is in thousands: its past points are the outstanding principal in each past week\'s last daily snapshot (null without a snapshot, or without branches:view_all), and its last point is this card.'),
             new OA\Response(response: 401, description: 'Unauthenticated'),
         ],
     )]
@@ -25,13 +38,13 @@ class DashboardController extends Controller
     {
         $this->authorize('dashboard:view');
 
-        return response()->json(['data' => $this->dashboardService->stats()]);
+        return response()->json(['data' => $this->dashboardService->stats($this->branchIds())]);
     }
 
     #[OA\Get(
         path: '/api/dashboard/collections-trend',
         summary: 'Collections trend time-series',
-        description: 'Default is 12 weekly buckets. Pass `?period=month` for 12 monthly buckets or `?period=year` for 5 yearly buckets.',
+        description: 'Default is 12 weekly buckets. Pass `?period=month` for 12 monthly buckets or `?period=year` for 5 yearly buckets. Each bucket\'s `value` leaves out the insurance premium payments collected, which is the bucket\'s `insurance_collected`.',
         tags: ['Dashboard'],
         security: [['sanctum' => []]],
         parameters: [
@@ -50,7 +63,7 @@ class DashboardController extends Controller
             $period = 'week';
         }
 
-        return response()->json($this->dashboardService->collectionsTrend($period));
+        return response()->json($this->dashboardService->collectionsTrend($this->branchIds(), $period));
     }
 
     #[OA\Get(
@@ -59,17 +72,22 @@ class DashboardController extends Controller
         tags: ['Dashboard'],
         security: [['sanctum' => []]],
         parameters: [
-            new OA\Parameter(name: 'date', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')),
+            new OA\Parameter(name: 'date', in: 'query', required: false, description: 'The day to list, as Y-m-d. Defaults to today.', schema: new OA\Schema(type: 'string', format: 'date')),
         ],
         responses: [
-            new OA\Response(response: 200, description: 'Daily dues list with summary'),
+            new OA\Response(response: 200, description: 'Daily dues list with summary. One item per loan: a period an extension or restructure closed early and its rescheduled remainder due the same day are one item, whose `amount_due` and `amount_collected` both include the closed part. A row is `collected` only once the principal and interest paid cover its `total_due` (penalty paid never counts towards it); `amount_collected` is that principal and interest, capped at the amount due. `summary` carries the dashboard pie: `collected_in_full`, `partially_collected`, `uncollected`, `total_collected`, `collection_rate` (never above 100) and `counts` per status.'),
+            new OA\Response(response: 422, description: '`date` is not a Y-m-d date (for example `?date=foo` or `?date[]=x`).'),
         ],
     )]
     public function dailyDues(): JsonResponse
     {
         $this->authorize('dashboard:view');
 
-        return response()->json($this->dashboardService->dailyDues(request('date')));
+        $filters = request()->validate([
+            'date' => ['nullable', 'date_format:Y-m-d'],
+        ]);
+
+        return response()->json($this->dashboardService->dailyDues($this->branchIds(), $filters['date'] ?? null));
     }
 
     #[OA\Get(
@@ -90,6 +108,6 @@ class DashboardController extends Controller
 
         $limit = max(1, min((int) request('limit', 10), 100));
 
-        return response()->json($this->dashboardService->recentTransactions($limit));
+        return response()->json($this->dashboardService->recentTransactions($this->branchIds(), $limit));
     }
 }

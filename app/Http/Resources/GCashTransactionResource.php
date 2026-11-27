@@ -2,6 +2,7 @@
 
 namespace App\Http\Resources;
 
+use App\Services\BranchAttribution;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\JsonResource;
 use OpenApi\Attributes as OA;
@@ -24,10 +25,18 @@ use OpenApi\Attributes as OA;
         new OA\Property(property: 'paid_at', type: 'string', format: 'date-time', nullable: true),
         new OA\Property(property: 'paid_by_user_id', type: 'integer', nullable: true),
         new OA\Property(property: 'days_pending', type: 'integer', nullable: true, description: 'Whole days since transaction_date; only included by /reports/pending.'),
+        new OA\Property(property: 'branch_id', type: 'integer', nullable: true, description: 'The branch whose books the row posts in: a walk-in\'s recorded branch (null for head office), or a member\'s branch when the row was written (null on a member row recorded before Phase 6 and not yet attributed). On /reports/pending only: the branch the row posts in, the member\'s branch for such an unattributed member row.'),
+        new OA\Property(property: 'branch_name', type: 'string', nullable: true, description: 'Only included by /reports/pending: the name of that branch, "Head office" for a walk-in with none, or "Unknown branch" for a member row whose member record is missing.'),
     ],
 )]
 class GCashTransactionResource extends JsonResource
 {
+    /** A pending report row with no branch: a walk-in recorded at head office. */
+    public const HEAD_OFFICE = 'Head office';
+
+    /** A pending report row for a member whose member record is missing. */
+    public const UNKNOWN_BRANCH = 'Unknown branch';
+
     public function toArray(Request $request): array
     {
         $data = [
@@ -46,6 +55,10 @@ class GCashTransactionResource extends JsonResource
                 'borrower_code' => $this->borrower->borrower_code,
             ]),
             'gcash_non_member_id' => $this->gcash_non_member_id,
+            // The branch whose books the row posts in, as stored: a walk-in's
+            // recorded branch (null for head office), or the member's branch
+            // stamped when the row was written.
+            'branch_id' => $this->branch_id,
             'non_member' => $this->whenLoaded('nonMember', fn () => [
                 'id' => $this->nonMember->id,
                 'full_name' => $this->nonMember->full_name,
@@ -63,9 +76,21 @@ class GCashTransactionResource extends JsonResource
             'updated_at' => $this->updated_at?->toIso8601String(),
         ];
 
-        if ($request->routeIs('gcash.reports.pending') && $this->transaction_date) {
-            $data['days_pending'] = (int) $this->transaction_date->copy()->startOfDay()
-                ->diffInDays(now()->startOfDay());
+        if ($request->routeIs('gcash.reports.pending')) {
+            if ($this->transaction_date) {
+                $data['days_pending'] = (int) $this->transaction_date->copy()->startOfDay()
+                    ->diffInDays(now()->startOfDay());
+            }
+
+            // The branch whose books the row posts in (BranchAttribution): the
+            // branch stamped on a member's row (the member's, for a row from
+            // before stamping), the recorded branch for a walk-in, none for
+            // head office. An unstamped member row whose member record is
+            // missing can't say which.
+            $memberMissing = $this->branch_id === null && $this->borrower_id !== null && $this->borrower === null;
+            $branch = BranchAttribution::gcashBranch($this->resource);
+            $data['branch_id'] = $branch?->id;
+            $data['branch_name'] = $branch?->name ?? ($memberMissing ? self::UNKNOWN_BRANCH : self::HEAD_OFFICE);
         }
 
         return $data;

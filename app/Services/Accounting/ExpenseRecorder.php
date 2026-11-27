@@ -4,6 +4,11 @@ namespace App\Services\Accounting;
 
 use App\Models\AccountingExpense;
 use App\Models\AccountingExpensePayment;
+use App\Models\AccountingJournal;
+use App\Services\AuditLogService;
+use App\Services\Branches\BranchRowLock;
+use Carbon\CarbonImmutable;
+use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
 
@@ -51,7 +56,11 @@ class ExpenseRecorder
 {
     use ResolvesPostingAccounts;
 
-    public function __construct(private JournalPoster $poster) {}
+    public function __construct(
+        private JournalPoster $poster,
+        private PeriodGuard $periods,
+        private ReconciliationMatchRelease $reconciliations,
+    ) {}
 
     /**
      * Records a cost and posts its journal in the same transaction.
@@ -81,6 +90,10 @@ class ExpenseRecorder
         $amount = (int) $data['amount'];
 
         return DB::transaction(function () use ($data, $paymentAccountId, $amount, $userId): AccountingExpense {
+            // The branch row first (BranchRowLock's lock order): a closed or
+            // closing branch takes no new expense.
+            BranchRowLock::lock(['branch_id' => $data['branch_id'] ?? null]);
+
             // Resolved BEFORE anything is written. Inside a transaction the
             // rollback would undo the row anyway; doing it in this order means
             // the failure is about the mapping rather than about a half-built
@@ -114,6 +127,9 @@ class ExpenseRecorder
                 // cannot later make a settled expense read as overdue.
                 'due_date' => $paidOnTheSpot ? null : ($data['due_date'] ?? null),
                 'settlement_status' => $paidOnTheSpot ? 'paid' : 'unpaid',
+                // Only ReconciliationActions sends it: the requests' validated
+                // data never holds it.
+                'reconciliation_line_id' => $data['reconciliation_line_id'] ?? null,
                 'created_by' => $userId,
             ]);
 
@@ -149,10 +165,17 @@ class ExpenseRecorder
      * Settles part or all of an accrued expense.
      *
      * Takes a row lock first. Two people paying the same bill at once would
-     * otherwise both read `amount_paid = 0`, both pass the "is there anything
-     * left to pay" check, and both post — paying the supplier twice, in the
-     * books and out of the cash account. The CHECK constraint would catch the
-     * second write only if the two amounts happened to exceed the total.
+     * otherwise both read what is paid so far, both pass the "is there
+     * anything left to pay" check, and both post — paying the supplier twice,
+     * in the books and out of the cash account.
+     *
+     * What is paid so far is the payments whose journal stands
+     * (AccountingExpense::paidAmount()), read under the locks a reversal takes
+     * (self::lockTheJournals()), so a payment never counts one whose reversal
+     * is in flight. The stored `amount_paid` and `settlement_status` are
+     * written as what stands after this payment, which keeps them within
+     * their CHECK when a reversed payment's amount is paid again; no figure
+     * reads them.
      *
      * @param  array{date: string, amount: int, account_id: int}  $data
      */
@@ -161,10 +184,23 @@ class ExpenseRecorder
         $amount = (int) $data['amount'];
 
         return DB::transaction(function () use ($expense, $data, $amount, $userId): AccountingExpense {
-            $locked = AccountingExpense::query()
-                ->whereKey($expense->id)
-                ->lockForUpdate()
-                ->firstOrFail();
+            // The branch row before the expense row (BranchRowLock's lock
+            // order): a closed or closing branch's payable isn't paid. An
+            // expense's branch never changes.
+            BranchRowLock::lock(['branch' => $expense->branch_id]);
+
+            $locked = $this->lockTheExpense($expense);
+            $payments = $this->paymentsOf($locked);
+            $chains = $this->lockTheJournals($locked, $payments);
+
+            // A reversed expense owes nothing: its payable was undone in the
+            // books, so a payment would pay out cash against nothing (finish
+            // run round 4). Refused before anything is written.
+            if (self::standsReversed($chains, $locked->journal_id)) {
+                throw ValidationException::withMessages([
+                    'expense' => ["This expense was reversed, so it can't be paid. Record it again if it's still owed."],
+                ]);
+            }
 
             if ($locked->wasPaidOnTheSpot()) {
                 throw ValidationException::withMessages([
@@ -176,7 +212,8 @@ class ExpenseRecorder
                 ]);
             }
 
-            $outstanding = $locked->outstanding();
+            $paid = self::standingTotal($payments, $chains);
+            $outstanding = $locked->amount - $paid;
 
             if ($outstanding <= 0) {
                 throw ValidationException::withMessages([
@@ -235,13 +272,374 @@ class ExpenseRecorder
             $payment->journal_id = $journal->id;
             $payment->save();
 
-            $paid = $locked->amount_paid + $amount;
-
-            $locked->amount_paid = $paid;
-            $locked->settlement_status = $paid >= $locked->amount ? 'paid' : 'partially_paid';
-            $locked->save();
+            $this->storePaid($locked, $paid + $amount);
 
             return $locked->refresh();
         });
+    }
+
+    /**
+     * Reverses one payment from Expenses & Payables (finish run round 5): its
+     * journal's mirror is posted through JournalPoster::reverse(), the
+     * Journals screen's own path, so the period and date rules apply, and an
+     * audit row says so in words. The payment then no longer counts as paid
+     * (AccountingExpensePayment::isReversed()), so what it paid is owed again.
+     * A payment on an expense whose own journal was reversed by hand before
+     * can be reversed too: that puts back the cash it paid against a payable
+     * that no longer exists.
+     *
+     * A payment whose journal was reversed and re-reversed by hand before
+     * stands through the last entry of that chain, so that entry is the one
+     * reversed: JournalPoster refuses the original, already reversed.
+     *
+     * Under the locks paying takes, in the same order, so a payment and a
+     * reversal on one expense, or two reversals, never interleave. Refused
+     * (422 in words) when the payment already stands reversed or has no
+     * journal, or when its reversal would post in a closed month (the message
+     * names that date, finish run round 6). A bank reconciliation's match to
+     * the payment is left as it is: the reversal is a new entry for its own
+     * statement line.
+     */
+    public function reversePayment(AccountingExpense $expense, AccountingExpensePayment $payment, string $reason, ?int $userId = null): AccountingExpense
+    {
+        return DB::transaction(function () use ($expense, $payment, $reason, $userId): AccountingExpense {
+            BranchRowLock::lock(['branch' => $expense->branch_id]);
+
+            $locked = $this->lockTheExpense($expense);
+            $payments = $this->paymentsOf($locked);
+            $chains = $this->lockTheJournals($locked, $payments);
+            $target = $payments->firstWhere('id', $payment->id) ?? $payment;
+
+            if ($target->journal_id === null) {
+                throw ValidationException::withMessages([
+                    'payment' => ['This payment has no journal entry to reverse.'],
+                ]);
+            }
+
+            if (self::standsReversed($chains, $target->journal_id)) {
+                throw ValidationException::withMessages([
+                    'payment' => ['This payment was already reversed.'],
+                ]);
+            }
+
+            $journal = AccountingJournal::query()->findOrFail($chains[$target->journal_id]['last']);
+            $date = $this->openReversalDate($journal, 'payment');
+            $reversal = $this->poster->reverse($journal, $date, $reason, $userId);
+            $chains[$target->journal_id]['reversed'] = true;
+
+            $this->storePaid($locked, self::standingTotal($payments, $chains));
+
+            AuditLogService::log(
+                'expense_payment_reversed',
+                $locked,
+                // The entry reversed and its reversal, which the Audit Trail
+                // reads by their numbers, and the reason.
+                newValues: ['journal_id' => $journal->id, 'reversed_by_journal_id' => $reversal->id, 'reason' => $reason],
+                description: sprintf(
+                    'Reversed the payment of %s made on %s to %s: %s. Reason: %s',
+                    Money::format((int) $target->amount),
+                    self::dateInWords($target->date->toDateString()),
+                    $locked->payee,
+                    self::reversedInWords($target->journal_id, $journal, $reversal),
+                    $reason,
+                ),
+                userId: $userId,
+            );
+
+            return $locked->refresh();
+        });
+    }
+
+    /**
+     * Reverses an expense from Expenses & Payables (finish run round 5): its
+     * own journal's mirror is posted through JournalPoster::reverse(), as for
+     * a payment, and audited. The expense then reads Reversed and counts in
+     * no total (AccountingExpense::isReversed()). An expense paid on the spot
+     * gets its cash back the same way, since its journal is the payment.
+     *
+     * Refused (422 in words) while any of its payments stands: reversing the
+     * accrual alone would leave the payment against a payable that no longer
+     * exists, and Accounts Payable below zero. Also refused when it already
+     * stands reversed or has no journal. Under the locks paying takes. An
+     * expense whose journal was reversed and re-reversed by hand before is
+     * reversed on the last entry of that chain, the one that stands. The
+     * closed-month refusal is worded as for a payment. An expense recorded
+     * from a bank reconciliation statement line frees that line while its
+     * reconciliation is open, and is refused while it reads Reconciled
+     * (ReconciliationMatchRelease, which takes its locks after these and
+     * before JournalPoster's, finish run round 6). A line on an "all branches"
+     * reconciliation is freed only by a user holding `branches:view_all`;
+     * anyone else is refused in words (finish run round 7).
+     */
+    public function reverse(AccountingExpense $expense, string $reason, ?int $userId = null): AccountingExpense
+    {
+        return DB::transaction(function () use ($expense, $reason, $userId): AccountingExpense {
+            BranchRowLock::lock(['branch' => $expense->branch_id]);
+
+            $locked = $this->lockTheExpense($expense);
+            $payments = $this->paymentsOf($locked);
+            $chains = $this->lockTheJournals($locked, $payments);
+
+            if ($locked->journal_id === null) {
+                throw ValidationException::withMessages([
+                    'expense' => ['This expense has no journal entry to reverse.'],
+                ]);
+            }
+
+            if (self::standsReversed($chains, $locked->journal_id)) {
+                throw ValidationException::withMessages([
+                    'expense' => ['This expense was already reversed.'],
+                ]);
+            }
+
+            $standing = self::standing($payments, $chains);
+
+            if ($standing->isNotEmpty()) {
+                throw ValidationException::withMessages([
+                    'expense' => [AccountingExpense::reversePaymentsFirst((int) $standing->sum('amount'), $standing->count())],
+                ]);
+            }
+
+            $journal = AccountingJournal::query()->findOrFail($chains[$locked->journal_id]['last']);
+            $line = $this->reconciliations->hold($locked, $journal, $userId);
+            $date = $this->openReversalDate($journal, 'expense');
+            $reversal = $this->poster->reverse($journal, $date, $reason, $userId);
+            $this->reconciliations->release($line, $journal, $reversal, $locked->payee, $userId);
+
+            AuditLogService::log(
+                'expense_reversed',
+                $locked,
+                newValues: ['journal_id' => $journal->id, 'reversed_by_journal_id' => $reversal->id, 'reason' => $reason],
+                description: sprintf(
+                    'Reversed the expense of %s to %s dated %s: %s. Reason: %s',
+                    Money::format((int) $locked->amount),
+                    $locked->payee,
+                    self::dateInWords($locked->date->toDateString()),
+                    self::reversedInWords($locked->journal_id, $journal, $reversal),
+                    $reason,
+                ),
+                userId: $userId,
+            );
+
+            return $locked->refresh();
+        });
+    }
+
+    /**
+     * Saves an expense's descriptive fields, refused (422 in words) once its
+     * journal stands reversed (finish run round 5): the cost was undone, and
+     * is recorded again if it's still owed. Under the expense row lock and its
+     * journal's, as a reversal takes them, so an edit never lands on an
+     * expense reversed in the meantime.
+     *
+     * @param  array{payee?: string, reference?: string|null, description?: string|null, due_date?: string|null}  $data
+     */
+    public function update(AccountingExpense $expense, array $data): AccountingExpense
+    {
+        return DB::transaction(function () use ($expense, $data): AccountingExpense {
+            $locked = $this->lockTheExpense($expense);
+            $chains = $this->lockTheJournals($locked, new Collection);
+
+            if (self::standsReversed($chains, $locked->journal_id)) {
+                throw ValidationException::withMessages([
+                    'expense' => ["This expense was reversed, so it can't be edited. Record it again if it's still owed."],
+                ]);
+            }
+
+            $locked->update($data);
+
+            return $locked->refresh();
+        });
+    }
+
+    private function lockTheExpense(AccountingExpense $expense): AccountingExpense
+    {
+        return AccountingExpense::query()->whereKey($expense->id)->lockForUpdate()->firstOrFail();
+    }
+
+    /**
+     * The expense's payments, in id order, read with no row lock once the
+     * expense row is locked. Every write of a payment (paying) holds that lock
+     * first, so none can be added meanwhile, and this is the transaction's
+     * first plain read, so it sees every payment committed before the lock.
+     * A locking read here would lock the payments' index range: with no
+     * payment yet that is a gap, which two expenses can share, and two first
+     * payments at the same moment then deadlocked on each other's gap lock
+     * (money review of #392). Their journals stay locked
+     * (self::lockTheJournals()).
+     *
+     * @return Collection<int, AccountingExpensePayment>
+     */
+    private function paymentsOf(AccountingExpense $locked): Collection
+    {
+        return AccountingExpensePayment::query()
+            ->where('accounting_expense_id', $locked->id)
+            ->orderBy('id')
+            ->get(['id', 'accounting_expense_id', 'date', 'amount', 'journal_id']);
+    }
+
+    /**
+     * For the expense's journal and each of its payments' journals: whether
+     * it stands reversed (AccountingJournal::endsReversed()), and the last
+     * entry of its chain of reversals, which is the entry that stands. Read
+     * under FOR UPDATE locks on each journal and every entry that reversed
+     * it, one level of the chains at a time in id order.
+     *
+     * Those are the rows JournalPoster::reverse() locks. A reversal never
+     * touches the expense row, so the expense row lock alone wouldn't stop a
+     * hand reversal made before the Journals screen refused one, and the
+     * branch lock is shared (and absent with no branch). This way a reversal
+     * in flight finishes first and is seen here, or waits until this write
+     * commits. No expense entry has a line on the allowance account (an
+     * expense account against a money account or Accounts Payable), so
+     * JournalPoster::reverse() takes no allowance lock behind these.
+     *
+     * @param  Collection<int, AccountingExpensePayment>  $payments
+     * @return array<int, array{reversed: bool, last: int}> by journal id
+     */
+    private function lockTheJournals(AccountingExpense $locked, Collection $payments): array
+    {
+        $ids = array_values(array_unique(array_filter(
+            [$locked->journal_id, ...$payments->pluck('journal_id')->all()],
+            static fn (mixed $id): bool => $id !== null,
+        )));
+        $chains = array_map(static fn (int $id): array => ['reversed' => false, 'last' => $id], array_combine($ids, $ids));
+        $following = array_combine($ids, $ids);
+
+        for ($reversals = 0; $following !== [] && $reversals < AccountingJournal::MAX_REVERSALS; $reversals++) {
+            $rows = AccountingJournal::query()
+                ->whereIn('id', array_values(array_unique($following)))
+                ->orderBy('id')
+                ->lockForUpdate()
+                ->get(['id', 'status', 'reversed_by_journal_id'])
+                ->keyBy('id');
+
+            foreach ($following as $journalId => $linkId) {
+                $row = $rows->get($linkId);
+
+                if ($row === null || $row->status !== 'reversed' || $row->reversed_by_journal_id === null) {
+                    unset($following[$journalId]);
+
+                    continue;
+                }
+
+                $chains[$journalId]['reversed'] = ! $chains[$journalId]['reversed'];
+                $chains[$journalId]['last'] = $following[$journalId] = (int) $row->reversed_by_journal_id;
+            }
+        }
+
+        return $chains;
+    }
+
+    /**
+     * Whether a journal stands reversed, from self::lockTheJournals(). An
+     * expense with no journal isn't reversed.
+     *
+     * @param  array<int, array{reversed: bool, last: int}>  $chains
+     */
+    private static function standsReversed(array $chains, ?int $journalId): bool
+    {
+        return $journalId !== null && ($chains[$journalId]['reversed'] ?? false);
+    }
+
+    /**
+     * The payments whose journal stands (one with no journal does).
+     *
+     * @param  Collection<int, AccountingExpensePayment>  $payments
+     * @param  array<int, array{reversed: bool, last: int}>  $chains
+     * @return Collection<int, AccountingExpensePayment>
+     */
+    private static function standing(Collection $payments, array $chains): Collection
+    {
+        return $payments->reject(static fn (AccountingExpensePayment $payment): bool => self::standsReversed($chains, $payment->journal_id))->values();
+    }
+
+    /**
+     * What the standing payments paid, in centavos.
+     *
+     * @param  Collection<int, AccountingExpensePayment>  $payments
+     * @param  array<int, array{reversed: bool, last: int}>  $chains
+     */
+    private static function standingTotal(Collection $payments, array $chains): int
+    {
+        return (int) self::standing($payments, $chains)->sum('amount');
+    }
+
+    /**
+     * The stored settlement columns, as what stands after this write. No
+     * figure reads them (AccountingExpense::paidAmount()); kept so the row
+     * stays within its CHECK and its audit trail shows each change.
+     */
+    private function storePaid(AccountingExpense $locked, int $paid): void
+    {
+        $locked->amount_paid = $paid;
+        $locked->settlement_status = match (true) {
+            $paid >= $locked->amount => 'paid',
+            $paid > 0 => 'partially_paid',
+            default => 'unpaid',
+        };
+        $locked->save();
+    }
+
+    /**
+     * The date the reversal will post on (self::reversalDate()), refused in
+     * words when it falls in a closed month (finish run round 6). The dialog
+     * has no date field, so the refusal says which date that is and why,
+     * under `$field`. JournalPoster checks the same date again under the same
+     * shared lock on the period row.
+     *
+     * @throws ValidationException
+     */
+    private function openReversalDate(AccountingJournal $journal, string $field): string
+    {
+        $date = self::reversalDate($journal);
+        $period = $this->periods->closedPeriodCovering($date);
+
+        if ($period === null) {
+            return $date;
+        }
+
+        $when = $date === CarbonImmutable::now()->toDateString()
+            ? 'today, '.self::dateInWords($date).', which is'
+            : 'on '.self::dateInWords($date).", the date of {$journal->journal_no}, since a reversal is never dated before the entry it reverses. That is";
+
+        throw ValidationException::withMessages([
+            $field => ["The reversal would post {$when} in a closed month ({$period->name}). Reopen the month on the Period Closing screen first."],
+        ]);
+    }
+
+    /**
+     * Where a reversal lands: today in Manila, or the entry's own date when
+     * that is later, since a reversal is never dated before the entry it
+     * reverses (ReverseJournalRequest's rule) and the pair cancels out on the
+     * entry's own date.
+     */
+    private static function reversalDate(AccountingJournal $journal): string
+    {
+        return max(CarbonImmutable::now()->toDateString(), $journal->date->toDateString());
+    }
+
+    /**
+     * The entries a reversal names, by number: "JE-000012, reversed by
+     * JE-000016", or, when the payment's or expense's own journal stands
+     * through a chain of earlier hand reversals, that journal first (the
+     * number the Payments dialog shows): "JE-000012, reversed through its
+     * latest standing entry JE-000015 by JE-000016".
+     */
+    private static function reversedInWords(int $journalId, AccountingJournal $reversed, AccountingJournal $reversal): string
+    {
+        if ((int) $reversed->id === $journalId) {
+            return "{$reversed->journal_no}, reversed by {$reversal->journal_no}";
+        }
+
+        $own = AccountingJournal::query()->whereKey($journalId)->value('journal_no');
+
+        return "{$own}, reversed through its latest standing entry {$reversed->journal_no} by {$reversal->journal_no}";
+    }
+
+    /** "Oct 5, 2026". */
+    private static function dateInWords(string $date): string
+    {
+        return CarbonImmutable::createFromFormat('!Y-m-d', $date)->format('M j, Y');
     }
 }

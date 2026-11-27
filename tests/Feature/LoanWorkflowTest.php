@@ -3,6 +3,8 @@
 namespace Tests\Feature;
 
 use App\Models\Borrower;
+use App\Models\Loan;
+use App\Models\LoanApprovalStep;
 use App\Models\LoanProduct;
 use Tests\TestCase;
 use Tests\Traits\SetupLendyPH;
@@ -80,6 +82,77 @@ class LoanWorkflowTest extends TestCase
         $this->getJson("/api/loans/{$loanId}/amortization-schedule")
             ->assertOk()
             ->assertJsonStructure(['data', 'summary']);
+    }
+
+    public function test_submitting_says_for_approval_not_for_review(): void
+    {
+        $loanId = $this->draftLoanId();
+
+        $response = $this->patchJson("/api/loans/{$loanId}/submit")->assertOk();
+
+        $this->assertSame('Loan submitted for approval.', $response->json('message'));
+        $this->assertSame('for_review', $response->json('data.status'));
+
+        $this->patchJson("/api/loans/{$loanId}/submit")
+            ->assertStatus(422)
+            ->assertJsonPath('errors.status.0', "Loan must be in 'draft' status to submit for approval.");
+    }
+
+    public function test_status_refusals_never_show_the_raw_for_review_key(): void
+    {
+        $draft = $this->draftLoanId();
+
+        $this->patchJson("/api/loans/{$draft}/approve")
+            ->assertStatus(422)
+            ->assertJsonPath('errors.status.0', "Loan must be in 'for approval' status to approve.");
+
+        $this->patchJson("/api/loans/{$draft}/reject", ['approval_remarks' => 'no'])
+            ->assertStatus(422)
+            ->assertJsonPath('errors.status.0', "Loan must be in 'for approval' status to reject.");
+
+        $this->patchJson("/api/loans/{$draft}/submit")->assertOk();
+        $this->patchJson("/api/loans/{$draft}/approve")->assertOk();
+
+        $this->putJson("/api/loans/{$draft}", ['purpose' => 'Changed'])
+            ->assertStatus(422)
+            ->assertJsonPath('errors.status.0', 'Loan can only be edited while it is a draft or under approval.');
+
+        $this->postJson('/api/loans/preview', [
+            'loan_id' => $draft,
+            'loan_product_id' => Loan::findOrFail($draft)->loan_product_id,
+            'borrower_id' => Loan::findOrFail($draft)->borrower_id,
+            'principal_amount' => (float) Loan::findOrFail($draft)->principal_amount,
+            'start_date' => now()->toDateString(),
+        ])
+            ->assertStatus(422)
+            ->assertJsonPath('errors.status.0', 'Loan can only be edited while it is a draft or under approval.');
+    }
+
+    public function test_an_approval_step_on_a_loan_past_approval_says_for_approval(): void
+    {
+        $loanId = $this->draftLoanId();
+        $this->patchJson("/api/loans/{$loanId}/submit")->assertOk();
+
+        $loan = Loan::findOrFail($loanId);
+        $step = $loan->approvalSteps()->where('status', LoanApprovalStep::STATUS_PENDING)->firstOrFail();
+        $loan->forceFill(['status' => 'approved'])->save();
+
+        $this->patchJson("/api/loans/{$loanId}/approval-steps/{$step->id}/approve")
+            ->assertStatus(422)
+            ->assertJsonPath('errors.status.0', "Loan must be in 'for approval' status to act on its approval chain.");
+    }
+
+    private function draftLoanId(): int
+    {
+        $product = LoanProduct::factory()->create();
+        $borrower = Borrower::factory()->create(['branch_id' => $this->branch->id]);
+
+        return $this->postJson('/api/loans', [
+            'borrower_id' => $borrower->id,
+            'loan_product_id' => $product->id,
+            'principal_amount' => (float) $product->min_amount,
+            'start_date' => now()->toDateString(),
+        ])->assertCreated()->json('data.id');
     }
 
     public function test_reject_loan(): void

@@ -2,7 +2,11 @@
 
 namespace App\Http\Requests\Accounting;
 
+use App\Http\Requests\Concerns\DateInputMessages;
+use App\Models\AccountingJournal;
 use Illuminate\Foundation\Http\FormRequest;
+use Illuminate\Support\Carbon;
+use Illuminate\Validation\Validator;
 
 /**
  * Reversing a posted entry.
@@ -11,9 +15,28 @@ use Illuminate\Foundation\Http\FormRequest;
  * entry's own STORED lines — a caller that could supply them could "reverse" an
  * entry into a different shape than the one it undoes, and the two would not
  * net to zero while both looked perfectly correct in isolation.
+ *
+ * The reversal is never dated before the entry it reverses, given or by
+ * default (today): it would undo the entry before the entry happened, and
+ * every balance between the two dates would read the pair as a lone credit.
+ *
+ * The reversal of an entry with no branch that has a line on the allowance
+ * can't be dated after today in Manila either
+ * ({@see RefusesFutureNoBranchAllowanceDates}): the mirror has the same branch
+ * and lines as the entry. The entry's own date is always allowed, because the
+ * pair cancels out on that day; so an entry posted with a future date before
+ * the rule existed can still be reversed, on its own date. Every refusal of
+ * such an entry names the one range that satisfies both rules, so the two
+ * never contradict each other.
+ *
+ * A reversal date is a calendar day written year-month-day, like a manual
+ * entry's (Finish run round 2, decision 1): a time, an offset or bare digits
+ * are refused.
  */
 class ReverseJournalRequest extends FormRequest
 {
+    use RefusesFutureNoBranchAllowanceDates;
+
     public function authorize(): bool
     {
         return $this->user()->can('journals:reverse');
@@ -26,10 +49,121 @@ class ReverseJournalRequest extends FormRequest
             // original's: reversing a September entry in October belongs in
             // October, or a period that has already been reported on silently
             // changes. Optional, defaulting to today.
-            'date' => ['sometimes', 'nullable', 'date'],
+            'date' => ['sometimes', 'nullable', 'date', 'date_format:Y-m-d'],
             // Folded into the reversal's description, because there is no
             // column for it and it is the most useful half of the record.
             'reason' => ['sometimes', 'nullable', 'string', 'max:300'],
         ];
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    public function messages(): array
+    {
+        return [
+            ...DateInputMessages::calendar(['date' => 'reversal date']),
+            'reason.max' => 'The reason can be at most 300 characters.',
+        ];
+    }
+
+    /**
+     * Refuses, in words, once the date itself is valid, a reversal dated
+     * before the entry it reverses, and one of a no-branch allowance entry
+     * dated after today (unless it is the entry's own date). All days are
+     * Manila days.
+     *
+     * @return list<callable(Validator): void>
+     */
+    public function after(): array
+    {
+        return [
+            function (Validator $validator): void {
+                $journal = $this->route('journal');
+
+                if ($validator->errors()->has('date') || ! $journal instanceof AccountingJournal || $journal->date === null) {
+                    return;
+                }
+
+                $refusal = $this->dateRefusal($journal, $journal->date->toDateString(), $this->reversalDay());
+
+                if ($refusal !== null) {
+                    $validator->errors()->add('date', $refusal);
+                }
+            },
+        ];
+    }
+
+    /**
+     * Allowed: from the entry's own date on. For an entry with no branch and
+     * a line on the allowance, also no later than today, except the entry's
+     * own date, which is always allowed. Each refusal of that entry names the
+     * days that are allowed, so following one message never meets the other.
+     */
+    private function dateRefusal(AccountingJournal $journal, string $entryDay, string $day): ?string
+    {
+        $today = $this->todayInManila();
+
+        if ($day === $entryDay || ($day > $entryDay && $day <= $today)) {
+            return null;
+        }
+
+        $allowance = $journal->branch_id === null
+            ? $this->allowanceAccountAmong($journal->lines()->pluck('accounting_account_id')->all())
+            : null;
+
+        if ($allowance === null) {
+            return $day < $entryDay
+                ? sprintf(
+                    'The reversal can\'t be dated before the entry it reverses (%1$s). Choose %1$s or later.',
+                    $this->dayInWords($entryDay),
+                )
+                : null;
+        }
+
+        $account = $this->accountInWords($allowance);
+
+        if ($entryDay > $today) {
+            return sprintf(
+                'This entry has no branch, a line on %1$s and a date after today (%2$s), so its reversal can only be dated on the entry\'s own date. Date it %3$s.',
+                $account,
+                $this->dayInWords($today),
+                $this->dayInWords($entryDay),
+            );
+        }
+
+        $allowed = $entryDay === $today
+            ? $this->dayInWords($today)
+            : 'from '.$this->dayInWords($entryDay).' to '.$this->dayInWords($today);
+
+        return $day < $entryDay
+            ? sprintf('The reversal can\'t be dated before the entry it reverses (%1$s). Date it %2$s.', $this->dayInWords($entryDay), $allowed)
+            : sprintf(
+                'This entry has no branch and a line on %1$s, so its reversal can\'t be dated after today (%2$s). Date it %3$s.',
+                $account,
+                $this->dayInWords($today),
+                $allowed,
+            );
+    }
+
+    /**
+     * The reversal lands on the day it was checked as.
+     */
+    protected function passedValidation(): void
+    {
+        if (filled($this->input('date'))) {
+            $this->merge(['date' => $this->reversalDay()]);
+        }
+    }
+
+    /** The reversal's day in the app's time zone, "2026-09-15"; today when none is sent. */
+    private function reversalDay(): string
+    {
+        $timezone = config('app.timezone');
+        $date = $this->input('date');
+
+        return filled($date)
+            ? Carbon::parse($date, $timezone)->setTimezone($timezone)->toDateString()
+            : Carbon::now($timezone)->toDateString();
     }
 }

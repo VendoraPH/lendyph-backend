@@ -1,14 +1,28 @@
 <?php
 
 use App\Http\Middleware\AllowAuthOrSubmissionToken;
+use App\Http\Middleware\BlockHiddenModules;
 use App\Http\Middleware\CheckTokenExpiry;
 use App\Http\Middleware\EnsureUserIsActive;
 use App\Http\Middleware\OptionalSanctumAuth;
+use App\Http\Middleware\Portal\CheckPortalTokenExpiry;
+use App\Http\Middleware\Portal\EnsurePortalFeature;
+use App\Http\Middleware\Portal\EnsurePortalMemberActive;
+use App\Http\Middleware\Portal\EnsurePortalToken;
+use App\Http\Middleware\Portal\RequirePortalTerms;
+use App\Http\Middleware\PublicApply\EnsureOriginationEnabled;
+use App\Http\Middleware\PublicApply\PublicApplyNoStore;
+use App\Http\Middleware\ReceiptShare\EnsureReceiptShareLinksEnabled;
+use App\Http\Middleware\ReceiptShare\PublicReceiptHeaders;
+use App\Http\Middleware\RejectInvalidUtf8;
 use App\Http\Middleware\RequirePasswordChange;
 use App\Http\Middleware\SecurityHeaders;
+use App\Http\Middleware\TrustFrontendProxy;
+use Illuminate\Auth\AuthenticationException;
 use Illuminate\Foundation\Application;
 use Illuminate\Foundation\Configuration\Exceptions;
 use Illuminate\Foundation\Configuration\Middleware;
+use Illuminate\Http\Middleware\TrustProxies;
 use Illuminate\Http\Request;
 use Illuminate\Routing\Middleware\SubstituteBindings;
 use Illuminate\Routing\Middleware\ThrottleRequests;
@@ -45,7 +59,7 @@ return Application::configure(basePath: dirname(__DIR__))
         // requests, and this host also runs unrelated third-party apps, so its
         // public IP is not a safe entry — nor is loopback. Turning it on needs
         // the frontend to authenticate itself as the proxy with a
-        // server-side-only shared secret; that is filed separately. The
+        // server-side-only shared secret; that is TrustFrontendProxy below. The
         // limiter split in AppServiceProvider fixes the reported bug on its
         // own, without this. See config/trustedproxy.php.
         //
@@ -62,6 +76,11 @@ return Application::configure(basePath: dirname(__DIR__))
         // browser-supplied `X-Forwarded-For: 6.6.6.6` becomes
         // "6.6.6.6, <browser-ip>" and the real browser IP is still what wins.
         $middleware->trustProxies(headers: Request::HEADER_X_FORWARDED_FOR);
+
+        // The frontend proves it is the proxy with a server-only shared secret
+        // (config/trustedproxy.php `proxy_secret`). With the secret unset this
+        // subclass is the framework's TrustProxies, unchanged.
+        $middleware->replace(TrustProxies::class, TrustFrontendProxy::class);
 
         // Keep the optional-auth middleware AHEAD of ThrottleRequests.
         //
@@ -89,6 +108,19 @@ return Application::configure(basePath: dirname(__DIR__))
         // priority 6.
         $middleware->prependToPriorityList(ThrottleRequests::class, OptionalSanctumAuth::class);
         $middleware->prependToPriorityList(ThrottleRequests::class, AllowAuthOrSubmissionToken::class);
+
+        // The public loan application's no-store and server switch run ahead
+        // of its limiters too, so while LOAN_ORIGINATION_ENABLED is off every
+        // request answers 404 (never 429) and every answer is no-store.
+        $middleware->prependToPriorityList(ThrottleRequests::class, PublicApplyNoStore::class);
+        $middleware->prependToPriorityList(ThrottleRequests::class, EnsureOriginationEnabled::class);
+
+        // A shared receipt's headers and server switch too (finish run round 2,
+        // decision 6): while RECEIPT_SHARE_LINKS_ENABLED is off every share link
+        // route answers its 404 (never 429), and every public receipt answer,
+        // a 429 included, is no-store.
+        $middleware->prependToPriorityList(ThrottleRequests::class, PublicReceiptHeaders::class);
+        $middleware->prependToPriorityList(ThrottleRequests::class, EnsureReceiptShareLinksEnabled::class);
 
         // Keep the three post-auth gates AHEAD of SubstituteBindings.
         //
@@ -144,9 +176,49 @@ return Application::configure(basePath: dirname(__DIR__))
         $middleware->prependToPriorityList(SubstituteBindings::class, EnsureUserIsActive::class);
         $middleware->prependToPriorityList(SubstituteBindings::class, RequirePasswordChange::class);
 
+        // The Member Portal's post-auth gates, for the same reason and in the
+        // same place: ahead of SubstituteBindings, behind the throttles (portal
+        // design §5). Portal routes bind nothing implicitly, so this guards
+        // against one that ever does: a staff token, an idle token or a member
+        // whose access ended is refused before any model is resolved, and the
+        // portal limiter still sees the PortalUser `auth:portal` attached.
+        // Asserted on the gathered stack in PortalRouteStackTest.
+        $middleware->prependToPriorityList(SubstituteBindings::class, EnsurePortalToken::class);
+        $middleware->prependToPriorityList(SubstituteBindings::class, CheckPortalTokenExpiry::class);
+        $middleware->prependToPriorityList(SubstituteBindings::class, EnsurePortalMemberActive::class);
+        $middleware->prependToPriorityList(SubstituteBindings::class, RequirePortalTerms::class);
+
+        // A module hidden in Settings → Menu Visibility answers 404 on its own
+        // API (finish run round 6). Listed last, so it sorts after every gate
+        // above, staff and portal: an idle token is still expired and deleted
+        // by CheckTokenExpiry (a 404 ahead of it would answer an idle token
+        // and leave it alive; since finish run round 7 the idle checks, not
+        // Sanctum, move last_used_at, after the limiters), and a deactivated or
+        // locked sign-in still gets its own answer. Still ahead of
+        // SubstituteBindings, so a hidden module's ids are never looked up.
+        // The limiters run first: a hidden module's requests are metered like
+        // any other's.
+        $middleware->prependToPriorityList(SubstituteBindings::class, BlockHiddenModules::class);
+
+        // An API guest is answered, never redirected. The framework default
+        // sends every guest to route('login'), which this API-only app does
+        // not have, so an unauthenticated api/* call without
+        // `Accept: application/json` threw RouteNotFoundException and came
+        // back 500. Returning null here lets the AuthenticationException
+        // through to the renderer below, which answers the JSON 401. Web
+        // routes keep the default redirect.
+        $middleware->redirectGuestsTo(
+            fn (Request $request) => $request->is('api/*') ? null : route('login'),
+        );
+
+        // Invalid UTF-8 in any input answers 422, on every route, before a
+        // controller, a /u pattern or MySQL can turn it into a 500.
+        $middleware->append(RejectInvalidUtf8::class);
+
         $middleware->alias([
             'role' => RoleMiddleware::class,
             'permission' => PermissionMiddleware::class,
+            'portal.feature' => EnsurePortalFeature::class,
         ]);
 
         $middleware->api(prepend: [
@@ -154,10 +226,27 @@ return Application::configure(basePath: dirname(__DIR__))
             ThrottleRequests::class.':api',
         ]);
 
+        // BlockHiddenModules sits on the whole `api` group, so every route
+        // file, staff, member portal and public, is covered without naming it
+        // on each route (MenuModules decides which routes a hidden module
+        // owns). Its place in the stack is the priority entry above.
         $middleware->api(append: [
             EnsureFrontendRequestsAreStateful::class,
+            BlockHiddenModules::class,
         ]);
     })
     ->withExceptions(function (Exceptions $exceptions): void {
+        // Every api/* route answers an unauthenticated caller with the same
+        // JSON 401 an `Accept: application/json` request always got, whatever
+        // Accept header it sent. Anything else falls through to the default
+        // rendering, so web routes are unchanged.
         //
+        // The message is fixed rather than read off the exception, so a future
+        // throw with its own wording cannot tell a caller which way its token
+        // failed.
+        $exceptions->render(function (AuthenticationException $exception, Request $request) {
+            if ($request->is('api/*')) {
+                return response()->json(['message' => 'Unauthenticated.'], 401);
+            }
+        });
     })->create();

@@ -18,4 +18,21 @@ class ToggleAutoPayRequest extends FormRequest
             'cbs_reference' => ['nullable', 'string', 'max:100', 'required_if:enabled,true'],
         ];
     }
+
+    /**
+     * Refusals in words, never Laravel's defaults ("The cbs reference field
+     * is required when enabled is true.").
+     *
+     * @return array<string, string>
+     */
+    public function messages(): array
+    {
+        return [
+            'enabled.required' => 'Choose whether Auto-Pay is on or off.',
+            'enabled.boolean' => 'Choose whether Auto-Pay is on or off.',
+            'cbs_reference.required_if' => 'Enter the CBS reference to turn Auto-Pay on.',
+            'cbs_reference.string' => 'The CBS reference must be text.',
+            'cbs_reference.max' => 'The CBS reference can be at most 100 characters.',
+        ];
+    }
 }

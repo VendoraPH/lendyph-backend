@@ -2,11 +2,53 @@
 
 namespace App\Http\Resources;
 
+use App\Models\Branch;
+use App\Models\Role;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\JsonResource;
 
 class UserResource extends JsonResource
 {
+    /**
+     * Set only by `GET /users` (UserController::index), from UserReach. Null
+     * everywhere else, so /auth/me, login, GET /users/{id} and the nested
+     * actors carry no `can_manage` key.
+     */
+    private ?bool $canManage = null;
+
+    /**
+     * Set only by GET /auth/me (AuthController::me()), so `role_details` names
+     * the caller's own roles and no one else's.
+     */
+    private bool $roleDetails = false;
+
+    /**
+     * Whether the caller can reach this user (UserReach): false exactly when
+     * edit, reset password, deactivate and reactivate would answer the masked
+     * 404 for this target. Each action still needs its own permission
+     * (users:update, users:delete, users:reset_password).
+     */
+    public function withCanManage(bool $canManage): static
+    {
+        $this->canManage = $canManage;
+
+        return $this;
+    }
+
+    /**
+     * Add `role_details`: the same roles as `roles`, in the same order, each as
+     * `{key, display_name}`. `display_name` is the role's editable label, or
+     * its key in words when it has none, as the role editor shows it
+     * (Role::auditLabel()). "Access Restricted" reads it to name the user's
+     * role without `users:view`, which the roles list needs.
+     */
+    public function withRoleDetails(): static
+    {
+        $this->roleDetails = true;
+
+        return $this;
+    }
+
     public function toArray(Request $request): array
     {
         return [
@@ -57,11 +99,25 @@ class UserResource extends JsonResource
                 'branches',
                 fn () => BranchResource::collection($this->branches),
             ),
+            /**
+             * The chosen primary branch (Phase 6 MB-BE6): `users.branch_id`,
+             * or null for Organisation-wide. Sent with `branches`, so the
+             * nested actor payload keeps its shape.
+             */
+            'primary_branch_id' => $this->when($this->relationLoaded('branches'), fn () => $this->branch_id === null ? null : (int) $this->branch_id),
+            'primary_branch_name' => $this->when($this->relationLoaded('branches'), fn () => $this->branch_id === null
+                ? 'Organisation-wide'
+                : ($this->branches->firstWhere('id', (int) $this->branch_id)?->name ?? Branch::query()->whereKey($this->branch_id)->value('name'))),
             'roles' => $this->whenLoaded('roles', fn () => $this->roles->pluck('name')),
+            'role_details' => $this->when(
+                $this->roleDetails && $this->relationLoaded('roles'),
+                fn () => $this->roles->map(fn (Role $role) => ['key' => $role->name, 'display_name' => $role->auditLabel()])->values(),
+            ),
             'permissions' => $this->when(
                 $this->relationLoaded('permissions'),
                 fn () => $this->getAllPermissions()->pluck('name'),
             ),
+            'can_manage' => $this->when($this->canManage !== null, fn () => $this->canManage),
             'created_at' => $this->created_at,
             'updated_at' => $this->updated_at,
         ];

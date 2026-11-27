@@ -2,19 +2,32 @@
 
 namespace App\Services;
 
+use App\Enums\TermUnit;
+use App\Exceptions\CannotPostToTheBooksException;
+use App\Models\AmortizationPrincipalChange;
 use App\Models\AmortizationSchedule;
 use App\Models\Loan;
 use App\Models\LoanAdjustment;
 use App\Models\LoanLedgerEntry;
 use App\Models\Repayment;
 use App\Models\User;
+use App\Services\Accounting\AutomaticPoster;
+use Brick\Math\BigDecimal;
 use Carbon\Carbon;
+use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Http\Exceptions\HttpResponseException;
 use Illuminate\Support\Collection;
-use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Validation\ValidationException;
 
 class LoanAdjustmentService
 {
+    /** A restructure's new rate above 100%, in a loan edit's words (UpdateLoanRequest's `max:100`). */
+    public const RATE_OVER_MAXIMUM = 'The interest rate field must not be greater than 100.';
+
+    /** A stored restructure whose rate isn't a number, in the request's words. */
+    public const RATE_NOT_A_NUMBER = 'The interest rate field must be a number.';
+
     public function __construct(
         private LoanService $loanService,
         private RepaymentService $repaymentService,
@@ -28,9 +41,37 @@ class LoanAdjustmentService
             ]);
         }
 
-        $oldValues = $this->captureOldValues($loan, $validated['adjustment_type']);
+        $reschedules = in_array($validated['adjustment_type'], ['restructure', 'term_extension'], true);
+        $newFrequency = $validated['new_values']['frequency'] ?? $loan->frequency;
 
-        return LoanAdjustment::create([
+        if ($reschedules && $newFrequency === 'upon_maturity'
+            && ! LoanTermSchedule::stepsByCalendarMonth($loan->term_unit->value, $newFrequency)) {
+            throw ValidationException::withMessages([
+                'adjustment_type' => 'A single-payment loan with a days term has no instalments to reschedule. Restructure it into a new loan instead.',
+            ]);
+        }
+
+        if ($validated['adjustment_type'] === 'restructure') {
+            $this->assertRestructureRate($loan, $validated['new_values']);
+        }
+
+        // Stated as a target: the server works the amount out, and records
+        // what it worked it out from beside it.
+        if ($validated['adjustment_type'] === 'balance_adjustment'
+            && ($validated['new_values']['target_principal_balance'] ?? null) !== null) {
+            $figures = $this->balanceAdjustmentFigures($loan, (float) $validated['new_values']['target_principal_balance']);
+            $validated['new_values']['adjustment_amount'] = $figures['adjustment_amount'];
+            $validated['new_values']['target_principal_balance'] = $figures['target_principal_balance'];
+            $validated['new_values']['outstanding_principal_at_request'] = $figures['outstanding_principal'];
+        }
+
+        if ($validated['adjustment_type'] === 'balance_adjustment') {
+            $this->refuseNothingToAdjust($validated['new_values']);
+        }
+
+        $oldValues = $this->captureOldValues($loan, $validated['adjustment_type'], $validated['new_values']);
+
+        return GeneratedNumberWrite::run(fn (): LoanAdjustment => LoanAdjustment::create([
             'loan_id' => $loan->id,
             'adjustment_type' => $validated['adjustment_type'],
             'description' => $validated['description'] ?? null,
@@ -39,35 +80,253 @@ class LoanAdjustmentService
             'status' => 'pending',
             'remarks' => $validated['remarks'] ?? null,
             'adjusted_by' => $user->id,
-        ]);
+        ]), GeneratedNumberWrite::ADJUSTMENT_CONFLICT);
     }
 
+    /**
+     * Refuse (422) a balance adjustment that changes nothing, so a no-op never
+     * goes through approval: a target equal to the current unpaid principal
+     * (reported on the target) or an amount of ₱0.00 (on the amount). Read in
+     * whole centavos, after the amount is worked out. The preview still shows
+     * a ₱0.00 amount, and applyBalanceAdjustment() still applies one requested
+     * before this check, posting nothing.
+     *
+     * @param  array<string, mixed>  $newValues
+     */
+    private function refuseNothingToAdjust(array $newValues): void
+    {
+        $amount = $newValues['adjustment_amount'] ?? null;
+
+        if (! is_numeric($amount) || (int) round((float) $amount * 100) !== 0) {
+            return;
+        }
+
+        throw ValidationException::withMessages(($newValues['target_principal_balance'] ?? null) !== null
+            ? ['new_values.target_principal_balance' => 'The target equals the current principal balance, so there is nothing to adjust.']
+            : ['new_values.adjustment_amount' => 'The adjustment amount is ₱0.00, so there is nothing to adjust.']);
+    }
+
+    /**
+     * What a balance adjustment to `$targetPrincipalBalance` would be, for
+     * GET /loans/{loan}/balance-adjustment-preview. Refuses, as a request
+     * would, a loan that cannot be adjusted. Writes nothing.
+     *
+     * @return array{outstanding_principal: float|int, target_principal_balance: float|int, adjustment_amount: float|int, resulting_principal_balance: float|int}
+     */
+    public function balanceAdjustmentPreview(Loan $loan, float $targetPrincipalBalance): array
+    {
+        if (! in_array($loan->status, ['released', 'ongoing'])) {
+            throw ValidationException::withMessages([
+                'loan' => 'Adjustments can only be made on released or ongoing loans.',
+            ]);
+        }
+
+        return $this->balanceAdjustmentFigures($loan, $targetPrincipalBalance);
+    }
+
+    /**
+     * The amount that takes the loan's unpaid principal to the target, in
+     * centavos: target minus outstanding principal, negative for a reduction.
+     *
+     * @return array{outstanding_principal: float|int, target_principal_balance: float|int, adjustment_amount: float|int, resulting_principal_balance: float|int}
+     */
+    private function balanceAdjustmentFigures(Loan $loan, float $targetPrincipalBalance): array
+    {
+        $outstanding = $this->outstandingPrincipalCentavos($loan);
+        $target = (int) round($targetPrincipalBalance * 100);
+
+        return [
+            'outstanding_principal' => $outstanding / 100,
+            'target_principal_balance' => $target / 100,
+            'adjustment_amount' => ($target - $outstanding) / 100,
+            'resulting_principal_balance' => $target / 100,
+        ];
+    }
+
+    /**
+     * The loan's unpaid principal, in centavos: over its open periods, each
+     * period's principal due less what was paid on it, never below zero. The
+     * one figure a balance adjustment is worked out from, guarded against
+     * (applyBalanceAdjustment()) and run down from
+     * (restateOpenRemainingBalances()).
+     */
+    public function outstandingPrincipalCentavos(Loan $loan): int
+    {
+        return $loan->amortizationSchedules()
+            ->whereIn('status', ['pending', 'partial', 'overdue'])
+            ->get()
+            ->sum(fn (AmortizationSchedule $schedule): int => self::unpaidPrincipalCentavos($schedule));
+    }
+
+    /**
+     * A balance adjustment requested as a target principal balance stores the
+     * amount worked out at request time, so it lands on the target only while
+     * the loan's unpaid principal is still what it was then. Checked under the
+     * loan's lock at approval and at apply; a moved principal is a 409 telling
+     * staff to reject it and request the target again (it is not rejected for
+     * them). One requested by amount is not checked.
+     *
+     * @throws HttpResponseException 409 when the principal moved since the request
+     */
+    private function assertTargetPrincipalUnchanged(LoanAdjustment $adjustment, Loan $loan): void
+    {
+        $own = $adjustment->ownNewValues();
+
+        if ($adjustment->adjustment_type !== 'balance_adjustment'
+            || ($own['target_principal_balance'] ?? null) === null) {
+            return;
+        }
+
+        $atRequest = (int) round((float) ($own['outstanding_principal_at_request'] ?? -1) * 100);
+
+        if ($this->outstandingPrincipalCentavos($loan) !== $atRequest) {
+            throw LoanWriteTransaction::conflict("The loan's principal changed since this adjustment was requested. Reject this request and create a new one for the same target.");
+        }
+    }
+
+    /**
+     * One period's unpaid principal, in centavos, never below zero.
+     */
+    private static function unpaidPrincipalCentavos(AmortizationSchedule $schedule): int
+    {
+        return max(0, (int) round((float) $schedule->principal_due * 100) - (int) round((float) $schedule->principal_paid * 100));
+    }
+
+    /**
+     * Approve a pending adjustment.
+     *
+     * The checks before the transaction refuse, with a 422, an approval that
+     * was wrong from the start. The transaction then takes the lock an apply
+     * takes, the loan and then this adjustment (lockAdjustmentRows()), and
+     * re-reads the adjustment under it: one rejected, approved or applied by
+     * another request since this one read it is a 409 and is left exactly as
+     * that request left it, as is a deadlock or a lock wait timeout.
+     *
+     * This is the outermost transaction: LoanAdjustmentController::approve()
+     * and the test helpers are the only callers.
+     */
     public function approveAdjustment(LoanAdjustment $adjustment, User $approver, ?string $remarks): LoanAdjustment
     {
         $this->guardStatus($adjustment, 'pending', 'approve');
+        $this->assertPayloadFitsType($adjustment);
 
-        $adjustment->update([
-            'status' => 'approved',
-            'approved_by' => $approver->id,
-            'approved_at' => now(),
-            'remarks' => $remarks ?? $adjustment->remarks,
-        ]);
+        return LoanWriteTransaction::run(function () use ($adjustment, $approver, $remarks): LoanAdjustment {
+            $loan = $this->lockAdjustmentRows($adjustment, 'pending');
+            $this->assertTargetPrincipalUnchanged($adjustment, $loan);
 
-        return $adjustment;
+            if ($adjustment->adjustment_type === 'restructure') {
+                $this->assertRestructureRate($loan, $adjustment->ownNewValues());
+            }
+
+            $adjustment->update([
+                'status' => 'approved',
+                'approved_by' => $approver->id,
+                'approved_at' => now(),
+                'remarks' => $remarks ?? $adjustment->remarks,
+            ]);
+
+            return $adjustment;
+        });
     }
 
+    /**
+     * Reject a pending adjustment, under the same lock and re-read as
+     * approveAdjustment(): a reject that read the adjustment as pending, when
+     * it has since been approved (and perhaps applied), is a 409 and never
+     * turns an applied adjustment into a rejected one.
+     *
+     * This is the outermost transaction: LoanAdjustmentController::reject()
+     * and the test helpers are the only callers.
+     */
     public function rejectAdjustment(LoanAdjustment $adjustment, User $approver, ?string $remarks): LoanAdjustment
     {
         $this->guardStatus($adjustment, 'pending', 'reject');
 
-        $adjustment->update([
-            'status' => 'rejected',
-            'approved_by' => $approver->id,
-            'approved_at' => now(),
-            'remarks' => $remarks ?? $adjustment->remarks,
-        ]);
+        return LoanWriteTransaction::run(function () use ($adjustment, $approver, $remarks): LoanAdjustment {
+            $this->lockAdjustmentRows($adjustment, 'pending');
 
-        return $adjustment;
+            $adjustment->update([
+                'status' => 'rejected',
+                'approved_by' => $approver->id,
+                'approved_at' => now(),
+                'remarks' => $remarks ?? $adjustment->remarks,
+            ]);
+
+            return $adjustment;
+        });
+    }
+
+    /**
+     * Cancel an approved adjustment that isn't applied yet (finish run round
+     * 6), with the reason staff give.
+     *
+     * Only `approved`: a pending one is rejected instead, and an applied,
+     * rejected or cancelled one is refused in words (422 on `status`). Under
+     * the lock an approve, reject and apply take, the loan and then this
+     * adjustment (lockAdjustmentRows()), the status is re-read: one applied or
+     * cancelled by another request since this one read it is a 409, as is a
+     * deadlock or a lock wait timeout, and nothing is written.
+     *
+     * An approved adjustment changes nothing on the loan until it is applied,
+     * so a cancel moves no money and touches no period: it only closes the
+     * request, which can then never be applied. Its stored figures stay as the
+     * record of what was approved. One audit row says so in words; the
+     * model's own "updated" row is not written as well.
+     *
+     * This is the outermost transaction: LoanAdjustmentController::cancel()
+     * and the test helpers are the only callers.
+     */
+    public function cancelAdjustment(LoanAdjustment $adjustment, User $user, string $reason): LoanAdjustment
+    {
+        $this->guardCancellable($adjustment);
+
+        return LoanWriteTransaction::run(function () use ($adjustment, $user, $reason): LoanAdjustment {
+            $loan = $this->lockAdjustmentRows($adjustment, 'approved');
+
+            AuditLogService::withoutModelAuditing(fn () => $adjustment->update([
+                'status' => 'cancelled',
+                'cancelled_by' => $user->id,
+                'cancelled_at' => now(),
+                'cancellation_reason' => $reason,
+            ]));
+
+            AuditLogService::log(
+                'adjustment_cancelled',
+                $adjustment,
+                ['status' => 'approved'],
+                ['status' => 'cancelled', 'cancellation_reason' => $reason],
+                sprintf(
+                    '%s %s on loan %s was cancelled before it was applied. Reason: %s',
+                    $adjustment->typeInWords(),
+                    $adjustment->adjustment_number,
+                    $loan->displayNumber(),
+                    $reason,
+                ),
+            );
+
+            return $adjustment;
+        });
+    }
+
+    /**
+     * Refuse, in words, a cancel of anything but an approved adjustment.
+     *
+     * @throws ValidationException on `status`
+     */
+    private function guardCancellable(LoanAdjustment $adjustment): void
+    {
+        $refusal = match ($adjustment->status) {
+            'approved' => null,
+            'pending' => 'This adjustment is still waiting for approval. Reject it instead of cancelling it.',
+            'rejected' => 'This adjustment was rejected, so there is nothing to cancel.',
+            'applied' => 'This adjustment has already been applied to the loan, so it can no longer be cancelled.',
+            'cancelled' => 'This adjustment has already been cancelled.',
+            default => 'Only an approved adjustment that is not applied yet can be cancelled.',
+        };
+
+        if ($refusal !== null) {
+            throw ValidationException::withMessages(['status' => $refusal]);
+        }
     }
 
     /**
@@ -79,12 +338,19 @@ class LoanAdjustmentService
      * LoanAdjustment row (no pending → approved → applied workflow).
      */
     /**
-     * Roll an upon-maturity loan forward by one cycle.
+     * Roll an upon-maturity loan forward by one cycle, or, when it is overdue,
+     * by as many anchored cycles as it takes for the new due date to fall
+     * after today, charging one cycle of fresh interest per cycle moved
+     * (extensionFigures()).
      *
      * `$interestOption` decides what happens to interest already outstanding:
      *
-     *   'pay'   — collect it as a repayment first, so the new period carries
-     *             only the freshly accrued interest.
+     *   'pay'   — collect, in one repayment first, everything the open
+     *             period owes except its principal: the insurance premium
+     *             owed, the late penalty owed and the interest outstanding
+     *             (extensionCollection()). The old period is then settled in
+     *             full, and the new period carries the principal and only
+     *             the freshly accrued interest.
      *   'defer' — leave it unpaid; it carries into the new period and stacks
      *             on top of the fresh interest (₱50 outstanding + ₱50 fresh
      *             becomes ₱50 + ₱50 = ₱100 due).
@@ -96,87 +362,101 @@ class LoanAdjustmentService
      * that reset whenever the dialog was reopened or the page refreshed. Doing
      * both here means either the borrower is charged AND the loan extends, or
      * neither happens.
+     *
+     * `$method` and `$reference` say how the member paid the 'pay'
+     * collection, as Record Payment's do (ExtendLoanRequest): the repayment
+     * stores them and its journal debits that method's settlement account
+     * (SettlementMethod). 'defer' collects nothing, so they are not used.
      */
     public function extendLoan(
         Loan $loan,
         ?string $remarks,
         User $user,
         string $interestOption = 'pay',
+        string $method = 'cash',
+        ?string $reference = null,
     ): LoanAdjustment {
-        // Extension is limited to one-month-term loans, whatever the product.
-        // Loan::isOneMonthTerm() reads the ORIGINAL term rather than the
-        // current one — each extension below bumps `term`, so checking the
-        // stored value would allow exactly one extension and then lock the
-        // loan out. A one-month loan can roll forward as often as needed.
-        if (! $loan->isOneMonthTerm()) {
-            throw ValidationException::withMessages([
-                'term' => 'Only loans with a one-month term can be extended.',
-            ]);
-        }
+        $this->assertExtendable($loan);
 
-        if (! in_array($loan->status, ['released', 'ongoing'])) {
-            throw ValidationException::withMessages([
-                'status' => 'Only released or ongoing loans can be extended.',
-            ]);
-        }
+        // A deadlock or lock wait timeout is a 409, not a 500. This is the
+        // outermost transaction: LoanController::extend() and the test helpers
+        // are the only callers. The interest is collected inside it, under its
+        // loan lock, through recordRepaymentOnLockedLoan(): processRepayment()
+        // opens a LoanWriteTransaction of its own, which must be the outermost.
+        return LoanWriteTransaction::run(function () use ($loan, $user, $remarks, $interestOption, $method, $reference) {
+            // The loan row first, the order every loan write takes
+            // (LoanWriteTransaction). No collateral lock: an extension writes
+            // `ongoing` at most, over `released`, and both already pledge.
+            $this->lockLoanForExtension($loan);
 
-        if (! $loan->amortizationSchedules()->whereIn('status', ['pending', 'partial', 'overdue'])->exists()) {
-            throw ValidationException::withMessages([
-                'loan' => 'Loan has no open period to extend.',
-            ]);
-        }
+            // "defer" is new credit, so never for a former member; re-checked
+            // under the loan lock (C1 re-review, L2). "pay" stays allowed.
+            if ($interestOption === 'defer') {
+                app(Cda\FormerMemberGuard::class)->assertMemberCurrent($loan, 'interest_option', 'Choose "pay" to collect the interest instead.');
+            }
 
-        return DB::transaction(function () use ($loan, $user, $remarks, $interestOption) {
             $oldMaturityDate = $loan->maturity_date->toDateString();
             $oldTerm = $loan->term;
 
-            $openBefore = $this->openSchedules($loan);
-            $interestBefore = $this->outstandingInterest($openBefore);
+            $quoted = $this->extensionCollection($loan, now());
+            ['interest' => $interestBefore, 'amount' => $collectAmount] = $quoted;
 
-            // Settle the accrued interest first so the new period starts clean.
-            // Allocation inside processRepayment runs penalty → interest →
-            // principal, so where a penalty is outstanding this amount is
-            // consumed by that first and some interest still carries. That
-            // matches what the UI did before this moved server-side, and the
-            // carry figures below are re-read afterwards, so the arithmetic
-            // stays correct either way.
+            // Settle everything the open period owes except its principal, so
+            // the new period starts clean: one payment of the premium owed, the
+            // late penalty owed and the interest outstanding
+            // (extensionCollection()). The allocation takes them in that order
+            // and the amount covers all three, so none of the interest carries.
+            // The carry figures below are re-read after the allocation all the
+            // same, so they record what genuinely remains.
             $interestPaid = 0.0;
+            $insurancePaid = 0.0;
+            $penaltyPaid = 0.0;
+            $amountCollected = 0.0;
             $interestRepayment = null;
 
-            if ($interestOption === 'pay' && $interestBefore > 0) {
-                $interestRepayment = $this->repaymentService->processRepayment(
+            if ($interestOption === 'pay' && $collectAmount > 0) {
+                // Today's payment, refused on an imported loan whose file
+                // already counts today (ImportedPaymentsCutoff), on the
+                // field that chose to pay.
+                ImportedPaymentsCutoff::assertAllowed($loan, now(), 'interest_option');
+
+                $interestRepayment = $this->repaymentService->recordRepaymentOnLockedLoan(
                     $loan,
-                    $interestBefore,
+                    $collectAmount,
                     now()->toDateString(),
                     $user,
                     $remarks ?: '[EXTENSION INTEREST]',
+                    $method,
+                    $reference,
                 );
+                $this->assertCollectedAsQuoted($loan, $quoted, $interestRepayment);
 
-                $interestPaid = $interestBefore;
+                // What the payment applied to each part, as the repayment
+                // records it: the credit entry and `interest_paid` must say
+                // what went to interest (GET /loans/{id}/ledger reads the
+                // repayment).
+                $interestPaid = (float) $interestRepayment->interest_applied;
+                $insurancePaid = (float) $interestRepayment->insurance_applied;
+                $penaltyPaid = (float) $interestRepayment->penalty_applied;
+                $amountCollected = (float) $interestRepayment->amount_paid;
             }
 
-            // Re-read: on the 'pay' path the rows above have just been
-            // allocated against, so this is what genuinely remains.
-            $openSchedules = $this->openSchedules($loan);
+            // Read after the collection: on the 'pay' path the rows above have
+            // just been allocated against, so this is what genuinely remains.
+            // extensionPreview() reads the same figures the same way.
+            [
+                'carry_principal' => $carryPrincipal,
+                'carry_interest' => $carryInterest,
+                'cycles' => $cycles,
+                'fresh_interest' => $freshInterest,
+                'new_interest_due' => $newInterestDue,
+                'new_total_due' => $newTotalDue,
+                'new_due_date' => $newDueDate,
+                'latest_open_due_date' => $latestOpenDueDate,
+            ] = $this->extensionFigures($loan, now());
 
-            $carryPrincipal = round($openSchedules->sum(
-                fn ($s) => (float) $s->principal_due - (float) $s->principal_paid,
-            ), 2);
-            $carryInterest = $this->outstandingInterest($openSchedules);
-
-            $latestOpenDueDate = Carbon::parse($openSchedules->max('due_date'));
             $maxPeriodNumber = (int) $loan->amortizationSchedules()->max('period_number');
 
-            // PH monthly-rate convention — same as LoanService::buildUponMaturity.
-            // One flat cycle regardless of how many days the cycle spans.
-            $freshInterest = round($carryPrincipal * ((float) $loan->interest_rate / 100), 2);
-
-            $newDueDate = $this->stepNextPeriod($latestOpenDueDate, $loan->frequency);
-
-            // On 'defer' this is where the stacking happens: the unpaid interest
-            // is still in $carryInterest and the fresh cycle is added on top.
-            $newInterestDue = round($carryInterest + $freshInterest, 2);
-            $newTotalDue = round($carryPrincipal + $newInterestDue, 2);
             $oldValues = [
                 'maturity_date' => $oldMaturityDate,
                 'term' => $oldTerm,
@@ -193,15 +473,41 @@ class LoanAdjustmentService
                 // stood, which is what the drift backfill reads.
                 'carry_principal' => $carryPrincipal,
                 'carry_interest' => $carryInterest,
+                // The anchored cycles the due date moved, at least 1. An
+                // overdue loan moves past the day it is extended, and
+                // `fresh_interest` is this many cycles of interest.
+                'cycles' => $cycles,
                 'fresh_interest' => $freshInterest,
                 'new_due_date' => $newDueDate->toDateString(),
                 'interest_option' => $interestOption,
+                // What the 'pay' collection took, by part (all 0 on 'defer'):
+                // the whole amount, the premium, the late penalty and the
+                // interest. The same figures as the preview's `collect_now`.
+                'amount_collected' => $amountCollected,
                 'interest_paid' => $interestPaid,
+                'insurance_paid' => $insurancePaid,
+                'penalty_paid' => $penaltyPaid,
+                // The payment that collected it, whatever it went to (all of
+                // it to penalty, or only to the premium, writes no interest
+                // credit). Its void is refused on this link
+                // (RepaymentService::assertNotAnExtensionCollection()), and
+                // GET /loans/{id}/ledger shows it as the extension's payment.
+                'repayment_id' => $interestRepayment?->id,
             ];
 
-            $loan->amortizationSchedules()
-                ->whereIn('status', ['pending', 'partial', 'overdue'])
-                ->delete();
+            $adjustment = LoanAdjustment::create([
+                'loan_id' => $loan->id,
+                'adjustment_type' => 'extension',
+                'description' => $cycles === 1 ? 'Loan extended by one cycle.' : "Loan extended by {$cycles} cycles.",
+                'old_values' => $oldValues,
+                'new_values' => $newValues,
+                'status' => 'applied',
+                'remarks' => $remarks,
+                'adjusted_by' => $user->id,
+                'applied_at' => now(),
+            ]);
+
+            $this->closeOpenSchedules($loan, $adjustment, $carryPrincipal);
 
             AmortizationSchedule::create([
                 'loan_id' => $loan->id,
@@ -221,18 +527,6 @@ class LoanAdjustmentService
                 'maturity_date' => $newDueDate,
             ]);
 
-            $adjustment = LoanAdjustment::create([
-                'loan_id' => $loan->id,
-                'adjustment_type' => 'extension',
-                'description' => 'Loan extended by one cycle.',
-                'old_values' => $oldValues,
-                'new_values' => $newValues,
-                'status' => 'applied',
-                'remarks' => $remarks,
-                'adjusted_by' => $user->id,
-                'applied_at' => now(),
-            ]);
-
             $this->recordExtensionLedgerEntries(
                 $loan,
                 $adjustment,
@@ -241,8 +535,331 @@ class LoanAdjustmentService
                 $interestRepayment,
             );
 
+            // Sent once the extension commits; one that rolls back tells nobody.
+            app(Notifications::class)->extensionApplied($loan, $adjustment, $user);
+
             return $adjustment;
+        }, racedUniqueIndex: Repayment::RECEIPT_NUMBER_INDEX);
+    }
+
+    /**
+     * What POST /loans/{loan}/extend with `$interestOption` would collect and
+     * record, for GET /loans/{loan}/extension-preview. Writes nothing.
+     *
+     * Refuses, with the same 422s, a loan the extension would refuse. The rest
+     * runs as extendLoan() does, under the loan's lock
+     * (RepaymentService::rolledBackUnderPaymentLock()) in a transaction that is
+     * then rolled back: it reads what 'pay' collects under the lock
+     * (extensionCollection(): premium owed, late penalty owed and interest
+     * outstanding), on 'pay' collects it through the real allocation, and reads
+     * the carry figures after it through extensionFigures(), the method
+     * extendLoan() reads them with, so the preview and the extension cannot
+     * drift.
+     *
+     * @return array{interest_option: string, collect_now: array{amount: float, insurance_part: float, penalty_part: float, interest_part: float}, carry_principal: float, carry_interest: float, cycles: int, fresh_interest: float, new_interest_due: float, new_total_due: float, new_due_date: string}
+     */
+    public function extensionPreview(Loan $loan, string $interestOption, User $user, Carbon $asOf): array
+    {
+        $this->assertExtendable($loan);
+
+        return $this->repaymentService->rolledBackUnderPaymentLock($loan, function (Loan $loan) use ($interestOption, $user, $asOf): array {
+            // Again under the lock, as extendLoan() does in lockLoanForExtension().
+            $this->assertSingleOpenPeriod($this->openSchedules($loan));
+
+            $collectNow = ['amount' => 0.0, 'insurance_part' => 0.0, 'penalty_part' => 0.0, 'interest_part' => 0.0];
+            $quoted = $this->extensionCollection($loan, $asOf);
+            $collectAmount = $quoted['amount'];
+
+            if ($interestOption === 'pay' && $collectAmount > 0) {
+                ImportedPaymentsCutoff::assertAllowed($loan, $asOf, 'interest_option');
+
+                $repayment = $this->repaymentService->recordRepaymentOnLockedLoan(
+                    $loan,
+                    $collectAmount,
+                    $asOf->toDateString(),
+                    $user,
+                    postToBooks: false,
+                    preview: true,
+                );
+                $this->assertCollectedAsQuoted($loan, $quoted, $repayment);
+
+                $collectNow = [
+                    'amount' => round((float) $repayment->amount_paid, 2),
+                    'insurance_part' => round((float) $repayment->insurance_applied, 2),
+                    'penalty_part' => round((float) $repayment->penalty_applied, 2),
+                    'interest_part' => round((float) $repayment->interest_applied, 2),
+                ];
+            }
+
+            $figures = $this->extensionFigures($loan, $asOf);
+
+            return [
+                'interest_option' => $interestOption,
+                'collect_now' => $collectNow,
+                'carry_principal' => $figures['carry_principal'],
+                'carry_interest' => $figures['carry_interest'],
+                'cycles' => $figures['cycles'],
+                'fresh_interest' => $figures['fresh_interest'],
+                'new_interest_due' => $figures['new_interest_due'],
+                'new_total_due' => $figures['new_total_due'],
+                'new_due_date' => $figures['new_due_date']->toDateString(),
+            ];
         });
+    }
+
+    /**
+     * What an extension on 'pay' collects in its one payment: everything the
+     * open period owes except its principal, so the old period is settled in
+     * full and only principal moves to the new one. That is the insurance
+     * premium still owed on the loan, the late penalty owed on the open
+     * periods and the interest outstanding on them, which the allocation
+     * takes in that order (RepaymentService::recordRepaymentOnLockedLoan()).
+     *
+     * The penalty is what the payment's own penalty step will charge on
+     * `$asOf` (RepaymentService::penaltyAsOf(), which writes nothing), less
+     * what is already paid toward it; a period it leaves alone owes its
+     * stamped penalty. Only one open period is allowed
+     * (assertSingleOpenPeriod(), checked again under the lock), so the amount
+     * reaches no principal; assertCollectedAsQuoted() checks it. Read under
+     * the loan's lock, in whole centavos. extendLoan() charges it and
+     * extensionPreview() quotes it, so the two cannot drift.
+     *
+     * @return array{insurance: float, penalty: float, interest: float, amount: float}
+     */
+    private function extensionCollection(Loan $loan, Carbon $asOf): array
+    {
+        $paymentDate = $asOf->copy()->startOfDay();
+        $openSchedules = $this->openSchedules($loan);
+
+        $insurance = max(0, LoanService::toCentavos((float) $loan->insurance_remaining_balance));
+        $interest = LoanService::toCentavos($this->outstandingInterest($openSchedules));
+        $penalty = 0;
+
+        foreach ($openSchedules as $schedule) {
+            $charged = $this->repaymentService->penaltyAsOf($loan, $schedule, $paymentDate) ?? (float) $schedule->penalty_amount;
+            $penalty += max(0, LoanService::toCentavos($charged) - LoanService::toCentavos((float) $schedule->penalty_paid));
+        }
+
+        return [
+            'insurance' => $insurance / 100,
+            'penalty' => $penalty / 100,
+            'interest' => $interest / 100,
+            'amount' => ($insurance + $penalty + $interest) / 100,
+        ];
+    }
+
+    /**
+     * Refuse, with a 422, a collection the allocation applied differently
+     * from what extensionCollection() quoted: each part (premium, penalty,
+     * interest), nothing to principal, and nothing left over. The quote and
+     * the allocation read the same rows under the same lock, so a mismatch is
+     * a defect, not a race; it is logged, and the caller's transaction rolls
+     * the payment back, so nothing is charged.
+     *
+     * @param  array{insurance: float, penalty: float, interest: float, amount: float}  $quoted
+     */
+    private function assertCollectedAsQuoted(Loan $loan, array $quoted, Repayment $repayment): void
+    {
+        $quotedCentavos = [
+            'amount' => LoanService::toCentavos($quoted['amount']),
+            'insurance' => LoanService::toCentavos($quoted['insurance']),
+            'penalty' => LoanService::toCentavos($quoted['penalty']),
+            'interest' => LoanService::toCentavos($quoted['interest']),
+            'principal' => 0,
+            'overpayment' => 0,
+        ];
+        $appliedCentavos = [
+            'amount' => LoanService::toCentavos((float) $repayment->amount_paid),
+            'insurance' => LoanService::toCentavos((float) $repayment->insurance_applied),
+            'penalty' => LoanService::toCentavos((float) $repayment->penalty_applied),
+            'interest' => LoanService::toCentavos((float) $repayment->interest_applied),
+            'principal' => LoanService::toCentavos((float) $repayment->principal_applied),
+            'overpayment' => LoanService::toCentavos((float) $repayment->overpayment),
+        ];
+
+        if ($quotedCentavos === $appliedCentavos) {
+            return;
+        }
+
+        Log::error('Loan extension: the collection did not apply what was quoted; extension refused.', [
+            'loan_id' => $loan->id,
+            'quoted_centavos' => $quotedCentavos,
+            'applied_centavos' => $appliedCentavos,
+        ]);
+
+        throw ValidationException::withMessages([
+            'loan' => 'The amount to collect could not be applied as quoted, so nothing was charged. Refresh and try again.',
+        ]);
+    }
+
+    /**
+     * Refuse, with a 422, an extension that would carry no principal: with
+     * nothing open, or the principal already paid, the new period would owe
+     * ₱0.00 principal (and, on a completed loan, reopen it).
+     *
+     * @param  \Illuminate\Database\Eloquent\Collection<int, AmortizationSchedule>  $openSchedules
+     */
+    private function assertPrincipalLeftToExtend(\Illuminate\Database\Eloquent\Collection $openSchedules): void
+    {
+        $carryCentavos = $openSchedules->sum(
+            fn (AmortizationSchedule $s) => LoanService::toCentavos((float) $s->principal_due) - LoanService::toCentavos((float) $s->principal_paid),
+        );
+
+        if ($openSchedules->isEmpty() || $carryCentavos <= 0) {
+            throw ValidationException::withMessages([
+                'loan' => 'Nothing is left to extend: the principal is already paid.',
+            ]);
+        }
+    }
+
+    /**
+     * Refuse, with a 422, a loan that cannot be extended: not a one-month
+     * term, not released or ongoing, no open period, more than one open
+     * period, or no principal left to carry.
+     *
+     * Extension is limited to one-month-term loans, whatever the product.
+     * Loan::isOneMonthTerm() reads the ORIGINAL term rather than the current
+     * one: each extension moves the maturity date, so checking the stored
+     * figures would allow exactly one extension and then lock the loan out. A
+     * one-month loan can roll forward as often as needed.
+     */
+    private function assertExtendable(Loan $loan): void
+    {
+        if (! $loan->isOneMonthTerm()) {
+            throw ValidationException::withMessages([
+                'term' => 'Only loans with a one-month term can be extended.',
+            ]);
+        }
+
+        if (! in_array($loan->status, ['released', 'ongoing'])) {
+            throw ValidationException::withMessages([
+                'status' => 'Only released or ongoing loans can be extended.',
+            ]);
+        }
+
+        $openSchedules = $this->openSchedules($loan);
+
+        if ($openSchedules->isEmpty()) {
+            throw ValidationException::withMessages([
+                'loan' => 'Loan has no open period to extend.',
+            ]);
+        }
+
+        $this->assertSingleOpenPeriod($openSchedules);
+        $this->assertPrincipalLeftToExtend($openSchedules);
+    }
+
+    /**
+     * Refuse, with a 422, a loan with more than one open period. The
+     * collection (extensionCollection()) and the carry assume the one open
+     * period a one-month loan has, which every extension leaves; with more,
+     * the allocation would pay one period's principal before the next one's
+     * interest. Checked before the lock (assertExtendable()) and again under
+     * it, in extendLoan() (lockLoanForExtension()) and extensionPreview(), so
+     * a write committed in between (a void reopening a closed period) cannot
+     * slip a second open period in.
+     *
+     * @param  \Illuminate\Database\Eloquent\Collection<int, AmortizationSchedule>  $openSchedules
+     */
+    private function assertSingleOpenPeriod(\Illuminate\Database\Eloquent\Collection $openSchedules): void
+    {
+        if ($openSchedules->count() > 1) {
+            throw ValidationException::withMessages([
+                'loan' => 'This loan has more than one open period, so it cannot be extended.',
+            ]);
+        }
+    }
+
+    /**
+     * The figures an extension records, read from the loan's open periods as
+     * they stand: after the 'pay' collection has been allocated, or untouched
+     * on 'defer'. The one place extendLoan() and extensionPreview() take them
+     * from. Reads only.
+     *
+     * The new due date is the first anchored date strictly after
+     * `$extensionDate` (nextCycleDueDate()), and `cycles` is how many cycles
+     * the due date moves to reach it, at least 1. The fresh interest is that
+     * many cycles of one month's interest at the loan's rate, whatever period
+     * the rate is quoted per: one flat cycle regardless of how many days it
+     * spans, rounded to the centavo once and then multiplied, so an overdue
+     * loan pays for every month it moves. On 'defer' the unpaid interest is
+     * still in the carry, so the fresh cycles stack on top of it. The new
+     * period is one row, so a loan with a Share Capital Build-Up carries one
+     * build-up on it however many cycles it moves
+     * (PersistedScheduleFigures): no share capital for the months skipped.
+     *
+     * @return array{carry_principal: float, carry_interest: float, cycles: int, fresh_interest: float, new_interest_due: float, new_total_due: float, new_due_date: Carbon, latest_open_due_date: Carbon}
+     */
+    private function extensionFigures(Loan $loan, Carbon $extensionDate): array
+    {
+        $openSchedules = $this->openSchedules($loan);
+
+        // After the 'pay' collection too: a period it settled in full leaves
+        // nothing to carry, and no ₱0.00 period is created.
+        $this->assertPrincipalLeftToExtend($openSchedules);
+
+        $carryPrincipal = round($openSchedules->sum(
+            fn ($s) => (float) $s->principal_due - (float) $s->principal_paid,
+        ), 2);
+        $carryInterest = $this->outstandingInterest($openSchedules);
+
+        $latestOpenDueDate = Carbon::parse($openSchedules->max('due_date'));
+        ['due_date' => $newDueDate, 'cycles' => $cycles] = $this->nextCycleDueDate($loan, $latestOpenDueDate, $extensionDate);
+
+        $oneCycleCentavos = LoanService::toCentavos($this->loanService->periodInterest($loan, $carryPrincipal, LoanTermSchedule::DAYS_PER_MONTH));
+        $freshInterest = round($cycles * $oneCycleCentavos / 100, 2);
+        $newInterestDue = round($carryInterest + $freshInterest, 2);
+
+        return [
+            'carry_principal' => $carryPrincipal,
+            'carry_interest' => $carryInterest,
+            'cycles' => $cycles,
+            'fresh_interest' => $freshInterest,
+            'new_interest_due' => $newInterestDue,
+            'new_total_due' => round($carryPrincipal + $newInterestDue, 2),
+            'new_due_date' => $newDueDate,
+            'latest_open_due_date' => $latestOpenDueDate,
+        ];
+    }
+
+    /**
+     * Lock the loan being extended and refuse with a 409 if it changed since
+     * the request read it.
+     *
+     * An extension always moves `maturity_date`, and so does every other
+     * rescheduling write, so a maturity date that no longer matches the one
+     * this request read means another extension (or an adjustment) got there
+     * first; extending again would roll the loan forward twice and collect the
+     * interest twice. A loan no longer released or ongoing, or left with no
+     * open period, has likewise moved under the request. `$loan` is then
+     * refreshed from its locked row. One left with more than one open period
+     * (a void committed since reopened one) is refused with the same 422 as
+     * assertExtendable() (assertSingleOpenPeriod()).
+     *
+     * @throws HttpResponseException 409 when the loan changed since it was read
+     * @throws ValidationException 422 when it has more than one open period
+     */
+    private function lockLoanForExtension(Loan $loan): void
+    {
+        $locked = Loan::whereKey($loan->getKey())->lockForUpdate()->first();
+
+        $changed = $locked === null
+            || ! in_array($locked->status, ['released', 'ongoing'], true)
+            || $locked->maturity_date?->toDateString() !== $loan->maturity_date?->toDateString();
+
+        if ($changed) {
+            throw LoanWriteTransaction::conflict();
+        }
+
+        $loan->setRawAttributes($locked->getAttributes(), true);
+
+        $openSchedules = $this->openSchedules($loan);
+
+        if ($openSchedules->isEmpty()) {
+            throw LoanWriteTransaction::conflict();
+        }
+
+        $this->assertSingleOpenPeriod($openSchedules);
     }
 
     /**
@@ -296,6 +913,7 @@ class LoanAdjustmentService
     {
         return $loan->amortizationSchedules()
             ->whereIn('status', ['pending', 'partial', 'overdue'])
+            ->with(['principalChanges', 'postedPrincipalPayments'])
             ->get();
     }
 
@@ -309,43 +927,373 @@ class LoanAdjustmentService
         ), 2);
     }
 
-    private function stepNextPeriod(Carbon $date, string $frequency): Carbon
+    /**
+     * Close the open periods money was collected on, and delete the rest.
+     *
+     * A closed period is due exactly what was collected on it and is `paid`,
+     * so what the borrower paid stays on the period it paid and in Total Paid;
+     * only the unpaid remainder moves into the rescheduled periods. Deleting
+     * partly paid periods, as this used to, took collected money off the loan.
+     *
+     * A payment made before this adjustment can no longer be voided
+     * (RepaymentService::assertNotRescheduledSincePaid()): the new periods were
+     * worked out from the balance it left, so reversing it would reopen a
+     * closed period under terms built on money it collected. Staff correct the
+     * loan with a balance adjustment instead.
+     *
+     * `closed_by_adjustment_id` marks the period, because a closed period is
+     * not paid in full and must not be the one the next restructure starts
+     * after (see lastPaidInFull()). Periods are not audited models, so the
+     * audit row is the only record of what each one was due before.
+     */
+    private function closeOpenSchedules(Loan $loan, LoanAdjustment $adjustment, float $carriedPrincipal): void
     {
-        return match ($frequency) {
-            'daily' => $date->copy()->addDay(),
-            'weekly' => $date->copy()->addWeek(),
-            'bi_weekly' => $date->copy()->addDays(14),
-            'semi_monthly' => $date->copy()->addDays(15),
-            'monthly', 'upon_maturity' => $date->copy()->addMonth(),
-        };
+        $before = [];
+        $after = [];
+
+        foreach ($this->openSchedules($loan) as $schedule) {
+            $collected = round((float) $schedule->principal_paid + (float) $schedule->interest_paid + (float) $schedule->penalty_paid, 2);
+
+            if ($collected <= 0) {
+                $schedule->delete();
+
+                continue;
+            }
+
+            $before[] = [
+                'schedule_id' => $schedule->id,
+                'period_number' => $schedule->period_number,
+                'principal_due' => (float) $schedule->principal_due,
+                'interest_due' => (float) $schedule->interest_due,
+                'penalty_amount' => (float) $schedule->penalty_amount,
+                'principal_paid' => (float) $schedule->principal_paid,
+                'interest_paid' => (float) $schedule->interest_paid,
+                'penalty_paid' => (float) $schedule->penalty_paid,
+            ];
+
+            // The months the period was late keep the principal they were
+            // charged on, so the Ledger keeps a line per monthly charge.
+            AmortizationPrincipalChange::record($schedule, Carbon::today()->toDateString(), (float) $schedule->principal_due, (float) $schedule->principal_paid, $adjustment->id);
+
+            $schedule->update([
+                'principal_due' => $schedule->principal_paid,
+                'interest_due' => $schedule->interest_paid,
+                'penalty_amount' => $schedule->penalty_paid,
+                // `total_due` excludes penalty everywhere else in this codebase.
+                'total_due' => round((float) $schedule->principal_paid + (float) $schedule->interest_paid, 2),
+                'remaining_balance' => round($carriedPrincipal, 2),
+                'status' => 'paid',
+                'closed_by_adjustment_id' => $adjustment->id,
+            ]);
+
+            $after[] = [
+                'schedule_id' => $schedule->id,
+                'period_number' => $schedule->period_number,
+                'principal_due' => (float) $schedule->principal_due,
+                'interest_due' => (float) $schedule->interest_due,
+                'penalty_amount' => (float) $schedule->penalty_amount,
+                'collected' => $collected,
+            ];
+        }
+
+        if ($after === []) {
+            return;
+        }
+
+        $totalCollected = round(array_sum(array_column($after, 'collected')), 2);
+
+        AuditLogService::log(
+            'periods_closed',
+            $adjustment,
+            ['periods' => $before],
+            ['periods' => $after, 'total_collected' => $totalCollected, 'carried_principal' => round($carriedPrincipal, 2)],
+            sprintf(
+                '%s closed %d partly paid period(s) of loan %s at the ₱%s collected on them and carried the rest forward.',
+                $adjustment->adjustment_number,
+                count($after),
+                $loan->displayNumber(),
+                number_format($totalCollected, 2),
+            ),
+        );
     }
 
-    public function applyAdjustment(LoanAdjustment $adjustment): LoanAdjustment
+    /**
+     * The latest period paid in full, which a rebuilt schedule starts after.
+     *
+     * A period a reschedule closed is `paid` too, but only for what was
+     * collected on it: the rest of it was carried into later periods, so
+     * starting after it would move the borrower's next due date.
+     */
+    private function lastPaidInFull(Loan $loan): ?AmortizationSchedule
+    {
+        // reorder(), because the relation already sorts by period_number,
+        // which would otherwise win and hand back the FIRST paid row.
+        return $loan->amortizationSchedules()
+            ->where('status', 'paid')
+            ->whereNull('closed_by_adjustment_id')
+            ->reorder('due_date', 'desc')
+            ->first();
+    }
+
+    /**
+     * How many instalments of the loan's length lie before a rebuilt schedule.
+     *
+     * The periods up to the latest one paid in full, less those a reschedule
+     * closed: a closed period shares its instalment with the period that took
+     * over its remainder, so it adds a period number but no length.
+     */
+    private function instalmentsBefore(Loan $loan): int
+    {
+        $lastPaidPeriod = (int) $loan->amortizationSchedules()
+            ->where('status', 'paid')
+            ->whereNull('closed_by_adjustment_id')
+            ->max('period_number');
+
+        $closedBefore = $loan->amortizationSchedules()
+            ->where('period_number', '<', $lastPaidPeriod)
+            ->whereNotNull('closed_by_adjustment_id')
+            ->count();
+
+        return $lastPaidPeriod - $closedBefore;
+    }
+
+    /**
+     * The term that reschedules `$instalments` instalments of `$frequency`.
+     *
+     * Restructure and term-extension adjustments count instalments. A months
+     * term paid monthly or at maturity counts them already. Any other loan is
+     * rescheduled as a days term of that many whole instalments, which
+     * LoanTermSchedule splits back into exactly that many.
+     *
+     * @return array{term: int, term_unit: string}
+     */
+    private function termForInstalments(Loan $loan, int $instalments, string $frequency): array
+    {
+        if (LoanTermSchedule::stepsByCalendarMonth($loan->term_unit->value, $frequency)) {
+            return ['term' => $instalments, 'term_unit' => TermUnit::Months->value];
+        }
+
+        return [
+            'term' => $instalments * LoanTermSchedule::PERIOD_DAYS[$frequency],
+            'term_unit' => TermUnit::Days->value,
+        ];
+    }
+
+    /**
+     * The first cycle date after `$latestDueDate` that falls strictly after
+     * the extension date, and how many cycles the due date moves to reach it
+     * (at least 1). A loan extended before or on its due date moves one cycle;
+     * an overdue one moves as many as it takes to land after the extension
+     * date, so its new period is never late the day it is created.
+     *
+     * A monthly or upon-maturity cycle lands on an anchored date: the loan's
+     * anchor day, capped at a shorter month's end. A loan started on the 31st
+     * rolls 28 Feb -> 31 Mar -> 30 Apr instead of staying on the 28th. An open
+     * row an overflowing month step pushed into the first days of the next
+     * month (3 Mar) rolls to that month's anchored date (31 Mar); every other
+     * row rolls into the following month. See
+     * LoanTermSchedule::firstAnchoredDateAfter().
+     *
+     * @return array{due_date: Carbon, cycles: int}
+     */
+    private function nextCycleDueDate(Loan $loan, Carbon $latestDueDate, Carbon $extensionDate): array
+    {
+        if (in_array($loan->frequency, ['monthly', 'upon_maturity'], true)) {
+            return LoanTermSchedule::firstAnchoredDateAfter($latestDueDate, $extensionDate, $this->anchorDay($loan));
+        }
+
+        $periodDays = LoanTermSchedule::PERIOD_DAYS[$loan->frequency];
+        $daysPast = (int) $latestDueDate->copy()->startOfDay()->diffInDays($extensionDate->copy()->startOfDay(), false);
+        $cycles = intdiv(max(0, $daysPast), $periodDays) + 1;
+
+        return ['due_date' => $latestDueDate->copy()->addDays($cycles * $periodDays), 'cycles' => $cycles];
+    }
+
+    /**
+     * The day of the month a loan's calendar-month due dates fall on: the day
+     * it started, whichever row a rebuild or a roll-forward starts from.
+     */
+    private function anchorDay(Loan $loan): int
+    {
+        return $loan->start_date->day;
+    }
+
+    /**
+     * Where a schedule rebuilt on `$tempLoan` ends: its last row's due date,
+     * on `$loan`'s anchor day when it steps by calendar month.
+     *
+     * Set on the temporary loan before its schedule is built, because a single
+     * payment at maturity takes its due date from `maturity_date`.
+     */
+    private function rescheduledMaturityDate(Loan $tempLoan, Loan $loan): Carbon
+    {
+        return LoanTermSchedule::maturityDate(
+            Carbon::parse($tempLoan->start_date),
+            (int) $tempLoan->term,
+            $tempLoan->term_unit->value,
+            $tempLoan->frequency,
+            $this->anchorDay($loan),
+        );
+    }
+
+    /**
+     * Apply an approved adjustment to its loan's schedule.
+     *
+     * The checks before the transaction refuse, with a 422, an apply that was
+     * wrong from the start. The transaction then locks in the order every loan
+     * write takes (LoanWriteTransaction): the loan, then this adjustment
+     * (lockAdjustmentRows()), and re-reads the adjustment under its lock,
+     * because two applies that both passed the status check would otherwise
+     * both rewrite the schedule. The second finds it already applied and is
+     * answered with a 409, as is a deadlock or a lock wait timeout, with
+     * nothing of it left.
+     *
+     * No collateral lock: no adjustment type changes what the loan pledges or
+     * moves it into or out of Loan::PLEDGING_STATUSES (a restructure
+     * adjustment keeps the loan's status on purpose; see applyRestructure()).
+     *
+     * The loan must still be released or ongoing, as it had to be for the
+     * adjustment to be requested (createAdjustment()): one completed, closed
+     * by a restructure, defaulted or voided since is a 422 when the request
+     * reads it so, and a 409 when it moved between that read and the lock.
+     *
+     * This is the outermost transaction: LoanAdjustmentController::apply() and
+     * the test helpers are the only callers.
+     *
+     * `$userId` is who applied it, and posts a balance adjustment's journal
+     * (applyBalanceAdjustment()). The controller passes the signed-in user;
+     * a caller that passes none posts as the adjustment's approver, who
+     * held the same permission. With neither, a balance adjustment that would
+     * post is refused rather than posted as nobody.
+     */
+    public function applyAdjustment(LoanAdjustment $adjustment, ?int $userId = null): LoanAdjustment
     {
         $this->guardStatus($adjustment, 'approved', 'apply');
+        $this->assertPayloadFitsType($adjustment);
 
-        return DB::transaction(function () use ($adjustment) {
-            $loan = $adjustment->loan;
+        if (! in_array($adjustment->loan?->status, Loan::ACTIVE_STATUSES, true)) {
+            throw ValidationException::withMessages([
+                'loan' => 'Adjustments can only be applied to released or ongoing loans.',
+            ]);
+        }
+
+        return LoanWriteTransaction::run(function () use ($adjustment, $userId) {
+            $loan = $this->lockAdjustmentRows($adjustment, 'approved');
+            $userId ??= $adjustment->approved_by;
+
+            // Set before the type is applied, so a balance adjustment's
+            // journal is dated the moment the adjustment records.
+            $appliedAt = now();
+            $adjustment->applied_at = $appliedAt;
+
+            if (! in_array($loan->status, Loan::ACTIVE_STATUSES, true)) {
+                throw LoanWriteTransaction::conflict();
+            }
+
+            $this->assertTargetPrincipalUnchanged($adjustment, $loan);
 
             match ($adjustment->adjustment_type) {
                 'restructure' => $this->applyRestructure($adjustment, $loan),
                 'penalty_waiver' => $this->applyPenaltyWaiver($adjustment, $loan),
-                'balance_adjustment' => $this->applyBalanceAdjustment($adjustment, $loan),
+                'balance_adjustment' => $this->applyBalanceAdjustment($adjustment, $loan, $userId),
                 'term_extension' => $this->applyTermExtension($adjustment, $loan),
             };
 
             $adjustment->update([
                 'status' => 'applied',
-                'applied_at' => now(),
+                'applied_at' => $appliedAt,
             ]);
+
+            // One notice per extension or restructure, however it is applied;
+            // sent once this commits. The actor is the signed-in user.
+            match ($adjustment->adjustment_type) {
+                'restructure' => app(Notifications::class)->restructureApplied($loan, $adjustment),
+                'term_extension' => app(Notifications::class)->extensionApplied($loan, $adjustment),
+                default => null,
+            };
 
             return $adjustment;
         });
     }
 
+    /**
+     * Lock the adjustment's loan row, then the adjustment's own, and refuse
+     * with a 409 unless the adjustment is still in `$expectedStatus`: pending
+     * for an approve or a reject, approved for an apply or a cancel.
+     *
+     * Two locking reads, in the order every loan write takes
+     * (LoanWriteTransaction), and the first statements of the transaction. The
+     * adjustment is refreshed from its locked row and handed the locked loan,
+     * so the write works from what is committed rather than from what the
+     * request read before the lock.
+     *
+     * @throws HttpResponseException 409 when the adjustment was decided, applied, or otherwise moved, since it was read
+     */
+    private function lockAdjustmentRows(LoanAdjustment $adjustment, string $expectedStatus): Loan
+    {
+        $loan = Loan::whereKey($adjustment->loan_id)->lockForUpdate()->first();
+        $locked = LoanAdjustment::whereKey($adjustment->getKey())->lockForUpdate()->first();
+
+        if ($loan === null || $locked === null || $locked->status !== $expectedStatus) {
+            throw LoanWriteTransaction::conflict();
+        }
+
+        $adjustment->setRawAttributes($locked->getAttributes(), true);
+        $adjustment->setRelation('loan', $loan);
+
+        return $loan;
+    }
+
+    /**
+     * An in-place restructure's new rate (finish run round 5), held to the
+     * rule a loan edit's changed rate is: at most 100%, as every rate is, and
+     * inside its product's range in the loan's own rate period
+     * (LoanRateRange), in the same words. A rate equal to the loan's, or none,
+     * changes nothing and is not checked.
+     *
+     * Checked when the restructure is requested, approved and applied, each
+     * time against the loan and its product as they are then, so a product
+     * changed in between refuses it, and so does a request stored before this
+     * rule (150% was accepted). A refused approval leaves the request pending,
+     * to be rejected; a refused apply leaves it approved and the loan as it
+     * was, and staff request a new restructure.
+     *
+     * @param  array<string, mixed>  $newValues  the restructure's own new values
+     *
+     * @throws ValidationException on `new_values.interest_rate`
+     */
+    private function assertRestructureRate(Loan $loan, array $newValues): void
+    {
+        $rate = $newValues['interest_rate'] ?? null;
+
+        if ($rate === null) {
+            return;
+        }
+
+        if (! is_numeric($rate)) {
+            throw ValidationException::withMessages(['new_values.interest_rate' => [self::RATE_NOT_A_NUMBER]]);
+        }
+
+        $value = BigDecimal::of((string) $rate);
+
+        if ($value->isEqualTo((string) $loan->interest_rate)) {
+            return;
+        }
+
+        if ($value->isGreaterThan(100)) {
+            throw ValidationException::withMessages(['new_values.interest_rate' => [self::RATE_OVER_MAXIMUM]]);
+        }
+
+        LoanRateRange::assertChangeable($loan, $loan->loanProduct, (string) $value, field: 'new_values.interest_rate');
+    }
+
     private function applyRestructure(LoanAdjustment $adjustment, Loan $loan): void
     {
-        $newValues = $adjustment->new_values;
+        $newValues = $adjustment->ownNewValues();
+
+        // Before anything is written: the product may have changed since the
+        // restructure was approved, or it was approved before the rate rule.
+        $this->assertRestructureRate($loan, $newValues);
 
         // Compute outstanding from unpaid schedules
         $unpaidSchedules = $loan->amortizationSchedules()
@@ -354,40 +1302,47 @@ class LoanAdjustmentService
 
         $outstanding = $unpaidSchedules->sum(fn ($s) => (float) $s->principal_due - (float) $s->principal_paid);
 
-        // Last paid period number
-        $lastPaidPeriod = $loan->amortizationSchedules()
-            ->where('status', 'paid')
-            ->max('period_number') ?? 0;
+        // Instalments already behind the loan, and the period the new
+        // schedule starts after, both from the periods paid in full.
+        $instalmentsBefore = $this->instalmentsBefore($loan);
+        $lastPaidSchedule = $this->lastPaidInFull($loan);
 
-        // Delete unpaid schedules
-        $loan->amortizationSchedules()
-            ->whereIn('status', ['pending', 'partial', 'overdue'])
-            ->delete();
+        $this->closeOpenSchedules($loan, $adjustment, $outstanding);
+        $lastKeptPeriod = (int) $loan->amortizationSchedules()->max('period_number');
 
         // Update loan with new terms
         $newRate = $newValues['interest_rate'] ?? $loan->interest_rate;
-        $newTerm = $newValues['term'] ?? $loan->term;
+        // `term` here counts instalments, like every restructure input.
+        $newTerm = $newValues['term'] ?? count(LoanTermSchedule::instalments(
+            Carbon::parse($loan->start_date),
+            $loan->term,
+            $loan->term_unit->value,
+            $loan->frequency,
+        ));
         $newFrequency = $newValues['frequency'] ?? $loan->frequency;
 
         // Build new schedule using a temporary loan state
         $tempLoan = $loan->replicate();
         $tempLoan->principal_amount = $outstanding;
         $tempLoan->interest_rate = $newRate;
-        $tempLoan->term = $newTerm;
+        $tempLoan->fill($this->termForInstalments($loan, (int) $newTerm, $newFrequency));
         $tempLoan->frequency = $newFrequency;
         $tempLoan->interest_method = $loan->interest_method;
 
-        // Use the last due date of paid schedules as new start date
-        $lastPaidSchedule = $loan->amortizationSchedules()->where('status', 'paid')->orderByDesc('due_date')->first();
+        // Use the last due date of paid schedules as new start date. The rows
+        // still fall on the loan's own anchor day, not on that row's day,
+        // starting at the next anchored date after it (see
+        // LoanTermSchedule::nthAnchoredDateAfter()).
         $tempLoan->start_date = $lastPaidSchedule ? $lastPaidSchedule->due_date : $loan->start_date;
+        $tempLoan->maturity_date = $this->rescheduledMaturityDate($tempLoan, $loan);
 
-        $newSchedule = $this->loanService->buildAmortizationPreview($tempLoan);
+        $newSchedule = $this->loanService->buildAmortizationPreview($tempLoan, $this->anchorDay($loan));
 
-        // Persist with continued period numbers
+        // Numbered on from every period kept, closed ones included.
         foreach ($newSchedule as $row) {
             AmortizationSchedule::create([
                 'loan_id' => $loan->id,
-                'period_number' => $lastPaidPeriod + $row['period_number'],
+                'period_number' => $lastKeptPeriod + $row['period_number'],
                 'due_date' => $row['due_date'],
                 'principal_due' => $row['principal_due'],
                 'interest_due' => $row['interest_due'],
@@ -397,15 +1352,6 @@ class LoanAdjustmentService
             ]);
         }
 
-        // Update loan record
-        $newMaturity = $this->loanService->computeMaturityDate(
-            $tempLoan->start_date instanceof Carbon
-                ? $tempLoan->start_date->toDateString()
-                : $tempLoan->start_date,
-            $newTerm,
-            $newFrequency,
-        );
-
         // The loan keeps its released/ongoing status on purpose. This adjustment
         // reschedules a balance that is still owed, and
         // RepaymentService::processRepayment() only accepts released/ongoing —
@@ -414,15 +1360,15 @@ class LoanAdjustmentService
         // moved to a NEW loan (see LoanService::closeRestructuredSource()).
         $loan->update([
             'interest_rate' => $newRate,
-            'term' => $lastPaidPeriod + $newTerm,
+            ...$this->termForInstalments($loan, $instalmentsBefore + $newTerm, $newFrequency),
             'frequency' => $newFrequency,
-            'maturity_date' => $newMaturity,
+            'maturity_date' => $tempLoan->maturity_date,
         ]);
     }
 
     private function applyPenaltyWaiver(LoanAdjustment $adjustment, Loan $loan): void
     {
-        $newValues = $adjustment->new_values;
+        $newValues = $adjustment->ownNewValues();
         $waiveAll = $newValues['waive_all'] ?? false;
 
         // Waiving every penalty on the loan must be asked for explicitly.
@@ -435,18 +1381,78 @@ class LoanAdjustmentService
             ]);
         }
 
-        $query = $loan->amortizationSchedules()
-            ->whereIn('status', ['pending', 'partial', 'overdue']);
+        $before = [];
+        $after = [];
 
-        if (! $waiveAll) {
-            $query->whereIn('id', $newValues['schedule_ids']);
-        }
+        // A waiver forgives only the penalty still owed. The charge comes down
+        // to what the borrower has already paid, and `penalty_paid` is never
+        // touched: zeroing it, as this used to, erased penalty that a posted
+        // receipt still carries, so Total Paid dropped and a later void took
+        // the missing penalty out of interest or principal instead.
+        //
+        // The period keeps a link to this waiver, and a checkpoint on the day
+        // it cleared the penalty with the charge it left (option b, from the
+        // monthly penalty, Arvin, 2026-11-11):
+        // RepaymentService::penaltyStateAsOf() charges nothing more until the
+        // period's next monthly charge day, then a charge a month while it
+        // stays unpaid. Waivers made before the switch have no checkpoint and
+        // keep their period penalty-free (option a), and a new waiver on such
+        // a period leaves it so.
+        //
+        // Each period is first charged up to today, so a waiver applied before
+        // the night's run forgives the month that fell today rather than
+        // leaving it uncharged for good.
+        $today = Carbon::today();
 
-        $query->each(function (AmortizationSchedule $schedule) {
-            $schedule->update([
-                'penalty_amount' => 0,
-                'penalty_paid' => 0,
-            ]);
+        $this->selectedOpenSchedules($loan, $newValues)->each(function (AmortizationSchedule $schedule) use ($adjustment, $loan, $today, &$before, &$after) {
+            $waivedForGood = $schedule->isWaivedForGood();
+            $state = $this->repaymentService->penaltyStateAsOf($loan, $schedule, $today);
+
+            if ($state !== null) {
+                $schedule->penalty_amount = $state['amount'];
+                $schedule->penalty_months = $state['months'];
+            }
+
+            $charged = (float) $schedule->penalty_amount;
+            $paid = (float) $schedule->penalty_paid;
+            $owed = $this->penaltyOwed($schedule);
+
+            if ($owed > 0) {
+                if ($waivedForGood) {
+                    $schedule->penalty_amount = $paid;
+                } elseif (! $this->repaymentService->penaltyCheckpoint($loan, $schedule, $today, $paid)) {
+                    // A period the rule leaves alone today (not late by it, or
+                    // before an imported loan's baseline) still gets the
+                    // waiver's checkpoint, so it never turns into option (a),
+                    // with the charges it really has today.
+                    $charges = count($this->repaymentService->penaltyCharges($loan, $schedule, $today));
+
+                    $schedule->fill([
+                        'penalty_amount' => $paid,
+                        'penalty_months' => $charges,
+                        'penalty_checkpoint_on' => $today->toDateString(),
+                        'penalty_checkpoint_amount' => $paid,
+                        'penalty_checkpoint_months' => $charges,
+                    ]);
+                }
+
+                $schedule->penalty_waiver_id = $adjustment->id;
+                $schedule->save();
+
+                $before[] = [
+                    'schedule_id' => $schedule->id,
+                    'period_number' => $schedule->period_number,
+                    'penalty_amount' => $charged,
+                    'penalty_paid' => $paid,
+                ];
+                $after[] = [
+                    'schedule_id' => $schedule->id,
+                    'period_number' => $schedule->period_number,
+                    'penalty_amount' => $paid,
+                    'penalty_paid' => $paid,
+                    'waived' => $owed,
+                ];
+            }
 
             // Recalculate status if overdue was only due to penalty
             if ($schedule->status === 'overdue') {
@@ -458,56 +1464,221 @@ class LoanAdjustmentService
                 }
             }
         });
+
+        // Periods are not audited models, so this row is the only record of
+        // what the waiver forgave on each one, who applied it, and when.
+        $totalWaived = round(array_sum(array_column($after, 'waived')), 2);
+
+        AuditLogService::log(
+            'penalty_waived',
+            $adjustment,
+            ['periods' => $before],
+            ['periods' => $after, 'total_waived' => $totalWaived],
+            sprintf(
+                'Penalty waiver %s forgave ₱%s of unpaid penalty on loan %s.',
+                $adjustment->adjustment_number,
+                number_format($totalWaived, 2),
+                $loan->displayNumber(),
+            ),
+        );
     }
 
-    private function applyBalanceAdjustment(LoanAdjustment $adjustment, Loan $loan): void
+    /**
+     * Spread a balance adjustment over the loan's open periods, in proportion
+     * to the principal each still owes, so the periods change by exactly the
+     * amount approved, to the centavo.
+     *
+     * Worked in whole centavos (balanceAdjustmentShares()). Paid periods are
+     * never touched. A reduction larger than the unpaid principal is refused
+     * (422 on `new_values.adjustment_amount`) rather than capped, so what is
+     * applied is always what was approved. A reduction that leaves a period
+     * owing nothing marks it `paid`, and one that leaves no open period
+     * completes the loan.
+     *
+     * Once the periods are restated, the change to the principal is posted to
+     * the books in this same transaction (AutomaticPoster::balanceAdjustment(),
+     * decision 7): a reduction is Dr 1180 / Cr 1110 and an increase the
+     * mirror, and a reduction that completes a restructured loan moves the
+     * deferral it still holds. The poster reads the restated periods to tell
+     * whether the loan completed, so it runs last. A loan with nothing unpaid,
+     * or an adjustment of ₱0.00, moves no period and posts nothing; with no
+     * chart, nothing posts.
+     */
+    private function applyBalanceAdjustment(LoanAdjustment $adjustment, Loan $loan, ?int $userId): void
     {
-        $adjustmentAmount = (float) $adjustment->new_values['adjustment_amount'];
+        $adjustmentAmount = (float) $adjustment->ownNewValues()['adjustment_amount'];
 
         $unpaidSchedules = $loan->amortizationSchedules()
             ->whereIn('status', ['pending', 'partial', 'overdue'])
             ->orderBy('period_number')
-            ->get();
+            ->get()
+            ->values();
 
-        if ($unpaidSchedules->isEmpty()) {
-            return;
-        }
+        $centavos = static fn (mixed $pesos): int => (int) round((float) $pesos * 100);
+        $amount = $centavos($adjustmentAmount);
+        $unpaid = $unpaidSchedules
+            ->map(fn (AmortizationSchedule $s): int => self::unpaidPrincipalCentavos($s))
+            ->all();
+        $totalUnpaid = array_sum($unpaid);
 
-        $totalUnpaidPrincipal = $unpaidSchedules->sum(fn ($s) => (float) $s->principal_due - (float) $s->principal_paid);
-
-        if ($totalUnpaidPrincipal <= 0) {
-            return;
-        }
-
-        // Distribute proportionally
-        $runningBalance = null;
-        foreach ($unpaidSchedules as $i => $schedule) {
-            $unpaidPrincipal = (float) $schedule->principal_due - (float) $schedule->principal_paid;
-            $proportion = $unpaidPrincipal / $totalUnpaidPrincipal;
-            $adjustForThis = round($adjustmentAmount * $proportion, 2);
-
-            $newPrincipalDue = max(0, round((float) $schedule->principal_due + $adjustForThis, 2));
-            $newTotalDue = round($newPrincipalDue + (float) $schedule->interest_due, 2);
-
-            $schedule->update([
-                'principal_due' => $newPrincipalDue,
-                'total_due' => $newTotalDue,
+        if ($amount < 0 && -$amount > $totalUnpaid) {
+            throw ValidationException::withMessages([
+                'new_values.adjustment_amount' => sprintf(
+                    'A reduction of ₱%s is more than the ₱%s of principal still unpaid on this loan.',
+                    number_format(-$amount / 100, 2),
+                    number_format($totalUnpaid / 100, 2),
+                ),
             ]);
         }
 
-        // Recalculate remaining_balance chain
-        $allSchedules = $loan->amortizationSchedules()->orderBy('period_number')->get();
-        $balance = (float) $loan->principal_amount + $adjustmentAmount;
-
-        foreach ($allSchedules as $schedule) {
-            $balance = round($balance - (float) $schedule->principal_due, 2);
-            $schedule->update(['remaining_balance' => max(0, $balance)]);
+        if ($totalUnpaid <= 0) {
+            return;
         }
+
+        // Each period's change is kept in its principal history
+        // (AmortizationPrincipalChange), from today: the late penalty charges
+        // each month on the principal owed on its own day, so the months
+        // already charged keep the principal before this adjustment, up or
+        // down, and only later months use the new one.
+        $today = Carbon::today();
+
+        foreach ($this->balanceAdjustmentShares($amount, $unpaid) as $i => $share) {
+            if ($share === 0) {
+                continue;
+            }
+
+            $schedule = $unpaidSchedules[$i];
+            $newPrincipalDue = $centavos($schedule->principal_due) + $share;
+
+            AmortizationPrincipalChange::record($schedule, $today->toDateString(), (float) $schedule->principal_due, $newPrincipalDue / 100, $adjustment->id);
+
+            $changes = [
+                'principal_due' => $newPrincipalDue / 100,
+                'total_due' => ($newPrincipalDue + $centavos($schedule->interest_due)) / 100,
+            ];
+
+            // A reduction that leaves the period owing nothing settles it, by
+            // the rule a payment uses (RepaymentService::allocateToSchedule()).
+            $penaltySettled = $centavos($schedule->penalty_amount) === 0
+                || $centavos($schedule->penalty_paid) >= $centavos($schedule->penalty_amount);
+
+            if ($share < 0
+                && $centavos($schedule->principal_paid) >= $newPrincipalDue
+                && $centavos($schedule->interest_paid) >= $centavos($schedule->interest_due)
+                && $penaltySettled) {
+                $changes['status'] = 'paid';
+            }
+
+            $schedule->update($changes);
+        }
+
+        // As a payment does (RepaymentService, step 6): a loan with no open
+        // period left and no insurance premium still owed is completed.
+        // `completed` leaves the pledging statuses, so no collateral guard
+        // applies.
+        if ($amount < 0
+            && ! $loan->owesInsurancePremium()
+            && ! $loan->amortizationSchedules()->whereIn('status', ['pending', 'partial', 'overdue'])->exists()) {
+            $loan->update(['status' => 'completed']);
+        }
+
+        $this->restateOpenRemainingBalances($loan);
+
+        if ($amount === 0) {
+            return;
+        }
+
+        $poster = app(AutomaticPoster::class);
+
+        if ($userId === null) {
+            if ($poster->enabled()) {
+                throw CannotPostToTheBooksException::because(
+                    "{$adjustment->adjustment_number} has no approver and was applied by no one, so there is no user to post it as. Nothing has been saved.");
+            }
+
+            return;
+        }
+
+        $poster->balanceAdjustment($adjustment, $amount, $userId);
+    }
+
+    /**
+     * Each open period's `remaining_balance`: the principal still owed once
+     * it is paid, run down from the loan's actual unpaid principal through the
+     * open periods in period order (the order a payment allocates), in centavos. Read after the adjustment is
+     * written, so it carries every earlier adjustment and payment.
+     *
+     * Paid periods, the rows an extension or a restructure closed among them,
+     * are never rewritten: what they recorded stays as it was.
+     */
+    private function restateOpenRemainingBalances(Loan $loan): void
+    {
+        $centavos = static fn (mixed $pesos): int => (int) round((float) $pesos * 100);
+
+        $open = $loan->amortizationSchedules()
+            ->whereIn('status', ['pending', 'partial', 'overdue'])
+            ->reorder('period_number')
+            ->orderBy('due_date')
+            ->get();
+
+        $balance = $open->sum(fn (AmortizationSchedule $s): int => self::unpaidPrincipalCentavos($s));
+
+        foreach ($open as $schedule) {
+            $balance -= self::unpaidPrincipalCentavos($schedule);
+
+            if ($centavos($schedule->remaining_balance) !== $balance) {
+                $schedule->update(['remaining_balance' => $balance / 100]);
+            }
+        }
+    }
+
+    /**
+     * Each open period's share of a balance adjustment, in centavos, adding up
+     * to exactly `$amount`.
+     *
+     * Each share is the period's part of the unpaid principal, rounded; the
+     * rounding remainder goes to the last period that still owes principal. A
+     * reduction never takes a period below what has been paid on it: a share
+     * a period cannot absorb moves to the periods before it that still can.
+     *
+     * @param  int  $amount  centavos; negative reduces
+     * @param  list<int>  $unpaid  each period's unpaid principal, in centavos
+     * @return list<int>
+     */
+    private function balanceAdjustmentShares(int $amount, array $unpaid): array
+    {
+        $total = array_sum($unpaid);
+        $shares = array_fill(0, count($unpaid), 0);
+        $owing = array_keys(array_filter($unpaid, fn (int $u): bool => $u > 0));
+        $last = end($owing);
+
+        foreach ($owing as $i) {
+            if ($i !== $last) {
+                $shares[$i] = (int) round($amount * $unpaid[$i] / $total);
+            }
+        }
+
+        $shares[$last] = $amount - array_sum($shares);
+
+        if ($amount >= 0) {
+            return $shares;
+        }
+
+        // From the last period back: what a period cannot take, the one before it tries.
+        $excess = 0;
+
+        foreach (array_reverse($owing) as $i) {
+            $wanted = $shares[$i] + $excess;
+            $shares[$i] = max($wanted, -$unpaid[$i]);
+            $excess = $wanted - $shares[$i];
+        }
+
+        return $shares;
     }
 
     private function applyTermExtension(LoanAdjustment $adjustment, Loan $loan): void
     {
-        $additionalTerms = (int) $adjustment->new_values['additional_terms'];
+        $additionalTerms = (int) $adjustment->ownNewValues()['additional_terms'];
 
         $unpaidSchedules = $loan->amortizationSchedules()
             ->whereIn('status', ['pending', 'partial', 'overdue'])
@@ -515,19 +1686,12 @@ class LoanAdjustmentService
 
         $outstanding = $unpaidSchedules->sum(fn ($s) => (float) $s->principal_due - (float) $s->principal_paid);
 
-        $lastPaidPeriod = $loan->amortizationSchedules()
-            ->where('status', 'paid')
-            ->max('period_number') ?? 0;
+        // As in applyRestructure().
+        $instalmentsBefore = $this->instalmentsBefore($loan);
+        $lastPaidSchedule = $this->lastPaidInFull($loan);
 
-        $lastPaidSchedule = $loan->amortizationSchedules()
-            ->where('status', 'paid')
-            ->orderByDesc('due_date')
-            ->first();
-
-        // Delete unpaid schedules
-        $loan->amortizationSchedules()
-            ->whereIn('status', ['pending', 'partial', 'overdue'])
-            ->delete();
+        $this->closeOpenSchedules($loan, $adjustment, $outstanding);
+        $lastKeptPeriod = (int) $loan->amortizationSchedules()->max('period_number');
 
         // Calculate remaining + additional terms
         $originalRemaining = $unpaidSchedules->count();
@@ -536,15 +1700,17 @@ class LoanAdjustmentService
         // Build new schedule
         $tempLoan = $loan->replicate();
         $tempLoan->principal_amount = $outstanding;
-        $tempLoan->term = $newTerm;
+        $tempLoan->fill($this->termForInstalments($loan, $newTerm, $loan->frequency));
         $tempLoan->start_date = $lastPaidSchedule ? $lastPaidSchedule->due_date : $loan->start_date;
+        $tempLoan->maturity_date = $this->rescheduledMaturityDate($tempLoan, $loan);
 
-        $newSchedule = $this->loanService->buildAmortizationPreview($tempLoan);
+        // On the loan's own anchor day, as applyRestructure() rebuilds.
+        $newSchedule = $this->loanService->buildAmortizationPreview($tempLoan, $this->anchorDay($loan));
 
         foreach ($newSchedule as $row) {
             AmortizationSchedule::create([
                 'loan_id' => $loan->id,
-                'period_number' => $lastPaidPeriod + $row['period_number'],
+                'period_number' => $lastKeptPeriod + $row['period_number'],
                 'due_date' => $row['due_date'],
                 'principal_due' => $row['principal_due'],
                 'interest_due' => $row['interest_due'],
@@ -554,21 +1720,44 @@ class LoanAdjustmentService
             ]);
         }
 
-        $newMaturity = $this->loanService->computeMaturityDate(
-            $tempLoan->start_date instanceof Carbon
-                ? $tempLoan->start_date->toDateString()
-                : $tempLoan->start_date,
-            $newTerm,
-            $loan->frequency,
-        );
-
         $loan->update([
-            'term' => $lastPaidPeriod + $newTerm,
-            'maturity_date' => $newMaturity,
+            ...$this->termForInstalments($loan, $instalmentsBefore + $newTerm, $loan->frequency),
+            'maturity_date' => $tempLoan->maturity_date,
         ]);
     }
 
-    private function captureOldValues(Loan $loan, string $type): array
+    /**
+     * The open periods a penalty waiver covers: all of them on `waive_all`,
+     * otherwise the selected `schedule_ids`.
+     *
+     * @param  array<string, mixed>  $newValues
+     */
+    private function selectedOpenSchedules(Loan $loan, array $newValues): Builder
+    {
+        $query = AmortizationSchedule::where('loan_id', $loan->id)
+            ->whereIn('status', AmortizationSchedule::UNPAID_STATUSES)
+            ->orderBy('period_number');
+
+        if (! ($newValues['waive_all'] ?? false)) {
+            $query->whereIn('id', $newValues['schedule_ids'] ?? []);
+        }
+
+        return $query;
+    }
+
+    /**
+     * The penalty still owed on a period: the most a waiver can forgive there.
+     */
+    private function penaltyOwed(AmortizationSchedule $schedule): float
+    {
+        return round(max(0, (float) $schedule->penalty_amount - (float) $schedule->penalty_paid), 2);
+    }
+
+    /**
+     * @param  array<string, mixed>  $newValues
+     * @return array<string, mixed>
+     */
+    private function captureOldValues(Loan $loan, string $type, array $newValues): array
     {
         return match ($type) {
             'restructure' => [
@@ -578,33 +1767,91 @@ class LoanAdjustmentService
                     ->sum(fn ($s) => (float) $s->principal_due - (float) $s->principal_paid),
                 'interest_rate' => (float) $loan->interest_rate,
                 'term' => $loan->term,
+                // With `term`, `frequency` and the method, enough to build the
+                // schedule as it stood again (GET /loans/{id}/ledger's opening):
+                // a restructure can turn a months term into days.
+                'term_unit' => $loan->term_unit->value,
                 'frequency' => $loan->frequency,
+                'interest_method' => $loan->interest_method,
                 'maturity_date' => $loan->maturity_date->toDateString(),
             ],
+            // What the waiver would forgive, period by period, as of the
+            // request: only open periods it covers that still owe penalty.
             'penalty_waiver' => [
-                'penalties' => $loan->amortizationSchedules()
-                    ->where('penalty_amount', '>', 0)
+                'penalties' => $this->selectedOpenSchedules($loan, $newValues)
                     ->get()
-                    ->map(fn ($s) => [
+                    ->filter(fn (AmortizationSchedule $s) => $this->penaltyOwed($s) > 0)
+                    ->map(fn (AmortizationSchedule $s) => [
                         'schedule_id' => $s->id,
                         'period_number' => $s->period_number,
                         'penalty_amount' => (float) $s->penalty_amount,
+                        'penalty_paid' => (float) $s->penalty_paid,
+                        'penalty_owed' => $this->penaltyOwed($s),
                     ])->values()->toArray(),
             ],
             'balance_adjustment' => [
-                'outstanding_principal' => $loan->amortizationSchedules()
-                    ->whereIn('status', ['pending', 'partial', 'overdue'])
-                    ->get()
-                    ->sum(fn ($s) => (float) $s->principal_due - (float) $s->principal_paid),
+                'outstanding_principal' => $this->outstandingPrincipalCentavos($loan) / 100,
             ],
             'term_extension' => [
                 'term' => $loan->term,
+                'term_unit' => $loan->term_unit->value,
+                'frequency' => $loan->frequency,
+                'interest_method' => $loan->interest_method,
                 'maturity_date' => $loan->maturity_date->toDateString(),
                 'remaining_schedules' => $loan->amortizationSchedules()
                     ->whereIn('status', ['pending', 'partial', 'overdue'])
                     ->count(),
             ],
         };
+    }
+
+    /**
+     * Refuse to approve or apply a request whose fields are not its type's.
+     *
+     * Validation has rejected such payloads at creation since 2026-10-02, but
+     * rows written before then can carry another type's fields, or none of
+     * their own: portfolio's ADJ-000018 is a penalty waiver whose whole
+     * payload is `{interest_rate: 4}`. Approving one records a decision about
+     * figures that will never apply. Rejecting it stays open.
+     *
+     * @throws ValidationException on `new_values`
+     */
+    private function assertPayloadFitsType(LoanAdjustment $adjustment): void
+    {
+        $type = $adjustment->adjustment_type;
+        $label = str_replace('_', ' ', $type);
+        $own = $adjustment->ownNewValues();
+        $foreign = LoanAdjustment::foreignFields($type, $adjustment->new_values ?? []);
+
+        if ($foreign !== []) {
+            throw ValidationException::withMessages([
+                'new_values' => sprintf(
+                    '%s is a %s but carries %s, which a %s does not take. Reject it and request a new one.',
+                    $adjustment->adjustment_number,
+                    $label,
+                    implode(', ', $foreign),
+                    $label,
+                ),
+            ]);
+        }
+
+        $missing = match ($type) {
+            'restructure' => $own === [] ? 'interest_rate, term or frequency' : null,
+            'penalty_waiver' => empty($own['waive_all']) && empty($own['schedule_ids']) ? 'waive_all or schedule_ids' : null,
+            'balance_adjustment' => is_numeric($own['adjustment_amount'] ?? null) ? null : 'adjustment_amount',
+            'term_extension' => (int) ($own['additional_terms'] ?? 0) >= 1 ? null : 'additional_terms',
+        };
+
+        if ($missing !== null) {
+            throw ValidationException::withMessages([
+                'new_values' => sprintf(
+                    '%s is a %s but has no %s. Reject it and request a new one.',
+                    $adjustment->adjustment_number,
+                    $label,
+                    $missing,
+                ),
+            ]);
+        }
     }
 
     private function guardStatus(LoanAdjustment $adjustment, string $expected, string $action): void

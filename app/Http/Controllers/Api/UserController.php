@@ -10,9 +10,17 @@ use App\Http\Requests\User\ShowUserRequest;
 use App\Http\Requests\User\StoreUserRequest;
 use App\Http\Requests\User\UpdateUserRequest;
 use App\Http\Resources\UserResource;
+use App\Models\Branch;
+use App\Models\Role;
 use App\Models\User;
+use App\Rules\BranchTakesNew;
 use App\Services\AuditLogService;
+use App\Services\BranchAccess;
+use App\Services\Branches\BranchRowLock;
+use App\Services\LikePattern;
+use App\Services\UserReach;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
 use Illuminate\Support\Facades\DB;
 use OpenApi\Attributes as OA;
@@ -32,10 +40,13 @@ use OpenApi\Attributes as OA;
  */
 class UserController extends Controller
 {
+    /** The refusal's wording for a sent primary branch (BranchRowLock). */
+    private const PRIMARY_REFUSAL = ['primary_branch_id' => BranchTakesNew::NO_PRIMARY];
+
     #[OA\Get(
         path: '/api/users',
         summary: 'List users',
-        description: 'Get a paginated list of all users',
+        description: 'Get a paginated list of all users. Each row carries `can_manage`: the caller can reach this user; each action still needs its own permission (users:update, users:delete, users:reset_password). It is false when edit, reset password, deactivate and reactivate would answer 404 for this target (the target is a super_admin and the caller is not, or, for a caller without `branches:view_all`, the target holds a permission the caller lacks or works in a branch outside the caller\'s). Only this list carries it.',
         tags: ['Users'],
         security: [['sanctum' => []]],
         parameters: [
@@ -81,32 +92,68 @@ class UserController extends Controller
         $branchId = $filters['branch_id'] ?? null;
         $role = $filters['role'] ?? null;
 
-        $users = User::with('branch', 'branches', 'roles')
+        $viewer = request()->user();
+        app(BranchAccess::class)->authorizeBranchFilter($viewer, $branchId);
+
+        // Only users sharing one of the caller's branches, unless the caller
+        // holds `branches:view_all`. The list and `meta.stats` take the same
+        // scope, so the tabs count the rows the caller can see.
+        // A scoped caller's `can_manage` (UserReach) compares each row's
+        // permissions, so they're loaded here and it asks nothing per row. A
+        // `branches:view_all` caller reaches everyone; only the roles count.
+        $relations = ['branch', 'branches', 'roles'];
+        if (app(BranchAccess::class)->for($viewer) !== null) {
+            $relations = [...$relations, 'roles.permissions', 'permissions'];
+        }
+
+        $users = User::with($relations)
+            ->visibleTo($viewer)
             ->when(filled($search), function ($query) use ($search) {
-                $query->where(function ($q) use ($search) {
-                    $q->where('first_name', 'like', "%{$search}%")
-                        ->orWhere('last_name', 'like', "%{$search}%")
-                        ->orWhere('username', 'like', "%{$search}%")
-                        ->orWhere('email', 'like', "%{$search}%");
+                $like = LikePattern::contains($search);
+
+                $query->where(function ($q) use ($like) {
+                    $q->where('first_name', 'like', $like)
+                        ->orWhere('last_name', 'like', $like)
+                        ->orWhere('username', 'like', $like)
+                        ->orWhere('email', 'like', $like);
                 });
             })
             ->when(filled($status), fn ($query) => $query->where('status', $status))
             ->when(filled($branchId), fn ($query) => $query->forBranch($branchId))
             ->when(filled($role), fn ($query) => $query->role($role))
             ->latest()
+            // Tiebreak on the key: users created in the same second tie on
+            // `created_at`, and a partial order lets a drained list serve one
+            // twice and another never. See DeterministicPaginationTest.
+            ->orderByDesc('id')
             ->paginate(min(max((int) ($filters['per_page'] ?? 15), 1), 100));
 
         // Status count aggregation so the frontend can render status tabs without
         // a second request. Branch-scoped on the same filled() gate as the list
         // above — the two must agree, or the tabs report the whole organisation
         // while the rows report one branch.
-        $stats = User::when(filled($branchId), fn ($q) => $q->forBranch($branchId))
+        $stats = User::visibleTo($viewer)
+            ->when(filled($branchId), fn ($q) => $q->forBranch($branchId))
             ->selectRaw('status, COUNT(*) as count')
             ->groupBy('status')
             ->pluck('count', 'status')
             ->toArray();
 
-        return UserResource::collection($users)
+        $reach = UserReach::of($viewer);
+        $canManage = $users->getCollection()
+            ->mapWithKeys(fn (User $user) => [$user->getKey() => $reach->canManage($user)]);
+
+        // Any direct permissions were loaded for `can_manage` only. Dropped
+        // again so the rows keep their shape: UserResource lists a user's
+        // permissions whenever that relation is loaded.
+        $users->getCollection()->each->unsetRelation('permissions');
+
+        $collection = UserResource::collection($users);
+        $collection->collection->each(
+            fn (UserResource $row) => $row->withCanManage($canManage[$row->resource->getKey()]),
+        );
+
+        return $collection
             ->additional(['meta' => ['stats' => [
                 'active' => (int) ($stats['active'] ?? 0),
                 'inactive' => (int) ($stats['inactive'] ?? 0),
@@ -140,6 +187,7 @@ class UserController extends Controller
                     new OA\Property(property: 'password_confirmation', type: 'string', example: 'password123'),
                     new OA\Property(property: 'branch_id', type: 'integer', nullable: true, example: 1, description: 'Legacy single-branch shape. Required only when `branch_ids` is absent.'),
                     new OA\Property(property: 'branch_ids', type: 'array', items: new OA\Items(type: 'integer'), example: [1, 2], description: 'Every branch this user is assigned to. Required only when `branch_id` is absent; wins over it when both are sent.'),
+                    new OA\Property(property: 'primary_branch_id', type: 'integer', nullable: true, example: 2, description: 'The chosen primary branch: one of the assigned branches, or null for Organisation-wide (only for a role that sees all branches). Never a closed branch (422 in words); a suspended one is allowed. Absent: the first assigned branch.'),
                     new OA\Property(property: 'role', type: 'string', example: 'loan_officer'),
                 ],
             ),
@@ -160,38 +208,44 @@ class UserController extends Controller
         // the client never sent the singular field. See ResolvesBranchAssignment.
         $branchIds = $request->branchAssignment() ?? [];
 
-        $user = User::create([
-            ...$request->safe()->except('role', 'branch_ids'),
-            'branch_id' => $request->primaryBranchId(),
-        ]);
+        // In one transaction that first locks the branches the user is placed
+        // in (BranchRowLock): a closed or closing branch is refused.
+        $user = BranchRowLock::write(self::branchLocks($request, $branchIds), function () use ($request, $branchIds): User {
+            $user = User::create([
+                ...$request->safe()->except('role', 'branch_ids', 'primary_branch_id'),
+                'branch_id' => $request->primaryBranchId(),
+            ]);
 
-        $user->assignRole($request->role);
-        $user->branches()->sync($branchIds);
+            $user->assignRole($request->role);
+            $user->branches()->sync($branchIds);
 
-        // The Auditable trait's `created` row carries the user's columns, and
-        // the role is not one of them — it lands in model_has_roles, which is
-        // mutable and keeps no history. Without this entry the trail cannot
-        // say which role an account was opened with.
-        AuditLogService::log(
-            action: 'role_assigned',
-            auditable: $user,
-            newValues: ['role' => $request->role],
-            description: "User {$user->username} created with role {$request->role}",
-        );
+            // The Auditable trait's `created` row carries the user's columns, and
+            // the role is not one of them — it lands in model_has_roles, which is
+            // mutable and keeps no history. Without this entry the trail cannot
+            // say which role an account was opened with.
+            AuditLogService::log(
+                action: 'role_assigned',
+                auditable: $user,
+                newValues: ['role' => $request->role],
+                description: sprintf('User %s created with role %s', $user->username, self::roleName($request->role)),
+            );
 
-        // Same gap, same fix, for the other pivot: `created` records
-        // `branch_id` and nothing else, so an account opened across three
-        // branches would be recorded as having been opened in one.
-        AuditLogService::log(
-            action: 'branches_assigned',
-            auditable: $user,
-            newValues: ['branch_ids' => $branchIds],
-            description: sprintf(
-                'User %s created with %d branch assignment(s)',
-                $user->username,
-                count($branchIds),
-            ),
-        );
+            // Same gap, same fix, for the other pivot: `created` records
+            // `branch_id` and nothing else, so an account opened across three
+            // branches would be recorded as having been opened in one.
+            AuditLogService::log(
+                action: 'branches_assigned',
+                auditable: $user,
+                newValues: ['branch_ids' => $branchIds],
+                description: sprintf(
+                    'User %s created with %s',
+                    $user->username,
+                    count($branchIds) === 1 ? '1 branch' : count($branchIds).' branches',
+                ),
+            );
+
+            return $user;
+        }, self::PRIMARY_REFUSAL);
 
         $user->load('branch', 'branches', 'roles');
 
@@ -251,6 +305,7 @@ class UserController extends Controller
                     new OA\Property(property: 'mobile_number', type: 'string'),
                     new OA\Property(property: 'branch_id', type: 'integer', description: 'Legacy single-branch shape.'),
                     new OA\Property(property: 'branch_ids', type: 'array', items: new OA\Items(type: 'integer'), description: 'Replaces the whole branch assignment. At least one id.'),
+                    new OA\Property(property: 'primary_branch_id', type: 'integer', nullable: true, description: 'The chosen primary branch: one of the user\'s branches after this save, or null for Organisation-wide (only for a user who sees all branches). Never a closed branch, even one the user is still assigned to (422 in words); a suspended one is allowed. Absent: unchanged while it stays assigned.'),
                     new OA\Property(property: 'role', type: 'string'),
                 ],
             ),
@@ -278,9 +333,29 @@ class UserController extends Controller
         $branchIds = $request->branchAssignment($user);
         $previousBranchIds = $branchIds === null ? [] : $this->assignedBranchIds($user);
 
+        // In one transaction that first locks the branches the save places the
+        // user in (BranchRowLock): a closed or closing branch is refused.
+        BranchRowLock::write(self::branchLocks($request, $branchIds ?? []), fn () => $this->save($request, $user, $previousRole, $branchIds, $previousBranchIds), self::PRIMARY_REFUSAL);
+
+        $user->load('branch', 'branches', 'roles');
+
+        return new UserResource($user);
+    }
+
+    /**
+     * The update's writes, inside the branch row lock.
+     *
+     * @param  list<int>|null  $branchIds
+     * @param  list<int>  $previousBranchIds
+     */
+    private function save(UpdateUserRequest $request, User $user, ?string $previousRole, ?array $branchIds, array $previousBranchIds): void
+    {
+        // `primary_branch_id` (Phase 6 MB-BE6) sets the column on its own; the
+        // Auditable `updated` row describes the change in words
+        // (User::describeAuditEvent()).
         $user->update([
-            ...$request->safe()->except('role', 'branch_ids'),
-            ...$branchIds === null ? [] : ['branch_id' => $request->primaryBranchId($user)],
+            ...$request->safe()->except('role', 'branch_ids', 'primary_branch_id'),
+            ...$branchIds === null && ! $request->has('primary_branch_id') ? [] : ['branch_id' => $request->primaryBranchId($user)],
         ]);
 
         if ($branchIds !== null) {
@@ -300,10 +375,9 @@ class UserController extends Controller
                     oldValues: ['branch_ids' => $previousBranchIds],
                     newValues: ['branch_ids' => $newBranchIds],
                     description: sprintf(
-                        'Branch assignment for %s changed from [%s] to [%s]',
+                        'Branch assignment for %s changed from %s to %s',
                         $user->username,
-                        implode(', ', $previousBranchIds),
-                        implode(', ', $newBranchIds),
+                        ...self::branchNames($previousBranchIds, $newBranchIds),
                     ),
                 );
             }
@@ -326,16 +400,58 @@ class UserController extends Controller
                     description: sprintf(
                         'Role for %s changed from %s to %s',
                         $user->username,
-                        $previousRole ?? 'none',
-                        $request->role,
+                        $previousRole === null ? 'none' : self::roleName($previousRole),
+                        self::roleName($request->role),
                     ),
                 );
             }
         }
+    }
 
-        $user->load('branch', 'branches', 'roles');
+    /**
+     * The branches a save places the user in, by the field that sent them,
+     * for BranchRowLock: the assigned set and a sent primary branch. A
+     * derived primary is one of the set.
+     *
+     * @param  list<int>  $branchIds
+     * @return array<string, list<int|null>|int|null>
+     */
+    private static function branchLocks(Request $request, array $branchIds): array
+    {
+        return [
+            ($request->has('branch_ids') ? 'branch_ids' : 'branch_id') => $branchIds,
+            'primary_branch_id' => $request->has('primary_branch_id') && is_numeric($request->input('primary_branch_id')) ? (int) $request->input('primary_branch_id') : null,
+        ];
+    }
 
-        return new UserResource($user);
+    /**
+     * How an audit description names a role: Role::auditName(), e.g.
+     * `"Teller" (cashier)`, as RolePermissionAudit and the role rows do, or the
+     * key in words in the same shape when no such role exists. The row's
+     * stored values keep the key.
+     */
+    private static function roleName(string $key): string
+    {
+        return Role::query()->where('name', $key)->where('guard_name', 'web')->first()?->auditName()
+            ?? json_encode(Role::fallbackLabel($key), JSON_UNESCAPED_UNICODE).' ('.$key.')';
+    }
+
+    /**
+     * Each list of branch ids by name, in the same order, for an audit
+     * description: "Branch #5" for a branch that is gone, "none" for an empty
+     * list. One query for all of them.
+     *
+     * @param  list<int>  ...$lists
+     * @return list<string>
+     */
+    private static function branchNames(array ...$lists): array
+    {
+        $names = Branch::query()->whereIn('id', array_merge(...$lists))->pluck('name', 'id');
+
+        return array_map(
+            fn (array $ids): string => $ids === [] ? 'none' : implode(', ', array_map(fn (int $id): string => $names->get($id) ?? "Branch #{$id}", $ids)),
+            $lists,
+        );
     }
 
     /**

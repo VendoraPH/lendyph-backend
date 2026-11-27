@@ -79,7 +79,7 @@ class CsvImportController extends Controller
     #[OA\Post(
         path: '/api/imports',
         summary: 'Open a CSV migration import run',
-        description: 'Declares the two files about to be uploaded and returns the server-chosen chunk size plus the number of chunks each file must be cut into. Refuses (409) while another run is still in progress.',
+        description: 'Declares the files about to be uploaded and returns the server-chosen chunk size plus the number of chunks each file must be cut into. A run carries the members file (`customers`), the share capital file (`share_capital`), or both; the loans file is optional and needs the members file (422 without it). The share capital file also needs `share_capital:create` (422 on `files.share_capital`). A run imports its members, then its loans, then its share capital, skipping any file it doesn\'t have. Refuses (409) while another run is still in progress.',
         tags: ['CSV Import'],
         security: [['sanctum' => []]],
         requestBody: new OA\RequestBody(
@@ -87,7 +87,7 @@ class CsvImportController extends Controller
             content: new OA\JsonContent(
                 required: ['branch_id', 'files'],
                 properties: [
-                    new OA\Property(property: 'branch_id', type: 'integer', description: 'Branch every imported member and loan is assigned to. Required — a legacy export cannot supply it and loans.branch_id is NOT NULL.', example: 1),
+                    new OA\Property(property: 'branch_id', type: 'integer', description: 'Branch every imported member and loan is assigned to: one of the caller\'s branches (any with branches:view_all). Required — a legacy export cannot supply it and loans.branch_id is NOT NULL.', example: 1),
                     new OA\Property(property: 'as_of_date', type: 'string', format: 'date', nullable: true, description: 'Date the extract represents. Defaults to today (Asia/Manila).', example: '2026-08-01'),
                     new OA\Property(
                         property: 'files',
@@ -103,6 +103,11 @@ class CsvImportController extends Controller
                                 new OA\Property(property: 'size_bytes', type: 'integer', example: 2097152),
                                 new OA\Property(property: 'sha256', type: 'string'),
                             ]),
+                            new OA\Property(property: 'share_capital', type: 'object', properties: [
+                                new OA\Property(property: 'filename', type: 'string', example: 'share-capital.csv'),
+                                new OA\Property(property: 'size_bytes', type: 'integer', example: 65536),
+                                new OA\Property(property: 'sha256', type: 'string'),
+                            ]),
                         ],
                     ),
                 ],
@@ -112,7 +117,7 @@ class CsvImportController extends Controller
             new OA\Response(response: 201, description: 'Run opened; returns chunk_size and total_chunks per file'),
             new OA\Response(response: 403, description: 'Requires the imports:process permission'),
             new OA\Response(response: 409, description: 'Another run is still in progress'),
-            new OA\Response(response: 422, description: 'Validation failed (missing branch_id, oversize file, bad digest)'),
+            new OA\Response(response: 422, description: 'Validation failed (missing branch_id, neither a members nor a share capital file, a loans file without its members file, a share capital file without share_capital:create, oversize file, bad digest)'),
         ],
     )]
     public function store(StoreCsvImportRunRequest $request): JsonResponse
@@ -162,7 +167,7 @@ class CsvImportController extends Controller
         ),
         parameters: [
             new OA\Parameter(name: 'run', in: 'path', required: true, schema: new OA\Schema(type: 'integer')),
-            new OA\Parameter(name: 'kind', in: 'path', required: true, schema: new OA\Schema(type: 'string', enum: ['customers', 'loans'])),
+            new OA\Parameter(name: 'kind', in: 'path', required: true, schema: new OA\Schema(type: 'string', enum: ['customers', 'loans', 'share_capital'])),
             new OA\Parameter(name: 'index', in: 'path', required: true, description: 'Zero-based chunk index', schema: new OA\Schema(type: 'integer')),
         ],
         responses: [

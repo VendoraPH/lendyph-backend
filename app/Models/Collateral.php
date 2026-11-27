@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Support\StaffRouteBinding;
 use App\Traits\Auditable;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
@@ -44,7 +45,7 @@ class Collateral extends Model
     }
 
     /**
-     * The loans currently holding this collateral, narrowed to Loan::ACTIVE_STATUSES.
+     * The loans currently holding this collateral, narrowed to Loan::PLEDGING_STATUSES.
      *
      * This is the single source of the "is this collateral already pledged?"
      * answer: CollateralResource renders it as `active_loans` and
@@ -56,14 +57,30 @@ class Collateral extends Model
      * Always eager-load it (`with('activeLoans')`); the collateral index is
      * unpaginated, so a lazy access there is one query per row.
      *
-     * Only the two columns the resource exposes are selected, so the loans
+     * Only the columns the resource needs are selected (its numbers, the
+     * display number's included, and the branch that decides whether the
+     * caller reads them), so the loans
      * hydrated here are deliberately partial models — do not read any other
      * attribute off them.
      */
     public function activeLoans(): BelongsToMany
     {
         return $this->belongsToMany(Loan::class, 'loan_collaterals')
-            ->select(['loans.id', 'loans.loan_account_number'])
-            ->whereIn('loans.status', Loan::ACTIVE_STATUSES);
+            ->select(['loans.id', ...array_map(fn (string $column): string => 'loans.'.$column, Loan::DISPLAY_NUMBER_COLUMNS), 'loans.branch_id'])
+            ->whereIn('loans.status', Loan::PLEDGING_STATUSES);
+    }
+
+    /**
+     * Every `{collateral}` route parameter resolves only to a row whose member
+     * the signed-in user may see (Borrower::visibleTo), so another branch's
+     * row answers 404 before any validation runs. Without a signed-in user the
+     * binding is unscoped.
+     */
+    public function resolveRouteBindingQuery($query, $value, $field = null)
+    {
+        return StaffRouteBinding::scope(
+            parent::resolveRouteBindingQuery($query, $value, $field),
+            fn ($query, User $user) => $query->whereHas('borrower', fn ($q) => $q->visibleTo($user)),
+        );
     }
 }

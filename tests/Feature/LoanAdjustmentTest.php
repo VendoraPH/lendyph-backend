@@ -88,6 +88,25 @@ class LoanAdjustmentTest extends TestCase
             ->assertJsonValidationErrors('new_values');
     }
 
+    public function test_extension_cannot_be_created_through_the_adjustments_endpoint(): void
+    {
+        // `extension` rows are written only by POST /loans/{loan}/extend, already
+        // applied. This endpoint used to accept the type anyway, and
+        // captureOldValues() has no arm for it, so the request passed validation
+        // and then died with an UnhandledMatchError — a 500, not a 422.
+        $loan = $this->createReleasedLoan();
+
+        $this->postJson("/api/loans/{$loan->id}/adjustments", [
+            'adjustment_type' => 'extension',
+            'new_values' => ['additional_terms' => 1],
+            'description' => 'Extend through the generic endpoint',
+        ])
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors('adjustment_type');
+
+        $this->assertDatabaseMissing('loan_adjustments', ['loan_id' => $loan->id]);
+    }
+
     public function test_penalty_waiver_with_schedule_ids_is_accepted(): void
     {
         $loan = $this->createReleasedLoan();
@@ -156,7 +175,8 @@ class LoanAdjustmentTest extends TestCase
 
     public function test_an_applied_restructure_adjustment_leaves_the_loan_collectible(): void
     {
-        $loan = $this->createReleasedLoan();
+        // A restructure's new rate sits in its product's range (2% to 3%).
+        $loan = $this->createReleasedLoan(['product' => ['min_interest_rate' => 2]]);
 
         $createResponse = $this->postJson("/api/loans/{$loan->id}/adjustments", [
             'adjustment_type' => 'restructure',

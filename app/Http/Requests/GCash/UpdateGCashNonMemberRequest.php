@@ -2,28 +2,58 @@
 
 namespace App\Http\Requests\GCash;
 
-use Illuminate\Foundation\Http\FormRequest;
+use App\Models\GCashNonMember;
 
-class UpdateGCashNonMemberRequest extends FormRequest
+/**
+ * The frontend's edit dialog posts the whole record back, so the rules are the
+ * store rules rather than `sometimes` — a partial update would silently blank
+ * the fields the dialog did not send. The ID keys are the exception: both may
+ * be left out, and then the saved ID is kept.
+ */
+class UpdateGCashNonMemberRequest extends StoreGCashNonMemberRequest
 {
-    public function authorize(): bool
+    /** Left-out ID keys keep the saved ID, so the saved row decides. */
+    protected function hasIdAfterSave(): bool
     {
-        return $this->user()->can('gcash:transact');
+        return $this->has('id_number')
+            ? $this->filled('id_number')
+            : $this->nonMember()->id_number !== null;
     }
 
     /**
-     * The frontend's edit dialog posts the whole record back, so these mirror
-     * the store rules rather than being `sometimes` — a partial update would
-     * silently blank the fields the dialog did not send.
+     * The full check (every walk-in) only when the name or mobile number really
+     * changed, as the check compares them, or the ID was just removed: a no-ID
+     * pair the teller already saved anyway must not warn again on an unrelated
+     * edit such as the remarks. Asked only when the saved walk-in will have no
+     * ID, so a saved ID here means this edit removes it.
+     *
+     * Otherwise the check still runs against walk-ins that have an ID. One saved
+     * with an ID runs no name check of its own, so a later one matching this
+     * walk-in is only ever caught from this side.
      */
-    public function rules(): array
+    protected function onlyMatchesWithId(): bool
     {
-        return [
-            'full_name' => ['required', 'string', 'max:255'],
-            'mobile_number' => ['required', 'string', 'max:32'],
-            'id_type' => ['required', 'string', 'max:64'],
-            'id_number' => ['required', 'string', 'max:64'],
-            'remarks' => ['nullable', 'string', 'max:2000'],
-        ];
+        $nonMember = $this->nonMember();
+
+        return GCashNonMember::comparableName((string) $this->input('full_name')) === GCashNonMember::comparableName($nonMember->full_name)
+            && GCashNonMember::comparableMobile((string) $this->input('mobile_number')) === GCashNonMember::comparableMobile($nonMember->mobile_number)
+            && $nonMember->id_number === null;
+    }
+
+    /**
+     * The walk-in being edited may keep its own ID, and its own name and
+     * mobile number never warn as a possible duplicate of itself.
+     */
+    protected function ignoredWalkInId(): ?int
+    {
+        return $this->nonMember()->id;
+    }
+
+    private function nonMember(): GCashNonMember
+    {
+        /** @var GCashNonMember $nonMember */
+        $nonMember = $this->route('nonMember');
+
+        return $nonMember;
     }
 }

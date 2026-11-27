@@ -6,9 +6,11 @@ use App\Models\AccountingAccount;
 use App\Models\AccountingAccountMapping;
 use App\Models\AccountingJournal;
 use App\Models\AccountingJournalLine;
+use App\Models\AccountingPeriod;
 use App\Models\AuditLog;
 use App\Services\Accounting\JournalPoster;
 use App\Services\Accounting\TrialBalanceBuilder;
+use Carbon\CarbonImmutable;
 use Illuminate\Console\Command;
 use Illuminate\Database\Events\TransactionBeginning;
 use Illuminate\Support\Facades\Artisan;
@@ -214,6 +216,46 @@ class AccountingOpeningBalancesTest extends TestCase
 
         $this->assertStringContainsString('2,350,000.00', $output, 'The computed plug is shown as a figure.');
         $this->assertStringContainsString('PLUG', $output);
+    }
+
+    public function test_the_plan_warns_when_a_contra_account_is_on_its_unusual_side_and_still_posts(): void
+    {
+        // 1200 Allowance for Credit Losses carries a credit; a debit on it is
+        // unusual but not refused (Lead's call 3).
+        $file = $this->csv("1010,50000.00,\n1200,400.00,\n2300,,10000.00\n");
+
+        $output = $this->runCommand(['--file' => $file, '--as-of' => self::AS_OF]);
+
+        $this->assertStringContainsString('WARNING', $output);
+        $this->assertStringContainsString(
+            '1200 Allowance for Credit Losses has a debit of ₱400.00. It is a contra account that normally carries a credit balance',
+            $output,
+        );
+        $this->assertSame(1, AccountingJournal::query()->count());
+    }
+
+    public function test_counts_in_the_plan_read_in_the_singular_and_the_plural(): void
+    {
+        $one = $this->runCommand(['--file' => $this->csv("1010,500.00,\n1020,,\n2300,,100.00\n"), '--as-of' => self::AS_OF, '--dry-run' => true]);
+
+        $this->assertStringContainsString('1 account carried no balance and was left out: 1020', $one);
+
+        $width = $this->runCommand(['--file' => $this->csv("1010,500.00,\n2300\n"), '--as-of' => self::AS_OF], Command::FAILURE);
+
+        $this->assertStringContainsString('Line 2 has 1 column, not 3.', $width);
+    }
+
+    public function test_messages_and_the_audit_row_read_the_as_of_date_in_words(): void
+    {
+        $output = $this->runCommand(['--file' => $this->canonicalCsv(), '--as-of' => self::AS_OF]);
+
+        $this->assertStringContainsString('of opening balances as of Aug 31, 2026.', $output);
+        $this->assertStringContainsString('dated Aug 31, 2026.', $output);
+        $this->assertSame('Opening balances as of Aug 31, 2026', AccountingJournal::query()->sole()->description);
+        $this->assertStringEndsWith(
+            'onto the books as of Aug 31, 2026',
+            (string) AuditLog::query()->where('action', 'accounting_opening_balances_posted')->sole()->description,
+        );
     }
 
     // ── Once, ever ──────────────────────────────────────────────────────────
@@ -835,5 +877,21 @@ class AccountingOpeningBalancesTest extends TestCase
         $this->assertArrayHasKey('env', $entry->new_values['deployment']);
         $this->assertArrayHasKey('branch', $entry->new_values['deployment']);
         $this->assertSame('console', $entry->ip_address);
+    }
+
+    public function test_a_closed_month_on_the_as_of_date_is_refused_under_its_own_heading(): void
+    {
+        AccountingPeriod::query()->create(AccountingPeriod::attributesForMonth(CarbonImmutable::parse(self::AS_OF)) + [
+            'status' => 'closed',
+            'closed_by' => $this->admin->id,
+            'closed_at' => now(),
+        ]);
+
+        $output = $this->runCommand(['--file' => $this->canonicalCsv(), '--as-of' => self::AS_OF], Command::FAILURE);
+
+        $this->assertStringContainsString('Refused: the as-of date falls in or before a closed month — nothing was written:', $output);
+        $this->assertStringContainsString('The opening balance entry is dated Aug 31, 2026, which falls in', $output);
+        $this->assertStringNotContainsString('JournalPoster', $output);
+        $this->assertSame(0, AccountingJournal::query()->count());
     }
 }

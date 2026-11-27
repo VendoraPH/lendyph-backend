@@ -15,10 +15,11 @@ use Illuminate\Validation\ValidationException;
  * checks, which is why the original guard only covered one of them:
  *
  *   1. A PIVOT WRITE — `loan_collaterals` gains a row for a collateral some
- *      other active loan already holds. CollateralController::attach() is the
- *      only route in. Guarded by assertCollateralIsFree().
+ *      other active loan already holds. CollateralAttacher is the only route
+ *      in, for both CollateralController::attach() and the `collaterals` list
+ *      on LoanService::updateLoan(). Guarded by assertCollateralIsFree().
  *   2. A STATUS TRANSITION — no pivot write at all. A loan that already holds
- *      collateral moves INTO Loan::ACTIVE_STATUSES while another active loan
+ *      collateral moves INTO Loan::PLEDGING_STATUSES while another active loan
  *      holds the same collateral. Guarded by lockCollateralsOf() +
  *      assertNoDoublePledge().
  *
@@ -55,7 +56,7 @@ class CollateralPledgeGuard
      * CALL THIS AS THE FIRST STATEMENT INSIDE THE TRANSACTION. Not "early" —
      * first. Every other writer that could add an active holder for one of
      * these collaterals (CollateralController::attach(),
-     * LoanService::inheritCollaterals(), and the other status transitions
+     * LoanService::restructure(), and the other status transitions
      * through this class) opens by locking the same rows, so once this returns,
      * no conflicting pledge can be committed until the caller's transaction
      * ends. Any snapshot the transaction establishes afterwards is therefore
@@ -91,8 +92,8 @@ class CollateralPledgeGuard
             // detector rolling one transaction back. What it does buy is that
             // every path that locks these rows asks for them in one stated
             // order, which makes a cycle less likely and, more usefully, makes
-            // the intent reviewable. LoanService::inheritCollaterals() carries
-            // the same clause for the same reason; keep them in step.
+            // the intent reviewable. CollateralAttacher::lock() asks in the
+            // same order for the same reason; keep them in step.
             ->orderBy('collaterals.id')
             ->lockForUpdate()
             ->pluck('collaterals.id')
@@ -100,7 +101,7 @@ class CollateralPledgeGuard
     }
 
     /**
-     * Refuse a transition INTO Loan::ACTIVE_STATUSES that would make `$loan` a
+     * Refuse a transition INTO Loan::PLEDGING_STATUSES that would make `$loan` a
      * SECOND active holder of collateral another active loan is already
      * standing on.
      *
@@ -108,23 +109,27 @@ class CollateralPledgeGuard
      * on a write into `loan_collaterals`; a loan changing status writes only to
      * `loans`, so no pivot guard will ever see it. Every path that moves a loan
      * from an inactive status into an active one must call this, INSIDE its own
-     * transaction, having opened that transaction with lockCollateralsOf():
+     * transaction, having opened that transaction by locking the loan's
+     * collateral rows:
      *
      *   - LoanService::release()             approved  → released
+     *     (CollateralAttacher::lock(), the collateral rows only)
      *   - RepaymentService::voidRepayment()  completed → ongoing/released
+     *     (lockCollateralsOf())
      *
      * That is the complete list for this codebase: they are the only two writes
      * of an active status from an inactive one anywhere in app/.
      * RepaymentService::processRepayment() also writes `ongoing`, but only over
      * `released`, which is already active — it cannot add a holder, so it does
-     * not call this.
+     * not call this. CheckDefaultedLoans writes `defaulted` only over `released`
+     * or `ongoing`, which already pledge, so it cannot add one either.
      *
-     * `$collateralIds` is threaded in from lockCollateralsOf() rather than
-     * re-derived here, deliberately: the assertion is only meaningful while
-     * those rows are locked, so it takes the lock's own output as its argument
-     * and cannot be called without one.
+     * `$collateralIds` is threaded in from the lock rather than re-derived
+     * here, deliberately: the assertion is only meaningful while those rows are
+     * locked, so it takes the lock's own output as its argument and cannot be
+     * called without one.
      *
-     * @param  array<int, int>  $collateralIds  as returned by lockCollateralsOf()
+     * @param  array<int, int>  $collateralIds  the ids the caller's collateral lock returned
      *
      * @throws ValidationException naming the conflicting loan(s), on `collateral`
      */
@@ -148,7 +153,7 @@ class CollateralPledgeGuard
     }
 
     /**
-     * Refuse a collateral that some other loan in Loan::ACTIVE_STATUSES already holds.
+     * Refuse a collateral that some other loan in Loan::PLEDGING_STATUSES already holds.
      *
      * Note which side the status test is on: it is the CURRENT holders that must
      * not be active, not the loan being attached to. Pledging to a draft loan a
@@ -160,7 +165,7 @@ class CollateralPledgeGuard
      *
      * The caller is expected to be holding the row lock on `$collateral`
      * already, and to have taken it before reading anything else in its
-     * transaction; CollateralController::attach() opens with that lock.
+     * transaction; CollateralAttacher::lock() is that lock.
      *
      * @throws ValidationException naming the conflicting loan(s), on `collateral_id`
      */
@@ -180,7 +185,7 @@ class CollateralPledgeGuard
     }
 
     /**
-     * The loans in Loan::ACTIVE_STATUSES holding any of `$collateralIds`, other
+     * The loans in Loan::PLEDGING_STATUSES holding any of `$collateralIds`, other
      * than `$loan` itself.
      *
      * The one query both guards above are built out of — the shared part is the
@@ -204,8 +209,8 @@ class CollateralPledgeGuard
     private static function activeHoldersOf(array $collateralIds, Loan $loan): EloquentCollection
     {
         return Loan::query()
-            ->select(['loans.id', 'loans.loan_account_number'])
-            ->whereIn('loans.status', Loan::ACTIVE_STATUSES)
+            ->select(['loans.id', ...Loan::DISPLAY_NUMBER_COLUMNS])
+            ->whereIn('loans.status', Loan::PLEDGING_STATUSES)
             ->whereKeyNot($loan->getKey())
             ->whereHas('collaterals', fn ($query) => $query->whereIn('collaterals.id', $collateralIds))
             ->orderBy('loans.id')
@@ -224,7 +229,7 @@ class CollateralPledgeGuard
     private static function references(EloquentCollection $conflicts): string
     {
         return $conflicts
-            ->map(fn (Loan $active) => $active->loan_account_number ?? "loan #{$active->getKey()}")
+            ->map(fn (Loan $active) => $active->displayNumber() ?? "loan #{$active->getKey()}")
             ->implode(', ');
     }
 }

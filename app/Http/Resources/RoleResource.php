@@ -11,6 +11,7 @@ use OpenApi\Attributes as OA;
     properties: [
         new OA\Property(property: 'id', type: 'integer'),
         new OA\Property(property: 'name', type: 'string', example: 'branch_manager'),
+        new OA\Property(property: 'display_name', type: 'string', nullable: true, example: 'Branch Manager', description: 'Editable label; `name` is the fixed key used in permission checks'),
         new OA\Property(property: 'description', type: 'string', nullable: true),
         new OA\Property(property: 'is_active', type: 'boolean'),
         new OA\Property(property: 'is_system', type: 'boolean', description: 'Seeded system roles cannot be renamed or deleted'),
@@ -27,6 +28,7 @@ class RoleResource extends JsonResource
         return [
             'id' => $this->id,
             'name' => $this->name,
+            'display_name' => $this->display_name,
             'description' => $this->description,
             'is_active' => (bool) $this->is_active,
             'is_system' => (bool) $this->is_system,

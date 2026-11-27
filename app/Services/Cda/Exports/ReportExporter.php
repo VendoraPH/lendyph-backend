@@ -1,0 +1,214 @@
+<?php
+
+namespace App\Services\Cda\Exports;
+
+use App\Models\CdaDocument;
+use App\Models\CdaDocumentVersion;
+use App\Models\CdaReport;
+use App\Models\Document;
+use App\Models\User;
+use App\Services\AuditLogService;
+use App\Services\Cda\Registers\DocumentCategories;
+use App\Services\Cda\Reports\ReportStages;
+use App\Services\LoanWriteTransaction;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
+use Throwable;
+
+/**
+ * Generates a CDA report export on request (CDA design §9) and keeps it.
+ *
+ * - The file is rendered first (PDF, or Excel generated or filled into the
+ *   template's official workbook), outside any lock.
+ * - It is stored on the private disk (a failed save answers 503 and records
+ *   nothing) as a `documents` row owned by the
+ *   report, and as a new version (origin generated, never overwritten) of the
+ *   report's export document for that format, in the repository category
+ *   `report_export`.
+ * - The report row is locked while the version is recorded; if its status or
+ *   snapshot changed while rendering, the export is refused (409) and the
+ *   file removed, so a draft render is never recorded as final or the
+ *   reverse.
+ * - One audit row (`cda_export_generated`) per export, with the format,
+ *   version, draft mark, snapshot and SHA-256.
+ *
+ * - A sworn statement's first export sets its stage to "generated"
+ *   (ReportStages::markGenerated(), under the report's lock).
+ *
+ * Drafts' file names end in `-DRAFT`.
+ */
+final class ReportExporter
+{
+    public const CATEGORY = DocumentCategories::REPORT_EXPORT;
+
+    public const FORMATS = ['pdf', 'xlsx'];
+
+    private const FORMAT_WORDS = ['pdf' => 'PDF', 'xlsx' => 'Excel'];
+
+    public const NOT_SAVED = "The export couldn't be saved to the server's storage, so nothing was recorded. Try again; if it keeps failing, ask your administrator to check the disk.";
+
+    private const MIME = [
+        'pdf' => 'application/pdf',
+        'xlsx' => 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    ];
+
+    public function __construct(
+        private readonly ExportContentBuilder $builder,
+        private readonly PdfRenderer $pdf,
+        private readonly XlsxWriter $xlsx,
+        private readonly XlsxTemplateFiller $filler,
+        private readonly ExportSupport $support,
+        private readonly ReportStages $stages,
+    ) {}
+
+    public function export(CdaReport $report, string $format, User $user): CdaDocumentVersion
+    {
+        abort_if($format === 'xlsx' && ! $this->support->zipAvailable(), 503, ExportSupport::ZIP_MISSING);
+
+        $content = $this->builder->build($report, $user);
+        [$bytes, $note] = $this->render($content, $format);
+        $path = 'cda/exports/'.$report->id.'/'.Str::uuid()->toString().'.'.$format;
+        $this->store($path, $bytes);
+
+        try {
+            return DB::transaction(fn (): CdaDocumentVersion => $this->record($report, $content, $format, $user, $path, $bytes, $note));
+        } catch (Throwable $e) {
+            Storage::disk('private')->delete($path);
+
+            throw $e;
+        }
+    }
+
+    /**
+     * Saves the file, or removes whatever part of it was written and answers
+     * 503 in words; nothing is recorded then.
+     */
+    private function store(string $path, string $bytes): void
+    {
+        try {
+            $saved = Storage::disk('private')->put($path, $bytes);
+        } catch (Throwable $e) {
+            report($e);
+            $saved = false;
+        }
+
+        if ($saved !== true) {
+            try {
+                Storage::disk('private')->delete($path);
+            } catch (Throwable $e) {
+                report($e);
+            }
+
+            abort(503, self::NOT_SAVED);
+        }
+    }
+
+    /** @return array{0: string, 1: string|null} the file and a note about how it was made */
+    private function render(ExportContent $content, string $format): array
+    {
+        if ($format === 'pdf') {
+            return [$this->pdf->render($content), null];
+        }
+
+        if (($content->excel['mode'] ?? 'generated') === 'template') {
+            $workbook = $content->excelTemplateDocumentId === null ? null : Document::query()->find($content->excelTemplateDocumentId);
+            $disk = Storage::disk('private');
+
+            if ($workbook !== null && $disk->exists($workbook->file_path)) {
+                [$bytes, $skipped] = $this->filler->fill((string) $disk->get($workbook->file_path), $content);
+
+                return [$bytes, trim('Filled into the official workbook. '.$skipped)];
+            }
+
+            return [$this->xlsx->write($content), 'The template maps an official workbook, but none is attached, so the generated layout was used.'];
+        }
+
+        return [$this->xlsx->write($content), null];
+    }
+
+    private function record(CdaReport $report, ExportContent $content, string $format, User $user, string $path, string $bytes, ?string $note): CdaDocumentVersion
+    {
+        $locked = CdaReport::query()->with('period')->whereKey($report->id)->lockForUpdate()->firstOrFail();
+        $nowDraft = ! $locked->isLocked();
+
+        if ($nowDraft !== $content->isDraft || ($locked->isLocked() && (int) $locked->current_snapshot_id !== $content->snapshotId)) {
+            throw LoanWriteTransaction::conflict('The report changed while it was being exported. Export it again.');
+        }
+
+        $title = $content->title.' '.$content->periodLabel.' · '.self::FORMAT_WORDS[$format].' export';
+        $document = CdaDocument::query()->where('report_id', $locked->id)->where('category', self::CATEGORY)->where('title', $title)->lockForUpdate()->first()
+            ?? CdaDocument::query()->create([
+                'period_id' => $locked->period_id,
+                'category' => self::CATEGORY,
+                'report_id' => $locked->id,
+                'title' => $title,
+                'description' => 'Exports generated by the server.',
+                'status' => 'active',
+                'created_by' => $user->id,
+            ]);
+
+        $number = (int) CdaDocumentVersion::query()->where('cda_document_id', $document->id)->max('version') + 1;
+        $fileName = $this->fileName($locked, $content, $number, $format);
+        $sha = hash('sha256', $bytes);
+
+        $file = Document::query()->create([
+            'documentable_type' => CdaReport::class,
+            'documentable_id' => $locked->id,
+            'type' => 'cda_export',
+            'label' => $title,
+            'file_path' => $path,
+            'original_filename' => $fileName,
+            'mime_type' => self::MIME[$format],
+            'file_size' => strlen($bytes),
+            'uploaded_by' => $user->id,
+        ]);
+
+        $version = CdaDocumentVersion::query()->create([
+            'cda_document_id' => $document->id,
+            'version' => $number,
+            'version_label' => $content->snapshotVersion === null ? 'Draft' : 'Snapshot v'.$content->snapshotVersion,
+            'origin' => 'generated',
+            'format' => $format,
+            'is_draft' => $content->isDraft,
+            'snapshot_id' => $content->snapshotId,
+            'document_id' => $file->id,
+            'sha256' => $sha,
+            'notes' => $note,
+            'uploaded_by' => $user->id,
+        ]);
+
+        $this->stages->markGenerated($locked);
+
+        AuditLogService::log('cda_export_generated', $locked, null, [
+            'format' => $format,
+            'version' => $number,
+            'is_draft' => $content->isDraft,
+            'snapshot_version' => $content->snapshotVersion,
+            'template_version' => $content->templateVersion,
+            'sha256' => $sha,
+            'file_name' => $fileName,
+        ], sprintf(
+            '%s export v%d of %s %s generated (%s), SHA-256 %s.',
+            self::FORMAT_WORDS[$format],
+            $number,
+            $content->title,
+            $content->periodLabel,
+            $content->isDraft ? 'draft, not for submission' : 'from snapshot v'.$content->snapshotVersion,
+            $sha,
+        ));
+
+        return $version->setRelation('file', $file)->setRelation('cdaDocument', $document);
+    }
+
+    private function fileName(CdaReport $report, ExportContent $content, int $number, string $format): string
+    {
+        $name = Str::upper(str_replace('_', '-', $report->report_type)).'-CY'.$report->period->year
+            .($report->part === 'annual' ? '' : '-'.Str::upper($report->part))
+            .($content->snapshotVersion === null ? '' : '-S'.$content->snapshotVersion)
+            .'-V'.$number
+            .($content->isDraft ? '-DRAFT' : '');
+
+        return $name.'.'.$format;
+    }
+}

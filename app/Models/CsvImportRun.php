@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Services\CsvImport\CsvImportSchema;
 use App\Services\CsvImport\CsvImportUploadService;
 use Carbon\CarbonInterface;
 use Illuminate\Database\Eloquent\Model;
@@ -12,7 +13,7 @@ use Illuminate\Database\Eloquent\Relations\HasOne;
 /**
  * One attempt at migrating a coop's legacy records in from CSV.
  *
- * A run owns its two uploaded files and, through `phase` and `cursor_row_id`,
+ * A run owns its uploaded files and, through `phase` and `cursor_row_id`,
  * enough state to resume a half-finished import instead of restarting it and
  * writing everything a second time.
  *
@@ -29,6 +30,7 @@ class CsvImportRun extends Model
         'as_of_date',
         'phase',
         'product_mapping',
+        'date_orders',
         'cursor_row_id',
         'initiated_by',
         'initiated_ip',
@@ -44,12 +46,57 @@ class CsvImportRun extends Model
         return [
             'as_of_date' => 'date',
             'product_mapping' => 'array',
+            'date_orders' => 'array',
             'cursor_row_id' => 'integer',
             'started_at' => 'datetime',
             'finished_at' => 'datetime',
             'rows_redacted_at' => 'datetime',
             'notes' => 'array',
         ];
+    }
+
+    /**
+     * The date order the Check step settled for each of a file's date columns:
+     * `dmy` (day-first) or `mdy` (month-first) by column key. A column that
+     * needed no order, and every column of a run started before orders were
+     * kept, is absent, and reads as it always has (ValueNormalizer::date()).
+     *
+     * @return array<string, string>
+     */
+    public function dateOrdersFor(string $kind): array
+    {
+        $orders = (array) (($this->date_orders ?? [])[$kind] ?? []);
+
+        return array_filter($orders, static fn (mixed $order): bool => in_array($order, ['dmy', 'mdy'], true));
+    }
+
+    /**
+     * The reading each ordered date column gets, in words, for the run's
+     * payload and the downloaded report: `Date Released: day first`. A column
+     * that needed no order reads as written, so it has no line.
+     *
+     * @return list<array{file: string, column: string, label: string, order: string, words: string}>
+     */
+    public function dateOrderLines(): array
+    {
+        $lines = [];
+
+        foreach (['customers', 'loans'] as $kind) {
+            $columns = array_column(CsvImportSchema::columns(CsvImportSchema::shapeOf($kind)), 'label', 'key');
+
+            foreach ($this->dateOrdersFor($kind) as $column => $order) {
+                $label = $columns[$column] ?? str_replace('_', ' ', $column);
+                $lines[] = [
+                    'file' => $kind,
+                    'column' => $column,
+                    'label' => $label,
+                    'order' => $order,
+                    'words' => $label.': '.($order === 'dmy' ? 'day first' : 'month first'),
+                ];
+            }
+        }
+
+        return $lines;
     }
 
     public function branch(): BelongsTo
@@ -81,6 +128,12 @@ class CsvImportRun extends Model
     public function loansFile(): HasOne
     {
         return $this->hasOne(CsvImportFile::class)->where('kind', 'loans');
+    }
+
+    /** The share capital file (finish run round 2, decision 13), when there is one. */
+    public function shareCapitalFile(): HasOne
+    {
+        return $this->hasOne(CsvImportFile::class)->where('kind', 'share_capital');
     }
 
     /**
@@ -148,5 +201,25 @@ class CsvImportRun extends Model
             'approved_at' => $this->as_of_date?->startOfDay() ?? $this->created_at ?? now(),
             'approved_by' => $this->initiated_by,
         ];
+    }
+
+    /**
+     * Whether this run may carry the membership columns (Membership Date,
+     * Member Type and Membership Number): the staff member who started it
+     * must still be active and able to edit members (`borrowers:update`,
+     * which sets a membership date and type on the member's profile), on top
+     * of the `imports:process` every import needs.
+     *
+     * Read fresh on every call. The staging pass asks it and so does the
+     * import pass, which can come days later (a run waits on its product
+     * mapping), and the starter can lose the access in between. A starter who
+     * has since left (`initiated_by` is nullOnDelete) credits nobody, so that
+     * run carries none.
+     */
+    public function starterMayEditMembers(): bool
+    {
+        $user = $this->initiated_by === null ? null : User::query()->find($this->initiated_by);
+
+        return $user !== null && $user->status !== 'inactive' && $user->can('borrowers:update');
     }
 }

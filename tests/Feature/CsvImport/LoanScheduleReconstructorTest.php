@@ -6,7 +6,9 @@ use App\Models\AmortizationSchedule;
 use App\Services\CsvImport\LoanReconstructionInput;
 use App\Services\CsvImport\LoanScheduleReconstructor;
 use App\Services\CsvImport\ReconstructedSchedule;
+use App\Services\CsvImport\RowNoteBag;
 use App\Services\LoanService;
+use App\Services\LoanTermSchedule;
 use Carbon\Carbon;
 use Tests\TestCase;
 
@@ -89,6 +91,44 @@ class LoanScheduleReconstructorTest extends TestCase
         ));
     }
 
+    public function test_an_off_schedule_maturity_names_the_payment_frequency_in_words_never_its_stored_value(): void
+    {
+        // Semi-monthly steps 15 days: the 12th falls on 14 Jul and the 13th on
+        // 29 Jul, so a 15 Jul maturity is off the schedule.
+        $schedule = $this->reconstructor()->reconstruct($this->input([
+            'frequency' => 'semi_monthly',
+            'dateReleased' => '2025-01-15',
+            'maturityDate' => '2025-07-15',
+            'termInMonths' => 6,
+            'balanceCentavos' => 7000007,
+            'interestBalanceCentavos' => 1470015,
+        ]));
+
+        $warning = collect($schedule->warnings)->first(fn ($note) => $note->code === 'maturity_off_schedule');
+
+        $this->assertNotNull($warning);
+        $this->assertSame(
+            'The maturity date 2025-07-15 does not fall exactly on a due date of a loan paid semi-monthly from 2025-01-15 (the nearest is 2025-07-29). The last instalment was dated 2025-07-15 as the file says, and the loan recorded as 13 periods.',
+            $warning->message,
+        );
+    }
+
+    public function test_a_schedule_that_does_not_reconcile_names_both_figures_in_pesos(): void
+    {
+        $schedule = $this->reconstructor()->reconstruct($this->input());
+        $this->assertTrue($schedule->isValid());
+
+        // The same schedule held to a loan amount one centavo larger.
+        $notes = new RowNoteBag;
+        (new \ReflectionMethod(LoanScheduleReconstructor::class, 'invariantsHold'))
+            ->invoke($this->reconstructor(), $schedule, $this->input(['principalCentavos' => 7000008]), $notes);
+
+        $this->assertSame(
+            ['The rebuilt schedule does not reconcile: scheduled principal comes to ₱70,000.07 but the loan amount is ₱70,000.08. The row was not imported.'],
+            array_map(fn ($note) => $note->message, $notes->errors()),
+        );
+    }
+
     public function test_every_frequency_lands_the_last_due_date_exactly_on_the_csv_maturity_date(): void
     {
         $loanService = new LoanService;
@@ -133,30 +173,29 @@ class LoanScheduleReconstructorTest extends TestCase
 
     public function test_a_month_end_release_derives_the_term_from_computematuritydate_not_a_stepwise_walk(): void
     {
-        // A six-month loan released 31 Aug 2024. Carbon here OVERFLOWS short
-        // months rather than clamping them (31 Aug + 1 month = 1 Oct), and the
-        // error compounds when you step one period at a time:
+        // A seven-month loan released 31 Aug 2024. Its instalments keep the
+        // 31st, capped at the end of each shorter month, so it matures 31 Mar
+        // 2025. Stepping one month at a time from the previous date instead
+        // loses the 31st for good the first time a short month clamps it:
         //
-        //   stepwise:  1 Oct, 1 Nov, 1 Dec, 1 Jan, 1 Feb, 1 Mar, 1 Apr
-        //              -> first reaches 3 Mar at step SEVEN
-        //   from start: 1 Oct, 31 Oct, 1 Dec, 31 Dec, 31 Jan, 3 Mar
-        //              -> reaches 3 Mar at step SIX, exactly
+        //   stepwise:   30 Sep, 30 Oct, 30 Nov, 30 Dec, 30 Jan, 28 Feb, 28 Mar, 28 Apr
+        //              -> first reaches 31 Mar at step EIGHT
+        //   from start: 30 Sep, 31 Oct, 30 Nov, 31 Dec, 31 Jan, 28 Feb, 31 Mar
+        //              -> reaches 31 Mar at step SEVEN, exactly
         //
-        // Six is the right answer, and it is right for a reason beyond
-        // arithmetic: LoanService::updateLoan() recomputes maturity_date as
-        // computeMaturityDate(start_date, term, frequency) on every edit. Any
-        // term that does not reproduce the file's maturity date through THAT
-        // function means the maturity date silently moves the first time an
-        // operator opens the loan and saves it.
+        // Seven is the right answer, and it is right for a reason beyond
+        // arithmetic: it is the term whose schedule, dated the way the app
+        // dates a released loan's, ends on the file's maturity date. Any other
+        // term stores a loan whose last instalment and maturity disagree.
         $loanService = new LoanService;
         $released = '2024-08-31';
-        $maturity = '2025-03-03';
+        $maturity = '2025-03-31';
 
         $stepwise = Carbon::parse($released);
         $stepwiseTerm = null;
 
         for ($k = 1; $k <= 24; $k++) {
-            $stepwise = $stepwise->copy()->addMonth();
+            $stepwise = $stepwise->copy()->addMonthNoOverflow();
 
             if ($stepwise->gte(Carbon::parse($maturity))) {
                 $stepwiseTerm = $k;
@@ -164,7 +203,7 @@ class LoanScheduleReconstructorTest extends TestCase
             }
         }
 
-        $this->assertSame(7, $stepwiseTerm, 'The naive walk really does come out one period too long.');
+        $this->assertSame(8, $stepwiseTerm, 'The naive walk really does come out one period too long.');
 
         $schedule = $this->reconstructor()->reconstruct($this->input([
             'frequency' => 'monthly',
@@ -175,17 +214,25 @@ class LoanScheduleReconstructorTest extends TestCase
         ]));
 
         $this->assertTrue($schedule->isValid());
-        $this->assertSame(6, $schedule->term);
-        $this->assertCount(6, $schedule->periods);
-        $this->assertSame($maturity, $schedule->periods[5]->dueDate);
+        $this->assertSame(7, $schedule->term);
+        $this->assertSame(
+            ['2024-09-30', '2024-10-31', '2024-11-30', '2024-12-31', '2025-01-31', '2025-02-28', '2025-03-31'],
+            array_map(fn ($period) => $period->dueDate, $schedule->periods),
+        );
         $this->assertNotContains('maturity_off_schedule', array_column(
             array_map(fn ($n) => $n->toArray(), $schedule->warnings), 'code'
         ));
 
-        // The round trip the app itself will perform on the next edit.
+        // The round trip: the stored term reproduces the maturity date, both
+        // as a period count and as the loan's own term.
         $this->assertSame(
             $maturity,
             $loanService->computeMaturityDate($released, $schedule->term, 'monthly')->toDateString(),
+        );
+        $term = LoanTermSchedule::fromPeriodCount($schedule->term, 'monthly');
+        $this->assertSame(
+            $maturity,
+            $loanService->maturityDateFor($released, $term['term'], $term['term_unit'], 'monthly')->toDateString(),
         );
     }
 

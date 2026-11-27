@@ -300,10 +300,10 @@ class LoanReleaseFeesTest extends TestCase
     /**
      * Term days come from the AGREED DATES, never from `loans.term`.
      *
-     * `term` is a period count whose unit follows `frequency`
-     * ({@see LoanService::computeMaturityDate()}), so `term: 30` on a daily
-     * loan is thirty DAYS and `term: 6` on a monthly one is about a hundred and
-     * eighty. Any `term * k` conversion gets one of these two wrong.
+     * `term` is a length in the loan's `term_unit`, so `term: 30` on a days
+     * loan is thirty DAYS and `term: 6` on a months one is about a hundred and
+     * eighty. Any `term * k` conversion that ignores the unit gets one of these
+     * two wrong.
      *
      * Both loans below are ₱10,000 with the same fee rule, `term_days_gt: 90`.
      * Read off `term`, the daily loan (30) and the monthly loan (6) would sort
@@ -313,7 +313,7 @@ class LoanReleaseFeesTest extends TestCase
     public function test_term_day_conditions_read_the_date_pair_not_the_period_count(): void
     {
         $sixMonths = $this->freeProduct(['term' => 6, 'frequency' => 'monthly']);
-        $thirtyDays = $this->freeProduct(['term' => 30, 'frequency' => 'daily', 'max_term' => 30]);
+        $thirtyDays = $this->freeProduct(['term' => 30, 'term_unit' => 'days', 'frequency' => 'daily', 'max_term' => 30]);
 
         Fee::create([
             'name' => 'Long Term Fee',
@@ -665,12 +665,13 @@ class LoanReleaseFeesTest extends TestCase
             return $line === null ? 0 : (int) $line->{$side};
         };
 
+        // Catalog fees are credited to 4080 Other Fee Income.
         $this->assertSame(5_000_000, $lineOn('1110', 'debit'));
-        $this->assertSame(148_456, $lineOn('4030', 'credit'));
+        $this->assertSame(148_456, $lineOn('4080', 'credit'));
         $this->assertSame(4_851_544, $lineOn('1010', 'credit'));
 
         // Not the peso figures wearing a centavo label.
-        $this->assertNotSame(1_484, $lineOn('4030', 'credit'));
+        $this->assertNotSame(1_484, $lineOn('4080', 'credit'));
         $this->assertNotSame(48_515, $lineOn('1010', 'credit'));
     }
 
@@ -890,5 +891,62 @@ class LoanReleaseFeesTest extends TestCase
             0,
             AuditLog::where('action', 'release_fees')->where('auditable_id', $loan->id)->count(),
         );
+    }
+
+    // ── Overlap warnings (advisory only, see FeeOverlapDetector) ─────────
+
+    /**
+     * The write-time guard (`FeeProductOverlapTest`) stops a NEW collision
+     * from being saved. This is the backstop for one that predates it — the
+     * exact setup from
+     * {@see self::test_a_settings_fee_sharing_a_name_with_a_product_column_is_not_deduplicated()},
+     * built the same way (raw `Fee::create()`, which bypasses that guard) —
+     * and it has to surface as an `overlap_warnings` entry on the preview
+     * WITHOUT moving any of the figures that protected spec pins. Proving
+     * that is the point: the warning is purely additive.
+     */
+    public function test_the_release_preview_flags_an_overlapping_fee_without_changing_the_totals(): void
+    {
+        $product = LoanProduct::factory()->create([
+            'interest_rate' => 3.0, 'interest_method' => 'straight', 'term' => 6, 'frequency' => 'monthly',
+            'penalty_rate' => 2.0, 'grace_period_days' => 3,
+            'processing_fee' => 2.0, 'service_fee' => 0, 'notarial_fee' => 0,
+        ]);
+
+        $fee = Fee::create(['name' => 'Processing Fee', 'type' => 'fixed', 'value' => 50]);
+
+        $loan = $this->approvedLoan($product, 10000);
+
+        $preview = $this->getJson("/api/loans/{$loan->id}/release-preview")->assertOk();
+
+        $warnings = $preview->json('data.overlap_warnings');
+        $this->assertCount(1, $warnings);
+        $this->assertSame($fee->id, $warnings[0]['fee_id']);
+        $this->assertSame('Processing Fee', $warnings[0]['fee_name']);
+        $this->assertStringContainsString('duplicates', $warnings[0]['message']);
+
+        // The same totals the protected spec pins for this exact setup
+        // (₱200 from the product column + ₱50 from the catalog fee),
+        // undisturbed by the warning's presence.
+        $this->assertSame('250.00', $preview->json('data.total_deductions'));
+        $this->assertSame('9750.00', $preview->json('data.net_proceeds'));
+        $this->assertCount(2, $preview->json('data.deductions'));
+    }
+
+    /** No false positive: a product WITH active fees of its own, next to a genuinely distinct catalog name. */
+    public function test_the_release_preview_reports_no_warnings_when_fees_and_product_columns_are_distinct(): void
+    {
+        $product = LoanProduct::factory()->create([
+            'interest_rate' => 3.0, 'interest_method' => 'straight', 'term' => 6, 'frequency' => 'monthly',
+            'penalty_rate' => 2.0, 'grace_period_days' => 3,
+            'processing_fee' => 2.0, 'service_fee' => 1.0, 'notarial_fee' => 0,
+        ]);
+        Fee::create(['name' => 'Insurance Premium', 'type' => 'percentage', 'value' => 1.0]);
+
+        $loan = $this->approvedLoan($product, 10000);
+
+        $preview = $this->getJson("/api/loans/{$loan->id}/release-preview")->assertOk();
+
+        $this->assertSame([], $preview->json('data.overlap_warnings'));
     }
 }

@@ -27,12 +27,25 @@ use Throwable;
  * twelve phone numbers dropped as unusable, twelve loans written outside the
  * product's maximum. Those are the rows nobody goes back to check, which is
  * exactly why they have to be in the file.
+ *
+ * THREE SEVERITIES, by what became of the row (finish run, round 5):
+ *  - `error`: why a row was not imported (its errors, or its failure);
+ *  - `skipped`: every other line of a row that was not imported, so it never
+ *    counts as a warning: why it was skipped, and its notes worded as what
+ *    would happen once it imports (RowNote::$ifNotImported);
+ *  - `warning`: a row that WAS imported, or will be while its run is open,
+ *    with something adjusted. Its notes keep their own wording.
  */
 class ErrorReportBuilder
 {
     public const SEVERITY_ERROR = 'error';
 
+    public const SEVERITY_SKIPPED = 'skipped';
+
     public const SEVERITY_WARNING = 'warning';
+
+    /** In the order the summary lists them: the row's fate, worst first. */
+    public const SEVERITIES = [self::SEVERITY_ERROR, self::SEVERITY_SKIPPED, self::SEVERITY_WARNING];
 
     /**
      * A loan written outside the bounds its mapped LoanProduct configures.
@@ -75,6 +88,20 @@ class ErrorReportBuilder
      * @var list<string>
      */
     private const WRITTEN_RESULTS = ['imported', 'matched_existing', 'already_imported'];
+
+    /** Results that mean the import pass decided not to write the row. */
+    private const NOT_WRITTEN_RESULTS = ['skipped', 'failed'];
+
+    /**
+     * Import failures that belong to one column, by `result_category`, so the
+     * report names that column (its label, and the cell as it arrived) instead
+     * of the whole row. A membership number another member holds is refused
+     * at import, where an earlier row of the same file counts too
+     * (CsvImportProcessor).
+     *
+     * @var array<string, string>
+     */
+    private const RESULT_CATEGORY_FIELDS = ['membership_number_taken' => 'membership_number'];
 
     /** Rows read per chunk when summarising or streaming. */
     private const CHUNK = 500;
@@ -136,36 +163,43 @@ class ErrorReportBuilder
             ->all();
 
         $severity = $filters['severity'] ?? null;
+        $wants = fn (string $level): bool => $severity === null || $severity === $level;
+        $closed = self::runIsClosed($run);
+
+        /**
+         * Notes live inside the staged payload rather than in a column, so
+         * this leg cannot use the `(csv_import_file_id, status, result)` index
+         * and scans. Acceptable here and nowhere else: the error report is a
+         * deliberate operator action, not the status poll.
+         *
+         * JSON_LENGTH returns NULL for a missing path, and NULL > 0 is not
+         * true, so a row with no `warnings` key is simply not matched.
+         */
+        $hasNotes = fn (Builder $row) => $row->whereRaw('JSON_LENGTH(`normalized`, ?) > 0', ['$.warnings']);
 
         return CsvImportRow::query()
             ->whereIn('csv_import_file_id', $fileIds === [] ? [0] : $fileIds)
-            ->where(function (Builder $q) use ($severity): void {
-                if ($severity !== self::SEVERITY_WARNING) {
+            ->where(function (Builder $q) use ($wants, $closed, $hasNotes): void {
+                if ($wants(self::SEVERITY_ERROR)) {
                     $q->orWhere('status', 'invalid')->orWhere('result', 'failed');
                 }
 
-                if ($severity !== self::SEVERITY_ERROR) {
-                    /**
-                     * Warnings live inside the staged payload rather than in a
-                     * column, so this leg cannot use the
-                     * `(csv_import_file_id, status, result)` index and scans.
-                     * Acceptable here and nowhere else: the error report is a
-                     * deliberate operator action, not the status poll.
-                     *
-                     * JSON_LENGTH returns NULL for a missing path, and NULL > 0
-                     * is not true, so a row with no `warnings` key is simply not
-                     * matched.
-                     */
-                    $q->orWhereRaw('JSON_LENGTH(`normalized`, ?) > 0', ['$.warnings'])
-                        ->orWhere('result', 'skipped')
+                if ($wants(self::SEVERITY_SKIPPED)) {
+                    $q->orWhere('result', 'skipped')
+                        ->orWhere(fn (Builder $row) => $row->where(fn (Builder $fate) => self::wasNotImported($fate, $closed))->where($hasNotes));
+                }
+
+                if ($wants(self::SEVERITY_WARNING)) {
+                    $q->orWhere(fn (Builder $row) => $row->where(fn (Builder $fate) => self::landsOrLanded($fate, $closed))->where($hasNotes))
                         /*
                          * A column read rather than a JSON one, so this leg
-                         * costs nothing beyond the scan the warnings leg above
+                         * costs nothing beyond the scan the notes leg above
                          * already forces — and unlike that one it still matches
                          * after `imports:redact-rows` has blanked `normalized`,
                          * because `result_category` is a column redaction keeps.
                          */
-                        ->orWhere('result_category', self::CATEGORY_OUT_OF_PRODUCT_BOUNDS);
+                        ->orWhere(fn (Builder $row) => $row->where('result_category', self::CATEGORY_OUT_OF_PRODUCT_BOUNDS)
+                            ->whereIn('result', self::WRITTEN_RESULTS));
                 }
             })
             ->orderBy('csv_import_file_id')
@@ -216,7 +250,7 @@ class ErrorReportBuilder
         $files = $this->filesById($run);
         $severity = $filters['severity'] ?? null;
 
-        $bySeverity = [self::SEVERITY_ERROR => 0, self::SEVERITY_WARNING => 0];
+        $bySeverity = array_fill_keys(self::SEVERITIES, 0);
         $groups = [];
         $rowsReported = 0;
         $totalIssues = 0;
@@ -325,6 +359,19 @@ class ErrorReportBuilder
 
         $lastRowId = null;
 
+        // Which reading each ordered date column got: a chosen order reads a
+        // day/month/year cell with no "reads two ways" warning, so the report
+        // says it, file by file, before the issues.
+        foreach ($run->dateOrderLines() as $line) {
+            $file = collect($files)->firstWhere('kind', $line['file']);
+
+            if ($file === null || (($filters['kind'] ?? null) !== null && $filters['kind'] !== $line['file'])) {
+                continue;
+            }
+
+            yield [(string) $file->original_filename, '', '', '', 'note', 'Date reading', $line['label'], $line['words'], ''];
+        }
+
         try {
             yield from $this->emit($rows, $files, $severity, $lastRowId);
         } catch (Throwable $e) {
@@ -383,7 +430,7 @@ class ErrorReportBuilder
                 'last_row_id' => $lastRowId,
             ]);
 
-            yield ['', '', '', '', self::SEVERITY_ERROR, 'export_failed', '', 'This report stopped early and is incomplete. Please download it again.', ''];
+            yield ['', '', '', '', self::SEVERITY_ERROR, IssueCategoryWords::for('export_failed'), '', 'This report stopped early and is incomplete. Please download it again.', ''];
         }
     }
 
@@ -411,7 +458,9 @@ class ErrorReportBuilder
                     $issue['account_no'],
                     $issue['loan_no'],
                     $issue['severity'],
-                    $issue['category'],
+                    // Words, as the screen shows them; the code is for grouping.
+                    // A skipped row's title never says what the import did.
+                    IssueCategoryWords::for($issue['category'], $issue['severity']),
                     $issue['field_label'],
                     /**
                      * Message before Original Value, and BOTH reach
@@ -437,7 +486,7 @@ class ErrorReportBuilder
      */
     public function issuesFor(CsvImportRow $row, ?CsvImportFile $file, ?string $severity = null): array
     {
-        $shape = $file?->kind === CsvImportSchema::LOANS ? CsvImportSchema::LOANS : CsvImportSchema::CUSTOMERS;
+        $shape = CsvImportSchema::shapeOf($file?->kind);
         $normalized = is_array($row->normalized) ? $row->normalized : [];
         $raw = is_array($row->raw) ? $row->raw : [];
 
@@ -453,8 +502,10 @@ class ErrorReportBuilder
         ];
 
         $issues = [];
+        $wants = fn (string $level): bool => $severity === null || $severity === $level;
+        $notImported = self::rowWasNotImported($row, $file);
 
-        if ($severity !== self::SEVERITY_WARNING) {
+        if ($wants(self::SEVERITY_ERROR)) {
             foreach ($this->notes($row->errors) as $note) {
                 $issues[] = $this->issue($base, self::SEVERITY_ERROR, $note, $shape, $normalized, $raw);
             }
@@ -468,39 +519,52 @@ class ErrorReportBuilder
                 $issues[] = $this->issue($base, self::SEVERITY_ERROR, [
                     'field' => '__row',
                     'code' => (string) ($row->result_category ?: 'invalid_row'),
-                    'message' => (string) ($row->result_message ?: 'This row was rejected during staging.'),
+                    'message' => (string) ($row->result_message ?: 'This row didn\'t pass the checks before import.'),
                 ], $shape, $normalized, $raw);
             }
 
             if ($row->result === 'failed') {
                 $issues[] = $this->issue($base, self::SEVERITY_ERROR, [
-                    'field' => '__row',
+                    'field' => self::RESULT_CATEGORY_FIELDS[(string) $row->result_category] ?? '__row',
                     'code' => (string) ($row->result_category ?: 'import_failed'),
                     'message' => (string) ($row->result_message ?: 'This row could not be imported.'),
                 ], $shape, $normalized, $raw);
             }
         }
 
-        if ($severity !== self::SEVERITY_ERROR) {
-            foreach ($this->notes($normalized['warnings'] ?? null) as $note) {
-                $issues[] = $this->issue($base, self::SEVERITY_WARNING, $note, $shape, $normalized, $raw);
-            }
+        /**
+         * A note is a warning only on a row that was imported, or will be while
+         * its run is open. On a row that never was, it is a skipped line, never
+         * a warning, worded as what would happen once the row imports; a note
+         * staged before that wording existed keeps its own.
+         */
+        $noteLevel = $notImported ? self::SEVERITY_SKIPPED : self::SEVERITY_WARNING;
 
-            /**
-             * `skipped` is not a failure, but an admin who sees 56 rows skipped
-             * and no reason will assume data was lost. `matched_existing` and
-             * `already_imported` are deliberately NOT here: those rows landed,
-             * they are reported as counts on the status endpoint, and listing
-             * them would bury the lines that need action.
-             */
-            if ($row->result === 'skipped') {
-                $issues[] = $this->issue($base, self::SEVERITY_WARNING, [
-                    'field' => '__row',
-                    'code' => (string) ($row->result_category ?: 'skipped'),
-                    'message' => (string) ($row->result_message ?: 'This row was skipped.'),
+        if ($wants($noteLevel)) {
+            foreach ($this->notes($normalized['warnings'] ?? null) as $note) {
+                $issues[] = $this->issue($base, $noteLevel, [
+                    ...$note,
+                    'message' => $notImported ? ($note['message_if_not_imported'] ?? $note['message']) : $note['message'],
                 ], $shape, $normalized, $raw);
             }
+        }
 
+        /**
+         * `skipped` is not a failure, but an admin who sees 56 rows skipped
+         * and no reason will assume data was lost. `matched_existing` and
+         * `already_imported` are deliberately NOT here: those rows landed,
+         * they are reported as counts on the status endpoint, and listing
+         * them would bury the lines that need action.
+         */
+        if ($wants(self::SEVERITY_SKIPPED) && $row->result === 'skipped') {
+            $issues[] = $this->issue($base, self::SEVERITY_SKIPPED, [
+                'field' => '__row',
+                'code' => (string) ($row->result_category ?: 'skipped'),
+                'message' => (string) ($row->result_message ?: 'This row was skipped.'),
+            ], $shape, $normalized, $raw);
+        }
+
+        if ($wants(self::SEVERITY_WARNING)) {
             /**
              * The loan landed, and it disagrees with its product.
              *
@@ -525,7 +589,7 @@ class ErrorReportBuilder
 
     /**
      * @param  array<string, mixed>  $base
-     * @param  array{field: string, code: string, message: string}  $note
+     * @param  array{field: string, code: string, message: string, message_if_not_imported?: string|null}  $note
      * @param  array<string, mixed>  $normalized
      * @param  array<int|string, mixed>  $raw
      * @return array<string, mixed>
@@ -551,9 +615,10 @@ class ErrorReportBuilder
     }
 
     /**
-     * Normalise whatever shape the notes were stored in into note triples.
+     * Normalise whatever shape the notes were stored in into note triples,
+     * with a warning's not-imported wording when it was stored.
      *
-     * @return list<array{field: string, code: string, message: string}>
+     * @return list<array{field: string, code: string, message: string, message_if_not_imported: string|null}>
      */
     private function notes(mixed $notes): array
     {
@@ -569,6 +634,7 @@ class ErrorReportBuilder
                     'field' => (string) ($note['field'] ?? (is_string($key) ? $key : '')),
                     'code' => (string) ($note['code'] ?? 'invalid'),
                     'message' => (string) ($note['message'] ?? ''),
+                    'message_if_not_imported' => isset($note['message_if_not_imported']) ? (string) $note['message_if_not_imported'] : null,
                 ];
 
                 continue;
@@ -586,6 +652,7 @@ class ErrorReportBuilder
                         'field' => is_string($key) ? $key : '',
                         'code' => 'invalid',
                         'message' => (string) $message,
+                        'message_if_not_imported' => null,
                     ];
                 }
             }
@@ -637,7 +704,49 @@ class ErrorReportBuilder
      */
     private function filesById(CsvImportRun $run): array
     {
-        return $run->files->keyBy('id')->all();
+        return $run->files->each(fn (CsvImportFile $file) => $file->setRelation('run', $run))->keyBy('id')->all();
+    }
+
+    /** Whether the run is over, so a row it never reached will not be imported. */
+    private static function runIsClosed(?CsvImportRun $run): bool
+    {
+        return $run !== null && in_array($run->phase, CsvImportRun::closedPhases(), true);
+    }
+
+    /**
+     * A row that was never imported: refused at the checks, skipped or failed
+     * by the import pass, or never reached before its run closed. The SQL twin
+     * of self::rowWasNotImported().
+     *
+     * @param  Builder<CsvImportRow>  $row
+     * @return Builder<CsvImportRow>
+     */
+    private static function wasNotImported(Builder $row, bool $runClosed): Builder
+    {
+        return $row->where('status', 'invalid')
+            ->orWhereIn('result', self::NOT_WRITTEN_RESULTS)
+            ->when($runClosed, fn (Builder $q) => $q->orWhereNull('result'));
+    }
+
+    /**
+     * Every other row: written by the import pass, or still to be decided
+     * while its run is open. Exactly the rows self::wasNotImported() leaves.
+     *
+     * @param  Builder<CsvImportRow>  $row
+     * @return Builder<CsvImportRow>
+     */
+    private static function landsOrLanded(Builder $row, bool $runClosed): Builder
+    {
+        return $row->where('status', '!=', 'invalid')
+            ->where(fn (Builder $fate) => $fate->whereIn('result', self::WRITTEN_RESULTS)
+                ->when(! $runClosed, fn (Builder $q) => $q->orWhereNull('result')));
+    }
+
+    private static function rowWasNotImported(CsvImportRow $row, ?CsvImportFile $file): bool
+    {
+        return $row->status === 'invalid'
+            || in_array($row->result, self::NOT_WRITTEN_RESULTS, true)
+            || ($row->result === null && self::runIsClosed($file?->run));
     }
 
     /**

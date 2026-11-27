@@ -2,16 +2,46 @@
 
 namespace App\Http\Controllers\Api;
 
+use App\Http\Controllers\Api\Traits\CsvExportTrait;
 use App\Http\Controllers\Controller;
+use App\Http\Requests\Concerns\DateInputMessages;
 use App\Http\Resources\AuditLogResource;
 use App\Models\AuditLog;
+use App\Services\AuditLogModules;
+use App\Services\BranchAccess;
+use App\Services\LikePattern;
+use Carbon\CarbonImmutable;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
+use Illuminate\Validation\Rule;
 use OpenApi\Attributes as OA;
 use Symfony\Component\HttpFoundation\StreamedResponse;
 
+/**
+ * The audit trail: list, CSV export and detail.
+ *
+ * Login rows written before AuthController::login() recorded the user have
+ * no user_id. The list and detail (AuditLogResource) and the export's User
+ * column show the signed-in user as their actor (AuditLog::inferredActor()).
+ * The `user_id` filter, `search` and the action stats read the stored
+ * user_id only, so those old login rows stay outside a user's filtered view;
+ * rows written since carry the user_id and are counted normally.
+ *
+ * The audit trail is a head-office control, so every endpoint here also
+ * requires `branches:view_all` (decision B2): a branch user holding
+ * `audit_logs:view` or `audit_logs:export` gets 403. Rows written since Phase
+ * 6 MB-BE6 record the audited record's branch (AuditBranch), which the list
+ * and the CSV filter on; that filter needs `branches:view_all` with them.
+ *
+ * A caller without `borrowers:view` reads member, co-maker, contact
+ * preference and credit rows without their personal fields (credit rows also
+ * need `credit_scoring:view`), in the list, the detail and the CSV alike
+ * (AuditLogResource::valuesShownTo()).
+ */
 class AuditLogController extends Controller
 {
+    use CsvExportTrait;
+
     #[OA\Get(
         path: '/api/audit-logs',
         summary: 'List audit logs',
@@ -21,8 +51,10 @@ class AuditLogController extends Controller
         parameters: [
             new OA\Parameter(name: 'search', in: 'query', required: false, schema: new OA\Schema(type: 'string'), description: 'Matches action, auditable_type, description, or user name'),
             new OA\Parameter(name: 'user_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')),
+            new OA\Parameter(name: 'branch_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer'), description: 'The audited record\'s branch, recorded on rows written since Phase 6 (older rows have none)'),
             new OA\Parameter(name: 'action', in: 'query', required: false, schema: new OA\Schema(type: 'string')),
             new OA\Parameter(name: 'auditable_type', in: 'query', required: false, schema: new OA\Schema(type: 'string')),
+            new OA\Parameter(name: 'module', in: 'query', required: false, schema: new OA\Schema(type: 'string', enum: ['auth', 'borrowers', 'loans', 'payments', 'collections', 'users', 'roles', 'accounting', 'gcash', 'system']), description: 'The `module` each row carries (auth = sign-in and self-service events; system = rows of no other module); an unknown value is a 422'),
             new OA\Parameter(name: 'date_from', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')),
             new OA\Parameter(name: 'date_to', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')),
             new OA\Parameter(name: 'per_page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', default: 15)),
@@ -30,17 +62,21 @@ class AuditLogController extends Controller
         responses: [
             new OA\Response(response: 200, description: 'Paginated audit log list'),
             new OA\Response(response: 401, description: 'Unauthenticated'),
-            new OA\Response(response: 403, description: 'Forbidden'),
+            new OA\Response(response: 403, description: 'Forbidden (also without branches:view_all)'),
         ],
     )]
     public function index(): AnonymousResourceCollection
     {
         $this->authorize('audit_logs:view');
+        $this->authorize(BranchAccess::VIEW_ALL);
 
         $filters = $this->validatedFilters();
 
         $logs = $this->buildQuery($filters)
             ->latest('created_at')
+            // Tiebreak on the key: a single request routinely writes several
+            // audit rows in the same second. See DeterministicPaginationTest.
+            ->orderByDesc('id')
             ->paginate(min(max((int) ($filters['per_page'] ?? 15), 1), 100));
 
         /**
@@ -65,6 +101,8 @@ class AuditLogController extends Controller
             ->pluck('count', 'action')
             ->toArray();
 
+        AuditLogResource::loadChangeNames($logs->getCollection());
+
         return AuditLogResource::collection($logs)
             ->additional(['meta' => ['stats' => [
                 'actions' => $stats,
@@ -81,20 +119,23 @@ class AuditLogController extends Controller
         parameters: [
             new OA\Parameter(name: 'search', in: 'query', required: false, schema: new OA\Schema(type: 'string')),
             new OA\Parameter(name: 'user_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer')),
+            new OA\Parameter(name: 'branch_id', in: 'query', required: false, schema: new OA\Schema(type: 'integer'), description: 'The audited record\'s branch, recorded on rows written since Phase 6 (older rows have none)'),
             new OA\Parameter(name: 'action', in: 'query', required: false, schema: new OA\Schema(type: 'string')),
             new OA\Parameter(name: 'auditable_type', in: 'query', required: false, schema: new OA\Schema(type: 'string')),
+            new OA\Parameter(name: 'module', in: 'query', required: false, schema: new OA\Schema(type: 'string', enum: ['auth', 'borrowers', 'loans', 'payments', 'collections', 'users', 'roles', 'accounting', 'gcash', 'system']), description: 'The `module` each row carries (auth = sign-in and self-service events; system = rows of no other module); an unknown value is a 422'),
             new OA\Parameter(name: 'date_from', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')),
             new OA\Parameter(name: 'date_to', in: 'query', required: false, schema: new OA\Schema(type: 'string', format: 'date')),
         ],
         responses: [
             new OA\Response(response: 200, description: 'CSV file stream', content: new OA\MediaType(mediaType: 'text/csv')),
             new OA\Response(response: 401, description: 'Unauthenticated'),
-            new OA\Response(response: 403, description: 'Forbidden'),
+            new OA\Response(response: 403, description: 'Forbidden (also without branches:view_all)'),
         ],
     )]
     public function export(): StreamedResponse
     {
         $this->authorize('audit_logs:export');
+        $this->authorize(BranchAccess::VIEW_ALL);
 
         // Validated here, not inside the closure below. The closure runs after
         // the response has begun streaming, so a ValidationException thrown from
@@ -103,8 +144,9 @@ class AuditLogController extends Controller
         $filters = $this->validatedFilters();
 
         $filename = 'audit-logs-'.now()->format('Ymd-His').'.csv';
+        $user = request()->user();
 
-        return response()->streamDownload(function () use ($filters) {
+        return response()->streamDownload(function () use ($filters, $user) {
             $handle = fopen('php://output', 'w');
 
             fputcsv($handle, [
@@ -121,19 +163,26 @@ class AuditLogController extends Controller
 
             $this->buildQuery($filters)
                 ->orderBy('created_at')
-                ->chunk(500, function ($chunk) use ($handle) {
+                // chunk() pages with LIMIT/OFFSET as well, so it needs the same
+                // total order as the list: without the key, a run of equal
+                // timestamps split by a 500-row boundary repeats some rows in
+                // the CSV and drops others.
+                ->orderBy('id')
+                ->chunk(500, function ($chunk) use ($handle, $user) {
                     foreach ($chunk as $log) {
-                        fputcsv($handle, [
+                        [$oldValues, $newValues] = AuditLogResource::valuesShownTo($log, $user);
+
+                        fputcsv($handle, array_map(self::sanitizeCsvCell(...), [
                             $log->created_at?->toDateTimeString(),
-                            $log->user?->full_name ?? ($log->user_id ? "User #{$log->user_id}" : 'system'),
+                            AuditLogResource::memberActorLabel($log) ?? ($log->user ?? $log->inferredActor())?->full_name ?? ($log->user_id ? "User #{$log->user_id}" : 'system'),
                             $log->action,
-                            class_basename($log->auditable_type ?? ''),
+                            self::targetType($log->auditable_type),
                             $log->auditable_id,
                             $log->description,
                             $log->ip_address,
-                            $log->old_values ? json_encode($log->old_values) : '',
-                            $log->new_values ? json_encode($log->new_values) : '',
-                        ]);
+                            $oldValues ? json_encode($oldValues) : '',
+                            $newValues ? json_encode($newValues) : '',
+                        ]));
                     }
                 });
 
@@ -142,6 +191,15 @@ class AuditLogController extends Controller
             'Content-Type' => 'text/csv',
             'Cache-Control' => 'no-store, no-cache',
         ]);
+    }
+
+    /**
+     * The target's kind in the Audit Trail screen's words ("Co-maker", "Loan
+     * approval step"). Stored rows keep the class name.
+     */
+    private static function targetType(?string $auditableType): string
+    {
+        return AuditLogResource::typeInWords(class_basename($auditableType ?? ''));
     }
 
     #[OA\Get(
@@ -156,15 +214,17 @@ class AuditLogController extends Controller
         responses: [
             new OA\Response(response: 200, description: 'Audit log details'),
             new OA\Response(response: 401, description: 'Unauthenticated'),
-            new OA\Response(response: 403, description: 'Forbidden'),
+            new OA\Response(response: 403, description: 'Forbidden (also without branches:view_all)'),
             new OA\Response(response: 404, description: 'Not found'),
         ],
     )]
     public function show(AuditLog $auditLog): AuditLogResource
     {
         $this->authorize('audit_logs:view');
+        $this->authorize(BranchAccess::VIEW_ALL);
 
-        $auditLog->load('user', 'auditable');
+        $auditLog->load('user', 'auditable', 'portalUser.borrower', 'branch:id,name');
+        AuditLogResource::loadChangeNames([$auditLog]);
 
         return new AuditLogResource($auditLog);
     }
@@ -182,12 +242,16 @@ class AuditLogController extends Controller
         return request()->validate([
             'search' => ['nullable', 'string'],
             'user_id' => ['nullable', 'integer', 'min:1'],
+            // The audited record's branch (Phase 6 MB-BE6). The trail itself
+            // already needs branches:view_all, so the filter does too.
+            'branch_id' => ['nullable', 'integer', 'min:1'],
             'action' => ['nullable', 'string'],
             'auditable_type' => ['nullable', 'string'],
-            'date_from' => ['nullable', 'date'],
-            'date_to' => ['nullable', 'date'],
+            'module' => ['nullable', 'string', Rule::in(AuditLogModules::all())],
+            'date_from' => ['nullable', 'date', 'date_format:Y-m-d'],
+            'date_to' => ['nullable', 'date', 'date_format:Y-m-d'],
             'per_page' => ['nullable', 'integer', 'min:1'],
-        ]);
+        ], DateInputMessages::calendar(['date_from' => 'start date', 'date_to' => 'end date']));
     }
 
     /**
@@ -207,28 +271,47 @@ class AuditLogController extends Controller
     {
         $search = $filters['search'] ?? null;
         $userId = $filters['user_id'] ?? null;
+        $branchId = $filters['branch_id'] ?? null;
         $action = $filters['action'] ?? null;
         $auditableType = $filters['auditable_type'] ?? null;
+        $module = $filters['module'] ?? null;
         $dateFrom = $filters['date_from'] ?? null;
         $dateTo = $filters['date_to'] ?? null;
 
-        return AuditLog::with('user', 'auditable')
+        return AuditLog::with('user', 'auditable', 'portalUser.borrower', 'branch:id,name')
             ->when(filled($search), function ($q) use ($search) {
-                $q->where(function ($q) use ($search) {
-                    $q->where('action', 'like', "%{$search}%")
-                        ->orWhere('auditable_type', 'like', "%{$search}%")
-                        ->orWhere('description', 'like', "%{$search}%")
-                        ->orWhereHas('user', function ($uq) use ($search) {
-                            $uq->where('first_name', 'like', "%{$search}%")
-                                ->orWhere('last_name', 'like', "%{$search}%")
-                                ->orWhere('username', 'like', "%{$search}%");
+                $like = LikePattern::contains($search);
+
+                $q->where(function ($q) use ($like) {
+                    $q->where('action', 'like', $like)
+                        ->orWhere('auditable_type', 'like', $like)
+                        ->orWhere('description', 'like', $like)
+                        ->orWhereHas('user', function ($uq) use ($like) {
+                            $uq->where('first_name', 'like', $like)
+                                ->orWhere('last_name', 'like', $like)
+                                ->orWhere('username', 'like', $like);
                         });
                 });
             })
             ->when(filled($userId), fn ($q) => $q->where('user_id', $userId))
+            ->when(filled($branchId), fn ($q) => $q->where('branch_id', $branchId))
             ->when(filled($action), fn ($q) => $q->where('action', $action))
-            ->when(filled($auditableType), fn ($q) => $q->where('auditable_type', 'like', "%{$auditableType}%"))
-            ->when(filled($dateFrom), fn ($q) => $q->where('created_at', '>=', $dateFrom))
-            ->when(filled($dateTo), fn ($q) => $q->where('created_at', '<=', "{$dateTo} 23:59:59"));
+            ->when(filled($auditableType), fn ($q) => $q->where('auditable_type', 'like', LikePattern::contains($auditableType)))
+            ->when(filled($module), fn ($q) => AuditLogModules::constrain($q, $module))
+            ->when(filled($dateFrom), fn ($q) => $q->where('created_at', '>=', self::manilaDayStart($dateFrom)))
+            ->when(filled($dateTo), fn ($q) => $q->where('created_at', '<', self::manilaDayStart($dateTo)->addDay()));
+    }
+
+    /**
+     * The first instant of a calendar day in the app timezone (Asia/Manila).
+     *
+     * `created_at` holds the Manila wall clock (AuditLog stamps it from PHP's
+     * clock), and a Carbon binding is written as its own wall clock, so the
+     * filter covers exactly the Manila days picked: from the start day's
+     * 00:00:00 up to, but not including, the day after the end day.
+     */
+    private static function manilaDayStart(string $date): CarbonImmutable
+    {
+        return CarbonImmutable::createFromFormat('!Y-m-d', $date, config('app.timezone'));
     }
 }

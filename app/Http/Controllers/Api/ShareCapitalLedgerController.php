@@ -3,11 +3,19 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Http\Requests\Concerns\DateInputMessages;
 use App\Http\Requests\ShareCapital\StoreShareCapitalLedgerRequest;
 use App\Http\Resources\ShareCapitalLedgerResource;
+use App\Models\Borrower;
 use App\Models\ShareCapitalLedger;
+use App\Services\BranchAccess;
+use App\Services\CashReferences;
+use App\Services\LikePattern;
+use App\Services\ShareCapitalMemberService;
+use App\Services\ShareCapitalService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
+use Illuminate\Http\Resources\Json\JsonResource;
 use OpenApi\Attributes as OA;
 
 class ShareCapitalLedgerController extends Controller
@@ -15,6 +23,7 @@ class ShareCapitalLedgerController extends Controller
     #[OA\Get(
         path: '/api/share-capital/ledger',
         summary: 'List share capital ledger entries',
+        description: 'Each entry carries `running_balance`: the member\'s balance after it, over all of the member\'s entries in posting order (date, then id), whatever the filters. With `borrower_id`, `meta.summary` carries that member\'s `opening_balance` (before `date_from`), `total_credits` and `total_debits` (from `date_from` to `date_to`) and `ending_balance`.',
         tags: ['Share Capital'],
         security: [['sanctum' => []]],
         parameters: [
@@ -29,7 +38,7 @@ class ShareCapitalLedgerController extends Controller
             new OA\Response(response: 401, description: 'Unauthenticated'),
         ],
     )]
-    public function index(): AnonymousResourceCollection
+    public function index(ShareCapitalMemberService $members): AnonymousResourceCollection
     {
         $this->authorize('share_capital:view');
 
@@ -37,11 +46,11 @@ class ShareCapitalLedgerController extends Controller
             // `min:1` is not cosmetic: 0 is a valid integer that no row can
             // carry, and it used to reach a `when()` that treats it as absent.
             'borrower_id' => ['nullable', 'integer', 'min:1'],
-            'date_from' => ['nullable', 'date'],
-            'date_to' => ['nullable', 'date'],
+            'date_from' => ['nullable', 'date', 'date_format:Y-m-d'],
+            'date_to' => ['nullable', 'date', 'date_format:Y-m-d'],
             'search' => ['nullable', 'string'],
             'per_page' => ['nullable', 'integer', 'min:1'],
-        ]);
+        ], DateInputMessages::calendar(['date_from' => 'start date', 'date_to' => 'end date']));
 
         /**
          * Pulled out as locals so every filter below can be gated on filled() —
@@ -59,23 +68,80 @@ class ShareCapitalLedgerController extends Controller
         $dateTo = $filters['date_to'] ?? null;
         $search = $filters['search'] ?? null;
 
-        $entries = ShareCapitalLedger::with('borrower', 'createdByUser')
+        // Only entries of members in the caller's branches (BranchAccess).
+        // A member's entries all share the member's branch, so the running
+        // balance over them is unchanged.
+        $entries = $members->withRunningBalance(ShareCapitalLedger::query())
+            ->with('borrower', 'createdByUser')
+            ->whereHas('borrower', fn ($q) => $q->visibleTo(request()->user()))
             ->when(filled($borrowerId), fn ($q) => $q->where('borrower_id', $borrowerId))
             ->when(filled($dateFrom), fn ($q) => $q->whereDate('date', '>=', $dateFrom))
             ->when(filled($dateTo), fn ($q) => $q->whereDate('date', '<=', $dateTo))
             ->when(filled($search), function ($q) use ($search) {
-                $q->where(function ($q) use ($search) {
-                    $q->where('reference', 'like', "%{$search}%")
-                        ->orWhere('description', 'like', "%{$search}%")
-                        ->orWhereHas('borrower', fn ($bq) => $bq->where('first_name', 'like', "%{$search}%")
-                            ->orWhere('last_name', 'like', "%{$search}%"));
+                $like = LikePattern::contains($search);
+
+                $q->where(function ($q) use ($like) {
+                    $q->where('reference', 'like', $like)
+                        ->orWhere('description', 'like', $like)
+                        ->orWhereHas('borrower', fn ($bq) => $bq->where('first_name', 'like', $like)
+                            ->orWhere('last_name', 'like', $like));
                 });
             })
             ->orderByDesc('date')
             ->orderByDesc('id')
             ->paginate(min(max((int) ($filters['per_page'] ?? 15), 1), 100));
 
-        return ShareCapitalLedgerResource::collection($entries);
+        $collection = ShareCapitalLedgerResource::collection($entries);
+
+        if (filled($borrowerId) && Borrower::visibleTo(request()->user())->whereKey($borrowerId)->exists()) {
+            $collection->additional(['meta' => [
+                'summary' => $members->memberPeriod((int) $borrowerId, $dateFrom, $dateTo),
+            ]]);
+        }
+
+        return $collection;
+    }
+
+    #[OA\Get(
+        path: '/api/share-capital/members',
+        summary: 'Share capital balance per member',
+        description: 'One row per member with ledger entries: `total_credits`, `total_debits`, `balance`, `entry_count` and `last_transaction_date`, over every entry. Each `balance` equals the member\'s share capital statement `closing_balance`. `meta.totals` covers the whole book (`member_count`, `total_credits`, `total_debits`, `balance`); `meta.matching_totals` covers the members matching `search`. `search` matches the member code and name, with %, _ and \\ taken literally.',
+        tags: ['Share Capital'],
+        security: [['sanctum' => []]],
+        parameters: [
+            new OA\Parameter(name: 'search', in: 'query', required: false, schema: new OA\Schema(type: 'string')),
+            new OA\Parameter(name: 'sort', in: 'query', required: false, schema: new OA\Schema(type: 'string', enum: ['name', 'balance'], default: 'name')),
+            new OA\Parameter(name: 'direction', in: 'query', required: false, schema: new OA\Schema(type: 'string', enum: ['asc', 'desc'], default: 'asc')),
+            new OA\Parameter(name: 'per_page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', default: 25, maximum: 100)),
+        ],
+        responses: [
+            new OA\Response(response: 200, description: 'Paginated member balances with book totals'),
+            new OA\Response(response: 403, description: 'Missing share_capital:view'),
+        ],
+    )]
+    public function members(ShareCapitalMemberService $members): AnonymousResourceCollection
+    {
+        $this->authorize('share_capital:view');
+
+        $filters = request()->validate([
+            'search' => ['nullable', 'string', 'max:255'],
+            'sort' => ['nullable', 'in:name,balance'],
+            'direction' => ['nullable', 'in:asc,desc'],
+            'per_page' => ['nullable', 'integer', 'min:1'],
+        ]);
+
+        $result = $members->members(
+            $filters['search'] ?? null,
+            $filters['sort'] ?? 'name',
+            $filters['direction'] ?? 'asc',
+            min((int) ($filters['per_page'] ?? 25), 100),
+            app(BranchAccess::class)->for(request()->user()),
+        );
+
+        return JsonResource::collection($result['members'])->additional(['meta' => [
+            'totals' => $result['totals'],
+            'matching_totals' => $result['matching_totals'],
+        ]]);
     }
 
     #[OA\Post(
@@ -93,29 +159,58 @@ class ShareCapitalLedgerController extends Controller
                     new OA\Property(property: 'description', type: 'string'),
                     new OA\Property(property: 'type', type: 'string', enum: ['credit', 'debit']),
                     new OA\Property(property: 'amount', type: 'number'),
+                    new OA\Property(property: 'method', type: 'string', enum: ['cash', 'gcash', 'maya', 'bank_transfer', 'online'], default: 'cash'),
+                    new OA\Property(property: 'reference_number', type: 'string', maxLength: 100, nullable: true, description: 'Required unless the method is cash. Ignored for cash: a cash entry gets its CSH number when it saves.'),
                 ],
             ),
         ),
         responses: [
-            new OA\Response(response: 201, description: 'Ledger entry created'),
-            new OA\Response(response: 422, description: 'Validation error. `borrower_id` must belong to a member — a borrower whose registration is still `pending` or was `rejected` is refused here, exactly as on `/pledges/{pledge}/entries`.'),
+            new OA\Response(response: 201, description: 'Ledger entry created, and posted Dr the method\'s account / Cr 3060 Share Capital for a credit, the reverse for a debit, when the organisation keeps books. A cash entry carries its `reference_number` CSH-[super admin id]-[year]-[0001]: the primary super admin\'s user id (the lowest-id active super_admin) padded to 4 digits, the entry date\'s year in Manila, and the next number of that series from 0001.'),
+            new OA\Response(response: 409, description: 'Kept colliding with other saves taking the next reference. Nothing was saved; submit again.'),
+            new OA\Response(response: 422, description: 'Validation error. `borrower_id` must belong to a member — a borrower whose registration is still `pending` or was `rejected` is refused here, exactly as on `/pledges/{pledge}/entries`. Also on `borrower_id`: the member\'s branch is closed or waiting to close, or the member\'s pledge is set to auto-credit, so the auto-credit run credits it (credit or debit, nothing saved). On `reference_number`: a cash entry while no super admin is active.'),
         ],
     )]
-    public function store(StoreShareCapitalLedgerRequest $request): JsonResponse
+    public function store(StoreShareCapitalLedgerRequest $request, ShareCapitalService $shareCapital): JsonResponse
     {
-        $entry = ShareCapitalLedger::create([
-            'borrower_id' => $request->borrower_id,
-            'date' => $request->date,
-            'description' => $request->description,
-            'debit' => $request->type === 'debit' ? $request->amount : 0,
-            'credit' => $request->type === 'credit' ? $request->amount : 0,
-            'created_by' => $request->user()->id,
-        ]);
+        $entry = $shareCapital->createEntry(
+            (int) $request->borrower_id,
+            $request->amount,
+            $request->type,
+            $request->date,
+            $request->user(),
+            $request->description,
+            $request->input('method'),
+            $request->reference_number,
+        );
 
         $entry->load('borrower', 'createdByUser');
 
         return (new ShareCapitalLedgerResource($entry))
             ->response()
             ->setStatusCode(201);
+    }
+
+    #[OA\Get(
+        path: '/api/share-capital/cash-reference/next',
+        summary: 'The next cash entry\'s CSH number',
+        description: 'The reference number the next cash share capital entry dated `date` (today when left out) would get: CSH-[super admin id]-[year]-[0001], in that date\'s year. A preview only: it reserves nothing, and the entry gets its number when it saves. `reference_number` is null while no super admin is active.',
+        tags: ['Share Capital'],
+        security: [['sanctum' => []]],
+        parameters: [new OA\Parameter(name: 'date', in: 'query', required: false, description: 'The entry date, year-month-day', schema: new OA\Schema(type: 'string', format: 'date'))],
+        responses: [
+            new OA\Response(response: 200, description: '{success, data: {reference_number}}'),
+            new OA\Response(response: 403, description: 'Missing share_capital:create'),
+            new OA\Response(response: 422, description: 'A `date` not written year-month-day'),
+        ],
+    )]
+    public function nextCashReference(CashReferences $references): JsonResponse
+    {
+        $this->authorize('share_capital:create');
+
+        $filters = request()->validate([
+            'date' => ['nullable', 'date', 'date_format:Y-m-d'],
+        ], DateInputMessages::calendar(['date' => 'entry date']));
+
+        return response()->json(['success' => true, 'data' => ['reference_number' => $references->next(CashReferences::SHARE_CAPITAL, $filters['date'] ?? null)]]);
     }
 }

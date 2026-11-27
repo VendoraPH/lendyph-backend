@@ -41,17 +41,17 @@ final class BorrowerMatch
 
     public static function alreadyImported(Borrower $borrower): self
     {
-        return new self(self::ALREADY_IMPORTED, $borrower, "This account number is already on borrower {$borrower->borrower_code}, so the row was skipped.");
+        return new self(self::ALREADY_IMPORTED, $borrower, "This account number is already on member {$borrower->borrower_code}, so the row was skipped.");
     }
 
     public static function backfilled(Borrower $borrower): self
     {
-        return new self(self::BACKFILLED, $borrower, "Matched existing borrower {$borrower->borrower_code} on name and birthdate; the account number was written onto their record and nothing else was changed.");
+        return new self(self::BACKFILLED, $borrower, "Matched existing member {$borrower->borrower_code} on name and birthdate; the account number was written onto their record and nothing else was changed.");
     }
 
     public static function accountNoConflict(Borrower $borrower, string $incoming): self
     {
-        return new self(self::ACCOUNT_NO_CONFLICT, $borrower, "Borrower {$borrower->borrower_code} is the same person by name and birthdate but already carries account number \"{$borrower->external_account_no}\", not \"{$incoming}\".");
+        return new self(self::ACCOUNT_NO_CONFLICT, $borrower, "Member {$borrower->borrower_code} is the same person by name and birthdate but already carries account number \"{$borrower->external_account_no}\", not \"{$incoming}\".");
     }
 
     /**

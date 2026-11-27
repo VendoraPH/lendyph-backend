@@ -3,12 +3,19 @@
 namespace App\Services;
 
 use App\Models\Loan;
+use App\Services\Penalties\PenaltyTerms;
 
 class PromissoryNoteService
 {
     public function __construct(private LoanService $loanService) {}
 
-    public function generatePromissoryNote(Loan $loan): array
+    /**
+     * The note's data. `$withAddresses` is false for a caller who may not read
+     * the member's personal data (`borrowers:view` and the member's branch,
+     * the round fz rule): the member's and each co-maker's address then read
+     * null.
+     */
+    public function generatePromissoryNote(Loan $loan, bool $withAddresses): array
     {
         $loan->load('borrower', 'loanProduct', 'branch', 'coMakers', 'amortizationSchedules', 'approvedByUser');
 
@@ -26,27 +33,18 @@ class PromissoryNoteService
             'reference_number' => 'PN-'.substr($loan->application_number, 3),
             'generated_at' => now()->toDateTimeString(),
 
+            // What the note prints, and nothing else: this answers to
+            // `loans:view`, so the addresses also need member access.
             'borrower' => [
                 'borrower_code' => $loan->borrower->borrower_code,
                 'full_name' => $loan->borrower->full_name,
-                'address' => $loan->borrower->address,
-                'contact_number' => $loan->borrower->contact_number,
-                'email' => $loan->borrower->email,
-                'birthdate' => $loan->borrower->birthdate?->toDateString(),
-                'civil_status' => $loan->borrower->civil_status,
-                'gender' => $loan->borrower->gender,
-                'employer_or_business' => $loan->borrower->employer_or_business,
-                'monthly_income' => (float) $loan->borrower->monthly_income,
+                'address' => $withAddresses ? ($loan->borrower->address ?: $loan->borrower->street_address) : null,
             ],
 
             'co_makers' => $loan->coMakers->map(fn ($cm) => [
                 'co_maker_code' => $cm->co_maker_code,
                 'full_name' => $cm->full_name,
-                'address' => $cm->address,
-                'contact_number' => $cm->contact_number,
-                'occupation' => $cm->occupation,
-                'employer' => $cm->employer,
-                'monthly_income' => (float) $cm->monthly_income,
+                'address' => $withAddresses ? $cm->address : null,
                 'relationship_to_borrower' => $cm->relationship_to_borrower,
             ])->values()->toArray(),
 
@@ -55,14 +53,21 @@ class PromissoryNoteService
                 'loan_account_number' => $loan->loan_account_number,
                 'principal_amount' => (float) $loan->principal_amount,
                 'interest_rate' => (float) $loan->interest_rate,
+                'interest_rate_frequency' => $loan->interest_rate_frequency->value,
                 'interest_method' => $loan->interest_method,
                 'term' => $loan->term,
+                'term_unit' => $loan->term_unit->value,
                 'frequency' => $loan->frequency,
                 'start_date' => $loan->start_date->toDateString(),
                 'maturity_date' => $loan->maturity_date->toDateString(),
                 'total_interest' => round($totalInterest, 2),
                 'total_obligation' => round($totalPrincipal + $totalInterest, 2),
+                // The late penalty clause: the fixed rate, or the day ranges of
+                // the configuration copied at creation with its name (both
+                // null on a loan charged by `penalty_rate`), and the grace.
                 'penalty_rate' => (float) $loan->penalty_rate,
+                'penalty_config_name' => $loan->penalty_config_name,
+                'penalty_brackets' => PenaltyTerms::bracketsOf($loan),
                 'grace_period_days' => $loan->grace_period_days,
             ],
 

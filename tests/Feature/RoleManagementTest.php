@@ -2,6 +2,7 @@
 
 use App\Models\Role;
 use App\Models\User;
+use Illuminate\Support\Facades\DB;
 use Tests\TestCase;
 
 uses(TestCase::class);
@@ -172,4 +173,385 @@ it('exposes users_count on GET', function () {
     $response = $this->getJson("/api/roles/{$role->id}")->assertSuccessful();
 
     expect($response->json('data.users_count'))->toBe(2);
+});
+
+it('saves a display_name on a custom role without changing its key', function () {
+    $role = Role::create(['name' => 'cash_manager', 'guard_name' => 'web', 'is_system' => false]);
+
+    $this->putJson("/api/roles/{$role->id}", [
+        'display_name' => 'Cash Desk Manager',
+    ])->assertSuccessful()
+        ->assertJsonPath('data.display_name', 'Cash Desk Manager')
+        ->assertJsonPath('data.name', 'cash_manager');
+
+    $this->assertDatabaseHas('roles', [
+        'id' => $role->id,
+        'name' => 'cash_manager',
+        'display_name' => 'Cash Desk Manager',
+    ]);
+});
+
+it('saves a display_name on a system role and still refuses a changed name', function () {
+    $loanOfficer = Role::where('name', 'loan_officer')->first();
+
+    $this->putJson("/api/roles/{$loanOfficer->id}", [
+        'display_name' => 'Account Officer',
+    ])->assertSuccessful()
+        ->assertJsonPath('data.display_name', 'Account Officer')
+        ->assertJsonPath('data.name', 'loan_officer');
+
+    $this->putJson("/api/roles/{$loanOfficer->id}", [
+        'name' => 'account_officer',
+        'display_name' => 'Renamed Again',
+    ])->assertStatus(422)
+        ->assertJsonValidationErrors(['name']);
+
+    expect($loanOfficer->fresh()->name)->toBe('loan_officer');
+    expect($loanOfficer->fresh()->display_name)->toBe('Account Officer');
+});
+
+it('returns display_name on role reads', function () {
+    $role = Role::create(['name' => 'counted_display', 'guard_name' => 'web', 'is_system' => false]);
+    $role->forceFill(['display_name' => 'Counted Display'])->save();
+
+    $this->getJson("/api/roles/{$role->id}")
+        ->assertSuccessful()
+        ->assertJsonPath('data.display_name', 'Counted Display');
+
+    $listed = collect($this->getJson('/api/roles')->assertSuccessful()->json('data'))
+        ->firstWhere('name', 'counted_display');
+
+    expect($listed)->toHaveKey('display_name');
+    expect($listed['display_name'])->toBe('Counted Display');
+});
+
+it('accepts display_name when creating a role', function () {
+    $this->postJson('/api/roles', [
+        'name' => 'branch_teller',
+        'display_name' => 'Branch Teller',
+    ])->assertCreated()
+        ->assertJsonPath('data.name', 'branch_teller')
+        ->assertJsonPath('data.display_name', 'Branch Teller');
+
+    $this->assertDatabaseHas('roles', [
+        'name' => 'branch_teller',
+        'display_name' => 'Branch Teller',
+    ]);
+});
+
+it('rejects a display_name longer than 100 characters', function () {
+    $role = Role::create(['name' => 'long_label', 'guard_name' => 'web', 'is_system' => false]);
+
+    $this->putJson("/api/roles/{$role->id}", [
+        'display_name' => str_repeat('a', 101),
+    ])->assertStatus(422)
+        ->assertJsonValidationErrors(['display_name']);
+
+    $this->postJson('/api/roles', [
+        'name' => 'long_label_two',
+        'display_name' => str_repeat('a', 101),
+    ])->assertStatus(422)
+        ->assertJsonValidationErrors(['display_name']);
+});
+
+function clientAdmin(): User
+{
+    $user = User::factory()->create();
+    $user->assignRole(Role::where('name', 'admin')->firstOrFail());
+
+    return $user;
+}
+
+it('refuses a client admin changing the super_admin display_name but allows other system roles', function () {
+    $superAdmin = Role::where('name', 'super_admin')->firstOrFail();
+    $cashier = Role::where('name', 'cashier')->firstOrFail();
+
+    $this->actingAs(clientAdmin())
+        ->putJson("/api/roles/{$superAdmin->id}", ['display_name' => 'Branch Clerk'])
+        ->assertStatus(422)
+        ->assertJsonValidationErrors(['display_name']);
+
+    expect($superAdmin->fresh()->display_name)->toBeNull();
+
+    $this->actingAs(clientAdmin())
+        ->putJson("/api/roles/{$cashier->id}", ['display_name' => 'Teller'])
+        ->assertSuccessful()
+        ->assertJsonPath('data.display_name', 'Teller');
+});
+
+it('lets a super_admin change the super_admin display_name', function () {
+    $superAdmin = Role::where('name', 'super_admin')->firstOrFail();
+
+    $this->putJson("/api/roles/{$superAdmin->id}", ['display_name' => 'Platform Owner'])
+        ->assertSuccessful()
+        ->assertJsonPath('data.display_name', 'Platform Owner')
+        ->assertJsonPath('data.name', 'super_admin');
+});
+
+it('rejects a display_name that reads as another role key', function (string $label) {
+    $role = Role::create(['name' => 'lookalike', 'guard_name' => 'web', 'is_system' => false]);
+
+    $this->putJson("/api/roles/{$role->id}", ['display_name' => $label])
+        ->assertStatus(422)
+        ->assertJsonValidationErrors(['display_name']);
+
+    $this->postJson('/api/roles', ['name' => 'lookalike_two', 'display_name' => $label])
+        ->assertStatus(422)
+        ->assertJsonValidationErrors(['display_name']);
+})->with(['Admin', 'super admin', 'Super_Admin', '  super   ADMIN  ']);
+
+it('rejects a display_name that reads as another role display_name', function () {
+    $cashier = Role::where('name', 'cashier')->firstOrFail();
+    $cashier->forceFill(['display_name' => 'Cash Desk'])->save();
+
+    $role = Role::create(['name' => 'second_desk', 'guard_name' => 'web', 'is_system' => false]);
+
+    $this->putJson("/api/roles/{$role->id}", ['display_name' => 'cash_desk'])
+        ->assertStatus(422)
+        ->assertJsonValidationErrors(['display_name']);
+});
+
+it('lets a role keep a display_name equal to its own key', function () {
+    $role = Role::create(['name' => 'cash_manager', 'guard_name' => 'web', 'is_system' => false]);
+
+    $this->putJson("/api/roles/{$role->id}", ['display_name' => '  Cash Manager '])
+        ->assertSuccessful()
+        ->assertJsonPath('data.display_name', 'Cash Manager');
+});
+
+it('rejects control, zero-width and bidi characters in display_name', function (string $label) {
+    $role = Role::create(['name' => 'odd_chars', 'guard_name' => 'web', 'is_system' => false]);
+
+    $this->putJson("/api/roles/{$role->id}", ['display_name' => $label])
+        ->assertStatus(422)
+        ->assertJsonValidationErrors(['display_name']);
+})->with([
+    'control' => "Desk\u{0007}Clerk",
+    'zero-width space' => "Desk\u{200B}Clerk",
+    'right-to-left override' => "\u{202E}Desk Clerk",
+]);
+
+it('forbids creating or updating a role without settings:update', function () {
+    $role = Role::create(['name' => 'guarded_role', 'guard_name' => 'web', 'is_system' => false]);
+
+    $viewer = User::factory()->create();
+    $viewerRole = Role::create(['name' => 'settings_viewer_only', 'guard_name' => 'web', 'is_system' => false]);
+    $viewerRole->syncPermissions(['settings:view', 'users:view']);
+    $viewer->assignRole($viewerRole);
+
+    $this->actingAs($viewer)
+        ->putJson("/api/roles/{$role->id}", ['display_name' => 'Renamed'])
+        ->assertForbidden();
+
+    $this->actingAs($viewer)
+        ->postJson('/api/roles', ['name' => 'not_allowed', 'display_name' => 'Not Allowed'])
+        ->assertForbidden();
+
+    expect($role->fresh()->display_name)->toBeNull();
+    $this->assertDatabaseMissing('roles', ['name' => 'not_allowed']);
+});
+
+it('rejects a new role key that reads as another role display_name', function (string $label, string $key) {
+    Role::where('name', 'cashier')->firstOrFail()->forceFill(['display_name' => $label])->save();
+
+    $this->postJson('/api/roles', ['name' => $key])
+        ->assertStatus(422)
+        ->assertJsonValidationErrors(['name']);
+
+    expect(Role::where('name', $key)->exists())->toBeFalse();
+})->with([
+    'single word' => ['Teller', 'teller'],
+    'spaced label' => ['Head  Teller', 'head_teller'],
+]);
+
+it('rejects renaming a custom role key to another role display_name', function () {
+    Role::where('name', 'cashier')->firstOrFail()->forceFill(['display_name' => 'Teller'])->save();
+    $role = Role::create(['name' => 'front_desk', 'guard_name' => 'web', 'is_system' => false]);
+
+    $this->putJson("/api/roles/{$role->id}", ['name' => 'teller'])
+        ->assertStatus(422)
+        ->assertJsonValidationErrors(['name']);
+
+    expect($role->fresh()->name)->toBe('front_desk');
+});
+
+it('lets a custom role rename its key to its own display_name', function () {
+    $role = Role::create(['name' => 'front_desk', 'guard_name' => 'web', 'is_system' => false, 'display_name' => 'Desk Lead']);
+
+    $this->putJson("/api/roles/{$role->id}", ['name' => 'desk_lead'])
+        ->assertSuccessful()
+        ->assertJsonPath('data.name', 'desk_lead')
+        ->assertJsonPath('data.display_name', 'Desk Lead');
+});
+
+it('rejects a compatibility-form display_name that reads as another role key', function (string $label) {
+    $role = Role::create(['name' => 'lookalike', 'guard_name' => 'web', 'is_system' => false]);
+
+    $this->putJson("/api/roles/{$role->id}", ['display_name' => $label])
+        ->assertStatus(422)
+        ->assertJsonValidationErrors(['display_name']);
+
+    $this->postJson('/api/roles', ['name' => 'lookalike_two', 'display_name' => $label])
+        ->assertStatus(422)
+        ->assertJsonValidationErrors(['display_name']);
+})->with([
+    'fullwidth' => "\u{FF21}\u{FF44}\u{FF4D}\u{FF49}\u{FF4E}",
+    'mathematical bold' => "\u{1D400}\u{1D41D}\u{1D426}\u{1D422}\u{1D427}",
+    'fullwidth underscore' => "super\u{FF3F}admin",
+]);
+
+it('rejects combining marks and Hangul fillers in display_name', function (string $label) {
+    $role = Role::create(['name' => 'odd_marks', 'guard_name' => 'web', 'is_system' => false]);
+
+    $this->putJson("/api/roles/{$role->id}", ['display_name' => $label])
+        ->assertStatus(422)
+        ->assertJsonValidationErrors(['display_name']);
+
+    $this->postJson('/api/roles', ['name' => 'odd_marks_two', 'display_name' => $label])
+        ->assertStatus(422)
+        ->assertJsonValidationErrors(['display_name']);
+})->with([
+    'stray mark after a space' => "Desk \u{0301}Clerk",
+    'combining overlay' => "Desk Cle\u{0336}rk",
+    'U+115F' => "Desk\u{115F}Clerk",
+    'U+1160' => "Desk\u{1160}Clerk",
+    'U+3164' => "Desk\u{3164}Clerk",
+    'U+FFA0' => "Desk\u{FFA0}Clerk",
+    'unassigned U+2065' => "Desk\u{2065}Clerk",
+    'unassigned U+FFF0' => "Desk\u{FFF0}Clerk",
+    'unassigned tag area U+E0080' => "Desk\u{E0080}Clerk",
+    'Braille blank U+2800' => "Desk\u{2800}Clerk",
+    'private use U+E000' => "Desk\u{E000}Clerk",
+]);
+
+it('saves a display_name with precomposed accents', function () {
+    $role = Role::create(['name' => 'accented', 'guard_name' => 'web', 'is_system' => false]);
+
+    $this->putJson("/api/roles/{$role->id}", ['display_name' => "Jos\u{00E9} Cashier"])
+        ->assertSuccessful()
+        ->assertJsonPath('data.display_name', "Jos\u{00E9} Cashier");
+});
+
+it('saves a decomposed accent in display_name as the precomposed form', function () {
+    $role = Role::create(['name' => 'decomposed', 'guard_name' => 'web', 'is_system' => false]);
+
+    $this->putJson("/api/roles/{$role->id}", ['display_name' => "Jose\u{0301} Cashier"])
+        ->assertSuccessful()
+        ->assertJsonPath('data.display_name', "Jos\u{00E9} Cashier");
+
+    expect($role->fresh()->display_name)->toBe("Jos\u{00E9} Cashier");
+
+    $this->postJson('/api/roles', ['name' => 'decomposed_two', 'display_name' => "Jose\u{0301} Teller"])
+        ->assertCreated()
+        ->assertJsonPath('data.display_name', "Jos\u{00E9} Teller");
+
+    expect(Role::where('name', 'decomposed_two')->value('display_name'))->toBe("Jos\u{00E9} Teller");
+});
+
+it('refuses invalid UTF-8 in a form-encoded display_name with 422, not 500', function () {
+    $role = Role::create(['name' => 'bytes_role', 'guard_name' => 'web', 'is_system' => false]);
+
+    $this->put("/api/roles/{$role->id}", ['display_name' => "Admin\xFF"], ['Accept' => 'application/json'])
+        ->assertStatus(422)
+        ->assertJsonValidationErrors(['display_name']);
+
+    $this->post('/api/roles', ['name' => 'bytes_role_two', 'display_name' => "Desk\xC3("], ['Accept' => 'application/json'])
+        ->assertStatus(422)
+        ->assertJsonValidationErrors(['display_name']);
+
+    expect($role->fresh()->display_name)->toBeNull()
+        ->and(Role::where('name', 'bytes_role_two')->exists())->toBeFalse();
+});
+
+it('rejects a new role key that reads as another role full-width display_name', function () {
+    Role::where('name', 'cashier')->firstOrFail()->forceFill(['display_name' => "\u{FF34}\u{FF45}\u{FF4C}\u{FF4C}\u{FF45}\u{FF52}"])->save();
+
+    $this->postJson('/api/roles', ['name' => 'teller'])
+        ->assertStatus(422)
+        ->assertJsonValidationErrors(['name']);
+});
+
+it('rejects a new role key that normalises to an existing key', function () {
+    Role::create(['name' => 'head_teller', 'guard_name' => 'web', 'is_system' => false]);
+
+    $this->postJson('/api/roles', ['name' => 'head__teller'])
+        ->assertStatus(422)
+        ->assertJsonValidationErrors(['name']);
+
+    expect(Role::where('name', 'head__teller')->exists())->toBeFalse();
+});
+
+/**
+ * Run `$land` once, right after the form request's role lookup (the last
+ * read before the controller opens its transaction), so a competing write
+ * lands deterministically in the window between validation and the write.
+ */
+function landAfterRoleValidation(Closure $land): Closure
+{
+    $landed = false;
+    DB::listen(function ($query) use (&$landed, $land) {
+        $sql = strtolower($query->sql);
+
+        if (! $landed && str_contains($sql, 'select `id`, `name`, `display_name` from `roles`') && ! str_contains($sql, 'for update')) {
+            $landed = true;
+            $land();
+        }
+    });
+
+    return function () use (&$landed) {
+        return $landed;
+    };
+}
+
+it('refuses a new key when another role takes it as a label between validation and the write', function () {
+    $landed = landAfterRoleValidation(fn () => DB::table('roles')->where('name', 'cashier')->update(['display_name' => 'Teller']));
+
+    $this->postJson('/api/roles', ['name' => 'teller'])
+        ->assertStatus(422)
+        ->assertJsonValidationErrors(['name'])
+        ->assertJsonFragment(['name' => ['The name is already used by another role.']]);
+
+    expect($landed())->toBeTrue('the competing relabel never landed, so this test proved nothing')
+        ->and(Role::where('name', 'teller')->exists())->toBeFalse();
+});
+
+it('refuses a label when another role takes it as a key between validation and the write', function () {
+    $cashier = Role::where('name', 'cashier')->firstOrFail();
+    $landed = landAfterRoleValidation(fn () => DB::table('roles')->insert([
+        'name' => 'teller', 'guard_name' => 'web', 'is_system' => false, 'is_active' => true,
+        'created_at' => now(), 'updated_at' => now(),
+    ]));
+
+    $this->putJson("/api/roles/{$cashier->id}", ['display_name' => 'Teller'])
+        ->assertStatus(422)
+        ->assertJsonValidationErrors(['display_name'])
+        ->assertJsonFragment(['display_name' => ['The display name is already used by another role.']]);
+
+    expect($landed())->toBeTrue('the competing create never landed, so this test proved nothing')
+        ->and($cashier->fresh()->display_name)->toBeNull();
+});
+
+it('refuses permission names that differ only in case with 422, not 500', function () {
+    $this->postJson('/api/roles', ['name' => 'case_probe', 'permissions' => ['LOANS:VIEW']])
+        ->assertStatus(422)
+        ->assertJsonValidationErrors(['permissions.0']);
+
+    expect(Role::where('name', 'case_probe')->exists())->toBeFalse();
+
+    $role = Role::create(['name' => 'case_target', 'guard_name' => 'web', 'is_system' => false]);
+    $role->syncPermissions(['loans:view']);
+
+    $this->putJson("/api/roles/{$role->id}", ['permissions' => ['loans:view', 'Dashboard:View']])
+        ->assertStatus(422)
+        ->assertJsonValidationErrors(['permissions.1']);
+
+    expect($role->fresh()->permissions->pluck('name')->all())->toBe(['loans:view']);
+});
+
+it('still accepts the exact-case permission names', function () {
+    $this->postJson('/api/roles', ['name' => 'exact_case', 'permissions' => ['loans:view', 'dashboard:view']])
+        ->assertCreated();
+
+    expect(Role::where('name', 'exact_case')->firstOrFail()->permissions->pluck('name')->sort()->values()->all())
+        ->toBe(['dashboard:view', 'loans:view']);
 });

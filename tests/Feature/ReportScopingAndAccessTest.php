@@ -7,6 +7,7 @@ use App\Models\Branch;
 use App\Models\Role;
 use App\Models\ShareCapitalLedger;
 use App\Models\User;
+use App\Services\BranchAccess;
 use Carbon\Carbon;
 use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\TestCase;
@@ -69,8 +70,8 @@ class ReportScopingAndAccessTest extends TestCase
         $this->assertSame(1, $cashFlow['share_capital']['count']);
 
         // The two reports now describe the same scope with the same word...
-        $this->assertSame('borrower_branch', $cashFlow['share_capital']['branch_scope']);
-        $this->assertSame('borrower_branch', $shareCapital['branch_scope']);
+        $this->assertSame('posted_branch', $cashFlow['share_capital']['branch_scope']);
+        $this->assertSame('posted_branch', $shareCapital['branch_scope']);
 
         // ...and arrive at the same numbers.
         $this->assertEqualsWithDelta(
@@ -147,7 +148,7 @@ class ReportScopingAndAccessTest extends TestCase
         $today = Carbon::today()->toDateString();
         $this->ledgerEntry($this->memberOf($satellite), $today, credit: 1000);
 
-        foreach ([null => 'organisation', $satellite->id => 'borrower_branch'] as $branchId => $expected) {
+        foreach ([null => 'organisation', $satellite->id => 'posted_branch'] as $branchId => $expected) {
             $query = $branchId ? "&branch_id={$branchId}" : '';
 
             $cashFlow = $this->getJson("/api/reports/cash-flow?date_from={$today}&date_to={$today}{$query}")
@@ -167,7 +168,7 @@ class ReportScopingAndAccessTest extends TestCase
             // keep asserting the pre-fix organisation-wide behaviour.
             $note = $cashFlow['share_capital']['note'];
 
-            if ($expected === 'borrower_branch') {
+            if ($expected === 'posted_branch') {
                 $this->assertStringContainsString('member\'s branch', $note);
                 $this->assertStringNotContainsString('organisation-wide', $note);
             } else {
@@ -179,10 +180,11 @@ class ReportScopingAndAccessTest extends TestCase
     }
 
     /**
-     * Share capital stays out of by_branch — that part was right and must not
-     * drift while the headline is being fixed.
+     * Share capital is in by_branch by the member's branch (decision 5c,
+     * 2026-11-02), so the rows reach the headline without adding anything
+     * back.
      */
-    public function test_share_capital_remains_excluded_from_by_branch(): void
+    public function test_share_capital_is_in_by_branch_by_the_member_s_branch(): void
     {
         $today = Carbon::today()->toDateString();
         $this->ledgerEntry($this->memberOf($this->branch), $today, credit: 4000);
@@ -190,19 +192,11 @@ class ReportScopingAndAccessTest extends TestCase
         $data = $this->getJson("/api/reports/cash-flow?date_from={$today}&date_to={$today}")
             ->assertOk()->json('data');
 
-        foreach ($data['by_branch'] as $row) {
-            $this->assertArrayNotHasKey('share_capital_credit', $row);
-            $this->assertArrayNotHasKey('share_capital_debit', $row);
-        }
+        $row = collect($data['by_branch'])->firstWhere('branch_id', $this->branch->id);
+        $this->assertEqualsWithDelta(4000, $row['inflow_share_capital'], 0.01);
 
-        // by_branch reconciles to the loan cash only; add share capital back to
-        // reach the headline, exactly as the docblock promises.
         $branchInflow = array_sum(array_column($data['by_branch'], 'inflow_total'));
-        $this->assertEqualsWithDelta(
-            $data['inflows']['total'],
-            $branchInflow + $data['inflows']['share_capital_credit'],
-            0.01,
-        );
+        $this->assertEqualsWithDelta($data['inflows']['total'], $branchInflow, 0.01);
     }
 
     // ── 2. by_member is roster data, not aggregate data ──────────────────
@@ -273,7 +267,12 @@ class ReportScopingAndAccessTest extends TestCase
 
         $withExport = $this->getJson($url)->assertOk()->json('data');
 
-        $this->actingAs($this->userWithRole('viewer'));
+        // Organisation-wide like the super_admin above (decision B2: without
+        // `branches:view_all` the report would cover the viewer's branch), so
+        // the roster gate is the only difference between the two callers.
+        $viewer = $this->userWithRole('viewer');
+        $viewer->givePermissionTo(BranchAccess::VIEW_ALL);
+        $this->actingAs($viewer);
         $withoutExport = $this->getJson($url)->assertOk()->json('data');
 
         foreach ([
@@ -291,6 +290,51 @@ class ReportScopingAndAccessTest extends TestCase
         // member_count in particular is derived from the member list, so prove
         // it survived the roster being withheld.
         $this->assertSame(2, $withoutExport['member_count']);
+    }
+
+    /**
+     * Decision B2: a viewer without `branches:view_all` and without
+     * `reports:export` gets exactly the aggregates super_admin sees for the
+     * viewer's own branch, so neither the branch scope nor the roster gate
+     * moves a number, and the other branch's member never counts.
+     */
+    public function test_a_scoped_viewer_gets_super_admins_figures_for_their_own_branch(): void
+    {
+        $today = Carbon::today()->toDateString();
+        $satellite = Branch::factory()->create(['name' => 'Satellite Branch']);
+
+        $first = $this->memberOf($this->branch);
+        $second = $this->memberOf($this->branch);
+        $this->ledgerEntry($first, $today, credit: 4000);
+        $this->ledgerEntry($second, $today, credit: 1500);
+        $this->ledgerEntry($second, $today, debit: 500);
+        $this->ledgerEntry($this->memberOf($satellite), $today, credit: 9000);
+
+        $url = "/api/reports/share-capital?date_from={$today}&date_to={$today}";
+
+        $superAdmin = $this->getJson("{$url}&branch_id={$this->branch->id}")->assertOk()->json('data');
+
+        $viewer = $this->userWithRole('viewer');
+        $this->assertFalse($viewer->can(BranchAccess::VIEW_ALL));
+        $this->assertFalse($viewer->can('reports:export'));
+        $this->actingAs($viewer);
+        $scoped = $this->getJson($url)->assertOk()->json('data');
+
+        foreach ([
+            'opening_balance', 'credits', 'debits', 'net_movement', 'closing_balance',
+            'entry_count', 'member_count', 'members_with_activity', 'branch_scope',
+            'subscription', 'by_month',
+        ] as $key) {
+            $this->assertEquals(
+                $superAdmin[$key],
+                $scoped[$key],
+                "`{$key}` must equal super_admin's figure for the viewer's branch.",
+            );
+        }
+
+        $this->assertSame(2, $scoped['member_count']);
+        $this->assertNull($scoped['by_member']);
+        $this->getJson("{$url}&branch_id={$satellite->id}")->assertForbidden();
     }
 
     /**

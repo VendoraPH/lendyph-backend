@@ -110,6 +110,11 @@ class CsvImportStager
         $this->clearPreviousStaging($file);
 
         $result = $this->reader->readFromDisk(CsvImportReader::PII_DISK, $file->assembled_path, $shape);
+        $mayImportMembership = $shape === CsvImportSchema::CUSTOMERS && ($file->run?->starterMayEditMembers() ?? false);
+        // The date order the admin settled on the Check step, per date column.
+        $dateOrders = $file->run?->dateOrdersFor($file->kind) ?? [];
+        // A fresh one per file: it remembers the file's own earlier rows.
+        $shareCapital = new ShareCapitalRowNormalizer;
 
         $batch = [];
         $staged = 0;
@@ -120,9 +125,11 @@ class CsvImportStager
         $now = now();
 
         foreach ($result->rows() as $row) {
-            $normalized = $shape === CsvImportSchema::LOANS
-                ? $this->loans->normalize($row)
-                : $this->customers->normalize($row);
+            $normalized = match ($shape) {
+                CsvImportSchema::LOANS => $this->loans->normalize($row, $dateOrders),
+                CsvImportSchema::SHARE_CAPITAL => $shareCapital->normalize($row),
+                default => $this->customers->normalize($row, $mayImportMembership, $dateOrders),
+            };
 
             if ($shape === CsvImportSchema::LOANS) {
                 $this->collectLoanProduct($normalized, $products, $productsTruncated);
@@ -173,7 +180,7 @@ class CsvImportStager
                 .'Only the first '.self::MAX_DISTINCT_PRODUCTS.' were collected; check the file before mapping.';
         }
 
-        $this->assertPayloadRoundTrips($file, $shape);
+        $this->assertPayloadRoundTrips($file, $result->columnCount);
 
         // Written LAST and only on a complete pass: this is the file's "staged"
         // flag, so it must not be true of a half-staged file.
@@ -283,8 +290,8 @@ class CsvImportStager
         }
 
         /*
-         * The schema's own index, never a literal 0. `account_no` leads both
-         * shapes today; deriving it is what keeps that from becoming a fact
+         * The schema's own index, never a literal 0. `account_no` leads every
+         * shape today; deriving it is what keeps that from becoming a fact
          * this method silently depends on.
          */
         $cell = $cells[CsvImportSchema::indexOf($normalized->shape, 'account_no')] ?? null;
@@ -304,7 +311,7 @@ class CsvImportStager
 
     private function shapeFor(CsvImportFile $file): string
     {
-        return $file->kind === 'loans' ? CsvImportSchema::LOANS : CsvImportSchema::CUSTOMERS;
+        return CsvImportSchema::shapeOf($file->kind);
     }
 
     /**
@@ -373,8 +380,12 @@ class CsvImportStager
      * key-ordered `raw` and a retyped money value both produce a staged file
      * that looks entirely normal and imports plausible garbage — the exact class
      * of bug that has to be caught on the way in or not at all.
+     *
+     * `$width` is the file's own layout width (CsvReadResult::columnCount):
+     * `raw` holds the cells as read, so a file in the earlier layout stages
+     * rows of that width.
      */
-    private function assertPayloadRoundTrips(CsvImportFile $file, string $shape): void
+    private function assertPayloadRoundTrips(CsvImportFile $file, int $width): void
     {
         $stored = CsvImportRow::query()
             ->where('csv_import_file_id', $file->id)
@@ -397,10 +408,10 @@ class CsvImportStager
         // value came back as something other than the string it went in as.
         NormalizedRow::fromPayload((array) $stored->normalized);
 
-        if (count($stored->raw) !== CsvImportSchema::width($shape) && $stored->status === 'valid') {
+        if (count($stored->raw) !== $width && $stored->status === 'valid') {
             throw new LogicException(
                 "A valid staged row for csv_import_files #{$file->id} holds ".count($stored->raw)
-                .' cells but the '.$shape.' shape is '.CsvImportSchema::width($shape).' columns wide.'
+                ." cells but the file is {$width} columns wide."
             );
         }
     }

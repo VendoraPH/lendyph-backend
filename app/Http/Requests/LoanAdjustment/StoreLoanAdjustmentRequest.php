@@ -2,6 +2,9 @@
 
 namespace App\Http\Requests\LoanAdjustment;
 
+use App\Models\LoanAdjustment;
+use App\Rules\NotAFormerMember;
+use App\Services\LoanAdjustmentService;
 use Illuminate\Contracts\Validation\Validator;
 use Illuminate\Foundation\Http\FormRequest;
 
@@ -31,12 +34,19 @@ class StoreLoanAdjustmentRequest extends FormRequest
     public function rules(): array
     {
         return [
-            'adjustment_type' => ['required', 'in:restructure,penalty_waiver,balance_adjustment,term_extension,extension'],
+            // `extension` is deliberately absent. Those rows are written only by
+            // POST /loans/{loan}/extend, already applied, and never go through
+            // this create → approve → apply workflow — LoanAdjustmentService has
+            // no arm for them, so accepting the type here turned into a 500.
+            'adjustment_type' => ['required', 'in:restructure,penalty_waiver,balance_adjustment,term_extension'],
             'description' => ['nullable', 'string', 'max:1000'],
             'new_values' => ['required', 'array'],
 
             // Restructure — any one of the three is enough; enforced in after().
-            'new_values.interest_rate' => ['nullable', 'numeric', 'min:0'],
+            // The rate is capped as every rate is; a new rate must also sit in
+            // the product's range in the loan's own period, which
+            // LoanAdjustmentService checks against the loan (finish run round 5).
+            'new_values.interest_rate' => ['nullable', 'numeric', 'min:0', 'max:100', 'decimal:0,4'],
             'new_values.term' => ['nullable', 'integer', 'min:1'],
             'new_values.frequency' => ['nullable', 'in:daily,weekly,bi_weekly,semi_monthly,monthly'],
 
@@ -45,9 +55,13 @@ class StoreLoanAdjustmentRequest extends FormRequest
             'new_values.schedule_ids.*' => ['integer', 'exists:amortization_schedules,id'],
             'new_values.waive_all' => ['nullable', 'boolean'],
 
-            // Balance adjustment — a signed delta applied to the principal,
-            // not the resulting balance.
-            'new_values.adjustment_amount' => ['required_if:adjustment_type,balance_adjustment', 'nullable', 'numeric'],
+            // Balance adjustment — either a signed delta applied to the
+            // principal, or the principal balance to end on, from which the
+            // server works out the delta (exactly one; enforced in after()).
+            // The outstanding principal is always the server's own reading.
+            'new_values.adjustment_amount' => ['nullable', 'numeric', 'decimal:0,2'],
+            'new_values.target_principal_balance' => ['nullable', 'numeric', 'decimal:0,2', 'min:0'],
+            'new_values.outstanding_principal_at_request' => ['prohibited'],
             'new_values.reason' => ['nullable', 'string', 'max:500'],
 
             // Term extension — the number of extra periods, not the new term.
@@ -55,6 +69,25 @@ class StoreLoanAdjustmentRequest extends FormRequest
 
             'remarks' => ['nullable', 'string', 'max:1000'],
         ];
+    }
+
+    /**
+     * The rate's refusals read as a loan edit's do ("The interest rate field
+     * must not be greater than 100."), never with the `new_values.` key.
+     *
+     * @return array<string, string>
+     */
+    public function attributes(): array
+    {
+        return ['new_values.interest_rate' => 'interest rate'];
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    public function messages(): array
+    {
+        return ['new_values.interest_rate.max' => LoanAdjustmentService::RATE_OVER_MAXIMUM];
     }
 
     /**
@@ -67,6 +100,15 @@ class StoreLoanAdjustmentRequest extends FormRequest
                 $type = $this->input('adjustment_type');
                 $newValues = $this->input('new_values', []);
 
+                // A restructure or a term extension is new credit, never for a
+                // withdrawn or deceased member; a waiver or a balance
+                // adjustment only lowers what they owe (C1 re-review, L3).
+                $member = $this->route('loan')?->borrower;
+
+                if (in_array($type, ['restructure', 'term_extension'], true) && $member !== null && $member->isFormerMember()) {
+                    $validator->errors()->add('adjustment_type', NotAFormerMember::messageFor($member).' A penalty waiver or a balance adjustment is still possible.');
+                }
+
                 // Waiving penalties must be deliberate. Without this, a payload
                 // carrying neither key reaches a handler that waives every open
                 // schedule on the loan.
@@ -77,6 +119,41 @@ class StoreLoanAdjustmentRequest extends FormRequest
                         'new_values.schedule_ids',
                         'Select the schedules to waive, or set waive_all to true.',
                     );
+                }
+
+                // Each type carries only its own fields. A penalty waiver that
+                // also carried `interest_rate` used to be accepted and stored,
+                // so an approver saw a figure the waiver would never apply.
+                if (isset(LoanAdjustment::NEW_VALUE_FIELDS[$type]) && is_array($newValues)) {
+                    foreach (LoanAdjustment::foreignFields($type, $newValues) as $field) {
+                        $validator->errors()->add(
+                            "new_values.{$field}",
+                            sprintf('A %s does not take %s.', str_replace('_', ' ', $type), $field),
+                        );
+                    }
+                }
+
+                // A balance adjustment states one figure: the amount, or the
+                // target principal balance the server works the amount out from.
+                if ($type === 'balance_adjustment' && is_array($newValues)) {
+                    $stated = array_filter(
+                        ['adjustment_amount', 'target_principal_balance'],
+                        fn (string $key): bool => ($newValues[$key] ?? null) !== null,
+                    );
+
+                    // Neither is reported on adjustment_amount, the key a missing
+                    // figure has always been reported on; both on new_values.
+                    if (count($stated) === 0) {
+                        $validator->errors()->add(
+                            'new_values.adjustment_amount',
+                            'Give adjustment_amount or target_principal_balance for a balance adjustment.',
+                        );
+                    } elseif (count($stated) > 1) {
+                        $validator->errors()->add(
+                            'new_values',
+                            'Give either adjustment_amount or target_principal_balance for a balance adjustment, not both.',
+                        );
+                    }
                 }
 
                 // Restructure with no figures at all would apply nothing while

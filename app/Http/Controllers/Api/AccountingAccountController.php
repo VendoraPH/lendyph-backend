@@ -2,16 +2,27 @@
 
 namespace App\Http\Controllers\Api;
 
+use App\Http\Controllers\Api\Traits\ScopesBranchFilter;
 use App\Http\Controllers\Controller;
+use App\Http\Requests\Accounting\SeedChartRequest;
 use App\Http\Requests\Accounting\StoreAccountingAccountRequest;
 use App\Http\Requests\Accounting\UpdateAccountingAccountRequest;
 use App\Http\Resources\AccountingAccountResource;
 use App\Models\AccountingAccount;
+use App\Models\AccountingAccountMapping;
+use App\Models\AccountingJournal;
+use App\Models\AccountingOpeningBalance;
+use App\Models\AccountingOpeningBalanceLine;
+use App\Services\Accounting\AccountRules;
 use App\Services\Accounting\ChartOfAccountsSeeder;
+use App\Services\Accounting\OpeningBalancePoster;
 use App\Services\Accounting\TrialBalanceBuilder;
+use App\Services\LoanWriteTransaction;
 use Illuminate\Database\Eloquent\Collection;
+use Illuminate\Database\QueryException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
+use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
 use OpenApi\Attributes as OA;
 
@@ -26,17 +37,26 @@ use OpenApi\Attributes as OA;
  */
 class AccountingAccountController extends Controller
 {
-    public function __construct(private TrialBalanceBuilder $trialBalance) {}
+    use ScopesBranchFilter;
+
+    /** MySQL's "Cannot delete or update a parent row": a foreign key still points here. */
+    private const ROW_IS_REFERENCED = 1451;
+
+    public function __construct(
+        private TrialBalanceBuilder $trialBalance,
+        private OpeningBalancePoster $openingBalances,
+    ) {}
 
     #[OA\Get(
         path: '/api/accounting/accounts',
         summary: 'List chart of accounts',
-        description: 'One page of the chart, in code order — which is statement order, because codes are fixed-width numeric strings. Returns the raw Laravel paginator envelope ({data, links, meta}); clients drain it by following `meta.last_page`.',
+        description: 'One page of the chart, in code order — which is statement order, because codes are fixed-width numeric strings. Returns the raw Laravel paginator envelope ({data, links, meta}); clients drain it by following `meta.last_page`. `balance` covers the caller\'s branches only (every branch, unbranched journals included, for branches:view_all).',
         tags: ['Accounting'],
         security: [['sanctum' => []]],
         parameters: [
             new OA\Parameter(name: 'page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', default: 1)),
             new OA\Parameter(name: 'per_page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', default: 15, maximum: 100)),
+            new OA\Parameter(name: 'branch_id', in: 'query', required: false, description: 'Balances of one of the caller\'s branches (another answers 403). Without it, every branch the caller holds.', schema: new OA\Schema(type: 'integer')),
         ],
         responses: [
             new OA\Response(response: 200, description: 'Paginated account list'),
@@ -54,6 +74,7 @@ class AccountingAccountController extends Controller
             // `$perPage ?: $model->getPerPage()` and silently becomes 15, while
             // a negative value reaches the database as a negative LIMIT.
             'per_page' => ['nullable', 'integer', 'min:1'],
+            'branch_id' => ['nullable', 'integer', 'min:1'],
         ]);
 
         $perPage = min((int) ($filters['per_page'] ?? 15), 100);
@@ -66,7 +87,7 @@ class AccountingAccountController extends Controller
             ->inCodeOrder()
             ->paginate($perPage);
 
-        $this->attachBalances($accounts->getCollection());
+        $this->attachBalances($accounts->getCollection(), $filters['branch_id'] ?? null);
 
         return AccountingAccountResource::collection($accounts);
     }
@@ -117,15 +138,33 @@ class AccountingAccountController extends Controller
     #[OA\Get(
         path: '/api/accounting/cash-accounts',
         summary: 'The money accounts, with their balances',
-        description: "Cash on hand, bank accounts, GCash and Maya — every account carrying a `cash_kind` — in code order, with `balance` in integer CENTAVOS. Returns the raw Laravel paginator envelope ({data, links, meta}); the Cash & Bank screen drains it by following `meta.last_page`, because it sums the balances into one headline figure and a short page would understate the co-op's cash position. Balances come from the SAME TrialBalanceBuilder aggregate the trial balance and the chart of accounts read, so this screen cannot drift from them. INACTIVE money accounts are included — see the method.",
+        description: "Cash on hand, bank accounts, GCash and Maya — every account carrying a `cash_kind` — in code order, with `balance` in integer CENTAVOS. Returns the raw Laravel paginator envelope ({data, links, meta}). `meta.totals` covers every money account, not the page: `balance` (the headline total) and `by_kind` (cash, bank, gcash, maya and wallet), in centavos and in the same branch scope as each row's balance. Balances come from the SAME TrialBalanceBuilder aggregate the trial balance and the chart of accounts read, so this screen cannot drift from them. INACTIVE money accounts are included — see the method. `balance` covers the caller's branches only (every branch, unbranched journals included, for branches:view_all).",
         tags: ['Accounting'],
         security: [['sanctum' => []]],
         parameters: [
             new OA\Parameter(name: 'page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', default: 1)),
             new OA\Parameter(name: 'per_page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', default: 15, maximum: 100)),
+            new OA\Parameter(name: 'branch_id', in: 'query', required: false, description: 'Balances of one of the caller\'s branches (another answers 403). Without it, every branch the caller holds.', schema: new OA\Schema(type: 'integer')),
         ],
         responses: [
-            new OA\Response(response: 200, description: 'Paginated money accounts'),
+            new OA\Response(
+                response: 200,
+                description: 'Paginated money accounts',
+                content: new OA\JsonContent(properties: [
+                    new OA\Property(property: 'meta', type: 'object', properties: [
+                        new OA\Property(property: 'totals', type: 'object', properties: [
+                            new OA\Property(property: 'balance', type: 'integer', description: 'Centavos, over every money account.'),
+                            new OA\Property(property: 'by_kind', type: 'object', properties: [
+                                new OA\Property(property: 'cash', type: 'integer'),
+                                new OA\Property(property: 'bank', type: 'integer'),
+                                new OA\Property(property: 'gcash', type: 'integer'),
+                                new OA\Property(property: 'maya', type: 'integer'),
+                                new OA\Property(property: 'wallet', type: 'integer'),
+                            ]),
+                        ]),
+                    ]),
+                ]),
+            ),
             new OA\Response(response: 401, description: 'Unauthenticated'),
             new OA\Response(response: 403, description: 'Missing cash_accounts:view'),
         ],
@@ -145,6 +184,7 @@ class AccountingAccountController extends Controller
             // `per_page` of 0 reaches Builder::paginate() as
             // `$perPage ?: $model->getPerPage()` and silently becomes 15.
             'per_page' => ['nullable', 'integer', 'min:1'],
+            'branch_id' => ['nullable', 'integer', 'min:1'],
         ]);
 
         $perPage = min((int) ($filters['per_page'] ?? 15), 100);
@@ -183,28 +223,61 @@ class AccountingAccountController extends Controller
             ->inCodeOrder()
             ->paginate($perPage);
 
-        $this->attachBalances($accounts->getCollection());
+        $this->attachBalances($accounts->getCollection(), $filters['branch_id'] ?? null);
 
-        return AccountingAccountResource::collection($accounts);
+        /*
+         * `meta.totals` over EVERY money account, not the page: the same
+         * accounts as the list (non-group, inactive included), from the same
+         * signedBalances() aggregate and in the same branch scope as each
+         * row's balance, so the headline equals the sum of the rows across
+         * all pages and the trial balance's money accounts.
+         */
+        $kinds = AccountingAccount::query()
+            ->whereNotNull('cash_kind')
+            ->where('is_group', false)
+            ->pluck('cash_kind', 'id');
+
+        $balances = $this->trialBalance->signedBalances(
+            null,
+            $this->branchScope($filters['branch_id'] ?? null),
+            $kinds->keys()->map(static fn ($id): int => (int) $id)->all(),
+        );
+
+        $byKind = array_fill_keys(AccountRules::CASH_KINDS, 0);
+
+        foreach ($kinds as $id => $kind) {
+            $byKind[$kind] += $balances[(int) $id] ?? 0;
+        }
+
+        return AccountingAccountResource::collection($accounts)
+            ->additional(['meta' => ['totals' => [
+                'balance' => array_sum($byKind),
+                'by_kind' => $byKind,
+            ]]]);
     }
 
     #[OA\Post(
         path: '/api/accounting/accounts/seed',
-        summary: 'Seed the default chart of accounts',
-        description: 'One-time. Creates the default chart and its posting defaults, and returns the whole chart in code order as a flat `{data: Account[]}` — NOT a paginator. Refuses with 409 if any account already exists, because merging would resurrect accounts an administrator removed and re-point roles they changed.',
+        summary: 'Seed the chart of accounts from a template',
+        description: 'One-time. Creates the chart of the chosen template and its posting defaults, and returns the whole chart in code order as a flat `{data: Account[]}` — NOT a paginator. `lending_company` (the default) is the standard chart; `cooperative` adds 2050 Savings Deposits, 2060 Time Deposits, 2070 Interest on Share Capital Payable, 2080 Patronage Refund Payable, the 3070 Statutory Funds heading with 3071–3074 under it, and 3080 Undivided Net Surplus, where `net_surplus` posts. Refuses with 409 if any account already exists, because merging would resurrect accounts an administrator removed and re-point roles they changed.',
         tags: ['Accounting'],
         security: [['sanctum' => []]],
+        requestBody: new OA\RequestBody(
+            required: false,
+            content: new OA\JsonContent(properties: [
+                new OA\Property(property: 'template', type: 'string', enum: ['lending_company', 'cooperative'], nullable: true, description: 'Absent or null: lending_company.'),
+            ]),
+        ),
         responses: [
             new OA\Response(response: 201, description: 'The seeded chart'),
             new OA\Response(response: 403, description: 'Missing chart_of_accounts:create'),
             new OA\Response(response: 409, description: 'A chart of accounts already exists'),
+            new OA\Response(response: 422, description: 'An unknown template'),
         ],
     )]
-    public function seed(ChartOfAccountsSeeder $seeder): JsonResponse
+    public function seed(SeedChartRequest $request, ChartOfAccountsSeeder $seeder): JsonResponse
     {
-        $this->authorize('chart_of_accounts:create');
-
-        $accounts = $seeder->seed(request()->user()?->id);
+        $accounts = $seeder->seed($request->user()?->id, $request->template());
 
         // Every count is zero on a chart that was created a moment ago. Loaded
         // anyway so the field is PRESENT and says so, rather than absent and
@@ -223,6 +296,7 @@ class AccountingAccountController extends Controller
         security: [['sanctum' => []]],
         parameters: [
             new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer')),
+            new OA\Parameter(name: 'branch_id', in: 'query', required: false, description: 'Balances of one of the caller\'s branches (another answers 403). Without it, every branch the caller holds.', schema: new OA\Schema(type: 'integer')),
         ],
         responses: [
             new OA\Response(response: 200, description: 'Account details'),
@@ -233,8 +307,12 @@ class AccountingAccountController extends Controller
     {
         $this->authorize('chart_of_accounts:view');
 
+        $filters = request()->validate([
+            'branch_id' => ['nullable', 'integer', 'min:1'],
+        ]);
+
         $account->loadCount('journalLines');
-        $this->attachBalances(new Collection([$account]));
+        $this->attachBalances(new Collection([$account]), $filters['branch_id'] ?? null);
 
         return new AccountingAccountResource($account);
     }
@@ -267,7 +345,7 @@ class AccountingAccountController extends Controller
     #[OA\Delete(
         path: '/api/accounting/accounts/{id}',
         summary: 'Delete an account',
-        description: 'Refuses (422) when the account has children, when a posting role resolves to it, or when any journal line — draft or posted — references it. All three are restricted by foreign keys as well; these checks turn what would be a 500 into something a screen can render. An account with history can only be deactivated.',
+        description: 'Refuses (422) when the account has children, when a posting role resolves to it, when any journal line — draft or posted — references it, or when it is on the opening balances draft (told to deactivate it once the draft can no longer change). All four are restricted by foreign keys as well; these checks turn what would be a 500 into something a screen can render, and any other foreign key that still holds the account (an expense, a reconciliation, a year-end close) answers the same 422. The checks and the delete run in one transaction; a colliding change answers 409. An account with history can only be deactivated.',
         tags: ['Accounting'],
         security: [['sanctum' => []]],
         parameters: [
@@ -276,32 +354,79 @@ class AccountingAccountController extends Controller
         responses: [
             new OA\Response(response: 200, description: 'Account deleted'),
             new OA\Response(response: 403, description: 'Missing chart_of_accounts:delete'),
-            new OA\Response(response: 422, description: 'Account has children, is referenced by a posting role, or has journal lines'),
+            new OA\Response(response: 409, description: 'Another change to the chart collided with this one'),
+            new OA\Response(response: 422, description: 'Account has children, is referenced by a posting role, has journal lines, is on the opening balances draft, or is still in use elsewhere'),
         ],
     )]
     public function destroy(AccountingAccount $account): JsonResponse
     {
         $this->authorize('chart_of_accounts:delete');
 
-        $children = $account->children()->count();
+        $label = "{$account->code} {$account->name}";
+
+        try {
+            LoanWriteTransaction::run(
+                fn () => $this->deleteUnused($account, $label),
+                conflictMessage: 'Someone else changed the chart of accounts at the same time. Reload and try again.',
+            );
+        } catch (QueryException $e) {
+            // A foreign key the checks don't list (an expense, a
+            // reconciliation, a year-end close) still holds the account. The
+            // same 422 the checks give, never a 500.
+            if (($e->errorInfo[1] ?? null) !== self::ROW_IS_REFERENCED) {
+                throw $e;
+            }
+
+            throw ValidationException::withMessages([
+                'account' => "{$label} is still in use elsewhere in the books and cannot be deleted. Deactivate it instead.",
+            ]);
+        }
+
+        return response()->json(['message' => 'Account deleted successfully.']);
+    }
+
+    /**
+     * The checks and the delete, in one transaction, in the opening balance
+     * lock order (OpeningBalancePoster): the allowance and 3050 rows, then
+     * the draft, then the account row, then the draft's lines under a
+     * locking read, so a draft save that adds this account either commits
+     * first and is seen, or waits. A deadlock or lock wait timeout that still
+     * happens answers 409 through LoanWriteTransaction::run(), never 500.
+     */
+    private function deleteUnused(AccountingAccount $account, string $label): void
+    {
+        $this->openingBalances->lockInOrder([$account->id], requireOpeningEquity: false);
+        $draft = AccountingOpeningBalance::query()->lockForUpdate()->first();
+
+        // The account row itself, before the reference checks. Their shared
+        // reads lock gaps, so without this a first reference to the account
+        // (a journal line, a role mapping, a sub-account) could deadlock
+        // against the DELETE; with it, that reference waits its turn.
+        AccountingAccount::query()->whereKey($account->id)->lockForUpdate()->first();
+        $onTheDraft = AccountingOpeningBalanceLine::query()
+            ->where('accounting_account_id', $account->id)
+            ->sharedLock()
+            ->exists();
+
+        $children = $account->children()->sharedLock()->count();
 
         if ($children > 0) {
             throw ValidationException::withMessages([
-                'account' => "{$account->code} {$account->name} has {$children} account(s) beneath it. Move or remove them first.",
+                'account' => "{$label} has {$children} ".Str::plural('account', $children).' beneath it. Move or remove '.($children === 1 ? 'it' : 'them').' first.',
             ]);
         }
 
-        $roles = $account->mappings()->pluck('role')->all();
+        $roles = $account->mappings()->sharedLock()->pluck('role')->all();
 
         if ($roles !== []) {
-            $list = implode(', ', $roles);
+            $list = AccountingAccountMapping::labelList($roles);
 
             throw ValidationException::withMessages([
-                'account' => "{$account->code} {$account->name} is the account for {$list}. Point those roles somewhere else first.",
+                'account' => "{$label} is the account for {$list}. Point those roles somewhere else first.",
             ]);
         }
 
-        $lines = $account->journalLines()->count();
+        $lines = $account->journalLines()->sharedLock()->count();
 
         if ($lines > 0) {
             // The third restricting foreign key, and the one that matters most.
@@ -315,13 +440,25 @@ class AccountingAccountController extends Controller
             // DELETE. Deactivating is the remedy: it stops the account taking
             // new history while keeping what it has.
             throw ValidationException::withMessages([
-                'account' => "{$account->code} {$account->name} has {$lines} journal line(s) against it and cannot be deleted. Deactivate it instead — an account with history keeps its history.",
+                'account' => "{$label} has {$lines} ".Str::plural('journal line', $lines).' against it and cannot be deleted. Deactivate it instead — an account with history keeps its history.',
+            ]);
+        }
+
+        // The opening balances draft's lines restrict the account too. Once
+        // the draft is finalised, or the CLI has posted the opening balance,
+        // the draft can't change, so removing the line there is no remedy.
+        if ($onTheDraft) {
+            $settled = $draft?->isFinalised() === true
+                || AccountingJournal::query()->where('source', OpeningBalancePoster::SOURCE)->sharedLock()->exists();
+
+            throw ValidationException::withMessages([
+                'account' => $settled
+                    ? "{$label} is on the opening balance draft, which can no longer change. Deactivate it instead."
+                    : "{$label} is on the opening balance draft. Remove it there first.",
             ]);
         }
 
         $account->delete();
-
-        return response()->json(['message' => 'Account deleted successfully.']);
     }
 
     /**
@@ -334,8 +471,12 @@ class AccountingAccountController extends Controller
      * and both figures would be plausible.
      *
      * Balances are ALL-TIME rather than as of a date — a money account's
-     * balance is what it holds, not what it held at some cut-off — and cover
-     * every branch, because the chart is organisation-wide.
+     * balance is what it holds, not what it held at some cut-off. The chart
+     * itself is organisation-wide, but the balances follow the caller's
+     * branches (decision B2): a caller without `branches:view_all` sees what
+     * their branches' journals posted, and journals with no branch count only
+     * for `branches:view_all`. A `branch_id` filter outside the caller's
+     * branches answers 403 (ScopesBranchFilter).
      *
      * Accounts with no movement are absent from the aggregate and are set to 0
      * here, not left null: "never posted to" and "posted to and netted out" are
@@ -343,16 +484,19 @@ class AccountingAccountController extends Controller
      * "not asked for".
      *
      * @param  Collection<int, AccountingAccount>  $accounts
+     * @param  mixed  $branchId  the request's `branch_id` filter, if any
      */
-    private function attachBalances(Collection $accounts): void
+    private function attachBalances(Collection $accounts, mixed $branchId): void
     {
+        $branchScope = $this->branchScope($branchId);
+
         if ($accounts->isEmpty()) {
             return;
         }
 
         $balances = $this->trialBalance->signedBalances(
             null,
-            null,
+            $branchScope,
             $accounts->pluck('id')->map(static fn ($id): int => (int) $id)->all(),
         );
 

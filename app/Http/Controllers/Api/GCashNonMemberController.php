@@ -7,7 +7,9 @@ use App\Http\Requests\GCash\StoreGCashNonMemberRequest;
 use App\Http\Requests\GCash\UpdateGCashNonMemberRequest;
 use App\Http\Resources\GCashNonMemberResource;
 use App\Models\GCashNonMember;
+use App\Rules\UniqueWalkInIdNumber;
 use App\Services\AuditLogService;
+use App\Services\LikePattern;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
@@ -27,23 +29,50 @@ class GCashNonMemberController extends Controller
         responses: [
             new OA\Response(response: 200, description: 'Paginated walk-in customers'),
             new OA\Response(response: 403, description: 'Missing gcash:view permission'),
+            new OA\Response(response: 422, description: 'Validation error'),
         ],
     )]
     public function index(Request $request): AnonymousResourceCollection
     {
         $this->authorize('gcash:view');
 
+        // `min:1`: `?per_page=0` silently became the default page inside
+        // paginate(), and a negative value reached MySQL as `offset` with no
+        // `limit` — a 500. The same rule every other list validates.
+        // `string`: `?search[]=x` arrived as an array and 500'd on concatenation.
+        $validated = $request->validate([
+            'per_page' => ['nullable', 'integer', 'min:1'],
+            'search' => ['nullable', 'string'],
+        ]);
+        $perPage = (int) ($validated['per_page'] ?? 25);
+        // Gated on filled(), not truthiness: `when()` skips a falsy value, so
+        // `?search=0` was dropped and listed every walk-in.
+        $search = $validated['search'] ?? null;
+
         $nonMembers = GCashNonMember::query()
-            ->withCount('transactions')
-            ->when($request->query('search'), function ($q, $term) {
-                $like = '%'.$term.'%';
+            // Only the transactions the caller may see (Phase 6 decision 1).
+            ->withCount(['transactions' => fn ($q) => $q->visibleTo($request->user())])
+            ->when(filled($search), function ($q) use ($search) {
+                $like = LikePattern::contains($search);
+                // ID numbers also match normalised, the way the duplicate rule
+                // compares them, so `12345678` finds `1234-5678` and the reverse.
+                // Skipped when nothing is left (a search of `---`), which would
+                // otherwise match every walk-in.
+                $normalised = UniqueWalkInIdNumber::normalise($search);
                 $q->where(fn ($w) => $w
                     ->where('full_name', 'like', $like)
                     ->orWhere('mobile_number', 'like', $like)
-                    ->orWhere('id_number', 'like', $like));
+                    ->orWhere('id_number', 'like', $like)
+                    ->when($normalised !== '', fn ($w) => $w->orWhereRaw(
+                        UniqueWalkInIdNumber::NORMALISED_COLUMN.' LIKE ?',
+                        [LikePattern::contains($normalised)],
+                    )));
             })
             ->orderBy('full_name')
-            ->paginate(min((int) $request->query('per_page', 25), 100));
+            // Tiebreak on the key: walk-ins share names, and the picker drains
+            // every page. See DeterministicPaginationTest.
+            ->orderBy('id')
+            ->paginate(min($perPage, 100));
 
         return GCashNonMemberResource::collection($nonMembers);
     }
@@ -53,24 +82,35 @@ class GCashNonMemberController extends Controller
         summary: 'Register a GCash walk-in customer',
         tags: ['GCash'],
         security: [['sanctum' => []]],
+        requestBody: new OA\RequestBody(required: true, content: new OA\JsonContent(
+            required: ['full_name', 'mobile_number'],
+            properties: [
+                new OA\Property(property: 'full_name', type: 'string', maxLength: 255),
+                new OA\Property(property: 'mobile_number', type: 'string', maxLength: 32),
+                new OA\Property(property: 'id_type', type: 'string', maxLength: 64, nullable: true, description: 'Optional. Both ID fields or neither.'),
+                new OA\Property(property: 'id_number', type: 'string', maxLength: 64, nullable: true, description: 'Optional. Both ID fields or neither. Unique per ID type among active walk-ins, ignoring spaces, dashes and case.'),
+                new OA\Property(property: 'remarks', type: 'string', nullable: true, maxLength: 2000),
+                new OA\Property(property: 'acknowledge_possible_duplicate', type: 'boolean', description: 'Saves a walk-in without an ID even when another active walk-in has the same name and mobile number.'),
+            ],
+        )),
         responses: [
             new OA\Response(response: 201, description: 'Walk-in registered'),
             new OA\Response(response: 403, description: 'Missing gcash:transact permission'),
-            new OA\Response(response: 422, description: 'Validation error'),
+            new OA\Response(response: 422, description: 'Validation error. errors.possible_duplicate: a walk-in without an ID matches another active walk-in by name and mobile number; resend with acknowledge_possible_duplicate: true to save anyway.'),
         ],
     )]
     public function store(StoreGCashNonMemberRequest $request): JsonResponse
     {
-        $nonMember = GCashNonMember::create($request->validated());
+        $nonMember = GCashNonMember::create($request->walkInAttributes());
 
         AuditLogService::log(
             action: 'created',
             auditable: $nonMember,
             newValues: $nonMember->toArray(),
-            description: "GCash non-member {$nonMember->full_name} registered",
+            description: "GCash walk-in {$nonMember->full_name} registered",
         );
 
-        return (new GCashNonMemberResource($nonMember->loadCount('transactions')))
+        return (new GCashNonMemberResource($nonMember->loadCount(['transactions' => fn ($q) => $q->visibleTo($request->user())])))
             ->response()
             ->setStatusCode(201);
     }
@@ -83,28 +123,39 @@ class GCashNonMemberController extends Controller
         parameters: [
             new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer')),
         ],
+        requestBody: new OA\RequestBody(required: true, content: new OA\JsonContent(
+            required: ['full_name', 'mobile_number'],
+            properties: [
+                new OA\Property(property: 'full_name', type: 'string', maxLength: 255),
+                new OA\Property(property: 'mobile_number', type: 'string', maxLength: 32),
+                new OA\Property(property: 'id_type', type: 'string', maxLength: 64, nullable: true, description: 'Optional. Both ID fields or neither.'),
+                new OA\Property(property: 'id_number', type: 'string', maxLength: 64, nullable: true, description: 'Optional. Both ID fields or neither. Unique per ID type among active walk-ins, ignoring spaces, dashes and case.'),
+                new OA\Property(property: 'remarks', type: 'string', nullable: true, maxLength: 2000),
+                new OA\Property(property: 'acknowledge_possible_duplicate', type: 'boolean', description: 'Saves a walk-in without an ID even when another active walk-in has the same name and mobile number.'),
+            ],
+        )),
         responses: [
             new OA\Response(response: 200, description: 'Walk-in updated'),
             new OA\Response(response: 403, description: 'Missing gcash:transact permission'),
-            new OA\Response(response: 422, description: 'Validation error'),
+            new OA\Response(response: 422, description: 'Validation error. errors.possible_duplicate: a walk-in without an ID matches another active walk-in by name and mobile number; resend with acknowledge_possible_duplicate: true to save anyway.'),
         ],
     )]
     public function update(UpdateGCashNonMemberRequest $request, GCashNonMember $nonMember): JsonResponse
     {
         $before = $nonMember->toArray();
-        $nonMember->update($request->validated());
+        $nonMember->update($request->walkInAttributes());
 
         AuditLogService::log(
             action: 'updated',
             auditable: $nonMember,
             oldValues: $before,
             newValues: $nonMember->toArray(),
-            description: "GCash non-member {$nonMember->full_name} updated",
+            description: "GCash walk-in {$nonMember->full_name} updated",
         );
 
         return response()->json([
             'message' => 'Walk-in customer updated.',
-            'data' => new GCashNonMemberResource($nonMember->loadCount('transactions')),
+            'data' => new GCashNonMemberResource($nonMember->loadCount(['transactions' => fn ($q) => $q->visibleTo($request->user())])),
         ]);
     }
 
@@ -140,7 +191,7 @@ class GCashNonMemberController extends Controller
             action: 'deleted',
             auditable: $nonMember,
             oldValues: $before,
-            description: "GCash non-member {$name} removed",
+            description: "GCash walk-in {$name} removed",
         );
 
         return response()->json(['message' => 'Walk-in customer removed.']);

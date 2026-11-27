@@ -31,15 +31,17 @@ class CsvImportErrorReportController extends Controller
     #[OA\Get(
         path: '/api/imports/{run}/errors',
         summary: 'Paginated import issues, plus a summary grouped by reason',
-        description: 'Errors and warnings for every reported row. `meta.total` counts REPORTED ROWS — the pagination '
-            .'unit — while `meta.stats.total_issues` counts the issue lines in `data`, since one row can carry '
-            .'several. `meta.stats.by_category` is the grouped view an admin acts on.',
+        description: 'Errors, skipped lines and warnings for every reported row. `meta.total` counts REPORTED ROWS — the '
+            .'pagination unit — while `meta.stats.total_issues` counts the issue lines in `data`, since one row can '
+            .'carry several. `meta.stats.by_severity` counts those lines as `error`, `skipped` and `warning`: a row '
+            .'that was not imported never counts as a warning. `meta.stats.by_category` is the grouped view an admin '
+            .'acts on.',
         tags: ['CSV Import'],
         security: [['sanctum' => []]],
         parameters: [
             new OA\Parameter(name: 'run', in: 'path', required: true, schema: new OA\Schema(type: 'integer')),
-            new OA\Parameter(name: 'severity', in: 'query', required: false, schema: new OA\Schema(type: 'string', enum: ['error', 'warning'])),
-            new OA\Parameter(name: 'kind', in: 'query', required: false, schema: new OA\Schema(type: 'string', enum: ['customers', 'loans'])),
+            new OA\Parameter(name: 'severity', in: 'query', required: false, description: '`error`: why a row was not imported. `skipped`: every other line of a row that was not imported (why it was skipped, and its notes worded as what would happen once it imports). `warning`: a row that was imported, or will be while the run is open, with something adjusted.', schema: new OA\Schema(type: 'string', enum: ['error', 'skipped', 'warning'])),
+            new OA\Parameter(name: 'kind', in: 'query', required: false, schema: new OA\Schema(type: 'string', enum: ['customers', 'loans', 'share_capital'])),
             new OA\Parameter(name: 'per_page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', default: 25, maximum: 100)),
         ],
         responses: [
@@ -103,8 +105,8 @@ class CsvImportErrorReportController extends Controller
         security: [['sanctum' => []]],
         parameters: [
             new OA\Parameter(name: 'run', in: 'path', required: true, schema: new OA\Schema(type: 'integer')),
-            new OA\Parameter(name: 'severity', in: 'query', required: false, schema: new OA\Schema(type: 'string', enum: ['error', 'warning'])),
-            new OA\Parameter(name: 'kind', in: 'query', required: false, schema: new OA\Schema(type: 'string', enum: ['customers', 'loans'])),
+            new OA\Parameter(name: 'severity', in: 'query', required: false, description: '`error`: why a row was not imported. `skipped`: every other line of a row that was not imported (why it was skipped, and its notes worded as what would happen once it imports). `warning`: a row that was imported, or will be while the run is open, with something adjusted.', schema: new OA\Schema(type: 'string', enum: ['error', 'skipped', 'warning'])),
+            new OA\Parameter(name: 'kind', in: 'query', required: false, schema: new OA\Schema(type: 'string', enum: ['customers', 'loans', 'share_capital'])),
         ],
         responses: [
             new OA\Response(response: 200, description: 'CSV file stream', content: new OA\MediaType(mediaType: 'text/csv')),
@@ -163,8 +165,8 @@ class CsvImportErrorReportController extends Controller
     private function validatedFilters(Request $request): array
     {
         $validated = $request->validate([
-            'severity' => ['nullable', 'string', 'in:error,warning'],
-            'kind' => ['nullable', 'string', 'in:customers,loans'],
+            'severity' => ['nullable', 'string', 'in:error,skipped,warning'],
+            'kind' => ['nullable', 'string', 'in:customers,loans,share_capital'],
             'per_page' => ['nullable', 'integer', 'min:1'],
         ]);
 

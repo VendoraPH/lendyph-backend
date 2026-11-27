@@ -3,11 +3,16 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Http\Requests\Concerns\DateInputMessages;
 use App\Http\Requests\Repayment\StoreRepaymentRequest;
 use App\Http\Requests\Repayment\VoidRepaymentRequest;
 use App\Http\Resources\RepaymentResource;
 use App\Models\Loan;
 use App\Models\Repayment;
+use App\Services\BranchAccess;
+use App\Services\Branches\BranchWriteGuard;
+use App\Services\ImportedPaymentsCutoff;
+use App\Services\LikePattern;
 use App\Services\RepaymentService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
@@ -21,6 +26,7 @@ class RepaymentController extends Controller
     #[OA\Get(
         path: '/api/repayments',
         summary: 'List all repayments (global)',
+        description: 'Payments on loans in the caller\'s branches; `branches:view_all` sees every branch. `meta.stats` and `meta.totals` cover the same payments.',
         tags: ['Repayments'],
         security: [['sanctum' => []]],
         parameters: [
@@ -33,7 +39,43 @@ class RepaymentController extends Controller
             new OA\Parameter(name: 'per_page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', default: 15)),
         ],
         responses: [
-            new OA\Response(response: 200, description: 'Paginated global repayment list'),
+            new OA\Response(
+                response: 200,
+                description: 'Paginated global repayment list, newest payment date first. Every row is the full `Repayment`, allocation breakdown included — the same object GET /api/repayments/{repayment} returns — so rows never need fetching one by one. `per_page` is clamped at 100.',
+                content: new OA\JsonContent(properties: [
+                    new OA\Property(property: 'data', type: 'array', items: new OA\Items(ref: '#/components/schemas/Repayment')),
+                    new OA\Property(property: 'links', type: 'object', properties: [
+                        new OA\Property(property: 'first', type: 'string', nullable: true),
+                        new OA\Property(property: 'last', type: 'string', nullable: true),
+                        new OA\Property(property: 'prev', type: 'string', nullable: true),
+                        new OA\Property(property: 'next', type: 'string', nullable: true),
+                    ]),
+                    new OA\Property(property: 'meta', type: 'object', properties: [
+                        new OA\Property(property: 'current_page', type: 'integer'),
+                        new OA\Property(property: 'from', type: 'integer', nullable: true),
+                        new OA\Property(property: 'last_page', type: 'integer'),
+                        new OA\Property(property: 'links', type: 'array', items: new OA\Items(properties: [
+                            new OA\Property(property: 'url', type: 'string', nullable: true),
+                            new OA\Property(property: 'label', type: 'string'),
+                            new OA\Property(property: 'page', type: 'integer', nullable: true),
+                            new OA\Property(property: 'active', type: 'boolean'),
+                        ])),
+                        new OA\Property(property: 'path', type: 'string'),
+                        new OA\Property(property: 'per_page', type: 'integer'),
+                        new OA\Property(property: 'to', type: 'integer', nullable: true),
+                        new OA\Property(property: 'total', type: 'integer'),
+                        new OA\Property(property: 'stats', type: 'object', description: 'Counts per status, narrowed by `borrower_id` only', properties: [
+                            new OA\Property(property: 'posted', type: 'integer'),
+                            new OA\Property(property: 'voided', type: 'integer'),
+                        ]),
+                        new OA\Property(property: 'totals', type: 'object', description: 'SUM(amount_paid) per status in pesos, summed in SQL and rounded once to 2 dp, over the `search`, `loan_id`, `borrower_id`, `date_from` and `date_to` filters. The `status` filter is ignored: the two figures are split by status already. `amount_paid` already includes any penalty, so nothing is added to it.', properties: [
+                            new OA\Property(property: 'collected', type: 'number', format: 'float', description: 'Posted payments'),
+                            new OA\Property(property: 'voided', type: 'number', format: 'float', description: 'Voided payments'),
+                            new OA\Property(property: 'total_insurance_applied', type: 'number', format: 'float', description: 'Insurance premium the posted payments collected (part of `collected`)'),
+                        ]),
+                    ]),
+                ]),
+            ),
             new OA\Response(response: 401, description: 'Unauthenticated'),
         ],
     )]
@@ -48,10 +90,10 @@ class RepaymentController extends Controller
             // carry, and it used to reach a `when()` that treats it as absent.
             'loan_id' => ['nullable', 'integer', 'min:1'],
             'borrower_id' => ['nullable', 'integer', 'min:1'],
-            'date_from' => ['nullable', 'date'],
-            'date_to' => ['nullable', 'date'],
+            'date_from' => ['nullable', 'date', 'date_format:Y-m-d'],
+            'date_to' => ['nullable', 'date', 'date_format:Y-m-d'],
             'per_page' => ['nullable', 'integer', 'min:1'],
-        ]);
+        ], DateInputMessages::calendar(['date_from' => 'start date', 'date_to' => 'end date']));
 
         /**
          * Pulled out as locals so every filter below can be gated on filled() —
@@ -72,44 +114,97 @@ class RepaymentController extends Controller
         $dateFrom = $filters['date_from'] ?? null;
         $dateTo = $filters['date_to'] ?? null;
 
-        $query = Repayment::with('loan.borrower', 'loan.loanProduct', 'loan.amortizationSchedules', 'receivedByUser', 'voidedByUser')
+        /**
+         * Only payments on loans in the caller's branches (BranchAccess, by the
+         * loan's branch): the rows, `meta.stats` and `meta.totals` alike. Null
+         * for `branches:view_all`, which sees every payment.
+         */
+        $branchIds = app(BranchAccess::class)->for(request()->user());
+        $inBranches = fn ($q) => $q->when($branchIds !== null, fn ($q) => $q->whereIn(
+            'repayments.loan_id',
+            Loan::query()->whereIn('loans.branch_id', $branchIds)->select('loans.id'),
+        ));
+
+        /**
+         * Every filter but `status`, built fresh on each call: the page's rows
+         * add `status` and their relations on top, and `meta.totals` sums the
+         * same payments split by status. One copy of the filters, so the totals
+         * can never describe a different set of payments than the list does.
+         */
+        $filtered = fn () => Repayment::query()
+            ->tap($inBranches)
             ->when(filled($search), function ($q) use ($search) {
-                $q->where(function ($q) use ($search) {
-                    $q->where('receipt_number', 'like', "%{$search}%")
-                        ->orWhereHas('loan', function ($lq) use ($search) {
-                            $lq->where('loan_account_number', 'like', "%{$search}%")
+                $like = LikePattern::contains($search);
+
+                $q->where(function ($q) use ($like) {
+                    $q->where('receipt_number', 'like', $like)
+                        ->orWhereHas('loan', function ($lq) use ($like) {
+                            $lq->where('loan_account_number', 'like', $like)
                                 ->orWhereHas('borrower', fn ($bq) => $bq->where(
                                     DB::raw("CONCAT(first_name, ' ', last_name)"),
                                     'like',
-                                    "%{$search}%"
+                                    $like
                                 ));
                         });
                 });
             })
-            ->when(filled($status), fn ($q) => $q->where('status', $status))
             ->when(filled($loanId), fn ($q) => $q->where('loan_id', $loanId))
             ->when(filled($borrowerId), fn ($q) => $q->whereHas('loan', fn ($lq) => $lq->where('borrower_id', $borrowerId)))
             ->when(filled($dateFrom), fn ($q) => $q->whereDate('payment_date', '>=', $dateFrom))
             ->when(filled($dateTo), fn ($q) => $q->whereDate('payment_date', '<=', $dateTo));
 
-        $repayments = $query->latest('payment_date')
+        $repayments = $filtered()
+            ->with('loan.borrower', 'loan.loanProduct', 'loan.amortizationSchedules', 'receivedByUser', 'voidedByUser', 'shareCapitalLedgerEntries')
+            ->when(filled($status), fn ($q) => $q->where('status', $status))
+            ->latest('payment_date')
+            // `payment_date` is a DATE, so every receipt taken on one day ties.
+            // The key makes the order total, so the drained payment history
+            // cannot serve a receipt twice or skip one. See
+            // DeterministicPaginationTest.
+            ->orderByDesc('id')
             ->paginate(min(max((int) ($filters['per_page'] ?? 15), 1), 100));
 
         // Attach status count aggregation to the meta envelope so the frontend can
         // render status tabs without a second request. Borrower-scoped on the same
         // filled() gate as the list above — the two must agree, or the tabs report
         // the whole organisation while the rows report one member.
-        $stats = Repayment::when(filled($borrowerId), fn ($q) => $q->whereHas('loan', fn ($lq) => $lq->where('borrower_id', $borrowerId)))
+        $stats = Repayment::query()
+            ->tap($inBranches)
+            ->when(filled($borrowerId), fn ($q) => $q->whereHas('loan', fn ($lq) => $lq->where('borrower_id', $borrowerId)))
             ->selectRaw('status, COUNT(*) as count')
             ->groupBy('status')
             ->pluck('count', 'status')
             ->toArray();
 
+        /**
+         * The Payment History page's "Total Collected", from the server.
+         *
+         * It used to be added up in the browser from the rows it held, adding
+         * each row's penalty to an `amount_paid` that already contains it, so
+         * every peso of penalty was counted twice. Summed in SQL over exactly
+         * the list's filters, ignoring `status` (the two figures are split by
+         * it), and rounded once.
+         */
+        $sums = $filtered()
+            ->selectRaw('status, COALESCE(SUM(amount_paid), 0) as total')
+            ->groupBy('status')
+            ->pluck('total', 'status');
+
+        // The insurance premium the same posted payments collected first.
+        $insuranceApplied = $filtered()->where('status', 'posted')->sum('insurance_applied');
+
         return RepaymentResource::collection($repayments)
-            ->additional(['meta' => ['stats' => [
-                'posted' => (int) ($stats['posted'] ?? 0),
-                'voided' => (int) ($stats['voided'] ?? 0),
-            ]]]);
+            ->additional(['meta' => [
+                'stats' => [
+                    'posted' => (int) ($stats['posted'] ?? 0),
+                    'voided' => (int) ($stats['voided'] ?? 0),
+                ],
+                'totals' => [
+                    'collected' => round((float) ($sums['posted'] ?? 0), 2),
+                    'voided' => round((float) ($sums['voided'] ?? 0), 2),
+                    'total_insurance_applied' => round((float) $insuranceApplied, 2),
+                ],
+            ]]);
     }
 
     #[OA\Get(
@@ -122,7 +217,34 @@ class RepaymentController extends Controller
             new OA\Parameter(name: 'per_page', in: 'query', required: false, schema: new OA\Schema(type: 'integer', default: 15)),
         ],
         responses: [
-            new OA\Response(response: 200, description: 'Paginated repayment list'),
+            new OA\Response(
+                response: 200,
+                description: "Paginated list of the loan's repayments, OLDEST payment date first. Every row is the full `Repayment`, allocation breakdown included — the same object GET /api/repayments/{repayment} returns — so rows never need fetching one by one. `per_page` defaults to 15 and is clamped at 100; follow `meta.last_page` to read them all.",
+                content: new OA\JsonContent(properties: [
+                    new OA\Property(property: 'data', type: 'array', items: new OA\Items(ref: '#/components/schemas/Repayment')),
+                    new OA\Property(property: 'links', type: 'object', properties: [
+                        new OA\Property(property: 'first', type: 'string', nullable: true),
+                        new OA\Property(property: 'last', type: 'string', nullable: true),
+                        new OA\Property(property: 'prev', type: 'string', nullable: true),
+                        new OA\Property(property: 'next', type: 'string', nullable: true),
+                    ]),
+                    new OA\Property(property: 'meta', type: 'object', properties: [
+                        new OA\Property(property: 'current_page', type: 'integer'),
+                        new OA\Property(property: 'from', type: 'integer', nullable: true),
+                        new OA\Property(property: 'last_page', type: 'integer'),
+                        new OA\Property(property: 'links', type: 'array', items: new OA\Items(properties: [
+                            new OA\Property(property: 'url', type: 'string', nullable: true),
+                            new OA\Property(property: 'label', type: 'string'),
+                            new OA\Property(property: 'page', type: 'integer', nullable: true),
+                            new OA\Property(property: 'active', type: 'boolean'),
+                        ])),
+                        new OA\Property(property: 'path', type: 'string'),
+                        new OA\Property(property: 'per_page', type: 'integer'),
+                        new OA\Property(property: 'to', type: 'integer', nullable: true),
+                        new OA\Property(property: 'total', type: 'integer'),
+                    ]),
+                ]),
+            ),
             new OA\Response(response: 401, description: 'Unauthenticated'),
             new OA\Response(response: 404, description: 'Loan not found'),
         ],
@@ -131,10 +253,22 @@ class RepaymentController extends Controller
     {
         $this->authorize('payments:view');
 
+        // `min:1`: `?per_page=0` silently became the default page inside
+        // paginate(), and a negative value reached MySQL as `offset` with no
+        // `limit` — a 500. The same rule every other list validates.
+        $perPage = (int) (request()->validate([
+            'per_page' => ['nullable', 'integer', 'min:1'],
+        ])['per_page'] ?? 15);
+
         $repayments = $loan->repayments()
-            ->with('receivedByUser', 'voidedByUser', 'loan.borrower', 'loan.loanProduct', 'loan.amortizationSchedules')
+            ->with('receivedByUser', 'voidedByUser', 'loan.borrower', 'loan.loanProduct', 'loan.amortizationSchedules', 'shareCapitalLedgerEntries')
             ->latest('payment_date')
-            ->paginate(min((int) request('per_page', 15), 100));
+            // ASCENDING, whatever the latest() above suggests. Loan::repayments()
+            // already orders by `payment_date`, and that clause comes first, so
+            // this list is oldest-first and latest() changes nothing. The
+            // tiebreaker follows the order the list actually has.
+            ->orderBy('id')
+            ->paginate(min($perPage, 100));
 
         return RepaymentResource::collection($repayments);
     }
@@ -153,14 +287,15 @@ class RepaymentController extends Controller
                 required: ['payment_date', 'amount_paid'],
                 properties: [
                     new OA\Property(property: 'payment_date', type: 'string', format: 'date', example: '2026-04-15'),
-                    new OA\Property(property: 'amount_paid', type: 'number', example: 5000.00),
+                    new OA\Property(property: 'amount_paid', type: 'number', example: 5000.00, description: 'Pesos, at most two decimals (more is a 422 on `amount_paid`)'),
                     new OA\Property(property: 'remarks', type: 'string', nullable: true),
                 ],
             ),
         ),
         responses: [
             new OA\Response(response: 201, description: 'Repayment recorded'),
-            new OA\Response(response: 422, description: 'Validation error'),
+            new OA\Response(response: 409, description: 'The loan was closed (completed, restructured or voided) since it was read, or the write deadlocked; nothing was recorded. Reload and try again'),
+            new OA\Response(response: 422, description: 'Validation error (including an `amount_paid` with more than two decimals, a `payment_date` before the loan\'s release date, read in the app timezone, or, on an imported loan, on or before the day its file counts payments up to, `payments_counted_until`), or the loan is not released, ongoing or defaulted (on `loan`)'),
         ],
     )]
     public function store(StoreRepaymentRequest $request, Loan $loan): JsonResponse
@@ -175,7 +310,7 @@ class RepaymentController extends Controller
             $request->reference_number,
         );
 
-        $repayment->load('receivedByUser', 'loan.borrower', 'loan.loanProduct', 'loan.amortizationSchedules');
+        $repayment->load('receivedByUser', 'loan.borrower', 'loan.loanProduct', 'loan.amortizationSchedules', 'shareCapitalLedgerEntries');
 
         return (new RepaymentResource($repayment))
             ->response()
@@ -191,7 +326,13 @@ class RepaymentController extends Controller
             new OA\Parameter(name: 'repayment', in: 'path', required: true, schema: new OA\Schema(type: 'integer')),
         ],
         responses: [
-            new OA\Response(response: 200, description: 'Repayment details'),
+            new OA\Response(
+                response: 200,
+                description: 'Repayment details — the same object each row of the repayment lists carries.',
+                content: new OA\JsonContent(properties: [
+                    new OA\Property(property: 'data', ref: '#/components/schemas/Repayment'),
+                ]),
+            ),
             new OA\Response(response: 404, description: 'Not found'),
         ],
     )]
@@ -199,7 +340,7 @@ class RepaymentController extends Controller
     {
         $this->authorize('payments:view');
 
-        $repayment->load('loan.borrower', 'loan.loanProduct', 'loan.amortizationSchedules', 'receivedByUser', 'voidedByUser');
+        $repayment->load('loan.borrower', 'loan.loanProduct', 'loan.amortizationSchedules', 'receivedByUser', 'voidedByUser', 'shareCapitalLedgerEntries');
 
         return new RepaymentResource($repayment);
     }
@@ -223,18 +364,26 @@ class RepaymentController extends Controller
         ),
         responses: [
             new OA\Response(response: 200, description: 'Repayment voided'),
-            new OA\Response(response: 422, description: 'Already voided or validation error'),
+            new OA\Response(response: 409, description: 'Another request voided this payment, or closed its loan, at the same time, or the write deadlocked; nothing was reversed. Reload and try again'),
+            new OA\Response(response: 422, description: 'Already voided, or validation error. Also refused (errors.repayment) when the payment was made before the loan was extended, restructured or given more terms: a period it paid was closed by that adjustment, or one was applied at or after the payment was recorded. Penalty waivers and balance adjustments do not count. Nothing is written; correct the loan with a balance adjustment instead'),
         ],
     )]
-    public function void(VoidRepaymentRequest $request, Repayment $repayment): JsonResponse
+    public function void(VoidRepaymentRequest $request, Repayment $repayment, BranchWriteGuard $branches): JsonResponse
     {
-        $repayment = $this->repaymentService->voidRepayment(
-            $repayment,
-            $request->void_reason,
-            $request->user(),
+        // A void would reopen a closed branch's loan, so a closed branch's
+        // payments stay as they are (Phase 6 MB-BE2), checked holding the
+        // branch's lock (BranchWriteGuard) around the unchanged service.
+        $repayment = $branches->whileOpen(
+            (int) $repayment->loan()->value('branch_id'),
+            BranchWriteGuard::PAYMENT_VOIDS,
+            fn () => $this->repaymentService->voidRepayment(
+                $repayment,
+                $request->void_reason,
+                $request->user(),
+            ),
         );
 
-        $repayment->load('loan.borrower', 'loan.loanProduct', 'loan.amortizationSchedules', 'receivedByUser', 'voidedByUser');
+        $repayment->load('loan.borrower', 'loan.loanProduct', 'loan.amortizationSchedules', 'receivedByUser', 'voidedByUser', 'shareCapitalLedgerEntries');
 
         return response()->json([
             'message' => 'Repayment voided successfully.',
@@ -245,14 +394,28 @@ class RepaymentController extends Controller
     #[OA\Get(
         path: '/api/loans/{loan}/summary',
         summary: 'Loan balance summary',
-        description: 'Returns outstanding balance, overdue amounts, next due date, and payment totals',
+        description: 'Returns outstanding balance, overdue amounts, next due date, payment totals and the Record Payment presets. `total_outstanding` is principal, interest and penalty still owed plus `insurance_owed` (the insurance premium still owed), the same figure as the loan\'s `total_outstanding` and, after release, `total_payable`; `outstanding_principal` is principal only; `restructurable_balance` is the most a restructure may take as principal (open periods\' principal, interest and penalty, never the premium).',
         tags: ['Repayments'],
         security: [['sanctum' => []]],
         parameters: [
             new OA\Parameter(name: 'loan', in: 'path', required: true, schema: new OA\Schema(type: 'integer')),
         ],
         responses: [
-            new OA\Response(response: 200, description: 'Loan summary'),
+            new OA\Response(response: 200, description: 'Loan summary', content: new OA\JsonContent(properties: [
+                new OA\Property(property: 'data', type: 'object', description: 'Partial list: only the outstanding figures and the Record Payment presets are described here. The response also carries the other summary fields named in the description above (paid totals, overdue figures, next due date, `restructurable_balance`, and so on).', properties: [
+                    new OA\Property(property: 'total_outstanding', type: 'number', description: 'Everything still owed: principal, interest, penalty and `insurance_owed`, in whole centavos'),
+                    new OA\Property(property: 'outstanding_principal', type: 'number', description: 'Unpaid principal only'),
+                    new OA\Property(property: 'insurance_owed', type: 'number'),
+                    new OA\Property(property: 'outstanding_balance', type: 'number', deprecated: true, description: 'Deprecated alias of `total_outstanding`, kept one release'),
+                    new OA\Property(property: 'total_repaid', type: 'number', description: 'Total Paid: every posted receipt, plus `paid_before_import`, in whole centavos'),
+                    new OA\Property(property: 'paid_before_import', type: 'number', description: 'On a loan the CSV importer brought in, what its file says was paid before the import (Loan Amount less Loan Balance, and Interest Amount less Interest Balance), which no receipt here records; the loan Ledger\'s "Paid before the loan was imported" row. 0 on any other loan'),
+                    new OA\Property(property: 'advance_presets', type: 'array', description: 'One entry per open period, in allocation order. `amount` is what a payment today must be to leave the first `periods` open periods paid: the premium owed, then each period\'s penalty as the payment charges it, its remaining interest and principal, in whole centavos. Empty, too, when the loan is not released, ongoing or defaulted (payments are refused there). On a loan with a Share Capital Build-Up only the 1-period entry is sent (the allocation turns money past the current period into share capital), and it adds that period\'s build-up when the period is the one the allocation treats as current and the borrower is a member, as `amount_due_now` does: paying it leaves the period paid and credits exactly the build-up. Empty when no period is open.', items: new OA\Items(properties: [
+                        new OA\Property(property: 'periods', type: 'integer'),
+                        new OA\Property(property: 'amount', type: 'number'),
+                    ])),
+                    new OA\Property(property: 'payoff_amount', type: 'number', nullable: true, description: 'Everything owed today: `total_outstanding`, plus the penalty of any period that fell late past its grace since penalties were last stamped (none on a defaulted loan, whose penalty is frozen). It equals the last `advance_presets` amount (when a period is open), and recording it settles the loan. Null when the loan is not released, ongoing or defaulted (payments are refused there), and null on a loan with a Share Capital Build-Up (`scb_amount` above zero): there one payment can\'t settle the loan, because the allocation stops after the current period and turns the rest into share capital. The page hides "Pay all remaining" whenever this is null.'),
+                ]),
+            ])),
             new OA\Response(response: 404, description: 'Loan not found'),
         ],
     )]
@@ -279,14 +442,24 @@ class RepaymentController extends Controller
             content: new OA\JsonContent(
                 required: ['amount_paid', 'payment_date'],
                 properties: [
-                    new OA\Property(property: 'amount_paid', type: 'number', example: 5000.00),
+                    new OA\Property(property: 'amount_paid', type: 'number', example: 5000.00, description: 'Pesos, at most two decimals (more is a 422 on `amount_paid`)'),
                     new OA\Property(property: 'payment_date', type: 'string', format: 'date', example: '2026-04-15'),
                 ],
             ),
         ),
         responses: [
-            new OA\Response(response: 200, description: 'Allocation preview'),
-            new OA\Response(response: 422, description: 'Validation error'),
+            new OA\Response(response: 200, description: 'Allocation preview', content: new OA\JsonContent(properties: [
+                new OA\Property(property: 'data', type: 'object', description: 'Partial list: only the balance figures are described here. The response also carries the allocation totals (`total_principal`, `total_interest`, `total_penalty`, `total_insurance`, `excess`, the `allocated_to_*` buckets), `payment_type`, `payment_badge`, `allocations` and `is_preview`. On a Share Capital Build-Up loan, a member\'s overpayment of exactly the build-up credited to share capital for the periods settled is not money paid past what was owed: `payment_type` and `payment_badge` say exact.', properties: [
+                    new OA\Property(property: 'build_up_credited', type: 'string', example: '750.00', description: 'How much of `excess` the payment will credit to share capital build-up, by the same code that records it (nothing on a loan with no build-up, or for a member who is a pending or rejected applicant). 2-decimal string, equal to the recorded repayment\'s `build_up_credited`.'),
+                    new OA\Property(property: 'overpayment_kept', type: 'string', example: '0.00', description: 'How much of `excess` stays as advance or overpayment. 2-decimal string, equal to the recorded repayment\'s `overpayment_kept`.'),
+                    new OA\Property(property: 'balance_before', type: 'number', description: 'Unpaid principal plus the premium owed, before the payment'),
+                    new OA\Property(property: 'balance_after', type: 'number', description: 'Unpaid principal plus the premium owed, after the payment'),
+                    new OA\Property(property: 'total_outstanding_before', type: 'number', description: 'Everything owed (principal, interest, penalty and premium) before the payment, including any penalty it charges as of `payment_date`'),
+                    new OA\Property(property: 'total_outstanding_after', type: 'number', description: 'Everything owed after the payment: `total_outstanding_before` less what the payment applies (an overpayment or share capital credit lowers neither)'),
+                ]),
+            ])),
+            new OA\Response(response: 409, description: 'The loan was closed (completed, restructured or voided) since it was read. Reload and try again'),
+            new OA\Response(response: 422, description: 'Validation error, including an `amount_paid` with more than two decimals, a `payment_date` before the loan\'s release date (read in the app timezone), or, on an imported loan, on or before `payments_counted_until`'),
             new OA\Response(response: 404, description: 'Loan not found'),
         ],
     )]
@@ -295,9 +468,9 @@ class RepaymentController extends Controller
         $this->authorize('payments:view');
 
         $validated = request()->validate([
-            'amount_paid' => ['required', 'numeric', 'min:0.01'],
-            'payment_date' => ['required', 'date'],
-        ]);
+            'amount_paid' => ['required', 'numeric', 'decimal:0,2', 'min:0.01'],
+            'payment_date' => ['required', 'date', 'date_format:Y-m-d', StoreRepaymentRequest::notBeforeRelease($loan), ImportedPaymentsCutoff::rule($loan)],
+        ], DateInputMessages::calendar(['payment_date' => 'payment date']));
 
         $preview = $this->repaymentService->previewAllocation(
             $loan,

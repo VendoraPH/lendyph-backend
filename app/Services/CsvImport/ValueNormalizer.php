@@ -51,6 +51,12 @@ class ValueNormalizer
     private const DAY_FIRST_COUNTERPARTS = ['m/d/Y' => 'd/m/Y', 'n/j/Y' => 'j/n/Y'];
 
     /**
+     * A day and month then a four-digit year, split by "/", "-" or ".", as the
+     * Check step reads one (lendyph-frontend, import-date.ts).
+     */
+    private const DAY_MONTH_YEAR = '#^(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})$#';
+
+    /**
      * Range of Excel serial dates we will convert: roughly 1954 to 2064.
      *
      * Bounded on purpose. Outside this window an all-digit cell is far more
@@ -83,6 +89,32 @@ class ValueNormalizer
     }
 
     /**
+     * An identifier (an account or loan number), exactly as typed, or a refusal.
+     *
+     * Never cut to fit its column: two numbers alike up to the cut would become
+     * one, and the second record would be taken for the first. A blank one is
+     * refused as required, and a longer one with the caller's code and words.
+     */
+    public function identifier(?string $raw, string $field, int $max, string $tooLongCode, string $tooLongMessage, RowNoteBag $notes): ?string
+    {
+        $value = $this->text($raw);
+
+        if ($value === null) {
+            $notes->fail($field, 'required', 'This field is required and the cell is blank.');
+
+            return null;
+        }
+
+        if (mb_strlen($value) > $max) {
+            $notes->fail($field, $tooLongCode, $tooLongMessage);
+
+            return null;
+        }
+
+        return $value;
+    }
+
+    /**
      * Trim and cap to a column width, noting the truncation.
      */
     public function boundedText(?string $raw, string $field, int $max, RowNoteBag $notes): ?string
@@ -97,7 +129,12 @@ class ValueNormalizer
             return $value;
         }
 
-        $notes->warn($field, 'truncated', "\"{$value}\" is longer than {$max} characters and was shortened to fit.");
+        $notes->warn(
+            $field,
+            'truncated',
+            "\"{$value}\" is longer than {$max} characters and was shortened to fit.",
+            "\"{$value}\" is longer than {$max} characters, so it would be shortened to fit.",
+        );
 
         return mb_substr($value, 0, $max);
     }
@@ -249,8 +286,15 @@ class ValueNormalizer
      * 2021-02-14, a date that appears nowhere in the file and that no operator
      * would ever spot in a success report. Re-formatting the result and
      * comparing it to the input is the only thing that catches it.
+     *
+     * `$order` is the date order the admin settled for the column on the Check
+     * step: `dmy` (day-first) or `mdy` (month-first). It decides a day/month/
+     * year cell outright, with no "reads two ways" warning, since a person has
+     * already decided it. Without one (the column needed none, or the run
+     * started before orders were kept), a slash date reads month-first as it
+     * always has.
      */
-    public function date(?string $raw, string $field, RowNoteBag $notes, bool $required = false): ?string
+    public function date(?string $raw, string $field, RowNoteBag $notes, bool $required = false, ?string $order = null): ?string
     {
         $value = $this->text($raw);
 
@@ -258,6 +302,20 @@ class ValueNormalizer
             if ($required) {
                 $notes->fail($field, 'date_required', 'This date is required and the cell is blank.');
             }
+
+            return null;
+        }
+
+        if (($order === 'dmy' || $order === 'mdy') && preg_match(self::DAY_MONTH_YEAR, $value, $parts) === 1) {
+            [$day, $month] = $order === 'dmy' ? [(int) $parts[1], (int) $parts[2]] : [(int) $parts[2], (int) $parts[1]];
+            $year = (int) $parts[3];
+
+            if (checkdate($month, $day, $year)) {
+                return sprintf('%04d-%02d-%02d', $year, $month, $day);
+            }
+
+            $reading = $order === 'dmy' ? 'day-first' : 'month-first';
+            $notes->fail($field, 'date_invalid', "\"{$value}\" is not a real date read {$reading}, the order chosen for this column.");
 
             return null;
         }
@@ -279,7 +337,12 @@ class ValueNormalizer
         if ($serial !== null) {
             $converted = Carbon::create(1899, 12, 30)->addDays($serial)->toDateString();
 
-            $notes->warn($field, 'excel_serial_date', "\"{$value}\" is an Excel serial date number and was read as {$converted}. Confirm it against the source workbook.");
+            $notes->warn(
+                $field,
+                'excel_serial_date',
+                "\"{$value}\" is an Excel serial date number and was read as {$converted}. Confirm it against the source workbook.",
+                "\"{$value}\" is an Excel serial date number and would be read as {$converted}. Confirm it against the source workbook.",
+            );
 
             return $converted;
         }
@@ -330,7 +393,12 @@ class ValueNormalizer
             return;
         }
 
-        $notes->warn($field, 'ambiguous_date', "\"{$value}\" could be read as {$chosen} (month first, which is what was used) or as {$alternative} (day first). Check it against the source workbook.");
+        $notes->warn(
+            $field,
+            'ambiguous_date',
+            "\"{$value}\" could be read as {$chosen} (month first, which is what was used) or as {$alternative} (day first). Check it against the source workbook.",
+            "\"{$value}\" could be read as {$chosen} (month first, which is what would be used) or as {$alternative} (day first). Check it against the source workbook.",
+        );
     }
 
     private function excelSerial(string $value): ?int
@@ -370,7 +438,12 @@ class ValueNormalizer
         ));
 
         if ($parts === []) {
-            $notes->warn($field, 'contact_number_unusable', "\"{$original}\" is not a usable contact number and was left blank.");
+            $notes->warn(
+                $field,
+                'contact_number_unusable',
+                "\"{$original}\" is not a usable contact number and was left blank.",
+                "\"{$original}\" is not a usable contact number, so it would be left blank.",
+            );
 
             return null;
         }
@@ -398,7 +471,12 @@ class ValueNormalizer
          */
         if (count($parts) > 1 && $digits !== '') {
             $dropped = implode(', ', array_slice($parts, 1));
-            $notes->warn($field, 'contact_number_multiple', "\"{$original}\" holds more than one number. The first was kept and \"{$dropped}\" dropped — the field stores only 20 characters, which is less than two mobile numbers.");
+            $notes->warn(
+                $field,
+                'contact_number_multiple',
+                "\"{$original}\" holds more than one number. The first was kept and \"{$dropped}\" dropped — the field stores only 20 characters, which is less than two mobile numbers.",
+                "\"{$original}\" holds more than one number. The first would be kept and \"{$dropped}\" dropped — the field stores only 20 characters, which is less than two mobile numbers.",
+            );
         }
 
         if ($normalized !== '' && preg_match(self::CONTACT_NUMBER_REGEX, $normalized) === 1) {
@@ -412,7 +490,12 @@ class ValueNormalizer
             return $this->boundedText($candidate, $field, 20, $notes);
         }
 
-        $notes->warn($field, 'contact_number_invalid', "\"{$original}\" is not a contact number this system accepts, so it was imported as blank. A member carrying a value the borrower form rejects can never be saved again — fix it in the app after the import.");
+        $notes->warn(
+            $field,
+            'contact_number_invalid',
+            "\"{$original}\" is not a contact number this system accepts, so it was imported as blank. A member carrying a value the member form rejects can never be saved again — fix it in the app after the import.",
+            "\"{$original}\" is not a contact number this system accepts, so it would be imported as blank. Correct it in the file to keep it.",
+        );
 
         return null;
     }
@@ -435,7 +518,12 @@ class ValueNormalizer
         $failed = Validator::make(['email' => $value], ['email' => ['email', 'max:255']])->fails();
 
         if ($failed) {
-            $notes->warn($field, 'email_invalid', "\"{$value}\" is not an email address this system accepts, so it was imported as blank. A member carrying a value the borrower form rejects can never be saved again — fix it in the app after the import.");
+            $notes->warn(
+                $field,
+                'email_invalid',
+                "\"{$value}\" is not an email address this system accepts, so it was imported as blank. A member carrying a value the member form rejects can never be saved again — fix it in the app after the import.",
+                "\"{$value}\" is not an email address this system accepts, so it would be imported as blank. Correct it in the file to keep it.",
+            );
 
             return null;
         }
@@ -451,12 +539,17 @@ class ValueNormalizer
      * "Bi-Weekly", "Straight (Fixed)". Keys are matched after folding case and
      * collapsing punctuation, so all four forms land.
      *
+     * A refusal lists the accepted values in `$words` (stored value => words,
+     * as the workbook writes them), never the stored values themselves. A
+     * stored value with no words there reads with its underscores as spaces.
+     *
      * @param  array<string, string>  $map
+     * @param  array<string, string>  $words
      */
-    public function enum(?string $raw, array $map, string $field, RowNoteBag $notes, bool $required = false, ?string $label = null): ?string
+    public function enum(?string $raw, array $map, string $field, RowNoteBag $notes, bool $required = false, ?string $label = null, array $words = []): ?string
     {
         $value = $this->text($raw);
-        $label ??= $field;
+        $label ??= str_replace('_', ' ', $field);
 
         if ($value === null) {
             if ($required) {
@@ -472,10 +565,14 @@ class ValueNormalizer
             return $map[$token];
         }
 
-        $accepted = implode(', ', array_values(array_unique($map)));
+        $accepted = implode(', ', array_map(
+            static fn (string $stored): string => $words[$stored] ?? ucfirst(str_replace('_', ' ', $stored)),
+            array_values(array_unique($map)),
+        ));
+        $article = preg_match('/^[aeiou]/i', $label) === 1 ? 'an' : 'a';
 
         if ($required) {
-            $notes->fail($field, 'enum_invalid', "\"{$value}\" is not a {$label} this system recognises. Accepted values: {$accepted}.");
+            $notes->fail($field, 'enum_invalid', "\"{$value}\" is not {$article} {$label} this system recognises. Accepted values: {$accepted}.");
 
             return null;
         }
@@ -483,7 +580,12 @@ class ValueNormalizer
         // Nullable columns take the same downgrade as contact number and email,
         // and for the same reason: the value cannot be stored, and refusing the
         // whole row over an optional field would orphan the member's loans.
-        $notes->warn($field, 'enum_unmapped', "\"{$value}\" is not a {$label} this system recognises, so it was imported as blank. Accepted values: {$accepted}.");
+        $notes->warn(
+            $field,
+            'enum_unmapped',
+            "\"{$value}\" is not {$article} {$label} this system recognises, so it was imported as blank. Accepted values: {$accepted}.",
+            "\"{$value}\" is not {$article} {$label} this system recognises, so it would be imported as blank. Accepted values: {$accepted}.",
+        );
 
         return null;
     }

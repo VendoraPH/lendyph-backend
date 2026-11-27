@@ -6,6 +6,7 @@ use App\Models\User;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\URL;
+use LogicException;
 
 /**
  * Mints and validates the temporary signed URLs that serve borrower KYC files.
@@ -59,6 +60,14 @@ class SignedFileLink
     public static function to(string $routeName, array $parameters): string
     {
         $user = Auth::user();
+
+        // A link is bound to a staff user id (`u`), checked against `users`
+        // when it is opened. A member's PortalUser id would bind it to an
+        // unrelated staff member, so portal code never mints these: it streams
+        // files after sign-in instead (portal design §0, finding 6).
+        if ($user !== null && ! $user instanceof User) {
+            throw new LogicException('Signed file links are minted for staff only; the Member Portal streams files to a signed-in member instead.');
+        }
 
         if ($user) {
             $parameters['u'] = $user->getKey();

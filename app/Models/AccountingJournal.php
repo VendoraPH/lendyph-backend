@@ -4,7 +4,13 @@ namespace App\Models;
 
 use App\Exceptions\PostedJournalIsImmutableException;
 use App\Http\Resources\JournalEntryResource;
+use App\Services\Accounting\ExpenseJournalGuard;
+use App\Services\BranchAccess;
+use App\Services\Branches\InterbranchTransferJournalGuard;
+use App\Services\Savings\SavingsJournalGuard;
+use App\Support\StaffRouteBinding;
 use App\Traits\Auditable;
+use Closure;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Collection as EloquentCollection;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
@@ -60,11 +66,12 @@ class AccountingJournal extends Model
      * Mirrors the column's enum exactly. A value absent here is a value no
      * posting rule can ask for.
      *
-     * ## Ten of these are written. Eight are not — and one of those is a policy
+     * ## Eighteen of these have a writer. One does not, and that is a policy
      *
      * The list is the column's enum, not an inventory of live behaviour, and
-     * reading it as one has already misled people. What actually writes each
-     * value, as of this commit:
+     * reading it as one has already misled people. What writes each value
+     * once accounting round C is in (the Phase 2 rules are called by their
+     * lending services once those are wired):
      *
      * | source            | written by                                              |
      * |-------------------|---------------------------------------------------------|
@@ -75,9 +82,17 @@ class AccountingJournal extends Model
      * | `expense`         | ExpenseRecorder, cash expense                            |
      * | `payable`         | ExpenseRecorder, accrual AND its later settlement        |
      * | `transfer`        | FundTransferRecorder, PostingRules::fundTransfer()       |
-     * | `credit_loss`     | PostingRules::creditLossProvision()                      |
+     * | `credit_loss`     | PostingRules::creditLossProvision(), restructureWriteOff() (J2), allowanceAdjustment() |
      * | `manual`          | StoreJournalRequest — forced, a client cannot choose     |
      * | `reversal`        | JournalPoster::reverse()                                 |
+     * | `adjustment`      | PostingRules::balanceAdjustment(), via AutomaticPoster   |
+     * | `share_capital`   | PostingRules::shareCapitalEntry(), via AutomaticPoster   |
+     * | `cash_in`         | PostingRules::gcashTransaction(), via AutomaticPoster    |
+     * | `cash_out`        | PostingRules::gcashTransaction(), via AutomaticPoster    |
+     * | `opening_balance` | RecordOpeningBalances (the CLI) and the Opening Balances screen (C2) |
+     * | `bank_transaction`| the reconciliation actions (C5): a suspense line from a bank account |
+     * | `cash_transaction`| the reconciliation actions (C5): a suspense line from any other money account |
+     * | `closing`         | YearEndCloser: one per branch at the year-end close (C3) |
      *
      * ### `penalty` is reserved and always will be — it is a decision
      *
@@ -97,22 +112,24 @@ class AccountingJournal extends Model
      * a valid filter, so the API advertises a source that cannot return rows.
      * That is deliberate — see the filter's note there.
      *
-     * ### `opening_balance` is being implemented now
+     * `cash_in` and `cash_out` are GCash counter transactions, not cash moved
+     * between the organisation's own accounts, which still posts as
+     * `transfer`.
      *
-     * In flight at the time of writing, not reserved. Expect it to join the
-     * table above; do not annotate it as unused on the strength of a grep.
+     * ### `closing` is left out of the income statement
      *
-     * ### The remaining six are unclaimed enum surface
+     * A closing journal, and the reversal of one (a reopened year), moves the
+     * year's result from income and expense into the `net_surplus` account.
+     * IncomeStatementBuilder leaves both out, so a closed year's income
+     * statement reads as it did before the close. It was the last value of the
+     * column's enum (migration 2026_11_09_203100).
      *
-     * `cash_transaction`, `bank_transaction`, `cash_in`, `cash_out`,
-     * `adjustment` and `share_capital` are written by nothing and no design
-     * currently calls for them. `cash_in`/`cash_out` in particular overlap
-     * `transfer`, which is what cash movement actually posts as today.
+     * ### Savings & Deposits (Phase 3)
      *
-     * They are kept rather than removed because this is a live enum column on
-     * ten deployments: narrowing it means a migration, and a migration that
-     * cannot fail safely if any row anywhere holds one of these. Annotated is
-     * cheaper and just as honest.
+     * `savings` (deposits, withdrawals and closing payouts), `savings_interest`
+     * (interest runs and the interest credited at close), `time_deposit`
+     * (placements) and `time_deposit_settlement` (maturity, rollover and early
+     * termination), appended after `closing` by migration 2026_11_10_500100.
      */
     public const SOURCES = [
         'loan_release',
@@ -133,6 +150,11 @@ class AccountingJournal extends Model
         'opening_balance',
         'credit_loss',
         'share_capital',
+        'closing',
+        'savings',
+        'savings_interest',
+        'time_deposit',
+        'time_deposit_settlement',
     ];
 
     /**
@@ -144,11 +166,18 @@ class AccountingJournal extends Model
      * WHICH classes are resolved and which columns are selected — all from this
      * one list, so the query and the read cannot drift apart.
      *
-     * These four classes are the only ones a production path puts in
-     * `postable_type`. Loan comes from AutomaticPoster::loanRelease(),
-     * Repayment from loanCollection(), and the two expense rows from
-     * ExpenseRecorder. AutomaticPoster's other methods take an untyped
-     * `Model $postable` and could add to this list; nothing calls them yet.
+     * Loan comes from AutomaticPoster::loanRelease() and
+     * restructureRelease() (J1 on the new loan, J2 on the source), Repayment
+     * from loanCollection(), and the two expense rows from ExpenseRecorder.
+     * Phase 2 adds LoanAdjustment (balanceAdjustment()), ShareCapitalLedger
+     * (shareCapitalEntry()) and GCashTransaction (gcashTransaction()).
+     * AutomaticPoster::allowanceAdjustment() and the older loanFee(),
+     * creditLossProvision(), fundTransfer() and walletCharge() take an
+     * untyped `Model $postable`; a class they bring that is not here reads
+     * with no label. Phase 3 adds SavingsTransaction (savingsTransaction() and
+     * savingsInterestCredit()), SavingsInterestRun (savingsInterestRun(), which
+     * the journal's own description names) and TimeDeposit
+     * (timeDepositPlacement() and timeDepositSettlement()).
      *
      * AccountingExpensePayment is deliberately empty: nothing on the payment
      * row names it. The payee lives on its parent expense, and reaching through
@@ -162,6 +191,12 @@ class AccountingJournal extends Model
         Repayment::class => ['receipt_number'],
         AccountingExpense::class => ['payee'],
         AccountingExpensePayment::class => [],
+        LoanAdjustment::class => ['adjustment_number'],
+        ShareCapitalLedger::class => ['reference'],
+        GCashTransaction::class => ['reference_no'],
+        SavingsTransaction::class => ['reference'],
+        SavingsInterestRun::class => [],
+        TimeDeposit::class => ['certificate_number'],
     ];
 
     public const STATUSES = ['draft', 'posted', 'reversed'];
@@ -177,6 +212,12 @@ class AccountingJournal extends Model
      * This is the single easiest thing in the module to get wrong.
      */
     public const HISTORICAL_STATUSES = ['posted', 'reversed'];
+
+    /**
+     * The longest chain of reversals self::endsReversed() and its SQL twin
+     * follow: far beyond any real one, so a damaged link can't loop.
+     */
+    public const MAX_REVERSALS = 100;
 
     protected $table = 'accounting_journals';
 
@@ -301,6 +342,73 @@ class AccountingJournal extends Model
         return $this->belongsTo(self::class, 'reversed_by_journal_id');
     }
 
+    /**
+     * Whether the chain of reversals that starts at `$journal` ends on a
+     * reversal, so the entry stands undone in the books.
+     *
+     * JournalPoster::reverse() marks the entry it reverses `reversed` and links
+     * it to the reversal (`reversed_by_journal_id`); the reversal is posted,
+     * and can be reversed the same way. So an entry reversed once,
+     * three times, … stands undone, and one reversed twice, four times, …
+     * stands again. `$reversalOf` reads the next entry: the relation, or the
+     * row under a lock (ExpenseRecorder::pay()). self::reversedIdsSql() is the
+     * SQL twin.
+     *
+     * @param  Closure(self): ?self  $reversalOf
+     */
+    public static function endsReversed(?self $journal, Closure $reversalOf): bool
+    {
+        $reversed = false;
+
+        for ($reversals = 0; $reversals < self::MAX_REVERSALS && $journal !== null
+            && $journal->status === 'reversed' && $journal->reversed_by_journal_id !== null; $reversals++) {
+            $reversed = ! $reversed;
+            $journal = $reversalOf($journal);
+        }
+
+        return $reversed;
+    }
+
+    /**
+     * The ids of the journals that stand reversed: the SQL twin of
+     * self::endsReversed(). It follows `reversed_by_journal_id` from each
+     * reversed journal, counting the reversals, and keeps the journals whose
+     * chain holds an odd number of them.
+     *
+     * With `$asOf` (Y-m-d), only reversals dated on or before it count, so the
+     * chain stops at the first one dated after it: the journals that stood
+     * reversed on that date. Reversals are never dated before the entry they
+     * reverse (ReverseJournalRequest).
+     *
+     * @return array{0: string, 1: list<string>} the SELECT, and its bindings
+     */
+    public static function reversedIdsSql(?string $asOf = null): array
+    {
+        $max = self::MAX_REVERSALS;
+        $onTime = $asOf === null ? '' : ' AND reversal.date <= ?';
+
+        $sql = <<<SQL
+            WITH RECURSIVE reversal_chain (reversed_journal_id, journal_id, reversals) AS (
+                SELECT reversed.id, reversal.id, 1
+                FROM accounting_journals AS reversed
+                JOIN accounting_journals AS reversal ON reversal.id = reversed.reversed_by_journal_id
+                WHERE reversed.status = 'reversed'{$onTime}
+                UNION ALL
+                SELECT chain.reversed_journal_id, reversal.id, chain.reversals + 1
+                FROM reversal_chain AS chain
+                JOIN accounting_journals AS reversed ON reversed.id = chain.journal_id
+                JOIN accounting_journals AS reversal ON reversal.id = reversed.reversed_by_journal_id
+                WHERE reversed.status = 'reversed' AND chain.reversals < {$max}{$onTime}
+            )
+            SELECT chain.reversed_journal_id
+            FROM reversal_chain AS chain
+            GROUP BY chain.reversed_journal_id
+            HAVING MOD(MAX(chain.reversals), 2) = 1
+            SQL;
+
+        return [$sql, $asOf === null ? [] : [$asOf, $asOf]];
+    }
+
     /** The lending event that caused this entry — a Loan, a Repayment. */
     public function postable(): MorphTo
     {
@@ -333,12 +441,12 @@ class AccountingJournal extends Model
      * dictionary is built in `addEagerConstraints()` before any `with()`
      * closure runs, and `getDictionary()` is a getter. So the load is done
      * here instead, from {@see self::POSTABLE_LABEL_COLUMNS} — a closed list
-     * of four classes that are referenced as `::class` and therefore cannot
+     * of classes that are referenced as `::class` and therefore cannot
      * silently stop existing.
      *
      * ## The cost
      *
-     * One keyed query per known type PRESENT, so three or four on a mixed
+     * One keyed query per known type PRESENT, so a handful on a mixed
      * register and zero on a page of transfers — and flat as the page grows
      * from 15 rows to 100, which is the property
      * `test_the_register_resolves_postables_without_going_n_plus_1()` pins.
@@ -408,6 +516,10 @@ class AccountingJournal extends Model
                 'branch:id,name',
                 'creator:id,first_name,last_name',
                 'poster:id,first_name,last_name',
+                // `source` and the postable tell SavingsJournalGuard and
+                // ExpenseJournalGuard whether a reversal undid a savings or an
+                // expense entry, with no query per row.
+                'reverses:id,journal_no,source,postable_type,postable_id',
             ])
             // Runs on the page `paginate()` produces — `paginate()` goes
             // through `get()`, which applies these. Here rather than left to
@@ -415,8 +527,25 @@ class AccountingJournal extends Model
             // `postable_label` from every row.
             ->afterQuery(static function (EloquentCollection $journals): EloquentCollection {
                 self::attachPostables($journals);
+                SavingsJournalGuard::preload($journals);
+                InterbranchTransferJournalGuard::preload($journals);
+                ExpenseJournalGuard::preload($journals);
 
                 return $journals;
             });
+    }
+
+    /**
+     * Every `{journal}` route parameter resolves only to a row in a branch the
+     * signed-in user may see (BranchAccess); a row with no branch only for
+     * `branches:view_all`. Another branch's row answers 404 before any
+     * validation runs. Without a signed-in user the binding is unscoped.
+     */
+    public function resolveRouteBindingQuery($query, $value, $field = null)
+    {
+        return StaffRouteBinding::scope(
+            parent::resolveRouteBindingQuery($query, $value, $field),
+            fn ($query, User $user) => app(BranchAccess::class)->constrain($query, $user, $this->qualifyColumn('branch_id')),
+        );
     }
 }

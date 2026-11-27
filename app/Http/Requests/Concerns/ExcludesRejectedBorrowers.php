@@ -2,6 +2,7 @@
 
 namespace App\Http\Requests\Concerns;
 
+use App\Services\BranchAccess;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\Rules\Exists;
 
@@ -43,6 +44,11 @@ trait ExcludesRejectedBorrowers
      */
     protected function nonRejectedBorrowerRule(): Exists
     {
-        return Rule::exists('borrowers', 'id')->whereNot('status', 'rejected');
+        // Only members in the caller's branches (BranchAccess): another
+        // branch's member fails exactly like a missing id.
+        return app(BranchAccess::class)->constrainExists(
+            Rule::exists('borrowers', 'id')->whereNot('status', 'rejected'),
+            $this->user(),
+        );
     }
 }

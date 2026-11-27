@@ -2,8 +2,12 @@
 
 namespace App\Models;
 
+use App\Services\BorrowerDuplicateDetector;
+use App\Services\BranchAccess;
+use App\Services\LikePattern;
 use App\Services\SequenceCode;
 use App\Services\SignedFileLink;
+use App\Support\StaffRouteBinding;
 use App\Traits\Auditable;
 use Illuminate\Database\Eloquent\Casts\Attribute;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
@@ -30,11 +34,45 @@ class Borrower extends Model
     public const NON_MEMBER_STATUSES = ['pending', 'rejected'];
 
     /**
+     * Statuses of a person whose membership has ended (CDA design §1): they
+     * withdrew, or they died. Still members for the records (their loans,
+     * ledgers and the CDA counts of members who left), so they stay out of
+     * NON_MEMBER_STATUSES, but no new credit or activity starts for them:
+     * - a loan is not created for them, nor with them as co-maker, and their
+     *   loan is not edited, restructured or released (NotAFormerMember);
+     * - a withdrawn member gets no share capital entry or pledge change; a
+     *   deceased member's stay allowed, so the estate can be settled;
+     * - payment reminders and share capital auto-credit skip them;
+     * - a savings account needs `active`.
+     *
+     * @var list<string>
+     */
+    public const FORMER_MEMBER_STATUSES = ['withdrawn', 'deceased'];
+
+    /** @var list<string> */
+    public const MEMBER_TYPES = ['regular', 'associate'];
+
+    public const MEMBER_TYPE_REGULAR = 'regular';
+
+    /**
      * The `borrower_code` family. Named so SequenceAllocator predicts codes from
      * the same constant the hook issues them from.
      */
     public const CODE_PREFIX = 'BRW';
 
+    /**
+     * The audit trail names a registration's possible duplicate by member code
+     * only (describeAuditEvent()), never by the link's id.
+     *
+     * @var list<string>
+     */
+    protected array $auditRedacted = ['possible_duplicate_of_id'];
+
+    /**
+     * `possible_duplicate_of_id` and `possible_duplicate_reason` are left out on
+     * purpose: only the server sets them (BorrowerRegistration), on a public
+     * registration that may duplicate a record on file.
+     */
     protected $fillable = [
         'registration_uuid',
         'external_account_no',
@@ -69,6 +107,11 @@ class Borrower extends Model
         'rejected_at',
         'rejected_by',
         'rejection_reason',
+        'membership_date',
+        'member_type',
+        'membership_number',
+        'membership_ended_on',
+        'membership_end_reason',
     ];
 
     protected function casts(): array
@@ -80,6 +123,8 @@ class Borrower extends Model
             'pledge_amount' => 'decimal:2',
             'approved_at' => 'datetime',
             'rejected_at' => 'datetime',
+            'membership_date' => 'date',
+            'membership_ended_on' => 'date',
         ];
     }
 
@@ -98,6 +143,12 @@ class Borrower extends Model
             $borrower->borrower_code = $last === null
                 ? SequenceCode::first(self::CODE_PREFIX)
                 : SequenceCode::after(self::CODE_PREFIX, $last->borrower_code, "borrowers.id {$last->id}");
+
+            // A member created with a membership date gets their membership
+            // number with it: the member code, unless one was given.
+            if ($borrower->membership_date !== null && blank($borrower->membership_number)) {
+                $borrower->membership_number = $borrower->borrower_code;
+            }
         });
 
         /**
@@ -109,6 +160,17 @@ class Borrower extends Model
          * The member / non-member split is made on READ instead — see
          * Borrower::scopeMembers() and ShareCapitalPledge::scopeForMembers().
          */
+        // The first membership date a member is given brings their membership
+        // number with it (the member code), unless they already have one or
+        // another member already holds that code as their number.
+        static::updating(function (Borrower $borrower): void {
+            if ($borrower->isDirty('membership_date') && $borrower->getOriginal('membership_date') === null
+                && $borrower->membership_date !== null && blank($borrower->membership_number)
+                && ! static::query()->where('membership_number', $borrower->borrower_code)->whereKeyNot($borrower->id)->exists()) {
+                $borrower->membership_number = $borrower->borrower_code;
+            }
+        });
+
         static::created(function (Borrower $borrower) {
             $borrower->shareCapitalPledge()->create([
                 'amount' => $borrower->pledge_amount ?? 0,
@@ -157,6 +219,57 @@ class Borrower extends Model
     public function rejectedBy(): BelongsTo
     {
         return $this->belongsTo(User::class, 'rejected_by');
+    }
+
+    /**
+     * The record a public registration may duplicate, linked by the server when
+     * the duplicate check matched it (finish run round 2, decision 3). Only a
+     * reviewer who can see that record is shown who it is
+     * (PossibleDuplicatePresenter).
+     */
+    public function possibleDuplicateOf(): BelongsTo
+    {
+        return $this->belongsTo(self::class, 'possible_duplicate_of_id');
+    }
+
+    /**
+     * The description on a member's automatic audit rows, only for a public
+     * registration saved as a possible duplicate: its creation and its approval
+     * name that record by member code only (`$auditRedacted` keeps the link's
+     * id out). Other rows keep no description, as before.
+     *
+     * The linked record is read only for those two rows. Any other write, such
+     * as the applicant's own photo upload, reads nothing more for a linked
+     * registration than for any other, so it can't tell them apart (security
+     * review of #372). On creation the link is already loaded
+     * (BorrowerRegistration).
+     */
+    public function describeAuditEvent(string $action): ?string
+    {
+        if ($this->possible_duplicate_of_id === null) {
+            return null;
+        }
+
+        if ($action === 'created') {
+            return sprintf(
+                'Public registration saved as a possible duplicate of %s (%s).',
+                $this->possibleDuplicateOf?->borrower_code,
+                lcfirst(BorrowerDuplicateDetector::reasonInWords($this->possible_duplicate_reason)),
+            );
+        }
+
+        $approved = $action === 'updated'
+            && ($this->getChanges()['status'] ?? null) === 'active'
+            && $this->getOriginal('status') === 'pending';
+
+        if (! $approved) {
+            return null;
+        }
+
+        return sprintf(
+            'Registration approved after the reviewer checked the possible duplicate of %s.',
+            $this->possibleDuplicateOf?->borrower_code,
+        );
     }
 
     public function coMakers(): HasMany
@@ -209,27 +322,115 @@ class Borrower extends Model
         return $query->whereNotIn('status', self::NON_MEMBER_STATUSES);
     }
 
+    /**
+     * Members whose membership hasn't ended: scopeMembers() without the
+     * withdrawn and deceased. What payment reminders and share capital
+     * auto-credit act on.
+     */
+    public function scopeCurrentMembers($query)
+    {
+        return $query->whereNotIn('status', [...self::NON_MEMBER_STATUSES, ...self::FORMER_MEMBER_STATUSES]);
+    }
+
+    public function isFormerMember(): bool
+    {
+        return in_array($this->status, self::FORMER_MEMBER_STATUSES, true);
+    }
+
+    /**
+     * The Members page's status counts (GET /borrowers `meta.stats`): every
+     * borrower in the branches $viewer may see, by status, narrowed to one
+     * branch and a search when given. Linda's member answer reads the same
+     * counts.
+     *
+     * @return array{active: int, inactive: int, blacklisted: int, pending: int, rejected: int, withdrawn: int, deceased: int}
+     */
+    public static function statusCounts(User $viewer, ?int $branchId = null, ?string $search = null): array
+    {
+        $counts = self::query()
+            ->visibleTo($viewer)
+            ->when($search !== null, fn ($q) => $q->search($search))
+            ->when($branchId !== null, fn ($q) => $q->forBranch($branchId))
+            ->selectRaw('status, COUNT(*) as count')
+            ->groupBy('status')
+            ->pluck('count', 'status')
+            ->toArray();
+
+        return [
+            'active' => (int) ($counts['active'] ?? 0),
+            'inactive' => (int) ($counts['inactive'] ?? 0),
+            'blacklisted' => (int) ($counts['blacklisted'] ?? 0),
+            'pending' => (int) ($counts['pending'] ?? 0),
+            'rejected' => (int) ($counts['rejected'] ?? 0),
+            'withdrawn' => (int) ($counts['withdrawn'] ?? 0),
+            'deceased' => (int) ($counts['deceased'] ?? 0),
+        ];
+    }
+
     public function scopeForBranch($query, int $branchId)
     {
         return $query->where('branch_id', $branchId);
     }
 
     /**
-     * Free-text borrower lookup: code, any name part, contact number or email.
+     * Borrowers in the branches $user may see (BranchAccess). A borrower with
+     * no branch (an anonymous registration not yet assigned) is visible only
+     * to `branches:view_all`. A local scope only: jobs and commands never
+     * call it.
+     */
+    public function scopeVisibleTo($query, User $user)
+    {
+        $branchIds = app(BranchAccess::class)->for($user);
+
+        return $branchIds === null ? $query : $query->whereIn('borrowers.branch_id', $branchIds);
+    }
+
+    /**
+     * Every `{borrower}` route parameter resolves only to a borrower the
+     * signed-in user may see, so another branch's member answers 404. Without
+     * a signed-in user (submission-token uploads, signed links, console) the
+     * binding is unscoped; a caller who isn't staff resolves nothing
+     * (StaffRouteBinding).
+     */
+    public function resolveRouteBindingQuery($query, $value, $field = null)
+    {
+        return StaffRouteBinding::scope(
+            parent::resolveRouteBindingQuery($query, $value, $field),
+            fn ($query, User $user) => $query->visibleTo($user),
+        );
+    }
+
+    /**
+     * Free-text borrower lookup: code, any name part, the full name, contact
+     * number or email.
      *
      * `email` is included because the Members screen searches it. That screen
      * filtered client-side over one page of results; moving it server-side
      * would have silently dropped email matching without this.
+     *
+     * Without `$matchContactDetails`, the contact number and email are left out:
+     * for a caller who may not read them, a hit would confirm that a number or
+     * address belongs to a member.
      */
-    public function scopeSearch($query, string $term)
+    public function scopeSearch($query, string $term, bool $matchContactDetails = true)
     {
-        return $query->where(function ($q) use ($term) {
-            $q->where('borrower_code', 'like', "%{$term}%")
-                ->orWhere('first_name', 'like', "%{$term}%")
-                ->orWhere('middle_name', 'like', "%{$term}%")
-                ->orWhere('last_name', 'like', "%{$term}%")
-                ->orWhere('contact_number', 'like', "%{$term}%")
-                ->orWhere('email', 'like', "%{$term}%");
+        $like = LikePattern::contains($term);
+        // A whole name typed with spaces ("Maria Dela Cruz") lives in no single
+        // column, so it is also matched against the name as shown (suffix
+        // included) and against first + last name. Runs of spaces in the term
+        // collapse to one. NULLIF: CONCAT_WS skips a NULL but not an empty part.
+        $nameLike = LikePattern::contains(preg_replace('/\s+/', ' ', trim($term)));
+
+        return $query->where(function ($q) use ($like, $nameLike, $matchContactDetails) {
+            $q->where('borrower_code', 'like', $like)
+                ->orWhere('first_name', 'like', $like)
+                ->orWhere('middle_name', 'like', $like)
+                ->orWhere('last_name', 'like', $like)
+                ->when($matchContactDetails, fn ($contact) => $contact
+                    ->orWhere('contact_number', 'like', $like)
+                    ->orWhere('email', 'like', $like))
+                ->orWhereRaw("CONCAT_WS(' ', first_name, NULLIF(middle_name, ''), last_name, NULLIF(suffix, '')) LIKE ?", [$nameLike])
+                ->orWhereRaw("CONCAT_WS(' ', first_name, last_name) LIKE ?", [$nameLike]);
         });
     }
 }

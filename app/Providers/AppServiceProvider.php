@@ -3,11 +3,19 @@
 namespace App\Providers;
 
 use App\Models\CsvImportRun;
+use App\Models\PortalUser;
+use App\Models\User;
+use App\Services\AuditLogService;
 use App\Services\BorrowerSubmissionTokenService;
 use App\Services\CsvImport\CsvImportUploadService;
 use App\Services\CsvImport\ImportErrorDigest;
+use App\Services\Linda\LindaHttpError;
 use App\Services\TokenIdleWindow;
+use App\Services\TokenTimeout;
 use Illuminate\Cache\RateLimiting\Limit;
+use Illuminate\Database\Events\MigrationEnded;
+use Illuminate\Database\Events\MigrationsEnded;
+use Illuminate\Database\Events\MigrationsStarted;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Event;
@@ -34,6 +42,23 @@ class AppServiceProvider extends ServiceProvider
      * unexpired signature minted for an already-authorised caller.
      */
     private const FILE_READS_PER_MINUTE = 300;
+
+    /**
+     * Dashboard and report reads allowed per staff user per minute (finish
+     * run round 7): GET under /api/dashboard/, /api/reports/ and
+     * /api/accounting/dashboard.
+     *
+     * The Executive Dashboard asks for 17 things at once on its first load
+     * (its 6 own endpoints, 9 reports, the accounting dashboard and a one-row
+     * loan list), and a filter change asks again. On the shared 60/min, next
+     * to the shell's own calls and the page just left, about 10 of them
+     * answered 429 (round 6, BC12b). 16 of the 17 are reads counted here: 120
+     * holds one load seven times over, and a development build's doubled load
+     * (React runs each effect twice there) three times, while still capping
+     * how fast one user can run heavy report queries. Its own `by()` prefix,
+     * so it never shares a counter with the shared budget.
+     */
+    private const REPORT_READS_PER_MINUTE = 120;
 
     /**
      * Chunk uploads allowed per operator per minute.
@@ -159,24 +184,49 @@ class AppServiceProvider extends ServiceProvider
 
     public function boot(): void
     {
+        // Refuse to start with a token lifetime of 0 or below. See TokenTimeout.
+        TokenTimeout::minutes();
+
         // Super-admin bypass — developer-side super_admin role gets all
         // permissions automatically. Client-side "admin" no longer bypasses
         // here; instead, the RoleAndPermissionSeeder gives the admin role
         // every permission directly, so this hook only matters as a safety
         // net for the platform team.
+        //
+        // Staff only: a member's PortalUser has no roles, and asking it
+        // hasRole() would answer 500 to a Gate check rather than "no" (portal
+        // design §0, finding 3). Anyone who isn't a staff User falls through
+        // to the permission checks, which grant them nothing.
         Gate::before(function ($user) {
-            return $user->hasRole('super_admin') ? true : null;
+            return $user instanceof User && $user->hasRole('super_admin') ? true : null;
+        });
+
+        /**
+         * The promotion upgrades from main in one run, so a migration's audit
+         * row can land before audit_logs has its later columns. During a
+         * migrate run the audit writer leaves out the ones the table lacks,
+         * and reads them again after each migration, since one may add them.
+         * Outside a run it writes every column. See AuditLogService.
+         */
+        Event::listen(MigrationsStarted::class, static function (): void {
+            AuditLogService::migrationsStarted();
+        });
+        Event::listen(MigrationEnded::class, static function (): void {
+            AuditLogService::forgetColumns();
+        });
+        Event::listen(MigrationsEnded::class, static function (): void {
+            AuditLogService::migrationsEnded();
         });
 
         /**
          * Capture `last_used_at` while it still says what it said when the
          * request arrived.
          *
-         * Sanctum's Guard fires this event and then IMMEDIATELY overwrites the
-         * column with now(), so this listener is the only point at which the
-         * stored value is observable. CheckTokenExpiry reads what is captured
-         * here; without it the idle timeout always measures zero elapsed time.
-         * See App\Services\TokenIdleWindow.
+         * Sanctum's Guard fires this event while resolving the caller. Its own
+         * overwrite of the column is turned off (`sanctum.last_used_at`, finish
+         * run round 7): the idle checks move it after the limiters instead.
+         * CheckTokenExpiry reads what is captured here. See
+         * App\Services\TokenIdleWindow.
          */
         Event::listen(function (TokenAuthenticated $event): void {
             if ($event->token instanceof PersonalAccessToken) {
@@ -326,7 +376,35 @@ class AppServiceProvider extends ServiceProvider
 
         // API rate limiters
         RateLimiter::for('api', function (Request $request) {
-            $key = $request->user()?->id ?: $request->ip();
+            $caller = $request->user();
+
+            // Member Portal routes carry their own limiters, keyed on the
+            // member (portal design §5). Metering them here as well would put
+            // every member who isn't signed in into one per-IP bucket, which is
+            // the Next.js proxy's address for everyone (§0, finding 8).
+            if ($request->routeIs('portal.*')) {
+                return Limit::none();
+            }
+
+            // The public loan application (routes/api/public-apply/, every
+            // route named `public-apply.*`) is anonymous for the same reason,
+            // and LoanOriginationServiceProvider gives it its own limiters.
+            // Both the name and the path must say so, so a route named
+            // `public-apply.*` anywhere else is still metered here.
+            if ($request->routeIs('public-apply.*') && $request->is('api/public-apply/*')) {
+                return Limit::none();
+            }
+
+            // A shared receipt (`public-receipts.*`, api/public/receipts/) is
+            // anonymous too, and ReceiptShareServiceProvider meters it with its
+            // own limiter. The name and the path must both say so, as above.
+            if ($request->routeIs('public-receipts.*') && $request->is('api/public/receipts/*')) {
+                return Limit::none();
+            }
+
+            // A portal user's id is not a staff id: portal user 7 and staff user
+            // 7 must not share one bucket (§0, finding 4).
+            $key = $caller instanceof PortalUser ? 'portal:'.$caller->getKey() : ($caller?->getKey() ?: $request->ip());
 
             // Signed file reads get their own bucket rather than a raised
             // global ceiling: a photo-heavy list render must not be able to
@@ -337,6 +415,13 @@ class AppServiceProvider extends ServiceProvider
             // bytes off disk and stay worth capping.
             if ($request->routeIs('files.*')) {
                 return Limit::perMinute(self::FILE_READS_PER_MINUTE)->by('files:'.$key);
+            }
+
+            // Dashboard and report reads, staff only (REPORT_READS_PER_MINUTE).
+            // Writes on these paths, exports' own 5/min and every other route
+            // keep their limits.
+            if ($caller instanceof User && $request->isMethod('GET') && $request->is('api/dashboard/*', 'api/reports/*', 'api/accounting/dashboard')) {
+                return Limit::perMinute(self::REPORT_READS_PER_MINUTE)->by('report-reads:'.$caller->getKey());
             }
 
             /**
@@ -508,8 +593,54 @@ class AppServiceProvider extends ServiceProvider
             return Limit::perMinute(self::IMPORT_CONTROL_CALLS_PER_MINUTE)->by('imports:ctl:'.$key);
         });
 
+        /*
+         * Five calls a minute per user, on every export route and the import
+         * product-mapping routes (routes/api.php). A refusal says so in
+         * neutral words, with `retry_after` in seconds, instead of the bare
+         * "Too Many Attempts." the screens strip as framework boilerplate.
+         */
         RateLimiter::for('exports', function (Request $request) {
-            return Limit::perMinute(5)->by($request->user()?->id ?: $request->ip());
+            return Limit::perMinute(5)->by($request->user()?->id ?: $request->ip())
+                ->response(fn (Request $request, array $headers): JsonResponse => response()->json([
+                    'message' => 'Too many requests. Wait a minute and try again.',
+                    'retry_after' => (int) ($headers['Retry-After'] ?? 0),
+                ], 429, $headers));
+        });
+
+        /**
+         * POST /loans/amortization-calculator builds up to three schedules of
+         * up to AmortizationCalculatorService::MAX_PERIODS rows per request,
+         * so it gets a ceiling of its own beside the api group's.
+         */
+        RateLimiter::for('calculator', function (Request $request) {
+            return Limit::perMinute(30)->by('calculator:'.($request->user()?->id ?: $request->ip()));
+        });
+
+        /**
+         * POST /linda/chat, per user (Linda v1 plan, "Limits and cost"):
+         * `linda.limits.per_minute` (10) a minute answers 429 `rate_limited`,
+         * and `per_day` (100) in a fixed 24-hour window that starts at the
+         * user's first question (Limit::perDay, not a calendar day) answers
+         * 429 `daily_limit`. The api group's limiter still applies. Nothing is
+         * counted while Linda is switched off (EnsureLindaEnabled answers 501
+         * then), so turning it on starts everyone at zero. The route sits behind auth:sanctum, so the
+         * caller is always a staff user here.
+         */
+        RateLimiter::for('linda', function (Request $request) {
+            $user = $request->user();
+
+            if (! config('linda.enabled') || $user === null) {
+                return Limit::none();
+            }
+
+            return [
+                Limit::perMinute((int) config('linda.limits.per_minute'))
+                    ->by('linda:minute:'.$user->getKey())
+                    ->response(fn (Request $request, array $headers) => LindaHttpError::rateLimited($headers)->toResponse()),
+                Limit::perDay((int) config('linda.limits.per_day'))
+                    ->by('linda:day:'.$user->getKey())
+                    ->response(fn (Request $request, array $headers) => LindaHttpError::dailyLimit($headers)->toResponse()),
+            ];
         });
 
         /**

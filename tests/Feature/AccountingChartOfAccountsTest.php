@@ -7,6 +7,7 @@ use App\Models\AccountingAccountMapping;
 use App\Models\AuditLog;
 use App\Models\User;
 use App\Services\Accounting\ChartOfAccountsSeeder;
+use App\Services\Accounting\PostingRules;
 use Illuminate\Testing\TestResponse;
 use Tests\TestCase;
 use Tests\Traits\SetupLendyPH;
@@ -53,7 +54,12 @@ class AccountingChartOfAccountsTest extends TestCase
         '1150' => ['Interest Receivable', 'asset', '1000', false, false, null],
         '1160' => ['Penalty Receivable', 'asset', '1000', false, false, null],
         '1170' => ['Other Receivables', 'asset', '1000', false, false, null],
+        '1180' => ['Loan Adjustments Clearing', 'asset', '1000', false, false, null],
+        // Phase 6 MB-BE5 (decision 9). The frontend constant gains it with
+        // MB-FE4.
+        '1190' => ['Interbranch Clearing', 'asset', '1000', false, false, null],
         '1200' => ['Allowance for Credit Losses', 'asset', '1000', false, true, null],
+        '1210' => ['Unearned Interest and Penalty – Restructured Loans', 'asset', '1000', false, true, null],
         '1300' => ['Prepaid Expenses', 'asset', '1000', false, false, null],
         '1400' => ['Property and Equipment', 'asset', '1000', true, false, null],
         '1410' => ['Office Equipment', 'asset', '1400', false, false, null],
@@ -62,12 +68,16 @@ class AccountingChartOfAccountsTest extends TestCase
         '2000' => ['Liabilities', 'liability', null, true, false, null],
         '2010' => ['Accounts Payable', 'liability', '2000', false, false, null],
         '2020' => ['Accrued Expenses', 'liability', '2000', false, false, null],
+        '2030' => ['Notarial Fees Payable', 'liability', '2000', false, false, null],
+        '2040' => ['Insurance Premium Payable', 'liability', '2000', false, false, null],
         '2100' => ['Loans Payable', 'liability', '2000', false, false, null],
         '2110' => ['Other Borrowings', 'liability', '2000', false, false, null],
         '2200' => ['Taxes Payable', 'liability', '2000', true, false, null],
         '2210' => ['Withholding Tax Payable', 'liability', '2200', false, false, null],
         '2220' => ['Other Taxes Payable', 'liability', '2200', false, false, null],
+        '2230' => ['Documentary Stamp Tax Payable', 'liability', '2200', false, false, null],
         '2300' => ['Other Liabilities', 'liability', '2000', false, false, null],
+        '2390' => ['Suspense Account', 'liability', '2000', false, false, null],
         '3000' => ['Equity', 'equity', null, true, false, null],
         '3010' => ['Capital', 'equity', '3000', false, false, null],
         '3020' => ['Additional Capital', 'equity', '3000', false, false, null],
@@ -76,6 +86,7 @@ class AccountingChartOfAccountsTest extends TestCase
         '3040' => ['Current Year Earnings', 'equity', '3000', true, false, null],
         // DEVIATION 2: absent from the frontend constant entirely.
         '3050' => ['Opening Balance Equity', 'equity', '3000', false, false, null],
+        '3060' => ['Share Capital', 'equity', '3000', false, false, null],
         '4000' => ['Income', 'income', null, true, false, null],
         '4010' => ['Interest Income', 'income', '4000', false, false, null],
         '4020' => ['Penalty Income', 'income', '4000', false, false, null],
@@ -84,6 +95,8 @@ class AccountingChartOfAccountsTest extends TestCase
         '4050' => ['Membership Fee Income', 'income', '4000', false, false, null],
         '4060' => ['Other Lending Income', 'income', '4000', false, false, null],
         '4070' => ['Other Income', 'income', '4000', false, false, null],
+        '4080' => ['Other Fee Income', 'income', '4000', false, false, null],
+        '4090' => ['GCash Service Income', 'income', '4000', false, false, null],
         '5000' => ['Expenses', 'expense', null, true, false, null],
         '5010' => ['Salaries and Wages', 'expense', '5000', false, false, null],
         '5020' => ['Rent', 'expense', '5000', false, false, null],
@@ -170,13 +183,20 @@ class AccountingChartOfAccountsTest extends TestCase
         );
     }
 
-    public function test_the_contra_accounts_are_exactly_the_allowance_and_accumulated_depreciation(): void
+    /**
+     * 1210 holds interest and penalty a restructure capitalised into the new
+     * loan's principal and has not yet earned: it subtracts from the loans
+     * above it, and it hangs off 1000, not 1100, so the portfolio heading
+     * never sums it in.
+     */
+    public function test_the_contra_accounts_are_exactly_the_allowance_unearned_restructure_income_and_accumulated_depreciation(): void
     {
         $this->seedChart()->assertCreated();
 
         $contra = AccountingAccount::query()->where('is_contra', true)->inCodeOrder()->pluck('code')->all();
 
-        $this->assertSame(['1200', '1490'], $contra);
+        $this->assertSame(['1200', '1210', '1490'], $contra);
+        $this->assertSame('1000', $this->parentCodeOf('1210'));
     }
 
     /**
@@ -189,6 +209,7 @@ class AccountingChartOfAccountsTest extends TestCase
         $this->seedChart()->assertCreated();
 
         $this->assertSame('credit', $this->account('1200')->normal_balance);
+        $this->assertSame('credit', $this->account('1210')->normal_balance);
         $this->assertSame('credit', $this->account('1490')->normal_balance);
 
         // And the plain accounts around them are unaffected.
@@ -243,7 +264,7 @@ class AccountingChartOfAccountsTest extends TestCase
         $this->seedChart()->assertStatus(409);
 
         $this->assertSame(count(self::EXPECTED_CHART), AccountingAccount::query()->count());
-        $this->assertSame(count(AccountingAccountMapping::ROLES), AccountingAccountMapping::query()->count());
+        $this->assertSame(count(ChartOfAccountsSeeder::DEFAULT_MAPPING_CODES), AccountingAccountMapping::query()->count());
     }
 
     /**
@@ -381,18 +402,18 @@ class AccountingChartOfAccountsTest extends TestCase
         $this->seedChart()->assertCreated();
 
         $response = $this->postJson('/api/accounting/accounts', [
-            'code' => '1180',
+            'code' => '1185',
             'name' => 'Advances to Officers',
             'type' => 'asset',
             'parent_id' => $this->id('1000'),
         ])->assertCreated();
 
-        $response->assertJsonPath('data.code', '1180')
+        $response->assertJsonPath('data.code', '1185')
             ->assertJsonPath('data.normal_balance', 'debit')
             ->assertJsonPath('data.is_group', false)
             ->assertJsonPath('data.is_active', true);
 
-        $this->assertSame($this->admin->id, AccountingAccount::query()->where('code', '1180')->value('created_by'));
+        $this->assertSame($this->admin->id, AccountingAccount::query()->where('code', '1185')->value('created_by'));
     }
 
     public function test_a_duplicate_code_is_refused(): void
@@ -487,7 +508,7 @@ class AccountingChartOfAccountsTest extends TestCase
         $this->seedChart()->assertCreated();
 
         $this->postJson('/api/accounting/accounts', [
-            'code' => '1210',
+            'code' => '1215',
             'name' => 'Allowance for Something Else',
             'type' => 'asset',
             'is_contra' => true,
@@ -496,7 +517,7 @@ class AccountingChartOfAccountsTest extends TestCase
             'parent_id' => $this->id('1000'),
         ])->assertCreated()->assertJsonPath('data.normal_balance', 'credit');
 
-        $this->assertSame('credit', AccountingAccount::query()->where('code', '1210')->value('normal_balance'));
+        $this->assertSame('credit', AccountingAccount::query()->where('code', '1215')->value('normal_balance'));
     }
 
     /**
@@ -641,13 +662,16 @@ class AccountingChartOfAccountsTest extends TestCase
 
         $mapping = $this->getJson('/api/accounting/settings/account-mapping')->assertOk()->json('data');
 
-        $this->assertSame(AccountingAccountMapping::ROLES, array_keys($mapping));
+        // Every role but the four savings roles (Phase 3), which need deposit
+        // accounts the lending chart doesn't carry (savings:prepare-books).
+        $lendingRoles = array_values(array_diff(AccountingAccountMapping::ROLES, PostingRules::SAVINGS_ROLES));
+        $this->assertSame($lendingRoles, array_keys($mapping));
 
         // Counted off the constant rather than a literal. The literal was 13,
         // and adding `borrower_advances` to ROLES reddened this test from a
         // file the change never touched — the count is a restatement of the
         // line above it, so it can only ever go stale.
-        $this->assertCount(count(AccountingAccountMapping::ROLES), $mapping);
+        $this->assertCount(count($lendingRoles), $mapping);
 
         $expected = [];
         foreach (ChartOfAccountsSeeder::DEFAULT_MAPPING_CODES as $role => $code) {
@@ -693,7 +717,7 @@ class AccountingChartOfAccountsTest extends TestCase
         $this->seedChart()->assertCreated();
 
         $spare = AccountingAccount::query()->create([
-            'code' => '1190',
+            'code' => '1195',
             'name' => 'Retired Receivable',
             'type' => 'asset',
             'is_active' => false,
@@ -756,7 +780,7 @@ class AccountingChartOfAccountsTest extends TestCase
         $this->assertCount(1, $rows);
         $this->assertSame($this->admin->id, $rows->first()->user_id);
         $this->assertSame(count(self::EXPECTED_CHART), $rows->first()->new_values['accounts']);
-        $this->assertSame(count(AccountingAccountMapping::ROLES), $rows->first()->new_values['mappings']);
+        $this->assertSame(count(ChartOfAccountsSeeder::DEFAULT_MAPPING_CODES), $rows->first()->new_values['mappings']);
 
         $this->assertSame(
             0,

@@ -104,7 +104,9 @@ class UpdateAccountMappingRequest extends FormRequest
      * ValidatesAccountShape. One statement of the rule, two doors.
      *
      * Errors are reported against the ROLE here, because the role is the field
-     * the settings screen submitted.
+     * the settings screen submitted. An account of the right shape can still
+     * be reserved for something else
+     * ({@see AccountingAccountMapping::reservedAccountReason()}).
      */
     private function assertAccountFitsTheRole(Validator $v, string $role, AccountingAccount $account): void
     {
@@ -118,6 +120,14 @@ class UpdateAccountMappingRequest extends FormRequest
 
         if ($mismatch !== null) {
             $v->errors()->add($role, $mismatch['message']);
+
+            return;
+        }
+
+        $reserved = AccountingAccountMapping::reservedAccountReason($role, (string) $account->code, "{$account->code} {$account->name}");
+
+        if ($reserved !== null) {
+            $v->errors()->add($role, "{$reserved} Choose another {$account->type} account.");
         }
     }
 }

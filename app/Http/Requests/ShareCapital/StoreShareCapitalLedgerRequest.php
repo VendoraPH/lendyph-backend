@@ -2,13 +2,20 @@
 
 namespace App\Http\Requests\ShareCapital;
 
+use App\Http\Requests\Concerns\DateInputMessages;
+use App\Http\Requests\Concerns\ReferenceNumberMessages;
 use App\Models\Borrower;
+use App\Services\BranchAccess;
+use App\Services\ShareCapitalService;
+use Closure;
 use Illuminate\Foundation\Http\FormRequest;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\Rules\Exists;
 
 class StoreShareCapitalLedgerRequest extends FormRequest
 {
+    use ReferenceNumberMessages;
+
     public function authorize(): bool
     {
         return $this->user()->can('share_capital:create');
@@ -17,12 +24,39 @@ class StoreShareCapitalLedgerRequest extends FormRequest
     public function rules(): array
     {
         return [
-            'borrower_id' => ['required', 'integer', $this->memberBorrowerRule()],
-            'date' => ['required', 'date'],
+            'borrower_id' => ['required', 'integer', $this->memberBorrowerRule(), function (string $attribute, mixed $value, Closure $fail): void {
+                // A withdrawn member settled their share capital to leave; a
+                // deceased member's estate still settles here (C1 review, M1).
+                if (Borrower::query()->whereKey((int) $value)->value('status') === 'withdrawn') {
+                    $fail('This member withdrew from the cooperative, so no share capital is recorded for them. Reactivate the membership first, with a reason.');
+                }
+            }],
+            'date' => ['required', 'date', 'date_format:Y-m-d', 'before_or_equal:today'],
             'description' => ['required', 'string', 'max:255'],
             'type' => ['required', 'in:credit,debit'],
-            'amount' => ['required', 'numeric', 'min:0.01'],
+            'amount' => ['required', 'numeric', 'min:0.01', 'decimal:0,2'],
+            'method' => ['sometimes', Rule::in(ShareCapitalService::ENTRY_METHODS)],
+            'reference_number' => ['nullable', 'string', 'max:100', 'required_unless:method,cash'],
         ];
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    public function messages(): array
+    {
+        return [...$this->referenceNumberMessages(), ...DateInputMessages::calendar(['date' => 'entry date'])];
+    }
+
+    /**
+     * An entry sent without a method was paid in cash, as Record Payment
+     * assumes (StoreRepaymentRequest).
+     */
+    protected function prepareForValidation(): void
+    {
+        if (! $this->has('method')) {
+            $this->merge(['method' => 'cash']);
+        }
     }
 
     /**
@@ -62,7 +96,11 @@ class StoreShareCapitalLedgerRequest extends FormRequest
      */
     private function memberBorrowerRule(): Exists
     {
-        return Rule::exists('borrowers', 'id')
-            ->whereNotIn('status', Borrower::NON_MEMBER_STATUSES);
+        // And in the caller's branches (BranchAccess): another branch's
+        // member fails like a missing one.
+        return app(BranchAccess::class)->constrainExists(
+            Rule::exists('borrowers', 'id')->whereNotIn('status', Borrower::NON_MEMBER_STATUSES),
+            $this->user(),
+        );
     }
 }

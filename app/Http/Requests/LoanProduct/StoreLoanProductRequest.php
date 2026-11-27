@@ -2,43 +2,49 @@
 
 namespace App\Http\Requests\LoanProduct;
 
+use App\Enums\InterestRateFrequency;
 use App\Enums\LoanFrequency;
+use App\Enums\TermUnit;
+use App\Http\Requests\LoanProduct\Concerns\GuardsAgainstFeeCatalogOverlap;
+use App\Http\Requests\LoanProduct\Concerns\RefusesTermOutsideItsRange;
+use App\Rules\UniqueLoanProductName;
+use Illuminate\Contracts\Validation\Validator;
 use Illuminate\Foundation\Http\FormRequest;
 
 class StoreLoanProductRequest extends FormRequest
 {
+    use GuardsAgainstFeeCatalogOverlap, RefusesTermOutsideItsRange;
+
     public function authorize(): bool
     {
-        return $this->user()->can('loans:create');
+        return $this->user()->can('loan_products:manage');
     }
 
     public function rules(): array
     {
         return [
-            'name' => ['required', 'string', 'max:255'],
+            'name' => ['required', 'string', 'max:255', new UniqueLoanProductName],
             'description' => ['nullable', 'string', 'max:2000'],
-            'interest_rate' => ['required', 'numeric', 'min:0', 'max:100'],
-            'min_interest_rate' => ['nullable', 'numeric', 'min:0', 'max:100'],
+            'interest_rate' => ['required', 'numeric', 'min:0', 'max:100', 'decimal:0,4'],
+            'min_interest_rate' => ['nullable', 'numeric', 'min:0', 'max:100', 'decimal:0,4'],
             'interest_method' => ['required', 'in:straight,diminishing,upon_maturity'],
             'term' => ['required', 'integer', 'min:1'],
             'min_term' => ['nullable', 'integer', 'min:1'],
             'max_term' => ['nullable', 'integer', 'min:1'],
+            'term_unit' => ['sometimes', TermUnit::rule()],
+            'interest_rate_frequency' => ['sometimes', InterestRateFrequency::rule()],
             'frequency' => ['required', LoanFrequency::rule()],
             'frequencies' => ['nullable', 'array'],
             'frequencies.*' => [LoanFrequency::rule()],
-            'processing_fee' => ['nullable', 'numeric', 'min:0', 'max:100'],
-            'min_processing_fee' => ['nullable', 'numeric', 'min:0', 'max:100'],
-            'max_processing_fee' => ['nullable', 'numeric', 'min:0', 'max:100'],
-            'service_fee' => ['nullable', 'numeric', 'min:0', 'max:100'],
-            'min_service_fee' => ['nullable', 'numeric', 'min:0', 'max:100'],
-            'max_service_fee' => ['nullable', 'numeric', 'min:0', 'max:100'],
-            'notarial_fee' => ['nullable', 'numeric', 'min:0'],
+            'processing_fee' => ['nullable', 'numeric', 'min:0', 'max:100', 'decimal:0,4'],
+            'min_processing_fee' => ['nullable', 'numeric', 'min:0', 'max:100', 'decimal:0,4'],
+            'max_processing_fee' => ['nullable', 'numeric', 'min:0', 'max:100', 'decimal:0,4'],
+            'service_fee' => ['nullable', 'numeric', 'min:0', 'max:100', 'decimal:0,4'],
+            'min_service_fee' => ['nullable', 'numeric', 'min:0', 'max:100', 'decimal:0,4'],
+            'max_service_fee' => ['nullable', 'numeric', 'min:0', 'max:100', 'decimal:0,4'],
+            'notarial_fee' => ['nullable', 'numeric', 'min:0', 'max:100', 'decimal:0,4'],
             'custom_fees' => ['nullable', 'array'],
-            'custom_fees.*.name' => ['required_with:custom_fees', 'string', 'max:255'],
-            'custom_fees.*.type' => ['required_with:custom_fees', 'in:fixed,percentage'],
-            'custom_fees.*.value' => ['required_with:custom_fees', 'numeric', 'min:0'],
-            'custom_fees.*.conditions' => ['nullable', 'array'],
-            'penalty_rate' => ['nullable', 'numeric', 'min:0', 'max:100'],
+            'penalty_rate' => ['nullable', 'numeric', 'min:0', 'max:100', 'decimal:0,4'],
             'grace_period_days' => ['nullable', 'integer', 'min:0'],
             'scb_required' => ['nullable', 'boolean'],
             'min_scb' => ['nullable', 'numeric', 'min:0', 'max:9999999.99'],
@@ -70,5 +76,19 @@ class StoreLoanProductRequest extends FormRequest
         if ($this->has('is_active') && ! $this->has('status')) {
             $this->merge(['status' => $this->boolean('is_active') ? 'active' : 'inactive']);
         }
+    }
+
+    public function withValidator(Validator $validator): void
+    {
+        $this->guardAgainstFeeCatalogOverlap($validator);
+        $this->refuseTermOutsideItsRange($validator);
+
+        // Additional fees are retired (see UpdateLoanProductRequest): a new
+        // product starts with none, so only an absent, null or empty list passes.
+        $validator->after(function (Validator $v): void {
+            if (! $v->errors()->has('custom_fees') && ! empty($this->input('custom_fees'))) {
+                $v->errors()->add('custom_fees', UpdateLoanProductRequest::CUSTOM_FEES_RETIRED);
+            }
+        });
     }
 }

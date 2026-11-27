@@ -3,13 +3,138 @@
 namespace Database\Seeders;
 
 use App\Models\Role;
+use App\Rules\UniqueRoleDisplayName;
+use App\Services\AuditLogService;
+use App\Services\BranchAccess;
 use Illuminate\Database\Seeder;
 use Spatie\Permission\Models\Permission;
 use Spatie\Permission\PermissionRegistrar;
 
 class RoleAndPermissionSeeder extends Seeder
 {
+    /**
+     * A board role's key: `bod` followed by digits, or starting with `bod_`
+     * (case-sensitive). Board roles hold `branches:view_all`. Same pattern as
+     * 2026_11_02_210000_add_branches_view_all_permission.
+     */
+    public const BOARD_ROLE_PATTERN = '/^bod(\d+$|_)/';
+
+    /**
+     * The Accountant's display name, in order of preference: the second when
+     * another role already reads as the first (UniqueRoleDisplayName), so
+     * Users never lists two roles reading "Accountant". Mirrors the
+     * 2026_11_09_120000 migration.
+     *
+     * @var list<string>
+     */
+    public const ACCOUNTANT_DISPLAY_NAMES = ['Accountant', 'Accountant (Books)'];
+
+    /**
+     * The Accountant keeps the books (Phase 2, accounting round C): every
+     * accounting permission, allowance included, every branch, and read-only
+     * lending and report views. Pointedly WITHOUT `borrowers:view` (members'
+     * personal data, round fz), any lending write, users or settings, and
+     * WITHOUT `audit_logs:view`: the audit trail quotes whole member rows
+     * (contacts, birthdate, address, spouse, income) across every branch, so
+     * reading it reads what `borrowers:view` guards. No user is given the role
+     * here; the owner assigns it in Users.
+     *
+     * Mirrors 2026_11_09_120000_add_accountant_role_and_allowance_permission,
+     * which creates the role with this list on already-migrated deployments.
+     *
+     * @var list<string>
+     */
+    public const ACCOUNTANT_PERMISSIONS = [
+        'accounting:view', 'accounting:reconcile', 'accounting:close', 'accounting:settings', 'accounting:allowance',
+        'chart_of_accounts:view', 'chart_of_accounts:create', 'chart_of_accounts:update', 'chart_of_accounts:delete',
+        'journals:view', 'journals:create', 'journals:post', 'journals:reverse',
+        'expenses:view', 'expenses:create', 'expenses:update', 'expenses:pay',
+        'cash_accounts:view', 'cash_accounts:transfer',
+        BranchAccess::VIEW_ALL,
+        'dashboard:view', 'reports:view', 'reports:export',
+        'loans:view', 'payments:view', 'loan_adjustments:view', 'share_capital:view',
+        'gcash:view', 'fees:view',
+    ];
+
+    /**
+     * Every Phase 6 permission (plan §2, decision 11): AMLA, the executive
+     * dashboard, branch management, member transfer, inter-branch transfers and
+     * loan origination. admin and super_admin only, through Permission::all()
+     * below; the Compliance Officer holds the `amla:*` ones. Mirrors
+     * 2026_11_19_100000_add_phase6_permissions_and_compliance_officer_role,
+     * which grants them on the already-migrated deployments.
+     *
+     * @var list<string>
+     */
+    public const PHASE6_PERMISSIONS = [
+        'amla:view', 'amla:alerts', 'amla:cases', 'amla:cdd', 'amla:screening', 'amla:sanctions', 'amla:ctr',
+        'amla:str', 'amla:approve', 'amla:export', 'amla:submit', 'amla:settings', 'amla:audit',
+        'dashboard:analytics', 'dashboard:export', 'dashboard:settings',
+        'branches:manage', 'borrowers:transfer',
+        'interbranch_transfers:view', 'interbranch_transfers:create', 'interbranch_transfers:approve', 'interbranch_transfers:receive',
+        'loan_origination:view', 'loan_origination:update', 'loan_origination:assess', 'loan_origination:convert', 'loan_origination:settings',
+    ];
+
+    /**
+     * The Compliance Officer's display name, in order of preference, picked as
+     * the Accountant's is. Mirrors the 2026_11_19_100000 migration.
+     *
+     * @var list<string>
+     */
+    public const COMPLIANCE_OFFICER_DISPLAY_NAMES = ['Compliance Officer', 'Compliance Officer (AMLA)'];
+
+    /**
+     * The Compliance Officer (Phase 6 plan §2, decision 12; AMLA analysis §4,
+     * decision 12): every `amla:*` permission, every branch, member details and
+     * reports, and read-only lending, savings and GCash (the viewer's read-only
+     * list plus `savings:view`). Pointedly WITHOUT `audit_logs:view` (AMLA
+     * keeps its own append-only log, so case activity never reaches the shared
+     * trail), `reports:export` (AMLA has `amla:export`), and any write outside
+     * AMLA. No user is given the role here; the owner assigns it in Users.
+     *
+     * Mirrors 2026_11_19_100000_add_phase6_permissions_and_compliance_officer_role,
+     * which creates the role with this list on already-migrated deployments.
+     *
+     * @var list<string>
+     */
+    public const COMPLIANCE_OFFICER_PERMISSIONS = [
+        'amla:view', 'amla:alerts', 'amla:cases', 'amla:cdd', 'amla:screening', 'amla:sanctions', 'amla:ctr',
+        'amla:str', 'amla:approve', 'amla:export', 'amla:submit', 'amla:settings', 'amla:audit',
+        BranchAccess::VIEW_ALL, 'borrowers:view', 'reports:view',
+        'dashboard:view', 'loans:view', 'loan_adjustments:view', 'payments:view', 'collaterals:view',
+        'fees:view', 'share_capital:view', 'auto_pay:view',
+        'savings:view', 'gcash:view',
+    ];
+
+    /**
+     * The Chairman/Chairwoman's role: `bod1`, the board role the default
+     * chain's "BOD Chairwoman" step names (ApprovalWorkflowSetting).
+     */
+    public const CHAIR_ROLE = 'bod1';
+
+    /**
+     * Held by self::CHAIR_ROLE alone (finish run round 2, decision 14): editing
+     * a loan application while it waits at the Chair's approval step
+     * (LoanApprovalEditService). Not admin, not super_admin, not any other
+     * role, so neither Permission::all() sync below hands it out, and an admin
+     * can't grant it on (RolePermissionGrants). Mirrors
+     * 2026_11_24_300000_add_loans_edit_in_approval_permission, which grants it
+     * on the already-migrated deployments.
+     *
+     * @var list<string>
+     */
+    public const CHAIR_ONLY_PERMISSIONS = ['loans:edit_in_approval'];
+
+    /**
+     * Seeding writes no audit rows: a fresh database's roles are the baseline,
+     * not a change anyone made (Role is Auditable).
+     */
     public function run(): void
+    {
+        AuditLogService::withoutModelAuditing(fn () => $this->seedRolesAndPermissions());
+    }
+
+    private function seedRolesAndPermissions(): void
     {
         app()[PermissionRegistrar::class]->forgetCachedPermissions();
 
@@ -28,6 +153,16 @@ class RoleAndPermissionSeeder extends Seeder
             'loans:view', 'loans:create', 'loans:update', 'loans:delete',
             'loans:approve', 'loans:reject', 'loans:release', 'loans:void',
             'loans:extend', 'loans:restructure', 'loans:write_off',
+            // The Chair's edit during approval: self::CHAIR_ROLE only.
+            ...self::CHAIR_ONLY_PERMISSIONS,
+
+            // Loan Products. Creating, editing and deleting a product sets the
+            // terms of every later application, so it has its own permission
+            // instead of riding on `loans:create` / `loans:update`. admin and
+            // super_admin only, through Permission::all() below; see
+            // 2026_10_03_110000_add_loan_products_manage_permission, which is
+            // what grants it on the already-migrated deployments.
+            'loan_products:manage',
 
             // Payments (renamed from repayments)
             'payments:view', 'payments:create', 'payments:update', 'payments:void',
@@ -81,24 +216,6 @@ class RoleAndPermissionSeeder extends Seeder
             // whole test suite build from. Either one alone is a half-measure.
             'accounting:view', 'accounting:reconcile', 'accounting:close', 'accounting:settings',
 
-            // NOT here, deliberately: credit_scoring:view / :override / :settings.
-            //
-            // The frontend already ships the whole Credit Scoring module — seven
-            // sidebar items, eight pages — and this API serves none of its eleven
-            // endpoints. The only thing keeping those items hidden is that this
-            // list has never contained the permission: the sidebar filters on what
-            // the server sends, and RouteGuard reads the same value, so it is not a
-            // second line of defence. Add the strings here and seven dead menu items
-            // appear across admin, manager and loan_officer at the next seed.
-            //
-            // The module's design spec does tell you to grant them. It was written
-            // before the endpoints were deferred and has since been corrected; the
-            // contract is in docs/CREDIT_SCORING_BACKEND_HANDOFF.md in the frontend
-            // repo. Ship the routes and these permissions in the same change.
-            //
-            // CreditScoringNotSeededTest enforces this and fails the moment one is
-            // granted without a matching route. It goes quiet by itself once the
-            // routes exist, so it needs no cleanup.
             'chart_of_accounts:view', 'chart_of_accounts:create',
             'chart_of_accounts:update', 'chart_of_accounts:delete',
             'journals:view', 'journals:create', 'journals:post', 'journals:reverse',
@@ -113,6 +230,83 @@ class RoleAndPermissionSeeder extends Seeder
             // grants it on the already-migrated deployments.
             'expenses:pay',
             'cash_accounts:view', 'cash_accounts:transfer',
+            // Posting the allowance for credit losses. Its own permission, so a
+            // bookkeeper can't post one: super_admin and admin (through
+            // Permission::all() below) and accountant only. Mirrors
+            // 2026_11_09_120000_add_accountant_role_and_allowance_permission,
+            // which grants it on the already-migrated deployments.
+            'accounting:allowance',
+
+            // Credit Scoring. Seeded together with its placeholder routes, which
+            // answer 501 until the module is built. admin and super_admin only,
+            // through Permission::all() below; no other role lists them. See
+            // 2026_10_02_160000_add_credit_scoring_permissions.
+            'credit_scoring:view', 'credit_scoring:override', 'credit_scoring:settings',
+
+            // Branch access (decision 5b). Without it a user sees only the
+            // branches they are assigned to (App\Services\BranchAccess).
+            // Held by the roles that oversee the whole cooperative: super_admin
+            // and admin (Permission::all() below), manager, general_bookkeeper
+            // and every board role (BOARD_ROLE_PATTERN). Mirrors
+            // 2026_11_02_210000_add_branches_view_all_permission, which grants
+            // it on the already-migrated deployments.
+            BranchAccess::VIEW_ALL,
+
+            // Payment reminders. admin and super_admin only, through
+            // Permission::all() below; no other role lists them. Mirrors
+            // 2026_11_09_100000_add_reminders_permissions, which grants them on
+            // the already-migrated deployments.
+            'reminders:view', 'reminders:send', 'reminders:pause', 'reminders:settings',
+
+            // Savings & Deposits (Phase 3). admin and super_admin only, through
+            // Permission::all() below; no other role lists them. Mirrors
+            // 2026_11_10_500300_add_savings_permissions, which grants them on
+            // the already-migrated deployments.
+            'savings:view', 'savings:create', 'savings:transact', 'savings:close',
+            'savings:approve', 'savings:post', 'savings:settings',
+
+            // CDA Reports (Phase 3). admin and super_admin only, through
+            // Permission::all() below; no other role lists them. Mirrors
+            // 2026_11_11_100200_add_cda_permissions, which grants them on the
+            // already-migrated deployments. The template manager is a
+            // super_admin role check, not a permission.
+            'cda:view', 'cda:prepare', 'cda:upload', 'cda:review', 'cda:approve',
+            'cda:finalize', 'cda:reopen', 'cda:submit', 'cda:export', 'cda:settings',
+            'cda:manage_officers', 'cda:manage_social', 'cda:manage_mediation',
+            'cda:view_mediation', 'cda:view_audit', 'cda:view_tax',
+
+            // Member Portal staff side (Phase 3). admin and super_admin only,
+            // through Permission::all() below; no other role lists them.
+            // Mirrors 2026_11_11_700200_add_member_portal_permissions, which
+            // grants them on the already-migrated deployments. Members hold no
+            // permissions: the portal takes the member from the token.
+            'member_portal:view', 'member_portal:invite', 'member_portal:manage',
+            'member_portal:requests', 'member_portal:announcements', 'member_portal:settings',
+
+            // Penalty configurations (Phase 4, Settings → Penalties). admin and
+            // super_admin only, through Permission::all() below; no other role
+            // lists them. Mirrors 2026_11_12_400200_add_penalty_permissions,
+            // which grants them on the already-migrated deployments.
+            'penalties:view', 'penalties:create', 'penalties:update', 'penalties:delete',
+
+            // Linda, the staff assistant: asking it, and Settings → Linda (which
+            // also needs branches:view_all). admin and super_admin only, through
+            // Permission::all() below; no other role lists them. Mirrors
+            // 2026_11_16_100000_add_linda_permissions, which grants them on the
+            // already-migrated deployments.
+            'linda:use', 'linda:settings',
+
+            // Settings → Menu Visibility, which also needs the administrator
+            // override password (finish run round 6). admin and super_admin
+            // only, through Permission::all() below; no other role lists it.
+            // Mirrors 2026_11_25_700100_add_menu_visibility_manage_permission,
+            // which grants it on the already-migrated deployments.
+            'menu_visibility:manage',
+
+            // Phase 6: self::PHASE6_PERMISSIONS (AMLA, executive dashboard,
+            // branches, member transfer, inter-branch transfers, loan
+            // origination).
+            ...self::PHASE6_PERMISSIONS,
         ];
 
         $guard = 'web';
@@ -124,13 +318,15 @@ class RoleAndPermissionSeeder extends Seeder
         // Default metadata for seeded system roles — flags them so the admin UI
         // knows they cannot be deleted or renamed.
         $systemRoleAttrs = [
-            'super_admin' => ['description' => 'Developer-side super administrator — every permission plus Gate::before bypass. Reserved for the platform team, not client staff.'],
-            'admin' => ['description' => 'Client-side administrator — every operational permission for the lending organization (borrowers, loans, payments, staff, reports, settings).'],
-            'loan_officer' => ['description' => 'Creates and processes loan applications; manages borrowers and share capital.'],
+            'super_admin' => ['description' => 'Platform super administrator — holds every permission. Reserved for the platform team, not client staff.'],
+            'admin' => ['description' => 'Client-side administrator — every operational permission for the lending organization (members, loans, payments, staff, reports, settings).'],
+            'loan_officer' => ['description' => 'Creates and processes loan applications; manages members and share capital.'],
             'cashier' => ['description' => 'Records payments, releases approved loans, and reconciles cash.'],
             'collector' => ['description' => 'Collects payments on the field and marks collection status.'],
             'viewer' => ['description' => 'Read-only access to operational data.'],
             'general_bookkeeper' => ['description' => 'Releases loans after BOD approval in the normal workflow.'],
+            'accountant' => ['description' => 'Keeps the books: journals, expenses, reconciliation, period and year-end close, opening balances and the allowance. Assigned by the owner.'],
+            'compliance_officer' => ['description' => 'Anti-money laundering compliance: alerts, cases, due diligence, screening, sanctions, covered and suspicious transaction reports and the AMLA log, with read-only lending, savings and GCash in every branch. Assigned by the owner.'],
 
             // Approval-chain roles. ApprovalWorkflowSetting's default chains
             // have always named these, but until 2026-09-16 none of them
@@ -172,13 +368,16 @@ class RoleAndPermissionSeeder extends Seeder
                 || str_starts_with($role, 'bod'),
         ));
 
+        // Every permission but the Chair's own (self::CHAIR_ONLY_PERMISSIONS).
+        $everyPermission = Permission::query()->whereNotIn('name', self::CHAIR_ONLY_PERMISSIONS)->get();
+
         // Super admin — developer-side role with every permission assigned
         // directly (so frontend permission gating renders the full app) plus
         // the Gate::before bypass in AppServiceProvider as defence-in-depth.
         Role::updateOrCreate(
             ['name' => 'super_admin', 'guard_name' => $guard],
             ['is_system' => true, 'is_active' => true, 'description' => $systemRoleAttrs['super_admin']['description']],
-        )->syncPermissions(Permission::all());
+        )->syncPermissions($everyPermission);
 
         // Admin — client-side full-access role for the lending organization's
         // admin staff. Same permission set as super_admin today, but kept as
@@ -187,7 +386,7 @@ class RoleAndPermissionSeeder extends Seeder
         Role::updateOrCreate(
             ['name' => 'admin', 'guard_name' => $guard],
             ['is_system' => true, 'is_active' => true, 'description' => $systemRoleAttrs['admin']['description']],
-        )->syncPermissions(Permission::all());
+        )->syncPermissions($everyPermission);
 
         Role::updateOrCreate(
             ['name' => 'loan_officer', 'guard_name' => $guard],
@@ -299,7 +498,51 @@ class RoleAndPermissionSeeder extends Seeder
             'expenses:view',
             'expenses:create',
             'cash_accounts:view',
+
+            // Keeps the books for every branch.
+            BranchAccess::VIEW_ALL,
         ]);
+
+        // Accountant: self::ACCOUNTANT_PERMISSIONS. Unlike the older system
+        // roles it comes with a display name, set only while it has none, so a
+        // label edited in User Roles survives a re-seed: the first of
+        // self::ACCOUNTANT_DISPLAY_NAMES no other role reads as. When both
+        // are taken it stays blank, for an admin to name.
+        $accountant = Role::updateOrCreate(
+            ['name' => 'accountant', 'guard_name' => $guard],
+            ['is_system' => true, 'is_active' => true, 'description' => $systemRoleAttrs['accountant']['description']],
+        );
+
+        if (blank($accountant->display_name)) {
+            $others = Role::query()->get(['id', 'name', 'display_name']);
+            $label = collect(self::ACCOUNTANT_DISPLAY_NAMES)
+                ->first(fn (string $label) => ! UniqueRoleDisplayName::readsAsAnotherRole($others, $label, $accountant->id));
+
+            if ($label !== null) {
+                $accountant->update(['display_name' => $label]);
+            }
+        }
+
+        $accountant->syncPermissions(self::ACCOUNTANT_PERMISSIONS);
+
+        // Compliance Officer: self::COMPLIANCE_OFFICER_PERMISSIONS, its display
+        // name set only while it has none, as the Accountant's is.
+        $complianceOfficer = Role::updateOrCreate(
+            ['name' => 'compliance_officer', 'guard_name' => $guard],
+            ['is_system' => true, 'is_active' => true, 'description' => $systemRoleAttrs['compliance_officer']['description']],
+        );
+
+        if (blank($complianceOfficer->display_name)) {
+            $others = Role::query()->get(['id', 'name', 'display_name']);
+            $label = collect(self::COMPLIANCE_OFFICER_DISPLAY_NAMES)
+                ->first(fn (string $label) => ! UniqueRoleDisplayName::readsAsAnotherRole($others, $label, $complianceOfficer->id));
+
+            if ($label !== null) {
+                $complianceOfficer->update(['display_name' => $label]);
+            }
+        }
+
+        $complianceOfficer->syncPermissions(self::COMPLIANCE_OFFICER_PERMISSIONS);
 
         /**
          * The five READ-ONLY accounting permissions `manager` is granted by
@@ -343,8 +586,35 @@ class RoleAndPermissionSeeder extends Seeder
                 // not extended to the BOD roles: signing authority comes from
                 // holding the role named on the step, not from a permission.
                 $roleName === 'loan_processor' ? ['loans:update'] : [],
+                // loan_processor also prepares the application itself: it
+                // creates the loan, reads what the new-loan form shows and attaches
+                // the member's collateral to it.
+                // Mirrors 2026_10_03_100000_grant_loan_processor_loan_creation_permissions,
+                // which grants the same six on already-migrated deployments.
+                $roleName === 'loan_processor' ? [
+                    'loans:create',
+                    'borrowers:view',
+                    'fees:view',
+                    'collaterals:view',
+                    'collaterals:update',
+                    'share_capital:view',
+                ] : [],
                 $roleName === 'manager' ? $managerAccountingPermissions : [],
+                // The Chair edits a loan while it waits at their step.
+                $roleName === self::CHAIR_ROLE ? self::CHAIR_ONLY_PERMISSIONS : [],
+                // Managers and the board oversee every branch.
+                $roleName === 'manager' || preg_match(self::BOARD_ROLE_PATTERN, $roleName) === 1
+                    ? [BranchAccess::VIEW_ALL]
+                    : [],
             ));
         }
+
+        // Custom board roles created through the role editor (staging has
+        // `bod_chairwoman`) oversee every branch too, as the migration grants.
+        // Additive only: their other permissions are the admins' to set.
+        Role::where('guard_name', $guard)
+            ->get()
+            ->filter(fn (Role $role) => preg_match(self::BOARD_ROLE_PATTERN, $role->name) === 1)
+            ->each(fn (Role $role) => $role->givePermissionTo(BranchAccess::VIEW_ALL));
     }
 }

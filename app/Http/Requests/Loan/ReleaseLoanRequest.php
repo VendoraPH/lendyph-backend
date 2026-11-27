@@ -2,12 +2,18 @@
 
 namespace App\Http\Requests\Loan;
 
+use App\Http\Requests\Concerns\ReferenceNumberMessages;
+use App\Http\Requests\Loan\Concerns\ValidatesReleaseInsurance;
+use App\Models\Branch;
+use App\Services\Branches\BranchWriteGuard;
+use App\Services\Cda\FormerMemberGuard;
 use Illuminate\Contracts\Validation\Validator;
 use Illuminate\Foundation\Http\FormRequest;
-use Illuminate\Validation\Rule;
 
 class ReleaseLoanRequest extends FormRequest
 {
+    use ReferenceNumberMessages, ValidatesReleaseInsurance;
+
     public function authorize(): bool
     {
         return $this->user()->can('loans:release');
@@ -16,11 +22,7 @@ class ReleaseLoanRequest extends FormRequest
     public function rules(): array
     {
         return [
-            'insurance_premium_percentage' => ['nullable', 'numeric', 'min:0', 'max:100', 'decimal:0,2'],
-            'insurance_premium_amount' => ['nullable', 'numeric', 'min:0', 'decimal:0,2'],
-            'insurance_payment_type' => ['nullable', Rule::in(['full', 'partial'])],
-            'insurance_partial_amount' => ['nullable', 'numeric', 'min:0', 'decimal:0,2', 'lte:insurance_premium_amount'],
-            'insurance_remaining_balance' => ['nullable', 'numeric', 'min:0', 'decimal:0,2'],
+            ...$this->insuranceRules(),
             // The fee-configuration fingerprint a release preview handed out.
             //
             // OPTIONAL on purpose. The frontend change this unblocks releases
@@ -35,50 +37,72 @@ class ReleaseLoanRequest extends FormRequest
             // mismatch, so both already land somewhere sensible, and a
             // `size:64` rule would only make the format impossible to version.
             'fee_fingerprint' => ['nullable', 'string', 'max:255'],
+            // How the net proceeds went out, and its reference, in the shape
+            // Record Payment takes them (StoreRepaymentRequest). The release
+            // journal credits that method's settlement account.
+            'method' => ['sometimes', 'in:cash,gcash,maya,bank_transfer,online'],
+            'reference_number' => ['nullable', 'string', 'max:100', 'required_unless:method,cash'],
         ];
+    }
+
+    /** The release method, `cash` when none was sent. */
+    public function releaseMethod(): string
+    {
+        return (string) $this->validated('method', 'cash');
+    }
+
+    /** The release's reference, or null when none was sent. */
+    public function releaseReference(): ?string
+    {
+        $reference = $this->validated('reference_number');
+
+        return is_string($reference) && $reference !== '' ? $reference : null;
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    public function messages(): array
+    {
+        return $this->referenceNumberMessages();
+    }
+
+    protected function prepareForValidation(): void
+    {
+        if (! $this->has('method')) {
+            $this->merge(['method' => 'cash']);
+        }
     }
 
     public function withValidator(Validator $validator): void
     {
-        $validator->after(function (Validator $v) {
-            $pct = $this->input('insurance_premium_percentage');
-            if ($pct === null || (float) $pct === 0.0) {
+        $this->validateInsuranceCombination($validator);
+
+        // No release while the member or a co-maker is a former member (C1
+        // review, H1 and M2). LoanService::release() checks again under the
+        // loan lock.
+        $validator->after(function (Validator $validator): void {
+            $loan = $this->route('loan');
+
+            if ($loan === null) {
                 return;
             }
 
-            $paymentType = $this->input('insurance_payment_type', 'full');
-            $partial = $this->input('insurance_partial_amount');
-
-            if ($paymentType === 'partial' && ($partial === null || $partial === '')) {
-                $v->errors()->add(
-                    'insurance_partial_amount',
-                    'The insurance partial amount is required when payment type is partial.',
-                );
+            foreach (app(FormerMemberGuard::class)->releaseRefusals($loan) as $field => $messages) {
+                foreach ($messages as $message) {
+                    $validator->errors()->add($field, $message);
+                }
             }
 
-            if ($paymentType === 'full' && $partial !== null && $partial !== '' && (float) $partial !== 0.0) {
-                $v->errors()->add(
-                    'insurance_partial_amount',
-                    'The insurance partial amount must be null or zero when payment type is full.',
-                );
+            // No release in a suspended or closed branch (Phase 6 MB-BE2).
+            // LoanController::release() checks again holding the branch's
+            // lock (BranchWriteGuard).
+            $branch = Branch::query()->whereKey($loan->branch_id)->first(['id', 'name', 'code', 'status']);
+
+            if ($branch !== null && $branch->status !== Branch::STATUS_ACTIVE) {
+                $validator->errors()->add('branch', BranchWriteGuard::refusal($branch, BranchWriteGuard::RELEASES));
             }
         });
-    }
-
-    /**
-     * Subset of validated payload destined for LoanService::release.
-     *
-     * @return array<string, mixed>
-     */
-    public function insurancePayload(): array
-    {
-        return $this->only([
-            'insurance_premium_percentage',
-            'insurance_premium_amount',
-            'insurance_payment_type',
-            'insurance_partial_amount',
-            'insurance_remaining_balance',
-        ]);
     }
 
     /**

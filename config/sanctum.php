@@ -69,6 +69,21 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Last Used At
+    |--------------------------------------------------------------------------
+    |
+    | Off: Sanctum would write a token's `last_used_at` while resolving the
+    | caller, ahead of every rate limiter, so a request refused with 429 reset
+    | the idle timer (finish run round 7). The idle checks, CheckTokenExpiry
+    | and CheckPortalTokenExpiry, write it instead, after the limiters
+    | (App\Services\TokenIdleWindow::touch()).
+    |
+    */
+
+    'last_used_at' => false,
+
+    /*
+    |--------------------------------------------------------------------------
     | Sanctum Middleware
     |--------------------------------------------------------------------------
     |

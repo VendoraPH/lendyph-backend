@@ -10,6 +10,10 @@ use App\Http\Resources\ShareCapitalLedgerResource;
 use App\Http\Resources\ShareCapitalPledgeResource;
 use App\Models\Borrower;
 use App\Models\ShareCapitalPledge;
+use App\Services\BranchAccess;
+use App\Services\LikePattern;
+use App\Services\LoanService;
+use App\Services\LoanWriteTransaction;
 use App\Services\ShareCapitalService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
@@ -52,14 +56,23 @@ class ShareCapitalPledgeController extends Controller
         // member and allowed the write. `borrower_id` is a restrictOnDelete
         // foreign key so that cannot happen today — but a guard should not
         // depend on a constraint declared in a different file to be safe.
+        // A withdrawn member settled their share capital to leave, so nothing
+        // more is recorded for them. A deceased member's estate still settles
+        // through here (C1 review, M1).
+        if ($status === 'withdrawn') {
+            throw ValidationException::withMessages([
+                'borrower_id' => 'This member withdrew from the cooperative, so no share capital is recorded for them. Reactivate the membership first, with a reason.',
+            ]);
+        }
+
         if ($status !== null && ! in_array($status, Borrower::NON_MEMBER_STATUSES, true)) {
             return;
         }
 
         throw ValidationException::withMessages([
             'borrower_id' => $status === null
-                ? 'This pledge is not attached to a borrower, so share capital cannot be recorded against it.'
-                : "This borrower's registration is {$status}, so they are not a member yet. "
+                ? 'This pledge is not attached to a member, so share capital cannot be recorded against it.'
+                : "This person's registration is {$status}, so they are not a member yet. "
                     .'Share capital can only be recorded once the registration is approved.',
         ]);
     }
@@ -75,6 +88,9 @@ excludes borrowers whose registration is still `pending` or was `rejected`.
 Members in poor standing (`inactive`, `blacklisted`) ARE included — they still
 hold share capital. `ShareCapitalPledgeResource` exposes no borrower status, so
 a client cannot reproduce this filter itself.
+
+`meta.totals.amount` is the pledged amount over every pledge the filters match,
+not just the page.
 DESC,
         tags: ['Share Capital'],
         security: [['sanctum' => []]],
@@ -111,16 +127,31 @@ DESC,
         $schedule = $filters['schedule'] ?? null;
         $search = $filters['search'] ?? null;
 
-        $pledges = ShareCapitalPledge::with('borrower')
+        $filtered = ShareCapitalPledge::query()
             ->forMembers()
-            ->withMax('borrowerLedgerEntries as last_transaction_date', 'date')
+            // Only pledges of members in the caller's branches (BranchAccess);
+            // `meta.totals` follows, since it sums the same query.
+            ->whereHas('borrower', fn ($q) => $q->visibleTo(request()->user()))
             ->when(filled($schedule), fn ($q) => $q->where('schedule', $schedule))
             ->when(request()->has('auto_credit'), fn ($q) => $q->where('auto_credit', filter_var(request('auto_credit'), FILTER_VALIDATE_BOOLEAN)))
-            ->when(filled($search), fn ($q) => $q->whereHas('borrower', fn ($bq) => $bq->where('first_name', 'like', "%{$search}%")->orWhere('last_name', 'like', "%{$search}%")))
+            ->when(filled($search), function ($q) use ($search) {
+                $like = LikePattern::contains($search);
+
+                $q->whereHas('borrower', fn ($bq) => $bq->where('first_name', 'like', $like)->orWhere('last_name', 'like', $like));
+            });
+
+        $pledges = (clone $filtered)
+            ->with('borrower')
+            ->withMax('borrowerLedgerEntries as last_transaction_date', 'date')
             ->orderBy('id')
             ->paginate(min(max((int) ($filters['per_page'] ?? 15), 1), 100));
 
-        return ShareCapitalPledgeResource::collection($pledges);
+        // The pledged total over every pledge the filters match, not just the
+        // page, so the browser never adds the page up. Summed in centavos.
+        $amount = LoanService::toCentavos((float) (clone $filtered)->sum('amount')) / 100;
+
+        return ShareCapitalPledgeResource::collection($pledges)
+            ->additional(['meta' => ['totals' => ['amount' => $amount]]]);
     }
 
     #[OA\Put(
@@ -157,6 +188,7 @@ DESC,
         ],
         responses: [
             new OA\Response(response: 200, description: 'Auto-credit toggled'),
+            new OA\Response(response: 409, description: 'The pledge was held by an auto-credit run or an entry for too long; nothing changed, try again'),
             new OA\Response(response: 422, description: 'The pledge belongs to a borrower whose registration is still `pending` or was `rejected`'),
         ],
     )]
@@ -166,11 +198,20 @@ DESC,
 
         $this->assertBorrowerIsMember($pledge);
 
-        $pledge->update(['auto_credit' => ! $pledge->auto_credit]);
+        // Read and flipped under the pledge's row lock (finish run round 7): an
+        // entry by hand or an auto-credit run holding the pledge FOR SHARE is
+        // waited for, and either sees the switch only once it has committed.
+        // A wait that times out (or a deadlock) answers 409 in words, never 500.
+        $autoCredit = LoanWriteTransaction::run(function () use ($pledge): bool {
+            $locked = ShareCapitalPledge::query()->whereKey($pledge->id)->lockForUpdate()->firstOrFail();
+            $locked->update(['auto_credit' => ! $locked->auto_credit]);
+
+            return (bool) $locked->auto_credit;
+        }, null, ShareCapitalService::PLEDGE_SWITCH_BUSY);
 
         return response()->json([
-            'message' => 'Auto-credit '.($pledge->auto_credit ? 'enabled' : 'disabled').'.',
-            'auto_credit' => $pledge->auto_credit,
+            'message' => 'Auto-credit '.($autoCredit ? 'enabled' : 'disabled').'.',
+            'auto_credit' => $autoCredit,
         ]);
     }
 
@@ -184,8 +225,9 @@ DESC,
         ],
         requestBody: new OA\RequestBody(required: true, content: new OA\JsonContent),
         responses: [
-            new OA\Response(response: 201, description: 'Entry created'),
-            new OA\Response(response: 422, description: 'The pledge belongs to a borrower whose registration is still `pending` or was `rejected`'),
+            new OA\Response(response: 201, description: 'Entry created. A cash entry carries its CSH number in `reference_number` (CSH-[super admin id]-[year]-[0001]); a typed one is ignored for cash.'),
+            new OA\Response(response: 409, description: 'Kept colliding with other saves taking the next reference. Nothing was saved; submit again.'),
+            new OA\Response(response: 422, description: 'The pledge belongs to a borrower whose registration is still `pending` or was `rejected`, or the member\'s branch is closed or waiting to close (on `borrower_id`), or the pledge is set to auto-credit, so the auto-credit run credits it (on `pledge_id`, credit or debit, nothing saved)'),
         ],
     )]
     public function manualEntry(ShareCapitalManualEntryRequest $request, ShareCapitalPledge $pledge): JsonResponse
@@ -199,6 +241,8 @@ DESC,
             $request->date,
             $request->user(),
             $request->description,
+            $request->input('method'),
+            $request->reference_number,
         );
 
         $entry->load('borrower', 'createdByUser');
@@ -215,8 +259,9 @@ DESC,
         security: [['sanctum' => []]],
         requestBody: new OA\RequestBody(required: true, content: new OA\JsonContent),
         responses: [
-            new OA\Response(response: 201, description: 'Bulk entries created'),
-            new OA\Response(response: 422, description: 'One of the pledges belongs to a borrower whose registration is still `pending` or was `rejected`'),
+            new OA\Response(response: 201, description: 'Bulk entries created. `data.reference_numbers` lists each row\'s reference in the batch\'s order: a cash batch gives each row its own CSH number (CSH-[super admin id]-[year]-[0001]); any other method stores the batch\'s one reference on every row.'),
+            new OA\Response(response: 409, description: 'Collided with another save taking the next reference. Not tried again, so a batch sent twice cannot post twice. Nothing was posted; check the ledger before submitting again.'),
+            new OA\Response(response: 422, description: 'One of the pledges belongs to a borrower whose registration is still `pending` or was `rejected`, or a row\'s member is in a branch that is closed or waiting to close (on `entries.N.pledge_id`), or the batch holds pledges set to auto-credit (on `entries`, naming their members; the whole batch is refused, nothing posted)'),
         ],
     )]
     public function bulkEntry(ShareCapitalBulkEntryRequest $request): JsonResponse
@@ -236,11 +281,17 @@ DESC,
         $entries = $this->shareCapitalService->bulkManualEntries(
             $request->entries,
             $request->user(),
+            $request->input('method'),
+            $request->reference_number,
         );
 
         return response()->json([
             'message' => "Created {$entries->count()} ledger entries.",
             'count' => $entries->count(),
+            'data' => [
+                'processed_count' => $entries->count(),
+                'reference_numbers' => $entries->pluck('reference_number')->all(),
+            ],
         ], 201);
     }
 }

@@ -10,13 +10,18 @@ use App\Models\CoMaker;
 use App\Models\Document;
 use App\Models\Loan;
 use App\Services\AuditLogService;
+use Closure;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
+use Illuminate\Routing\Controllers\HasMiddleware;
+use Illuminate\Routing\Controllers\Middleware;
 use Illuminate\Support\Facades\Storage;
 use OpenApi\Attributes as OA;
+use Throwable;
 
-class DocumentController extends Controller
+class DocumentController extends Controller implements HasMiddleware
 {
     private const PARENT_MODELS = [
         'borrower' => Borrower::class,
@@ -24,15 +29,45 @@ class DocumentController extends Controller
         'loan' => Loan::class,
     ];
 
+    /**
+     * Resolve the `{borrower}`, `{coMaker}` or `{loan}` parent before anything
+     * else runs, StoreDocumentRequest's validation included.
+     *
+     * The routes can't type-hint one parent, so implicit binding never sees
+     * it. Resolving it here, through the model's own route binding, scopes it
+     * to the caller's branches exactly as a typed parameter is: another
+     * branch's parent answers 404 whatever the body, never 422.
+     */
+    public static function middleware(): array
+    {
+        return [
+            new Middleware(function (Request $request, Closure $next) {
+                foreach (self::PARENT_MODELS as $key => $modelClass) {
+                    $value = $request->route($key);
+
+                    if ($value === null || $value instanceof Model) {
+                        continue;
+                    }
+
+                    $request->route()->setParameter(
+                        $key,
+                        (new $modelClass)->resolveRouteBinding($value) ?? abort(404),
+                    );
+                }
+
+                return $next($request);
+            }, only: ['index', 'store']),
+        ];
+    }
+
     private function resolveParent(): Model
     {
-        foreach (self::PARENT_MODELS as $key => $modelClass) {
+        foreach (array_keys(self::PARENT_MODELS) as $key) {
             $value = request()->route($key);
-            if ($value === null) {
-                continue;
-            }
 
-            return $value instanceof Model ? $value : $modelClass::findOrFail($value);
+            if ($value instanceof Model) {
+                return $value;
+            }
         }
 
         abort(404, 'Document parent not found.');
@@ -103,7 +138,7 @@ class DocumentController extends Controller
                     required: ['file', 'type'],
                     properties: [
                         new OA\Property(property: 'file', type: 'string', format: 'binary'),
-                        new OA\Property(property: 'type', type: 'string', example: 'valid_id'),
+                        new OA\Property(property: 'type', type: 'string', example: 'proof_of_income', description: 'Letters, numbers, spaces, hyphens and underscores. A valid ID has its own upload (`/valid-ids`) and is refused here.'),
                         new OA\Property(property: 'label', type: 'string', example: 'PhilID Front'),
                     ],
                 ),
@@ -131,7 +166,7 @@ class DocumentController extends Controller
                     required: ['file', 'type'],
                     properties: [
                         new OA\Property(property: 'file', type: 'string', format: 'binary'),
-                        new OA\Property(property: 'type', type: 'string', example: 'valid_id'),
+                        new OA\Property(property: 'type', type: 'string', example: 'proof_of_income', description: 'Letters, numbers, spaces, hyphens and underscores. A valid ID has its own upload (`/valid-ids`) and is refused here.'),
                         new OA\Property(property: 'label', type: 'string', example: 'PhilID Front'),
                     ],
                 ),
@@ -182,20 +217,41 @@ class DocumentController extends Controller
         $modelType = strtolower(class_basename($parent));
         $path = $file->store("documents/{$type}/{$modelType}/{$parent->id}", 'private');
 
-        $document = $parent->documents()->create([
-            'type' => $type,
-            'label' => $request->input('label'),
-            'file_path' => $path,
-            'original_filename' => $file->getClientOriginalName(),
-            'mime_type' => $file->getMimeType(),
-            'file_size' => $file->getSize(),
-        ]);
+        try {
+            $document = $parent->documents()->create([
+                'type' => $type,
+                'label' => $request->input('label'),
+                'file_path' => $path,
+                'original_filename' => Document::cleanOriginalFilename($file->getClientOriginalName()),
+                'mime_type' => $file->getMimeType(),
+                'file_size' => $file->getSize(),
+            ]);
+        } catch (Throwable $e) {
+            // No row points at the stored file, so nothing would ever remove it.
+            Storage::disk('private')->delete($path);
 
-        AuditLogService::log('uploaded', $parent, description: "Document '{$type}' uploaded for {$modelType} #{$parent->id}");
+            throw $e;
+        }
+
+        AuditLogService::log('uploaded', $parent, description: "Document '{$type}' uploaded for ".self::parentInWords($parent));
 
         return (new DocumentResource($document))
             ->response()
             ->setStatusCode(201);
+    }
+
+    /**
+     * The parent as the audit row names it: "Member #7", "Co-maker #3", or a
+     * loan by its number ("loan LN-000004", the application number before
+     * release). Rows already stored keep their own words.
+     */
+    private static function parentInWords(Model $parent): string
+    {
+        return match (true) {
+            $parent instanceof Loan => 'loan '.($parent->displayNumber() ?? "#{$parent->id}"),
+            $parent instanceof CoMaker => "Co-maker #{$parent->id}",
+            default => "Member #{$parent->id}",
+        };
     }
 
     #[OA\Get(

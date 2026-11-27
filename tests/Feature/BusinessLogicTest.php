@@ -128,6 +128,34 @@ class BusinessLogicTest extends TestCase
         $this->assertEquals(500, $response->json('data.total_deductions'));
     }
 
+    public function test_an_empty_deductions_list_charges_no_fees_and_null_charges_the_product_fees(): void
+    {
+        $product = LoanProduct::factory()->create([
+            'processing_fee' => 2.0,
+            'service_fee' => 1.0,
+        ]);
+        $payload = fn (): array => [
+            'borrower_id' => Borrower::factory()->create(['branch_id' => $this->branch->id])->id,
+            'loan_product_id' => $product->id,
+            'principal_amount' => 100000,
+            'start_date' => now()->toDateString(),
+        ];
+
+        // A sent `[]` is "no deductions", not "work them out for me".
+        $this->postJson('/api/loans', $payload() + ['deductions' => []])
+            ->assertCreated()
+            ->assertJsonPath('data.deductions', [])
+            ->assertJsonPath('data.total_deductions', '0.00')
+            ->assertJsonPath('data.net_proceeds', '100000.00');
+
+        // Null reads like an omitted key: the product's 2% + 1%.
+        $this->postJson('/api/loans', $payload() + ['deductions' => null])
+            ->assertCreated()
+            ->assertJsonCount(2, 'data.deductions')
+            ->assertJsonPath('data.total_deductions', '3000.00')
+            ->assertJsonPath('data.net_proceeds', '97000.00');
+    }
+
     public function test_auto_computed_notarial_fee_is_percentage_of_principal(): void
     {
         $product = LoanProduct::factory()->create([
@@ -382,6 +410,12 @@ class BusinessLogicTest extends TestCase
             'spouse_first_name' => 'Juan',
             'spouse_last_name' => 'Santos',
             'spouse_occupation' => 'Engineer',
+            'birthdate' => '1990-05-12',
+            'gender' => 'female',
+            'address' => '12 Mabini St',
+            'city' => 'Butuan',
+            'province' => 'Agusan del Norte',
+            'contact_number' => '09170000222',
         ]);
 
         $response->assertCreated();
@@ -409,10 +443,10 @@ class BusinessLogicTest extends TestCase
             'processing_fee' => 2.0,
             'min_processing_fee' => 1.0,
             'max_processing_fee' => 3.0,
-            'notarial_fee' => 500,
-            'custom_fees' => [
-                ['name' => 'Insurance', 'type' => 'percentage', 'value' => 1.5],
-            ],
+            // A percentage of the principal, capped at 100.
+            'notarial_fee' => 1.5,
+            // Additional fees are retired: only an empty list is accepted.
+            'custom_fees' => [],
             'min_amount' => 5000,
             'max_amount' => 500000,
         ]);
@@ -427,9 +461,8 @@ class BusinessLogicTest extends TestCase
         $this->assertEquals(['monthly', 'semi_monthly'], $data['frequencies']);
         $this->assertEquals(1.0, (float) $data['min_processing_fee']);
         $this->assertEquals(3.0, (float) $data['max_processing_fee']);
-        $this->assertEquals(500, (float) $data['notarial_fee']);
-        $this->assertCount(1, $data['custom_fees']);
-        $this->assertEquals('Insurance', $data['custom_fees'][0]['name']);
+        $this->assertEquals(1.5, (float) $data['notarial_fee']);
+        $this->assertSame([], $data['custom_fees']);
     }
 
     // ── 12. LoanResource computed fields ──────────────────────────────────

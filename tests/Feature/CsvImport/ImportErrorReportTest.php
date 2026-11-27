@@ -128,13 +128,14 @@ class ImportErrorReportTest extends TestCase
         $body = $this->getJson("/api/imports/{$this->run->id}/errors?per_page=100")->assertOk()->json();
         $stats = $body['meta']['stats'];
 
-        $this->assertSame(11, $stats['total_issues'], '3 failures + 2 errors + 4 warnings + 1 row carrying both.');
+        $this->assertSame(11, $stats['total_issues'], '3 failures + 2 errors + 4 warnings + 1 refused row carrying a note.');
         $this->assertSame(10, $stats['rows_reported']);
         $this->assertSame(10, $body['meta']['total'], 'meta.total counts reported ROWS.');
         $this->assertCount(11, $body['data'], 'data carries one entry per issue.');
         $this->assertSame(11, $body['meta']['issues_on_page']);
 
-        $this->assertSame(['error' => 6, 'warning' => 5], $stats['by_severity']);
+        // B-11 was refused at the checks, so its note is a skipped line, never a warning.
+        $this->assertSame(['error' => 6, 'skipped' => 1, 'warning' => 4], $stats['by_severity']);
         $this->assertSame(
             $stats['total_issues'],
             array_sum(array_column($stats['by_category'], 'count')),
@@ -200,8 +201,28 @@ class ImportErrorReportTest extends TestCase
             'File,"Row Number","Account No.","Loan No.",Severity,Category,Field,Message,"Original Value"',
             $csv,
         );
-        $this->assertStringContainsString('binhs-loans-2026.csv,4813,A-77,2019-0007,error,date_invalid,"Maturity Date"', $csv);
+        // The category in the screen's words, never its code.
+        $this->assertStringContainsString('binhs-loans-2026.csv,4813,A-77,2019-0007,error,"Not a date","Maturity Date"', $csv);
+        $this->assertStringNotContainsString('date_invalid', $csv);
         $this->assertStringNotContainsString(',4812,', $csv);
+    }
+
+    /**
+     * A date order chosen on the Check step decides how a day/month/year cell
+     * reads, with no "reads two ways" warning, so the report says which reading
+     * each date column got, in words. A column that needed none has no line.
+     */
+    public function test_the_download_says_which_reading_each_date_column_got(): void
+    {
+        $this->run->forceFill(['date_orders' => ['loans' => ['date_released' => 'dmy', 'maturity_date' => null]]])->save();
+        $this->stageRow($this->loans, 2, $this->loanValues(['loan_no' => 'D-1']), [
+            'errors' => [['interest_rate', 'rate_invalid', 'Not a rate.']],
+        ]);
+
+        $csv = $this->csv();
+
+        $this->assertStringContainsString('binhs-loans-2026.csv,,,,note,"Date reading","Date Released","Date Released: day first",', $csv);
+        $this->assertStringNotContainsString('Maturity Date:', $csv);
     }
 
     public function test_a_cell_that_begins_like_a_formula_is_neutralised_in_both_original_value_and_message(): void
@@ -372,7 +393,9 @@ class ImportErrorReportTest extends TestCase
         // What the operator downloads: the rows that made it, then an honest
         // final line — never a stack trace in a spreadsheet.
         $this->assertStringContainsString('L-1', $body);
-        $this->assertStringContainsString('export_failed', $body);
+        // Its category in words, as every other line's (IssueCategoryWords).
+        $this->assertStringContainsString('Report stopped early', $body);
+        $this->assertStringNotContainsString('export_failed', $body);
         $this->assertStringContainsString('This report stopped early and is incomplete.', $body);
         $this->assertStringNotContainsString('Dela Cruz', $body, "The failing query was appended to the operator's CSV.");
         $this->assertStringNotContainsString('Lock wait timeout', $body);

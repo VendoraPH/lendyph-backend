@@ -2,6 +2,8 @@
 
 namespace App\Http\Requests\Accounting;
 
+use App\Http\Requests\Concerns\AssignsCallerBranch;
+use App\Rules\BranchTakesNew;
 use Illuminate\Contracts\Validation\Validator;
 use Illuminate\Foundation\Http\FormRequest;
 
@@ -26,9 +28,18 @@ use Illuminate\Foundation\Http\FormRequest;
  * make a hand-typed adjustment indistinguishable from an automatic posting.
  * Automatic sources are set by the posting engine, in the same transaction as
  * the event they describe.
+ *
+ * ## `date` is a plain day
+ *
+ * `date_format:Y-m-d`, as StoreExpenseRequest has it: a date sent with a time
+ * or an offset is refused rather than stored as the sender's day. And an entry
+ * with no branch that has a line on the allowance can't be dated after today
+ * in Manila ({@see RefusesFutureNoBranchAllowanceDates}).
  */
 class StoreJournalRequest extends FormRequest
 {
+    use AssignsCallerBranch;
+    use RefusesFutureNoBranchAllowanceDates;
     use ValidatesJournalLines;
 
     public function authorize(): bool
@@ -39,19 +50,57 @@ class StoreJournalRequest extends FormRequest
     public function rules(): array
     {
         return array_merge([
-            'date' => ['required', 'date'],
+            'date' => ['required', 'date_format:Y-m-d'],
             'reference' => ['nullable', 'string', 'max:64'],
             'description' => ['required', 'string', 'max:500'],
-            'branch_id' => ['nullable', 'integer', 'exists:branches,id'],
+            'branch_id' => ['bail', 'nullable', 'integer', $this->callerBranchRule(), BranchTakesNew::openOnly($this->user())],
             // Accepted so a complete payload is not refused; never read.
             'total_debit' => ['sometimes', 'nullable', 'integer', 'min:0'],
             'total_credit' => ['sometimes', 'nullable', 'integer', 'min:0'],
         ], $this->lineRules());
     }
 
+    /**
+     * @return array<string, string>
+     */
+    public function messages(): array
+    {
+        return [
+            'date.required' => 'Enter the entry date.',
+            'date.date_format' => 'Enter the entry date as a plain date (year-month-day), with no time or time zone.',
+        ];
+    }
+
     public function withValidator(Validator $validator): void
     {
-        $validator->after(fn (Validator $v) => $this->validateLineSides($v));
+        $validator->after(function (Validator $v): void {
+            $this->validateLineSides($v);
+            $this->refuseAFutureNoBranchAllowanceDate($v);
+        });
+    }
+
+    /**
+     * Once the date and branch are valid: no branch, a line on the allowance,
+     * and a date after today in Manila is refused on `date`.
+     */
+    private function refuseAFutureNoBranchAllowanceDate(Validator $validator): void
+    {
+        $errors = $validator->errors();
+        $lines = $this->input('lines');
+
+        if ($errors->has('date') || $errors->has('branch_id') || ! is_array($lines)) {
+            return;
+        }
+
+        $refusal = $this->futureNoBranchAllowanceRefusal(
+            $this->input('branch_id'),
+            (string) $this->input('date'),
+            array_map(static fn (mixed $line): mixed => is_array($line) ? ($line['account_id'] ?? null) : null, $lines),
+        );
+
+        if ($refusal !== null) {
+            $errors->add('date', $refusal);
+        }
     }
 
     /**
@@ -70,6 +119,11 @@ class StoreJournalRequest extends FormRequest
             'description' => trim((string) $validated['description']),
             'branch_id' => $validated['branch_id'] ?? null,
         ];
+    }
+
+    protected function prepareForValidation(): void
+    {
+        $this->defaultToCallerBranch();
     }
 
     private function nullIfBlank(?string $value): ?string

@@ -1,0 +1,178 @@
+{
+  "report_type": "atir",
+  "version": "2026.2",
+  "name": "Annual Tax Incentives Report (ATIR) CY2026",
+  "effective_from": "2026-01-01",
+  "effective_until": null,
+  "cooperative_types": [],
+  "asset_classes": [],
+  "definition": {
+    "schema_version": 1,
+    "meta": {
+      "verified": false,
+      "source_doc": "ATIR template, April 2026 (owner to supply the Excel; to verify)",
+      "notes": "2026.2 (2026-11-12): Adds the April 2026 fields: sector and subsector, gross sales or receipts and the geographic fields. Still to verify against the official CDA form."
+    },
+    "parts": [
+      "annual"
+    ],
+    "deadline": {
+      "basis": "year_end",
+      "days_setting": "annual_deadline_days"
+    },
+    "applies": {
+      "requires_cte": true
+    },
+    "sections": [
+      {
+        "key": "tax",
+        "title": "Tax incentives",
+        "kind": "fields",
+        "fields": [
+          {
+            "key": "tin",
+            "label": "TIN",
+            "type": "text",
+            "required": true,
+            "source": {
+              "key": "profile.field",
+              "params": {
+                "name": "tin"
+              }
+            }
+          },
+          {
+            "key": "cte_number",
+            "label": "CTE number",
+            "type": "text",
+            "required": true,
+            "source": {
+              "key": "profile.field",
+              "params": {
+                "name": "cte_number"
+              }
+            }
+          },
+          {
+            "key": "cte_expires_on",
+            "label": "CTE valid until",
+            "type": "date",
+            "source": {
+              "key": "profile.field",
+              "params": {
+                "name": "cte_expires_on"
+              }
+            }
+          },
+          {
+            "key": "sector",
+            "label": "Sector",
+            "type": "text"
+          },
+          {
+            "key": "subsector",
+            "label": "Subsector",
+            "type": "text"
+          },
+          {
+            "key": "geographic_region",
+            "label": "Region",
+            "type": "text"
+          },
+          {
+            "key": "geographic_province",
+            "label": "Province",
+            "type": "text"
+          },
+          {
+            "key": "geographic_city",
+            "label": "City or municipality",
+            "type": "text"
+          },
+          {
+            "key": "geographic_coverage",
+            "label": "Area of operation",
+            "type": "select",
+            "options": [
+              {
+                "value": "barangay",
+                "label": "Barangay"
+              },
+              {
+                "value": "municipal",
+                "label": "Municipal or city"
+              },
+              {
+                "value": "provincial",
+                "label": "Provincial"
+              },
+              {
+                "value": "regional",
+                "label": "Regional"
+              },
+              {
+                "value": "national",
+                "label": "National"
+              }
+            ]
+          },
+          {
+            "key": "total_income",
+            "label": "Total income",
+            "type": "money",
+            "source": {
+              "key": "fs.total_income"
+            }
+          },
+          {
+            "key": "gross_sales",
+            "label": "Gross sales or receipts",
+            "type": "money",
+            "required": true
+          },
+          {
+            "key": "income_tax_exempt",
+            "label": "Income tax exempted",
+            "type": "money",
+            "required": true
+          },
+          {
+            "key": "other_taxes_exempt",
+            "label": "Other taxes exempted",
+            "type": "money"
+          }
+        ]
+      }
+    ],
+    "rules": [
+      {
+        "id": "cte_valid",
+        "type": "check",
+        "check": "period.cte_valid",
+        "severity": "critical",
+        "category": "compliance_document",
+        "component": "fields",
+        "fix_href": "/cda/settings"
+      },
+      {
+        "id": "tin_format",
+        "type": "pattern",
+        "field": "tin",
+        "pattern": "tin",
+        "severity": "warning",
+        "category": "invalid_data",
+        "component": "fields",
+        "fix_href": "/cda/settings"
+      },
+      {
+        "id": "template_verified",
+        "type": "check",
+        "check": "template.verified",
+        "severity": "info",
+        "category": "invalid_data",
+        "component": "fields",
+        "message": "This form follows the CDA template as understood in v1 and is still to be checked against the official form."
+      }
+    ]
+  }
+}

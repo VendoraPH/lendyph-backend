@@ -2,15 +2,32 @@
 
 namespace App\Models;
 
+use App\Support\StaffRouteBinding;
 use App\Traits\Auditable;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Support\Arr;
 
 class LoanAdjustment extends Model
 {
     use Auditable, HasFactory;
+
+    /**
+     * The `new_values` fields each requested type carries, and the only ones
+     * it applies. `extension` rows are absent: POST /loans/{loan}/extend writes
+     * them already applied, and they never carry a request.
+     */
+    public const NEW_VALUE_FIELDS = [
+        'restructure' => ['interest_rate', 'term', 'frequency'],
+        'penalty_waiver' => ['waive_all', 'schedule_ids'],
+        // `target_principal_balance` and `outstanding_principal_at_request`
+        // record how the server worked out `adjustment_amount` for a request
+        // stated as a target; the amount is what is approved and applied.
+        'balance_adjustment' => ['adjustment_amount', 'reason', 'target_principal_balance', 'outstanding_principal_at_request'],
+        'term_extension' => ['additional_terms'],
+    ];
 
     protected $fillable = [
         'adjustment_number',
@@ -25,6 +42,18 @@ class LoanAdjustment extends Model
         'approved_by',
         'approved_at',
         'applied_at',
+        'cancelled_by',
+        'cancelled_at',
+        'cancellation_reason',
+    ];
+
+    /** Each requested type in words, for audit rows and refusals. */
+    public const TYPE_WORDS = [
+        'restructure' => 'Restructure',
+        'penalty_waiver' => 'Penalty waiver',
+        'balance_adjustment' => 'Balance adjustment',
+        'term_extension' => 'Term extension',
+        'extension' => 'Extension',
     ];
 
     protected function casts(): array
@@ -34,7 +63,29 @@ class LoanAdjustment extends Model
             'new_values' => 'array',
             'approved_at' => 'datetime',
             'applied_at' => 'datetime',
+            'cancelled_at' => 'datetime',
         ];
+    }
+
+    /**
+     * The fields in `$newValues` that belong to another type, not `$type`.
+     *
+     * @param  array<string, mixed>  $newValues
+     * @return list<string>
+     */
+    public static function foreignFields(string $type, array $newValues): array
+    {
+        return array_values(array_diff(array_keys($newValues), self::NEW_VALUE_FIELDS[$type] ?? []));
+    }
+
+    /**
+     * This adjustment's own `new_values` fields, and nothing another type would carry.
+     *
+     * @return array<string, mixed>
+     */
+    public function ownNewValues(): array
+    {
+        return Arr::only($this->new_values ?? [], self::NEW_VALUE_FIELDS[$this->adjustment_type] ?? []);
     }
 
     public function ledgerEntries(): HasMany
@@ -64,5 +115,30 @@ class LoanAdjustment extends Model
     public function approvedByUser(): BelongsTo
     {
         return $this->belongsTo(User::class, 'approved_by');
+    }
+
+    public function cancelledByUser(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'cancelled_by');
+    }
+
+    /** This adjustment's type in words ("Balance adjustment"). */
+    public function typeInWords(): string
+    {
+        return self::TYPE_WORDS[$this->adjustment_type] ?? 'Loan adjustment';
+    }
+
+    /**
+     * Every `{loanAdjustment}` route parameter resolves only to a row whose loan the
+     * signed-in user may see (Loan::visibleTo), so another branch's loan adjustment
+     * answers 404 on every route. Without a signed-in user (console) the
+     * binding is unscoped.
+     */
+    public function resolveRouteBindingQuery($query, $value, $field = null)
+    {
+        return StaffRouteBinding::scope(
+            parent::resolveRouteBindingQuery($query, $value, $field),
+            fn ($query, User $user) => $query->whereIn('loan_id', Loan::visibleTo($user)->select('loans.id')),
+        );
     }
 }

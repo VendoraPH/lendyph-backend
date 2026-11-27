@@ -2,10 +2,12 @@
 
 namespace Tests\Feature;
 
+use App\Models\AuditLog;
 use App\Models\Borrower;
 use App\Models\GCashTier;
 use App\Models\GCashTransaction;
 use App\Models\User;
+use Illuminate\Support\Carbon;
 use Tests\TestCase;
 use Tests\Traits\SetupLendyPH;
 
@@ -44,6 +46,46 @@ class GCashTransactionTest extends TestCase
         $this->assertEquals(20.0, (float) $response->json('data.charge_amount'));
         $this->assertEquals(1020.0, (float) $response->json('data.total_amount'));
         $this->assertStringStartsWith('GC-', $response->json('data.reference_no'));
+    }
+
+    public function test_a_cash_in_recorded_as_paid_is_stamped_paid_when_it_is_recorded(): void
+    {
+        $this->travelTo(Carbon::parse('2026-10-03 14:25:36'));
+
+        $id = $this->postJson('/api/gcash/transactions', [
+            'borrower_id' => $this->borrower->id,
+            'type' => 'cash_in',
+            'amount' => 1000,
+        ])->assertCreated()
+            ->assertJsonPath('data.status', 'paid')
+            ->json('data.id');
+
+        $tx = GCashTransaction::findOrFail($id);
+        $this->assertSame('2026-10-03 14:25:36', $tx->paid_at?->toDateTimeString());
+        $this->assertTrue($tx->paid_at->equalTo($tx->transaction_date));
+        $this->assertNull($tx->paid_by_user_id);
+
+        $created = AuditLog::where('auditable_type', GCashTransaction::class)->where('auditable_id', $id)->where('action', 'created')->sole();
+        $this->assertNotNull($created->new_values['paid_at']);
+    }
+
+    public function test_a_pending_cash_in_and_a_cash_out_have_no_paid_at(): void
+    {
+        $pending = $this->postJson('/api/gcash/transactions', [
+            'borrower_id' => $this->borrower->id,
+            'type' => 'cash_in',
+            'amount' => 1000,
+            'is_pending' => true,
+        ])->assertCreated()->json('data.id');
+
+        $cashOut = $this->postJson('/api/gcash/transactions', [
+            'borrower_id' => $this->borrower->id,
+            'type' => 'cash_out',
+            'amount' => 3000,
+        ])->assertCreated()->json('data.id');
+
+        $this->assertNull(GCashTransaction::findOrFail($pending)->paid_at);
+        $this->assertNull(GCashTransaction::findOrFail($cashOut)->paid_at);
     }
 
     public function test_create_cash_in_pending_when_is_pending_true(): void

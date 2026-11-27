@@ -9,7 +9,10 @@ use App\Models\CsvImportRun;
 use App\Models\Loan;
 use App\Models\LoanProduct;
 use App\Services\AuditLogService;
+use App\Services\LoanTermSchedule;
+use App\Services\Penalties\PenaltyTerms;
 use Carbon\Carbon;
+use Closure;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use LogicException;
@@ -19,8 +22,9 @@ use Throwable;
  * Drives one CSV import run forward by one unit of work at a time.
  *
  * The run is a state machine — staging, then an optional wait for a human to
- * confirm the product mapping, then customers, then loans — and this class owns
- * every transition. The command above it owns only the clock.
+ * confirm the product mapping, then customers, then loans, then share capital
+ * — and this class owns every transition. The command above it owns only the
+ * clock.
  *
  * ## The unit of work is a CHUNK, not a row
  *
@@ -49,7 +53,8 @@ use Throwable;
  * real rows silently. The NULL `result` is the only marker that cannot lie,
  * because it commits with the work.
  *
- * The window is then `id > $cursor AND id <= $cursor + CHUNK_SIZE`, the shape
+ * The window is then `id > $cursor AND id <= $cursor + <window size>` (CHUNK_SIZE,
+ * or LOANS_CHUNK_SIZE in the loans phase), the shape
  * TimezoneShift::apply() uses: it advances by a fixed amount whether or not the
  * rows inside it matched, so the walk terminates by construction rather than by
  * relying on rows falling out of their own WHERE clause.
@@ -70,12 +75,31 @@ use Throwable;
 class CsvImportProcessor
 {
     /**
+     * How many characters of a Loan No. an import kept before round 4, when a
+     * longer one was cut to fit (see self::loanStoredCutShort()).
+     */
+    private const LOAN_NO_CUT_BEFORE_ROUND_4 = 20;
+
+    /**
      * Rows per transaction. Big enough that the sequence lock is taken once per
      * fifty members rather than once per member; small enough that a rollback
      * costs a second of work and that the lock is not held long enough to make a
      * teller's "Save" spin.
      */
     public const CHUNK_SIZE = 50;
+
+    /**
+     * Rows per transaction in the loans phase, smaller than CHUNK_SIZE.
+     *
+     * A loan row rebuilds its whole schedule, so it costs many times a member
+     * row, and the command only checks its budget between windows. The import
+     * screen also measures progress from the run row, which moves once per
+     * committed window. A small window keeps a tick close to its budget, shows
+     * progress often, and limits what a killed tick makes the next one retry
+     * row by row. Only the batching changes: each loan is written exactly as in
+     * a larger window.
+     */
+    public const LOANS_CHUNK_SIZE = 10;
 
     /**
      * How many times a row may be picked up before it is given up on.
@@ -139,13 +163,14 @@ class CsvImportProcessor
      *
      * @var list<string>
      */
-    public const WORKABLE_PHASES = ['assembled', 'staging', 'awaiting_mapping', 'importing_customers', 'importing_loans'];
+    public const WORKABLE_PHASES = ['assembled', 'staging', 'awaiting_mapping', 'importing_customers', 'importing_loans', 'importing_share_capital'];
 
     public function __construct(
         private readonly CsvImportStager $stager = new CsvImportStager,
         private readonly BorrowerMatcher $matcher = new BorrowerMatcher,
         private readonly SequenceAllocator $sequences = new SequenceAllocator,
         private readonly LoanScheduleReconstructor $schedules = new LoanScheduleReconstructor,
+        private readonly ShareCapitalRowImporter $shareCapital = new ShareCapitalRowImporter,
     ) {}
 
     /**
@@ -158,6 +183,7 @@ class CsvImportProcessor
             'awaiting_mapping' => $this->mappingGate($run),
             'importing_customers' => $this->importCustomers($run),
             'importing_loans' => $this->importLoans($run),
+            'importing_share_capital' => $this->importShareCapital($run),
             default => new ImportTick($run->phase, 0, idle: true, note: "Phase [{$run->phase}] is not workable."),
         };
     }
@@ -324,7 +350,7 @@ class CsvImportProcessor
 
         $this->markInvalidRowsSkipped($file);
 
-        $rows = $this->nextWindow($file);
+        $rows = $this->nextWindow($file, self::CHUNK_SIZE);
 
         if ($rows === []) {
             return $this->finishCustomers($run);
@@ -350,7 +376,7 @@ class CsvImportProcessor
         $loansFile = $run->loansFile;
 
         if ($loansFile === null) {
-            return $this->completeRun($run);
+            return $this->beginShareCapital($run);
         }
 
         if (! $this->stager->isStaged($loansFile)) {
@@ -378,15 +404,15 @@ class CsvImportProcessor
         $file = $run->loansFile;
 
         if ($file === null) {
-            return $this->completeRun($run);
+            return $this->beginShareCapital($run);
         }
 
         $this->markInvalidRowsSkipped($file);
 
-        $rows = $this->nextWindow($file);
+        $rows = $this->nextWindow($file, self::LOANS_CHUNK_SIZE);
 
         if ($rows === []) {
-            return $this->completeRun($run);
+            return $this->beginShareCapital($run);
         }
 
         $processed = $this->processWindow($run, $rows, CsvImportSchema::LOANS);
@@ -402,6 +428,83 @@ class CsvImportProcessor
         ]);
 
         return new ImportTick('importing_loans', $processed);
+    }
+
+    /**
+     * The share capital file's turn, after the members and the loans: its rows
+     * find their members among those already in Lendyph and those this run's
+     * members file just wrote (finish run round 2, decision 13). A run with
+     * no share capital file is complete.
+     */
+    private function beginShareCapital(CsvImportRun $run): ImportTick
+    {
+        $file = $run->shareCapitalFile;
+
+        if ($file === null) {
+            return $this->completeRun($run);
+        }
+
+        if (! $this->stager->isStaged($file)) {
+            // Defensive, as for the loans file: never import from rows that
+            // do not exist yet.
+            $this->setPhase($run, 'staging');
+
+            return new ImportTick('staging', 0, note: 'The share capital file still needs staging.');
+        }
+
+        $this->setPhase($run, 'importing_share_capital', ['cursor_row_id' => null]);
+
+        Log::info('csv-import: importing share capital', [
+            'csv_import_run_id' => $run->id,
+            'csv_import_file_id' => $file->id,
+        ]);
+
+        return new ImportTick('importing_share_capital', 0, note: 'Share capital import started.');
+    }
+
+    /**
+     * One window of the share capital file: every contribution first, then
+     * the withdrawals, whatever order the file lists them in. A withdrawal is
+     * refused when it would take the member's balance below ₱0.00
+     * (ShareCapitalRowImporter), so the file's own contributions are all on
+     * the ledger before any withdrawal is weighed against it.
+     */
+    private function importShareCapital(CsvImportRun $run): ImportTick
+    {
+        $this->assertCustomersComplete($run);
+
+        $file = $run->shareCapitalFile;
+
+        if ($file === null) {
+            return $this->completeRun($run);
+        }
+
+        $this->markInvalidRowsSkipped($file);
+
+        $type = 'normalized->values['.CsvImportSchema::indexOf(CsvImportSchema::SHARE_CAPITAL, 'transaction_type').']';
+        $rows = $this->nextWindow($file, self::CHUNK_SIZE, static fn ($rows) => $rows->where($type, ShareCapitalRowNormalizer::CREDIT));
+
+        if ($rows === []) {
+            $rows = $this->nextWindow($file, self::CHUNK_SIZE);
+        }
+
+        if ($rows === []) {
+            return $this->completeRun($run);
+        }
+
+        $processed = $this->processWindow($run, $rows, CsvImportSchema::SHARE_CAPITAL);
+        $this->rememberCursor($run, $rows);
+
+        Log::info('csv-import: share capital chunk done', [
+            'csv_import_run_id' => $run->id,
+            'csv_import_file_id' => $file->id,
+            'rows' => $processed,
+            'from_row_id' => $rows[0]->id,
+            'to_row_id' => $rows[array_key_last($rows)]->id,
+            'remaining' => $this->pendingCount($file),
+        ]);
+
+        return new ImportTick('importing_share_capital', $processed);
     }
 
     /**
@@ -473,7 +576,7 @@ class CsvImportProcessor
             ->update([
                 'result' => 'skipped',
                 'result_category' => 'invalid_row',
-                'result_message' => 'This row did not pass validation at staging and was not imported. See its per-field errors.',
+                'result_message' => 'This row didn\'t pass the checks before import, so it wasn\'t imported. Its errors are listed by field.',
                 'updated_at' => now(),
             ]);
     }
@@ -481,14 +584,20 @@ class CsvImportProcessor
     /**
      * The next chunk, re-derived from the data rather than from the cursor.
      *
+     * `$narrow`, when given, keeps only some of the rows still to do (the
+     * share capital file's contributions), for both the resume point and the
+     * window.
+     *
+     * @param  Closure|null  $narrow  takes the rows query and narrows it
      * @return list<CsvImportRow>
      */
-    private function nextWindow(CsvImportFile $file): array
+    private function nextWindow(CsvImportFile $file, int $size, ?Closure $narrow = null): array
     {
         $min = DB::table('csv_import_rows')
             ->where('csv_import_file_id', $file->id)
             ->where('status', 'valid')
             ->whereNull('result')
+            ->when($narrow !== null, $narrow)
             ->min('id');
 
         if ($min === null) {
@@ -501,8 +610,9 @@ class CsvImportProcessor
             ->where('csv_import_file_id', $file->id)
             ->where('status', 'valid')
             ->whereNull('result')
+            ->when($narrow !== null, $narrow)
             ->where('id', '>', $cursor)
-            ->where('id', '<=', $cursor + self::CHUNK_SIZE)
+            ->where('id', '<=', $cursor + $size)
             ->orderBy('id')
             ->get()
             ->all();
@@ -564,9 +674,25 @@ class CsvImportProcessor
             return count($rows);
         }
 
+        // The share capital writer reads who started the run and the cash
+        // series' owner before any chunk transaction opens, as CashReferences
+        // wants its owner read (ShareCapitalRowImporter::writerFor()).
+        $shareCapital = $shape === CsvImportSchema::SHARE_CAPITAL ? $this->shareCapital->writerFor($run) : null;
+
+        if ($retrying) {
+            // A tick killed mid-window leaves no log line of its own, so this
+            // is the first moment anyone can know it happened.
+            Log::warning('csv-import: resuming a window an interrupted tick left, row by row', [
+                'csv_import_run_id' => $run->id,
+                'shape' => $shape,
+                'rows' => count($workable),
+                'from_row_id' => $workable[0]->id,
+            ]);
+        }
+
         if (! $retrying) {
             try {
-                DB::transaction(fn () => $this->writeChunk($run, $workable, $shape));
+                DB::transaction(fn () => $this->writeChunk($run, $workable, $shape, $shareCapital));
 
                 return count($rows);
             } catch (Throwable $e) {
@@ -593,7 +719,7 @@ class CsvImportProcessor
 
         foreach ($workable as $row) {
             try {
-                DB::transaction(fn () => $this->writeChunk($run, [$row], $shape));
+                DB::transaction(fn () => $this->writeChunk($run, [$row], $shape, $shareCapital));
             } catch (Throwable $e) {
                 $context = ImportErrorDigest::context($e);
 
@@ -638,18 +764,22 @@ class CsvImportProcessor
      * it and prove the rollback took the borrowers AND the stamps with it.
      *
      * @param  list<CsvImportRow>  $rows
+     * @param  (Closure(CsvImportRow): RowOutcome)|null  $shareCapital  the share capital file's writer, built before the transaction (processWindow())
      *
      * @throws LogicException when called outside a transaction
      */
-    public function writeChunk(CsvImportRun $run, array $rows, string $shape): void
+    public function writeChunk(CsvImportRun $run, array $rows, string $shape, ?Closure $shareCapital = null): void
     {
         // Takes the same row lock Borrower::booted() and Loan::booted() take,
         // and holds it for the whole chunk because the caller's transaction is
         // still open. The codes it returns are a prediction, not an assignment
         // — the hooks issue the real ones and arrive at the same values.
-        $shape === CsvImportSchema::CUSTOMERS
-            ? $this->sequences->allocateBorrowerCodes(count($rows))
-            : $this->sequences->allocateApplicationNumbers(count($rows));
+        match ($shape) {
+            CsvImportSchema::CUSTOMERS => $this->sequences->allocateBorrowerCodes(count($rows)),
+            CsvImportSchema::LOANS => $this->sequences->allocateApplicationNumbers(count($rows)),
+            // A share capital entry takes no member code or application number.
+            default => null,
+        };
 
         // Drops the Auditable trait's per-model row WITHOUT dropping the model
         // event, so Borrower::booted()'s `created` hook still creates the
@@ -671,18 +801,27 @@ class CsvImportProcessor
         // an absence in `audit_logs` that nobody notices until an auditor asks.
         // If you add a write here, decide explicitly whether it belongs in the
         // run's summary row (self::finalise()) and put it there.
-        AuditLogService::withoutModelAuditing(function () use ($run, $rows, $shape): void {
+        // Asked again here, not only at staging: a run can wait days on its
+        // product mapping, and its starter can lose the access meanwhile.
+        $membershipAllowed = $shape === CsvImportSchema::CUSTOMERS && $run->starterMayEditMembers();
+        // The same for share capital: the starter's access, read once a chunk
+        // (here only for a caller that didn't build the writer first).
+        $shareCapital ??= $shape === CsvImportSchema::SHARE_CAPITAL ? $this->shareCapital->writerFor($run) : null;
+
+        AuditLogService::withoutModelAuditing(function () use ($run, $rows, $shape, $membershipAllowed, $shareCapital): void {
             foreach ($rows as $row) {
-                $outcome = $shape === CsvImportSchema::CUSTOMERS
-                    ? $this->importCustomerRow($run, $row)
-                    : $this->importLoanRow($run, $row);
+                $outcome = match (true) {
+                    $shareCapital !== null => $shareCapital($row),
+                    $shape === CsvImportSchema::CUSTOMERS => $this->importCustomerRow($run, $row, $membershipAllowed),
+                    default => $this->importLoanRow($run, $row),
+                };
 
                 $this->stamp($row, $outcome);
             }
         });
     }
 
-    private function importCustomerRow(CsvImportRun $run, CsvImportRow $row): RowOutcome
+    private function importCustomerRow(CsvImportRun $run, CsvImportRow $row, bool $membershipAllowed): RowOutcome
     {
         $normalized = NormalizedRow::fromPayload((array) $row->normalized);
 
@@ -703,6 +842,19 @@ class CsvImportProcessor
 
         if ($match->needsReview()) {
             return RowOutcome::skipped($match->outcome, (string) $match->reason, $match->borrower?->id);
+        }
+
+        if (! $membershipAllowed && $this->carriesMembership($normalized)) {
+            return RowOutcome::failed(CustomerRowNormalizer::MEMBERSHIP_NEEDS_MEMBER_EDIT, CustomerRowNormalizer::MEMBERSHIP_NEEDS_MEMBER_EDIT_MESSAGE);
+        }
+
+        // Asked here rather than at staging: in this transaction the rows
+        // already written are visible, an earlier row of this same file
+        // included. The unique index stays the backstop for a race with staff.
+        $membershipNumber = $normalized->value('membership_number');
+
+        if (is_string($membershipNumber) && Borrower::query()->where('membership_number', $membershipNumber)->exists()) {
+            return RowOutcome::failed('membership_number_taken', "Membership Number {$membershipNumber} is already another member's, and each member's number is their own. Correct it in the file, or leave it blank to use the member's own code.");
         }
 
         $street = $normalized->value('street_address');
@@ -738,6 +890,7 @@ class CsvImportProcessor
             'city' => $normalized->value('city'),
             'province' => $normalized->value('province'),
             'employer_or_business' => $normalized->value('employer_or_business'),
+            'date_hired' => $normalized->value('date_hired'),
             'monthly_income' => $this->pesos($this->money($normalized, 'monthly_income')),
             /*
              * Read by Borrower::booted()'s `created` hook to size the member's
@@ -751,6 +904,15 @@ class CsvImportProcessor
             'spouse_last_name' => $normalized->value('spouse_last_name'),
             'spouse_contact_number' => $normalized->value('spouse_contact_number'),
             'spouse_occupation' => $normalized->value('spouse_occupation'),
+            /*
+             * The CDA membership columns, where the file gives them. A blank
+             * membership date stays blank for staff to enter, as before; a date
+             * with no number gets the member's own code (Borrower::booted()),
+             * and a blank type is the app's default for every new member.
+             */
+            'membership_date' => $normalized->value('membership_date'),
+            'member_type' => $normalized->value('member_type') ?? Borrower::MEMBER_TYPE_REGULAR,
+            'membership_number' => $membershipNumber,
             'branch_id' => $run->branch_id,
             /*
              * `active`, never `pending`.
@@ -805,7 +967,13 @@ class CsvImportProcessor
             );
         }
 
-        $borrower = Borrower::query()->where('external_account_no', $accountNo)->first();
+        $storedCutShort = $this->loanStoredCutShort($row, $normalized, $loanNo, $accountNo);
+
+        if ($storedCutShort !== null) {
+            return $storedCutShort;
+        }
+
+        $borrower = Borrower::query()->where('external_account_no', $accountNo)->sharedLock()->first();
 
         if ($borrower === null) {
             return RowOutcome::failed(
@@ -904,10 +1072,10 @@ class CsvImportProcessor
             'branch_id' => $borrower->branch_id ?? $run->branch_id,
             'interest_rate' => $normalized->value('interest_rate'),
             'interest_method' => $normalized->value('interest_type'),
-            // A PERIOD COUNT in units of `frequency`, derived from the dates by
-            // the reconstructor. NOT the CSV's "Term in Months", which would
-            // corrupt every loan that is not monthly.
-            'term' => $schedule->term,
+            // From the PERIOD COUNT the reconstructor derived from the dates —
+            // NOT the CSV's "Term in Months", which would corrupt every loan
+            // that is not monthly — as the exact term that reproduces it.
+            ...LoanTermSchedule::fromPeriodCount($schedule->term, $normalized->value('payment_frequency')),
             'frequency' => $normalized->value('payment_frequency'),
             'principal_amount' => $this->pesos($principal),
             'purpose' => $normalized->value('purpose'),
@@ -927,7 +1095,7 @@ class CsvImportProcessor
             ),
             'total_deductions' => $this->pesos($totalDeductions),
             'net_proceeds' => $this->pesos($principal - $totalDeductions),
-            'penalty_rate' => $product->penalty_rate,
+            ...PenaltyTerms::forProduct($product),
             'grace_period_days' => $product->grace_period_days,
             /*
              * `ongoing`, not `released`.
@@ -948,6 +1116,9 @@ class CsvImportProcessor
             // user of this system released it.
             'released_at' => Carbon::parse((string) $normalized->value('date_released'))->startOfDay(),
             'created_by' => $run->initiated_by,
+            // Its principal ladder came from the exact engine
+            // (LoanScheduleReconstructor::stubLoan()), so any rebuild matches.
+            'schedule_rounding' => Loan::SCHEDULE_ROUNDING_EXACT,
         ]);
 
         $now = now();
@@ -992,12 +1163,16 @@ class CsvImportProcessor
          * their own file. The reconstructed period count is a different number
          * in a different unit and comparing it here would report breaches that
          * are not there for every non-monthly loan.
+         *
+         * The payment frequency names the period the rate is stored in, so
+         * the rate is compared with the product's range in like periods.
          */
         $breaches = ProductMappingResolver::boundsBreaches(
             $product,
             $principal,
             $normalized->value('term_in_months'),
             $normalized->value('interest_rate'),
+            $normalized->value('payment_frequency'),
         );
 
         $messages = $warnings === [] ? [] : [$this->joinNotes($warnings)];
@@ -1061,6 +1236,20 @@ class CsvImportProcessor
         }
 
         return $items;
+    }
+
+    /**
+     * Whether a staged member row holds a value in any membership column.
+     */
+    private function carriesMembership(NormalizedRow $normalized): bool
+    {
+        foreach (CustomerRowNormalizer::MEMBERSHIP_FIELDS as $field) {
+            if ($normalized->value($field) !== null) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**
@@ -1136,6 +1325,7 @@ class CsvImportProcessor
             'result_message' => $outcome->message === null ? null : mb_substr($outcome->message, 0, 2000),
             'borrower_id' => $outcome->borrowerId,
             'loan_id' => $outcome->loanId,
+            'share_capital_ledger_id' => $outcome->shareCapitalLedgerId,
             'updated_at' => now(),
         ]);
     }
@@ -1286,6 +1476,11 @@ class CsvImportProcessor
     {
         $written = "{$summary['borrowers_imported']} member(s) and {$summary['loans_imported']} loan(s)";
 
+        if (array_key_exists('share_capital', $summary['by_file'])) {
+            $entries = $summary['share_capital_imported'];
+            $written = "{$summary['borrowers_imported']} member(s), {$summary['loans_imported']} loan(s) and {$entries} share capital ".($entries === 1 ? 'entry' : 'entries');
+        }
+
         return match ($phase) {
             'completed' => "CSV migration run #{$run->id} completed: {$written} imported.",
             'failed' => "CSV migration run #{$run->id} failed: {$written} had already been imported when it stopped.",
@@ -1320,6 +1515,7 @@ class CsvImportProcessor
             'borrowers_matched' => (int) ($counts['customers']['matched_existing'] ?? 0)
                 + (int) ($counts['customers']['already_imported'] ?? 0),
             'loans_imported' => (int) ($counts['loans']['imported'] ?? 0),
+            'share_capital_imported' => (int) ($counts['share_capital']['imported'] ?? 0),
             'by_file' => $counts,
         ];
     }
@@ -1352,5 +1548,90 @@ class CsvImportProcessor
         $run->forceFill([
             'notes' => array_replace((array) ($run->notes ?? []), $additions),
         ])->save();
+    }
+
+    /**
+     * A loan an earlier import stored under the first 20 characters of its
+     * Loan No.: before round 4 a Loan No. of 21 to 50 characters was cut to 20
+     * (`loans.external_loan_no`), and an import since names it in full, so the
+     * exact lookup misses it. Only a loan whose own import row noted that cut
+     * is looked for (self::wasCutWhenImported()): a genuine 20-character Loan
+     * No. stands for itself. Found by those 20 characters:
+     *  - the same member, date released and loan amount: the same loan, already
+     *    imported, with the outcome of any already-imported row; but only once
+     *    a run, so a second row of the run matching it is refused;
+     *  - anything else: a different loan whose number was cut to the same 20
+     *    characters. Refused in words, never created, so the two can't be
+     *    mixed up.
+     * Null when the Loan No. is 20 characters or fewer, or no loan was stored
+     * cut under its first 20.
+     */
+    private function loanStoredCutShort(CsvImportRow $row, NormalizedRow $normalized, string $loanNo, string $accountNo): ?RowOutcome
+    {
+        if (mb_strlen($loanNo) <= self::LOAN_NO_CUT_BEFORE_ROUND_4) {
+            return null;
+        }
+
+        $cut = mb_substr($loanNo, 0, self::LOAN_NO_CUT_BEFORE_ROUND_4);
+        $stored = Loan::query()->where('external_loan_no', $cut)->first();
+
+        if ($stored === null || ! $this->wasCutWhenImported($stored)) {
+            return null;
+        }
+
+        $member = Borrower::query()->where('external_account_no', $accountNo)->first();
+        $sameLoan = $member !== null
+            && $stored->borrower_id === $member->id
+            && $stored->start_date?->toDateString() === $normalized->value('date_released')
+            && (string) $stored->principal_amount === $this->pesos((int) $this->money($normalized, 'loan_amount'));
+
+        if (! $sameLoan) {
+            return RowOutcome::failed(
+                'loan_no_shortened_earlier',
+                "An earlier import filed loan {$stored->application_number} under {$cut}, this Loan No.'s first 20 characters, and its member, date released or loan amount differ from this row's. The row wasn't imported, so the two aren't mixed up: check it against {$stored->application_number}.",
+                borrowerId: $member?->id,
+            );
+        }
+
+        // Rows are stamped as they are decided, inside the chunk's transaction,
+        // so an earlier row's claim on this loan is already on file.
+        $claimed = CsvImportRow::query()
+            ->where('csv_import_file_id', $row->csv_import_file_id)
+            ->where('loan_id', $stored->id)
+            ->where('id', '<', $row->id)
+            ->orderBy('id')
+            ->first(['id', 'line_number']);
+
+        if ($claimed !== null) {
+            return RowOutcome::failed(
+                'loan_no_shortened_earlier',
+                "Loan {$loanNo} matches loan {$stored->application_number}, which an earlier import filed under {$cut}, but line {$claimed->line_number} of this file already matched that loan. The row wasn't imported, so one loan isn't matched twice: check which of the two rows is that loan.",
+                borrowerId: $member->id,
+            );
+        }
+
+        return RowOutcome::alreadyImported(
+            $stored->borrower_id,
+            "Loan {$loanNo} is already on file as {$stored->application_number}: an earlier import filed it under its first 20 characters, {$cut}. The row was skipped.",
+            loanId: $stored->id,
+        );
+    }
+
+    /**
+     * Whether a loan's Loan No. was cut short when it was imported: the row that
+     * imported it noted the cut on its Loan No. (code `truncated`). Redaction
+     * keeps a row's loan and each note's field and code, so the mark outlives
+     * the row's data.
+     */
+    private function wasCutWhenImported(Loan $loan): bool
+    {
+        return CsvImportRow::query()
+            ->where('loan_id', $loan->id)
+            ->where('result', 'imported')
+            ->get(['normalized'])
+            ->contains(static fn (CsvImportRow $importRow): bool => collect((array) ($importRow->normalized['warnings'] ?? []))
+                ->contains(static fn (mixed $note): bool => is_array($note)
+                    && ($note['field'] ?? null) === 'loan_no'
+                    && ($note['code'] ?? null) === 'truncated'));
     }
 }

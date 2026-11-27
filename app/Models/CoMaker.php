@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Support\StaffRouteBinding;
 use App\Traits\Auditable;
 use Illuminate\Database\Eloquent\Casts\Attribute;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
@@ -16,6 +17,7 @@ class CoMaker extends Model
 
     protected $fillable = [
         'borrower_id',
+        'member_borrower_id',
         'first_name',
         'middle_name',
         'last_name',
@@ -67,6 +69,22 @@ class CoMaker extends Model
 
     public function loans(): BelongsToMany
     {
-        return $this->belongsToMany(Loan::class, 'co_maker_loan')->withTimestamps();
+        return $this->belongsToMany(Loan::class, 'co_maker_loan')
+            ->withPivot('added_by')
+            ->withTimestamps();
+    }
+
+    /**
+     * Every `{coMaker}` route parameter resolves only to a co-maker whose
+     * borrower the signed-in user may see (Borrower::visibleTo), so another
+     * branch's co-maker answers 404. Without a signed-in user the binding is
+     * unscoped.
+     */
+    public function resolveRouteBindingQuery($query, $value, $field = null)
+    {
+        return StaffRouteBinding::scope(
+            parent::resolveRouteBindingQuery($query, $value, $field),
+            fn ($query, User $user) => $query->whereHas('borrower', fn ($q) => $q->visibleTo($user)),
+        );
     }
 }

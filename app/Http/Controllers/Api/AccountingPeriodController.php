@@ -7,6 +7,7 @@ use App\Http\Resources\AccountingPeriodResource;
 use App\Models\AccountingPeriod;
 use App\Services\Accounting\PeriodCalendar;
 use App\Services\Accounting\PeriodGuard;
+use App\Services\Accounting\YearEndCloser;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
 use OpenApi\Attributes as OA;
@@ -22,7 +23,10 @@ use OpenApi\Attributes as OA;
  */
 class AccountingPeriodController extends Controller
 {
-    public function __construct(private PeriodCalendar $calendar) {}
+    public function __construct(
+        private PeriodCalendar $calendar,
+        private YearEndCloser $yearEnd,
+    ) {}
 
     #[OA\Get(
         path: '/api/accounting/periods',
@@ -106,14 +110,15 @@ class AccountingPeriodController extends Controller
         responses: [
             new OA\Response(response: 200, description: 'Period reopened'),
             new OA\Response(response: 403, description: 'Missing accounting:close'),
-            new OA\Response(response: 422, description: 'Already open'),
+            new OA\Response(response: 422, description: 'Already open, or the month is part of a year-end close (reopen the year instead)'),
         ],
     )]
     public function reopen(AccountingPeriod $period): JsonResponse
     {
         $this->authorize('accounting:close');
 
-        return $this->respond($this->calendar->reopen($period, request()->user()));
+        // Through the year-end closer, which refuses a month of a closed year.
+        return $this->respond($this->yearEnd->reopenPeriod($period, request()->user()));
     }
 
     /** One period in the `{"data": {...}}` envelope `api.post` unwraps. */

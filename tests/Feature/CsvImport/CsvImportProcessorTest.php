@@ -649,6 +649,194 @@ class CsvImportProcessorTest extends TestCase
     }
 
     /**
+     * `loans.purpose` holds 500 characters. A Purpose of 501 to 1,000 used to
+     * pass staging whole and fail at the insert; it now imports, cut to 500.
+     */
+    public function test_a_purpose_of_501_to_1000_characters_imports_cut_to_its_column(): void
+    {
+        $this->seedForImport();
+
+        $product = $this->salaryLoanProduct();
+        $run = $this->makeRun(['product_mapping' => ['Salary Loan' => $product->id]]);
+        $long = mb_substr(str_repeat('Hog raising and feeds. ', 50), 0, 1000);
+
+        $this->makeFile($run, 'customers', [$this->customerRow('A-001')]);
+        $loans = $this->makeFile($run, 'loans', [
+            $this->loanRow('A-001', 'L-501', ['purpose' => mb_substr($long, 0, 501)]),
+            $this->loanRow('A-001', 'L-1000', ['purpose' => $long]),
+        ]);
+
+        $this->runToIdle($run);
+
+        $this->assertSame('completed', $run->fresh()->phase);
+
+        foreach (['L-501', 'L-1000'] as $loanNo) {
+            $this->assertSame(mb_substr($long, 0, 500), Loan::where('external_loan_no', $loanNo)->firstOrFail()->purpose, $loanNo);
+        }
+
+        $rows = CsvImportRow::where('csv_import_file_id', $loans->id)->orderBy('id')->get();
+        $this->assertSame(['imported', 'imported'], $rows->pluck('result')->all());
+        $this->assertSame(['imported_with_warnings', 'imported_with_warnings'], $rows->pluck('result_category')->all());
+    }
+
+    /**
+     * Before round 4 a Loan No. of 21 to 50 characters was stored as its first
+     * 20. Re-importing the same export names the loan in full, so the exact
+     * lookup misses the stored one: it must still be found, by its first 20,
+     * and never created a second time with its balance. A different loan whose
+     * number shares those 20 characters is refused, never created.
+     */
+    /**
+     * A loan as an import stored it before round 4: its Loan No. cut to the
+     * first 20 characters, and its import row's note saying so, as redaction
+     * leaves it (the note's field and code, and the row's loan).
+     */
+    private function storeLoanCutShort(LoanProduct $product, string $fullLoanNo): Loan
+    {
+        $earlier = $this->makeRun(['product_mapping' => ['Salary Loan' => $product->id]]);
+        $this->makeFile($earlier, 'customers', [$this->customerRow('A-001')]);
+        $loans = $this->makeFile($earlier, 'loans', [$this->loanRow('A-001', mb_substr($fullLoanNo, 0, 20))]);
+        $this->runToIdle($earlier);
+
+        $row = CsvImportRow::where('csv_import_file_id', $loans->id)->firstOrFail();
+        DB::table('csv_import_rows')->where('id', $row->id)->update(['normalized' => json_encode([
+            'shape' => CsvImportSchema::LOANS,
+            'row' => $row->record_number,
+            'warnings' => [['field' => 'loan_no', 'code' => 'truncated']],
+        ])]);
+
+        return Loan::findOrFail($row->loan_id);
+    }
+
+    public function test_a_loan_stored_under_its_cut_number_is_already_imported_when_named_in_full(): void
+    {
+        $this->seedForImport();
+
+        $product = $this->salaryLoanProduct();
+        $stored = $this->storeLoanCutShort($product, 'LN-2023-000000000001-A');
+
+        // The same export again, the loan named in full, beside a different
+        // loan whose number shares the same first 20 characters.
+        $again = $this->makeRun(['product_mapping' => ['Salary Loan' => $product->id]]);
+        $this->makeFile($again, 'customers', [$this->customerRow('A-001')]);
+        $loans = $this->makeFile($again, 'loans', [
+            $this->loanRow('A-001', 'LN-2023-000000000001-A'),
+            $this->loanRow('A-001', 'LN-2023-000000000001-B', ['loan_amount' => '50,000.00']),
+        ]);
+        $this->runToIdle($again);
+
+        $this->assertSame('completed', $again->fresh()->phase);
+        $this->assertSame([$stored->id], Loan::whereNotNull('external_loan_no')->pluck('id')->all(), 'Nothing is created a second time.');
+
+        $rows = CsvImportRow::where('csv_import_file_id', $loans->id)->orderBy('id')->get();
+        $this->assertSame(['already_imported', 'failed'], $rows->pluck('result')->all());
+        $this->assertSame($stored->id, $rows[0]->loan_id);
+        $this->assertSame(
+            "Loan LN-2023-000000000001-A is already on file as {$stored->application_number}: an earlier import filed it under its first 20 characters, LN-2023-000000000001. The row was skipped.",
+            $rows[0]->result_message,
+        );
+        $this->assertSame('loan_no_shortened_earlier', $rows[1]->result_category);
+        $this->assertSame(
+            "An earlier import filed loan {$stored->application_number} under LN-2023-000000000001, this Loan No.'s first 20 characters, and its member, date released or loan amount differ from this row's. The row wasn't imported, so the two aren't mixed up: check it against {$stored->application_number}.",
+            $rows[1]->result_message,
+        );
+    }
+
+    /**
+     * Only a number that was cut is looked for by its first 20 characters. A
+     * genuine 20-character Loan No., with no cut noted on its import row,
+     * doesn't stand in for a longer number that starts with it.
+     */
+    public function test_a_genuine_20_character_loan_no_does_not_block_a_longer_one_that_starts_with_it(): void
+    {
+        $this->seedForImport();
+
+        $product = $this->salaryLoanProduct();
+        $first = $this->makeRun(['product_mapping' => ['Salary Loan' => $product->id]]);
+        $this->makeFile($first, 'customers', [$this->customerRow('A-001')]);
+        $this->makeFile($first, 'loans', [$this->loanRow('A-001', 'LN-2023-000000000001')]);
+        $this->runToIdle($first);
+
+        $then = $this->makeRun(['product_mapping' => ['Salary Loan' => $product->id]]);
+        $this->makeFile($then, 'customers', [$this->customerRow('A-001')]);
+        $loans = $this->makeFile($then, 'loans', [$this->loanRow('A-001', 'LN-2023-000000000001-A')]);
+        $this->runToIdle($then);
+
+        $this->assertSame('imported', CsvImportRow::where('csv_import_file_id', $loans->id)->firstOrFail()->result);
+        $this->assertSame(
+            ['LN-2023-000000000001', 'LN-2023-000000000001-A'],
+            Loan::whereNotNull('external_loan_no')->orderBy('id')->pluck('external_loan_no')->all(),
+        );
+    }
+
+    /**
+     * A stored loan is claimed once per run. Two rows with different full
+     * numbers, both matching one loan stored under their first 20 characters,
+     * can't both be that loan: the second is refused, never silently skipped.
+     */
+    public function test_a_loan_stored_cut_short_is_claimed_once_per_run(): void
+    {
+        $this->seedForImport();
+
+        $product = $this->salaryLoanProduct();
+        $stored = $this->storeLoanCutShort($product, 'LN-2023-000000000001-A');
+
+        $again = $this->makeRun(['product_mapping' => ['Salary Loan' => $product->id]]);
+        $this->makeFile($again, 'customers', [$this->customerRow('A-001')]);
+        $loans = $this->makeFile($again, 'loans', [
+            $this->loanRow('A-001', 'LN-2023-000000000001-A'),
+            $this->loanRow('A-001', 'LN-2023-000000000001-B'),
+        ]);
+        $this->runToIdle($again);
+
+        $this->assertSame([$stored->id], Loan::whereNotNull('external_loan_no')->pluck('id')->all());
+
+        $rows = CsvImportRow::where('csv_import_file_id', $loans->id)->orderBy('id')->get();
+        $this->assertSame(['already_imported', 'failed'], $rows->pluck('result')->all());
+        $this->assertSame('loan_no_shortened_earlier', $rows[1]->result_category);
+        $this->assertNull($rows[1]->loan_id);
+        $this->assertSame(
+            "Loan LN-2023-000000000001-B matches loan {$stored->application_number}, which an earlier import filed under LN-2023-000000000001, but line {$rows[0]->line_number} of this file already matched that loan. The row wasn't imported, so one loan isn't matched twice: check which of the two rows is that loan.",
+            $rows[1]->result_message,
+        );
+    }
+
+    /**
+     * Two Loan Nos alike in their first 20 characters are two loans. Cut to 20,
+     * they read as one number, and the second was taken for a re-run of the
+     * first ("already on file") and never imported. Kept whole, both land; past
+     * the column's 50 a Loan No. is refused, never cut.
+     */
+    public function test_loan_numbers_alike_in_their_first_20_characters_import_as_two_loans(): void
+    {
+        $this->seedForImport();
+
+        $product = $this->salaryLoanProduct();
+        $run = $this->makeRun(['product_mapping' => ['Salary Loan' => $product->id]]);
+        $tooLong = 'LN-2023-'.str_repeat('9', 43);
+
+        $this->makeFile($run, 'customers', [$this->customerRow('A-001')]);
+        $loans = $this->makeFile($run, 'loans', [
+            $this->loanRow('A-001', 'LN-2023-000000000001-A'),
+            $this->loanRow('A-001', 'LN-2023-000000000001-B'),
+            $this->loanRow('A-001', $tooLong),
+        ]);
+
+        $this->runToIdle($run);
+
+        $this->assertSame('completed', $run->fresh()->phase);
+        $this->assertSame(
+            ['LN-2023-000000000001-A', 'LN-2023-000000000001-B'],
+            Loan::whereNotNull('external_loan_no')->orderBy('id')->pluck('external_loan_no')->all(),
+        );
+
+        $rows = CsvImportRow::where('csv_import_file_id', $loans->id)->orderBy('id')->get();
+        $this->assertSame(['imported', 'imported', 'skipped'], $rows->pluck('result')->all());
+        $this->assertSame(51, mb_strlen($tooLong));
+        $this->assertSame(['loan_no_too_long'], array_column((array) $rows[2]->errors, 'code'));
+    }
+
+    /**
      * An imported member is admitted BY somebody, ON a date — and neither is
      * "now", and neither is nobody.
      *
@@ -833,6 +1021,38 @@ class CsvImportProcessorTest extends TestCase
         $this->assertSame('imported', $row->result);
         $this->assertNotSame(CsvImportProcessor::CATEGORY_OUT_OF_PRODUCT_BOUNDS, $row->result_category);
         $this->assertSame(0, CsvImportRow::where('result_category', CsvImportProcessor::CATEGORY_OUT_OF_PRODUCT_BOUNDS)->count());
+    }
+
+    /**
+     * A semi-monthly loan's rate is stored per half-month, so it is compared
+     * with a monthly product's range as a half-month rate. 1.5% per half-month
+     * is 3% a month, inside the product's 3% ceiling, and must not be flagged
+     * as below the floor.
+     */
+    public function test_a_non_monthly_loans_rate_is_compared_in_its_own_period(): void
+    {
+        $this->seedForImport();
+
+        $product = $this->salaryLoanProduct();
+        $run = $this->makeRun(['product_mapping' => ['Salary Loan' => $product->id]]);
+
+        $this->makeFile($run, 'customers', [$this->customerRow('A-001'), $this->customerRow('A-002')]);
+        $this->makeFile($run, 'loans', [
+            $this->loanRow('A-001', 'L-1', ['interest_rate' => '1.5', 'payment_frequency' => 'Semi-Monthly']),
+            // 2% per half-month is 4% a month: above the ceiling.
+            $this->loanRow('A-002', 'L-2', ['interest_rate' => '2', 'payment_frequency' => 'Semi-Monthly']),
+        ]);
+
+        $this->runToIdle($run);
+
+        $inside = CsvImportRow::where('loan_id', Loan::where('external_loan_no', 'L-1')->value('id'))->firstOrFail();
+        $this->assertSame('imported', $inside->result);
+        $this->assertNotSame(CsvImportProcessor::CATEGORY_OUT_OF_PRODUCT_BOUNDS, $inside->result_category);
+        $this->assertStringNotContainsString('rate_below_min', (string) $inside->result_message);
+
+        $above = CsvImportRow::where('loan_id', Loan::where('external_loan_no', 'L-2')->value('id'))->firstOrFail();
+        $this->assertSame(CsvImportProcessor::CATEGORY_OUT_OF_PRODUCT_BOUNDS, $above->result_category);
+        $this->assertStringContainsString('rate_above_max', (string) $above->result_message);
     }
 
     /**

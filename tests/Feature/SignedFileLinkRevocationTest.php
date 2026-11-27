@@ -133,6 +133,11 @@ it('leaves an anonymous applicants link unbound', function () {
         'contact_number' => '09170000001',
         'email' => 'anon.applicant@example.com',
         'address' => '1 Mango St',
+        'birthdate' => '1990-05-12',
+        'civil_status' => 'single',
+        'gender' => 'female',
+        'city' => 'Butuan',
+        'province' => 'Agusan del Norte',
     ])->assertCreated();
 
     $borrowerId = $created->json('data.id');

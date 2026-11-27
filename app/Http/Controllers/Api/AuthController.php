@@ -9,6 +9,9 @@ use App\Http\Requests\Auth\UpdateMeRequest;
 use App\Http\Resources\UserResource;
 use App\Models\User;
 use App\Services\AuditLogService;
+use App\Services\MenuVisibility\AdministratorOverride;
+use App\Services\TokenTimeout;
+use Carbon\CarbonInterface;
 use Illuminate\Contracts\Auth\StatefulGuard;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -32,7 +35,15 @@ class AuthController extends Controller
                 properties: [
                     new OA\Property(property: 'login', type: 'string', example: 'admin'),
                     new OA\Property(property: 'password', type: 'string', example: 'password'),
-                    new OA\Property(property: 'remember', type: 'boolean', example: false),
+                    new OA\Property(
+                        property: 'remember',
+                        description: 'Ignored. "Remember me" was removed (finish run round 7): every sign-in gets the '
+                            .'normal session length (AUTH_TOKEN_TIMEOUT). Still accepted, as a boolean, so older '
+                            .'clients keep signing in.',
+                        type: 'boolean',
+                        example: false,
+                        deprecated: true,
+                    ),
                 ],
             ),
         ),
@@ -43,6 +54,13 @@ class AuthController extends Controller
                 content: new OA\JsonContent(
                     properties: [
                         new OA\Property(property: 'token', type: 'string'),
+                        new OA\Property(
+                            property: 'expires_in',
+                            description: 'Seconds until the token expires. A token can only be refreshed while it is '
+                                .'still valid, so a client renews before this runs out rather than after a 401.',
+                            type: 'integer',
+                            example: 1800,
+                        ),
                         new OA\Property(
                             property: 'user',
                             description: 'The full user record. `user.must_change_password` is true when an '
@@ -72,9 +90,10 @@ class AuthController extends Controller
             return response()->json(['message' => 'Your account has been deactivated.'], 403);
         }
 
-        $expiry = $request->boolean('remember')
-            ? now()->addDays(30)
-            : now()->addMinutes(config('auth.token_timeout', 30));
+        // Every sign-in gets the normal session length. `remember` is still
+        // accepted (LoginRequest) and ignored: "Remember me for 30 days" was
+        // removed at Pepito's QA request (finish run round 7, security).
+        $expiry = now()->addMinutes(TokenTimeout::minutes());
 
         $token = $user->createToken('auth-token', ['*'], $expiry);
 
@@ -90,12 +109,13 @@ class AuthController extends Controller
         // bcrypt hash into audit_logs.old_values.
         $user->forceFill(['last_login_at' => now()])->saveQuietly();
 
-        AuditLogService::log('login', $user, description: "User {$user->username} logged in");
+        AuditLogService::log('login', $user, description: "User {$user->username} logged in", userId: $user->id);
 
         $user->load('branch', 'branches', 'roles', 'permissions');
 
         return response()->json([
             'token' => $token->plainTextToken,
+            'expires_in' => $this->secondsUntil($expiry),
             'user' => new UserResource($user),
         ]);
     }
@@ -163,7 +183,9 @@ class AuthController extends Controller
         path: '/api/auth/me',
         summary: 'Current user',
         description: 'Get the authenticated user profile with roles and permissions. Reachable even while '
-            .'`data.must_change_password` is true — it is how a locked client finds out why it is locked.',
+            .'`data.must_change_password` is true — it is how a locked client finds out why it is locked. '
+            .'`data.role_details` lists the same roles as `data.roles`, each as `{key, display_name}` (the label, '
+            .'or the key in words when it has none); it is sent here only, for the caller\'s own roles.',
         tags: ['Auth'],
         security: [['sanctum' => []]],
         responses: [
@@ -176,7 +198,7 @@ class AuthController extends Controller
         $user = auth()->user();
         $user->load('branch', 'branches', 'roles', 'permissions');
 
-        return new UserResource($user);
+        return (new UserResource($user))->withRoleDetails();
     }
 
     #[OA\Patch(
@@ -285,6 +307,7 @@ class AuthController extends Controller
                 content: new OA\JsonContent(
                     properties: [
                         new OA\Property(property: 'token', type: 'string'),
+                        new OA\Property(property: 'expires_in', description: 'Seconds until the new token expires.', type: 'integer', example: 1800),
                     ],
                 ),
             ),
@@ -297,7 +320,7 @@ class AuthController extends Controller
             new OA\Response(response: 423, description: 'Password change required — change the password first, then log in again'),
         ],
     )]
-    public function refresh(Request $request): JsonResponse
+    public function refresh(Request $request, AdministratorOverride $overrides): JsonResponse
     {
         $user = $request->user();
         $currentToken = $user->currentAccessToken();
@@ -320,14 +343,37 @@ class AuthController extends Controller
             ], 400);
         }
 
+        // Menu Visibility's administrator override belongs to the sign-in, not
+        // to one token: read it before the delete cascades it away, then carry
+        // it to the new token with the same expiry, never longer.
+        $override = $overrides->openOn($currentToken);
+
         $currentToken->delete();
 
-        $token = $user->createToken(
-            'auth-token',
-            ['*'],
-            now()->addMinutes(config('auth.token_timeout', 30)),
-        );
+        $expiry = now()->addMinutes(TokenTimeout::minutes());
 
-        return response()->json(['token' => $token->plainTextToken]);
+        $token = $user->createToken('auth-token', ['*'], $expiry);
+
+        $overrides->carry($override, $token->accessToken);
+
+        return response()->json([
+            'token' => $token->plainTextToken,
+            'expires_in' => $this->secondsUntil($expiry),
+        ]);
+    }
+
+    /**
+     * How long a token just issued has left, for the client to renew by.
+     *
+     * The client needs this because refreshing is authenticated by the very
+     * token it replaces: once `expires_at` passes, `POST /auth/refresh` answers
+     * 401 like everything else, so a renewal has to happen before expiry, not
+     * in response to one. A duration rather than a timestamp, because the
+     * browser measures it against its own clock and a workstation whose clock
+     * is off would otherwise renew too late or not at all.
+     */
+    private function secondsUntil(CarbonInterface $expiresAt): int
+    {
+        return max(0, (int) round(now()->diffInSeconds($expiresAt)));
     }
 }

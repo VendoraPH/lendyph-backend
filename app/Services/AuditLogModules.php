@@ -1,0 +1,363 @@
+<?php
+
+namespace App\Services;
+
+use App\Models\AccountingAccount;
+use App\Models\AccountingAccountMapping;
+use App\Models\AccountingAllowancePosting;
+use App\Models\AccountingExpense;
+use App\Models\AccountingExpensePayment;
+use App\Models\AccountingJournal;
+use App\Models\AccountingJournalLine;
+use App\Models\AccountingOpeningBalance;
+use App\Models\AccountingPeriod;
+use App\Models\AccountingReconciliation;
+use App\Models\AccountingReconciliationLine;
+use App\Models\AccountingYearClose;
+use App\Models\AmortizationSchedule;
+use App\Models\ApprovalWorkflowSetting;
+use App\Models\AuditLog;
+use App\Models\Borrower;
+use App\Models\BorrowerNotificationPreference;
+use App\Models\Branch;
+use App\Models\CdaComplianceRequirement;
+use App\Models\CdaDocument;
+use App\Models\CdaDocumentVersion;
+use App\Models\CdaMediationCase;
+use App\Models\CdaNoticeSent;
+use App\Models\CdaOfficer;
+use App\Models\CdaOfficerTraining;
+use App\Models\CdaRegulatoryProfile;
+use App\Models\CdaReport;
+use App\Models\CdaReportingPeriod;
+use App\Models\CdaReportSnapshot;
+use App\Models\CdaReportTemplate;
+use App\Models\CdaReportValue;
+use App\Models\CdaSetting;
+use App\Models\CdaSocialProgram;
+use App\Models\CdaSubmission;
+use App\Models\Collateral;
+use App\Models\CollateralType;
+use App\Models\CoMaker;
+use App\Models\CreditApplicationProfile;
+use App\Models\CreditDecision;
+use App\Models\CreditScorecardRevision;
+use App\Models\CreditScoringSetting;
+use App\Models\CsvImportRun;
+use App\Models\DashboardSetting;
+use App\Models\Document;
+use App\Models\Fee;
+use App\Models\GCashNonMember;
+use App\Models\GCashTier;
+use App\Models\GCashTransaction;
+use App\Models\InterbranchTransfer;
+use App\Models\LindaSetting;
+use App\Models\Loan;
+use App\Models\LoanAdjustment;
+use App\Models\LoanApprovalStep;
+use App\Models\LoanLedgerEntry;
+use App\Models\LoanProduct;
+use App\Models\OriginationApplication;
+use App\Models\OriginationDocument;
+use App\Models\OriginationLink;
+use App\Models\OriginationNotice;
+use App\Models\OriginationProductSetting;
+use App\Models\OriginationRuleRevision;
+use App\Models\OriginationSetting;
+use App\Models\PenaltyConfig;
+use App\Models\PortalAnnouncement;
+use App\Models\PortalCode;
+use App\Models\PortalRequest;
+use App\Models\PortalSetting;
+use App\Models\PortalTermsVersion;
+use App\Models\PortalUser;
+use App\Models\ReminderBranchSetting;
+use App\Models\ReminderPause;
+use App\Models\ReminderRule;
+use App\Models\ReminderSetting;
+use App\Models\ReminderTemplate;
+use App\Models\Repayment;
+use App\Models\RepaymentAllocation;
+use App\Models\Role;
+use App\Models\SavingsAccount;
+use App\Models\SavingsApproval;
+use App\Models\SavingsAutoCreditInstruction;
+use App\Models\SavingsAutoCreditPosting;
+use App\Models\SavingsAutoCreditRun;
+use App\Models\SavingsHold;
+use App\Models\SavingsIdempotencyKey;
+use App\Models\SavingsInterestRun;
+use App\Models\SavingsInterestRunLine;
+use App\Models\SavingsProduct;
+use App\Models\SavingsProductRate;
+use App\Models\SavingsSetting;
+use App\Models\SavingsTaxRule;
+use App\Models\SavingsTransaction;
+use App\Models\ShareCapitalLedger;
+use App\Models\ShareCapitalPledge;
+use App\Models\TimeDeposit;
+use App\Models\User;
+use Illuminate\Database\Eloquent\Builder;
+
+/**
+ * Which Audit Trail module an audit row belongs to, in one place, so the
+ * `module` each row carries (AuditLogResource) and the list's `module` filter
+ * (AuditLogController) can never disagree.
+ *
+ * - Self-service auth events (login, logout, profile and password changes)
+ *   are `auth`, whatever their auditable type: a login row carries the User.
+ * - The GCash "tiers replaced" row, which has no auditable class, is `gcash`.
+ * - Otherwise the auditable class decides (MODULE_MAP). Every class that
+ *   writes audit rows is listed there, `system` ones included, and
+ *   AuditLogModuleMapTest keeps it that way.
+ * - Any other row with no auditable class is `system`.
+ */
+class AuditLogModules
+{
+    public const AUTH = 'auth';
+
+    public const UNMAPPED = 'system';
+
+    /**
+     * The actions AuthController writes for the signed-in user's own session
+     * and profile.
+     */
+    public const AUTH_ACTIONS = ['login', 'logout', 'password_changed', 'profile_updated'];
+
+    /**
+     * The description GCashService writes on its "tiers replaced" row. That
+     * row has no auditable record (it replaces the whole tier table) and the
+     * generic `updated` action, so this fixed text is what files it under
+     * `gcash`. The writer uses this constant, so the two cannot drift.
+     */
+    public const GCASH_TIERS_REPLACED = 'GCash tiers replaced';
+
+    /**
+     * Auditable class => module, by full class name: stored types are full
+     * class names (there is no morph map), and the label and the filter both
+     * compare them exactly.
+     */
+    private const MODULE_MAP = [
+        Borrower::class => 'borrowers',
+        CoMaker::class => 'borrowers',
+        Document::class => 'borrowers',
+        Loan::class => 'loans',
+        LoanProduct::class => 'loans',
+        LoanAdjustment::class => 'loans',
+        LoanApprovalStep::class => 'loans',
+        ApprovalWorkflowSetting::class => 'loans',
+        AmortizationSchedule::class => 'loans',
+        LoanLedgerEntry::class => 'loans',
+        Collateral::class => 'loans',
+        CollateralType::class => 'loans',
+        Fee::class => 'loans',
+        Repayment::class => 'payments',
+        RepaymentAllocation::class => 'payments',
+        User::class => 'users',
+        Branch::class => 'users',
+        Role::class => 'roles',
+        ShareCapitalPledge::class => 'collections',
+        ShareCapitalLedger::class => 'collections',
+        AccountingAccount::class => 'accounting',
+        AccountingAccountMapping::class => 'accounting',
+        AccountingExpense::class => 'accounting',
+        AccountingExpensePayment::class => 'accounting',
+        AccountingJournal::class => 'accounting',
+        AccountingJournalLine::class => 'accounting',
+        AccountingPeriod::class => 'accounting',
+        AccountingReconciliation::class => 'accounting',
+        AccountingReconciliationLine::class => 'accounting',
+        AccountingYearClose::class => 'accounting',
+        AccountingAllowancePosting::class => 'accounting',
+        AccountingOpeningBalance::class => 'accounting',
+        InterbranchTransfer::class => 'accounting',
+        GCashTransaction::class => 'gcash',
+        GCashNonMember::class => 'gcash',
+        GCashTier::class => 'gcash',
+        // Planned Phase 2 models (reminders and credit scoring here, year-end
+        // close and allowance postings with accounting above), filed ahead of
+        // the slices that create them so those slices never edit this file.
+        // The class names are the contract those slices build to.
+        ReminderSetting::class => 'reminders',
+        ReminderBranchSetting::class => 'reminders',
+        ReminderRule::class => 'reminders',
+        ReminderTemplate::class => 'reminders',
+        ReminderPause::class => 'reminders',
+        BorrowerNotificationPreference::class => 'reminders',
+        CreditScoringSetting::class => 'credit_scoring',
+        CreditScorecardRevision::class => 'credit_scoring',
+        CreditApplicationProfile::class => 'credit_scoring',
+        CreditDecision::class => 'credit_scoring',
+        // Savings & Deposits (Phase 3): every savings model, including the
+        // ones no module writes audit rows for today, so a later writer never
+        // drifts into `system`.
+        SavingsSetting::class => 'savings',
+        SavingsProduct::class => 'savings',
+        SavingsProductRate::class => 'savings',
+        SavingsTaxRule::class => 'savings',
+        SavingsAccount::class => 'savings',
+        SavingsTransaction::class => 'savings',
+        SavingsHold::class => 'savings',
+        SavingsApproval::class => 'savings',
+        TimeDeposit::class => 'savings',
+        SavingsInterestRun::class => 'savings',
+        SavingsInterestRunLine::class => 'savings',
+        SavingsIdempotencyKey::class => 'savings',
+        // Auto-credit into savings (gap round S3).
+        SavingsAutoCreditInstruction::class => 'savings',
+        SavingsAutoCreditRun::class => 'savings',
+        SavingsAutoCreditPosting::class => 'savings',
+        // CDA Reports (Phase 3): every CDA model, including the ones that
+        // write no audit rows today (report values, notices), so a later
+        // writer never drifts into `system`. Mediation cases redact their
+        // text ($auditRedacted).
+        CdaRegulatoryProfile::class => 'cda',
+        CdaSetting::class => 'cda',
+        CdaReportTemplate::class => 'cda',
+        CdaReportingPeriod::class => 'cda',
+        CdaReport::class => 'cda',
+        CdaReportValue::class => 'cda',
+        CdaReportSnapshot::class => 'cda',
+        CdaSubmission::class => 'cda',
+        CdaDocument::class => 'cda',
+        CdaDocumentVersion::class => 'cda',
+        CdaOfficer::class => 'cda',
+        CdaOfficerTraining::class => 'cda',
+        CdaSocialProgram::class => 'cda',
+        CdaMediationCase::class => 'cda',
+        CdaNoticeSent::class => 'cda',
+        CdaComplianceRequirement::class => 'cda',
+        // Member Portal (Phase 3): access, codes, settings, terms, requests and
+        // announcements. A member's own actions are filed here too, through
+        // the portal user or record they act on.
+        PortalUser::class => 'member_portal',
+        PortalCode::class => 'member_portal',
+        PortalSetting::class => 'member_portal',
+        PortalTermsVersion::class => 'member_portal',
+        PortalRequest::class => 'member_portal',
+        PortalAnnouncement::class => 'member_portal',
+        // Penalty configurations (Phase 4, Settings → Penalties). Its brackets
+        // and products are written on the configuration's own rows.
+        PenaltyConfig::class => 'penalties',
+        // Loan origination (Phase 6): online application settings, rule
+        // revisions, notices and links, and the applications and their
+        // documents, whose rows hold ids only.
+        OriginationSetting::class => 'loan_origination',
+        OriginationProductSetting::class => 'loan_origination',
+        OriginationRuleRevision::class => 'loan_origination',
+        OriginationNotice::class => 'loan_origination',
+        OriginationLink::class => 'loan_origination',
+        OriginationApplication::class => 'loan_origination',
+        OriginationDocument::class => 'loan_origination',
+        // Settings → Linda's model change. System, so the Audit Trail's module
+        // filter needs no new entry; the row's description names the change.
+        LindaSetting::class => self::UNMAPPED,
+        // Executive dashboard alert thresholds (Phase 6 EB-C). System, like
+        // Linda's model, so the module filter needs no new entry; the row's
+        // description names the change in words.
+        DashboardSetting::class => self::UNMAPPED,
+        // Deliberately system: an import run is housekeeping, not a record
+        // any module's screen shows.
+        CsvImportRun::class => self::UNMAPPED,
+    ];
+
+    /**
+     * Every module a row can carry, which is also every value the `module`
+     * filter accepts.
+     *
+     * @return list<string>
+     */
+    public static function all(): array
+    {
+        return array_values(array_unique([...array_values(self::MODULE_MAP), self::AUTH, self::UNMAPPED]));
+    }
+
+    public static function for(?string $action, ?string $auditableType, ?string $description = null): string
+    {
+        if (in_array($action, self::AUTH_ACTIONS, true)) {
+            return self::AUTH;
+        }
+
+        if (self::isGCashTiersRow($action, $auditableType, $description)) {
+            return 'gcash';
+        }
+
+        return $auditableType !== null && isset(self::MODULE_MAP[$auditableType])
+            ? self::MODULE_MAP[$auditableType]
+            : self::UNMAPPED;
+    }
+
+    /**
+     * Whether the class is filed under a module on purpose (`system`
+     * included), rather than falling through to `system` by omission.
+     */
+    public static function isMapped(string $auditableType): bool
+    {
+        return isset(self::MODULE_MAP[$auditableType]);
+    }
+
+    public static function isAuthAction(?string $action): bool
+    {
+        return in_array($action, self::AUTH_ACTIONS, true);
+    }
+
+    /**
+     * Narrow an audit_logs query to one module, by the same rules as for().
+     *
+     * @param  Builder<AuditLog>  $query
+     */
+    public static function constrain(Builder $query, string $module): void
+    {
+        if ($module === self::AUTH) {
+            $query->whereIn('action', self::AUTH_ACTIONS);
+
+            return;
+        }
+
+        $query->whereNotIn('action', self::AUTH_ACTIONS);
+
+        $types = array_keys(array_filter(self::MODULE_MAP, fn (string $mapped) => $mapped === $module));
+
+        if ($module === 'gcash') {
+            $query->where(fn (Builder $q) => $q
+                ->whereIn('auditable_type', $types)
+                ->orWhere(fn (Builder $q) => self::whereGCashTiersRow($q)));
+
+            return;
+        }
+
+        if ($module === self::UNMAPPED) {
+            $query->where(fn (Builder $q) => $q
+                ->where(fn (Builder $q) => $q
+                    ->whereNull('auditable_type')
+                    ->where(fn (Builder $q) => $q
+                        ->where('action', '!=', 'updated')
+                        ->orWhereNull('description')
+                        ->orWhere('description', 'not like', self::GCASH_TIERS_REPLACED.'%')))
+                ->orWhereIn('auditable_type', $types)
+                ->orWhereNotIn('auditable_type', array_keys(self::MODULE_MAP)));
+
+            return;
+        }
+
+        $query->whereIn('auditable_type', $types);
+    }
+
+    private static function isGCashTiersRow(?string $action, ?string $auditableType, ?string $description): bool
+    {
+        return $auditableType === null
+            && $action === 'updated'
+            && $description !== null
+            && str_starts_with($description, self::GCASH_TIERS_REPLACED);
+    }
+
+    /**
+     * @param  Builder<AuditLog>  $query
+     */
+    private static function whereGCashTiersRow(Builder $query): void
+    {
+        $query->whereNull('auditable_type')
+            ->where('action', 'updated')
+            ->where('description', 'like', self::GCASH_TIERS_REPLACED.'%');
+    }
+}

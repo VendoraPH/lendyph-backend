@@ -58,13 +58,13 @@ class LoanListTest extends TestCase
         $released = $this->createLoan(['status' => 'released']);
         $this->createLoan(['status' => 'draft']);
 
-        // `current` was never an enum member and is no longer offered. A client
-        // still sending it has to get an empty result, not a 422 that takes the
-        // whole page down. (`past_due` was in the same position and is now a
-        // real virtual filter — see the past due section below.)
-        $this->assertSame(0, $this->getJson('/api/loans?status=current')->assertOk()->json('meta.total'));
+        // A client sending a value that is no status has to get an empty result,
+        // not a 422 that takes the whole page down. (`past_due` and `current`
+        // were in the same position and are now real virtual filters: see the
+        // past due section below and LoanDisplayStatusTest.)
+        $this->assertSame(0, $this->getJson('/api/loans?status=retired')->assertOk()->json('meta.total'));
 
-        $mixed = $this->getJson('/api/loans?status=released,current')->assertOk();
+        $mixed = $this->getJson('/api/loans?status=released,retired')->assertOk();
 
         $this->assertSame([$released->id], array_column($mixed->json('data'), 'id'));
     }
@@ -89,9 +89,9 @@ class LoanListTest extends TestCase
 
         $shorthand = $this->getJson('/api/loans?status=active')->assertOk();
         $spelledOut = $this->getJson('/api/loans?status=released,ongoing')->assertOk();
-        // What a client pinned to the OLD active set still sends. `current`
-        // matches nothing, and none of these loans carries a schedule, so
-        // `past_due` matches nothing here either — it is NOT a subset of
+        // What a client pinned to the OLD active set still sends. None of these
+        // loans carries a schedule, so `current` adds nothing to `released` and
+        // `ongoing`, and `past_due` matches nothing here — it is NOT a subset of
         // `active` any more, since it now reaches `defaulted` too. Which is the
         // argument for sending `active` and letting the server own the set,
         // rather than hardcoding a list that goes stale in silence.
@@ -714,7 +714,6 @@ class LoanListTest extends TestCase
 
         // Every tab on the loans screen has a count, so none of them can read
         // as an undefined badge once the frontend stops counting rows itself.
-        // The Current tab reads `ongoing`.
         $this->assertSame([], array_diff(
             ['draft', 'for_review', 'approved', 'rejected', 'released', 'ongoing', 'completed', 'active'],
             array_keys($stats),
@@ -724,10 +723,10 @@ class LoanListTest extends TestCase
         // status — its own section below holds it against the rows.
         $this->assertArrayHasKey('past_due', $stats);
 
-        // And nothing reports a status the `loans.status` enum cannot hold. A
-        // key that is structurally always 0 is an invitation to add the enum
-        // member. The Current tab reads `ongoing`.
-        $this->assertSame([], array_intersect(['current'], array_keys($stats)));
+        // `current` is the Current tab: no such enum member, but a real filter
+        // (`status=current`), so its badge counts the released and ongoing loans
+        // that are not past due. None of these has a late period.
+        $this->assertSame(3, $stats['current']);
 
         $this->assertSame(2, $stats['released']);
         $this->assertSame(1, $stats['ongoing']);

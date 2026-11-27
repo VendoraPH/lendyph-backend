@@ -4,6 +4,7 @@ namespace App\Rules;
 
 use App\Models\Role;
 use App\Models\User;
+use App\Services\PermissionWords;
 use Closure;
 use Illuminate\Contracts\Validation\ValidationRule;
 
@@ -19,8 +20,11 @@ use Illuminate\Contracts\Validation\ValidationRule;
  * of the balance, so that is a direct path from "client admin" to "destroys
  * debt unilaterally".
  *
- * Two things are refused:
+ * Three things are refused:
  *
+ * 0. A deactivated role. It grants nothing (User::getPermissionsViaRoles()),
+ *    so handing it out would give the user a role that does nothing until
+ *    someone reactivates it, outside this check.
  * 1. `super_admin`, unless the actor already holds it. Its permission set is
  *    identical to `admin`'s, so the superset check below cannot tell them
  *    apart — super_admin's extra power lives in the Gate bypass and the
@@ -29,6 +33,8 @@ use Illuminate\Contracts\Validation\ValidationRule;
  *    roles created through POST /api/roles may carry any permission in the
  *    registry, so without this a narrowly-scoped operator who was given
  *    `users:update` could still grant away far more than they were ever given.
+ *    So only a super admin assigns the Chair's role: no admin holds its
+ *    `loans:edit_in_approval`. The refusal names permissions in words.
  */
 class AssignableRole implements ValidationRule
 {
@@ -55,6 +61,12 @@ class AssignableRole implements ValidationRule
             return;
         }
 
+        if ($role->is_active === false) {
+            $fail('The selected role is deactivated. Reactivate it before assigning it.');
+
+            return;
+        }
+
         if (! $this->actor instanceof User) {
             $fail('The :attribute cannot be assigned.');
 
@@ -75,15 +87,32 @@ class AssignableRole implements ValidationRule
 
         $missing = $role->permissions
             ->pluck('name')
+            // Active roles only: what the actor holds, not what they're assigned.
             ->diff($this->actor->getAllPermissions()->pluck('name'))
             ->sort()
             ->values();
 
         if ($missing->isNotEmpty()) {
-            $fail(sprintf(
-                'The selected role grants permissions you do not hold yourself (%s).',
-                $missing->take(3)->implode(', ').($missing->count() > 3 ? ', …' : ''),
-            ));
+            $fail(self::refusal($missing->all()));
         }
+    }
+
+    /**
+     * The refusal in words, never permission keys. A role carrying a
+     * permission only a super admin hands out (the Chair's edit during
+     * approval) says so; otherwise the first three missing permissions are
+     * named as the roles screen names them.
+     *
+     * @param  list<string>  $missing
+     */
+    private static function refusal(array $missing): string
+    {
+        $superAdminOnly = PermissionWords::superAdminOnly($missing);
+
+        if ($superAdminOnly !== null) {
+            return "Only a super admin can assign a role that can {$superAdminOnly}.";
+        }
+
+        return 'The selected role grants permissions you do not hold yourself: '.PermissionWords::list($missing).'.';
     }
 }
