@@ -45,6 +45,7 @@ jobs:
           staging-api.lendyph.com|development|lendy.ph staging
           api.binhs-coop.lendyph.com|main|binhs-coop prod
           api.binhs-coop-staging.lendyph.com|development|binhs-coop staging
+          api.mcc.lendyph.com|main|mcc prod
           '
 
           declare -A TIP
