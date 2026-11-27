@@ -2,6 +2,7 @@
 
 namespace App\Services\Amla\Events\Sources;
 
+use App\Models\Loan;
 use App\Services\Amla\Events\BuiltRow;
 use App\Services\Amla\Events\EventCannotBeBuilt;
 use App\Services\Amla\Events\EventSource;
@@ -58,6 +59,7 @@ final class LoanReleases extends EventSource
             ->whereNull('loans.imported_arrears_baseline')
             ->select([
                 'loans.id', 'loans.released_at as recorded', 'loans.borrower_id', 'loans.source_loan_id', 'loans.loan_account_number',
+                'loans.application_number',
                 'loans.release_method', 'loans.release_reference', 'loans.principal_amount', 'loans.total_deductions', 'loans.net_proceeds',
                 DB::raw(BranchAttribution::loanBranchSql().' as branch_id'),
             ]);
@@ -65,6 +67,9 @@ final class LoanReleases extends EventSource
 
     public function build(stdClass $row, string $harvestedBy): BuiltRow
     {
+        // The loan by its display number (round 9), "Loan #id" only when it has
+        // none. No file Loan No.: imported loans are never a release event.
+        $number = Loan::displayNumberOf($row->loan_account_number, null, $row->application_number);
         $common = [
             'borrower_id' => self::intOrNull($row->borrower_id),
             'gcash_non_member_id' => null,
@@ -74,7 +79,7 @@ final class LoanReleases extends EventSource
             'channel' => $row->release_method,
             'channel_reference' => $row->release_reference,
         ];
-        $loan = $row->loan_account_number ?? "Loan #{$row->id}";
+        $loan = $number ?? "Loan #{$row->id}";
 
         if ($row->source_loan_id === null) {
             if ($row->net_proceeds === null || PesoAmount::centavos((string) $row->net_proceeds) < 0) {

@@ -5,6 +5,7 @@ namespace App\Services;
 use App\Models\AutoCreditRun;
 use App\Models\AutoCreditRunSkip;
 use App\Models\Borrower;
+use App\Models\Branch;
 use App\Models\ShareCapitalLedger;
 use App\Models\ShareCapitalPledge;
 use App\Models\User;
@@ -53,6 +54,12 @@ class ShareCapitalService
 
     /** The 409 when a member's membership ended while the run was being saved. */
     public const AUTO_CREDIT_MEMBER_LEFT = 'A member\'s membership ended while auto-credit was running, so it no longer credits them. Nothing was posted; run it again.';
+
+    /** The `cycle_branches` row for members with no branch (round 9). */
+    public const NO_BRANCH_LABEL = 'No branch';
+
+    /** Why a caller with no branch and no branches:view_all can't run auto-credit (round 9). */
+    public const AUTO_CREDIT_NO_BRANCH = 'No branch is assigned to your account, so there are no members to credit.';
 
     /** The description every auto-credit row carries, which tells it from an entry by hand. */
     public const AUTO_CREDIT_DESCRIPTION = 'Monthly pledge - auto-credit';
@@ -296,6 +303,18 @@ class ShareCapitalService
      * hand debits, and by earlier runs; alreadyCreditedThisMonth()) is skipped, with the reason stored on the run (AutoCreditRunSkip) and
      * returned as the run's `skips` relation.
      *
+     * The run records what it covered (round 9), in its own transaction, so a
+     * run is never saved without it:
+     * - `scope` `all` for a `branches:view_all` caller (and with no
+     *   `$scopeTo`): every branch, and members with no branch. Its
+     *   `auto_credit_run_branches` rows list every branch that exists then,
+     *   whatever its status;
+     * - `scope` `branches` for a branch user: exactly their BranchAccess
+     *   branches at run time, recorded in `auto_credit_run_branches`.
+     * A caller with no branch and no view_all has no members to credit: the
+     * run is refused in words (AUTO_CREDIT_NO_BRANCH, on `branch`) before
+     * anything is read or written.
+     *
      * The run is for one cycle, `$cycleDate` (finish run round 8): a month's
      * 15th or its 30th, the current one or a missed one (cycleRefusal()),
      * stored on it. It credits only the pledges whose schedule falls in that
@@ -307,7 +326,7 @@ class ShareCapitalService
      *
      * @param  string  $cycleDate  YYYY-MM-DD
      *
-     * @throws ValidationException a cycle the run can't take, on `cycle_date`
+     * @throws ValidationException a cycle the run can't take, on `cycle_date`; a caller with no branch, on `branch`
      */
     public function processAutoCredit(
         User $user,
@@ -322,6 +341,12 @@ class ShareCapitalService
             throw ValidationException::withMessages(['cycle_date' => $refusal]);
         }
 
+        $access = $scopeTo === null ? null : app(BranchAccess::class)->for($scopeTo);
+
+        if ($access === []) {
+            throw ValidationException::withMessages(['branch' => self::AUTO_CREDIT_NO_BRANCH]);
+        }
+
         $cycle = CarbonImmutable::parse($cycleDate, self::TIMEZONE)->startOfDay();
         $eligiblePledges = ShareCapitalPledge::with('borrower')
             ->forCurrentMembers()
@@ -331,11 +356,13 @@ class ShareCapitalService
             ->get();
 
         $branchIds = $eligiblePledges->map(fn (ShareCapitalPledge $pledge): ?int => $pledge->borrower?->branch_id)->all();
+        $scope = $access === null ? AutoCreditRun::SCOPE_ALL : AutoCreditRun::SCOPE_BRANCHES;
+        $coveredBranchIds = $access ?? Branch::query()->orderBy('id')->pluck('id')->map(fn ($id): int => (int) $id)->all();
 
         // Never tried again. The pledges were read before this transaction, so
         // a retry after another run committed would credit each pledge twice.
         // The loser of a collision answers 409 and posts nothing.
-        return LoanWriteTransaction::run(function () use ($eligiblePledges, $branchIds, $user, $cycle, $method, $referenceNumber) {
+        return LoanWriteTransaction::run(function () use ($eligiblePledges, $branchIds, $scope, $coveredBranchIds, $user, $cycle, $method, $referenceNumber) {
             BranchRowLock::lock(['branch' => $branchIds], ['branch' => self::AUTO_CREDIT_BRANCH_CONSEQUENCE]);
             $this->assertMembersStayed(
                 $eligiblePledges->mapWithKeys(fn (ShareCapitalPledge $pledge): array => [$pledge->borrower_id => $pledge->borrower?->branch_id])->all(),
@@ -361,7 +388,13 @@ class ShareCapitalService
                 'processed_by' => $user->id,
                 'status' => 'completed',
                 'cycle_date' => $cycle->toDateString(),
+                'scope' => $scope,
             ]);
+            // The branches it covered (round 9), in its own transaction: the
+            // status reads a branch's cycle from these. An `all` run writes
+            // them too, on purpose, as the record of which branches existed at
+            // run time; its coverage doesn't read them (AutoCreditRunCoverage).
+            $run->branches()->attach($coveredBranchIds);
 
             $rows = [];
 
@@ -618,6 +651,24 @@ class ShareCapitalService
      * With `$scopeTo`, only the pledges of members in that user's branches
      * (Borrower::visibleTo), the same set processAutoCredit() posts for them.
      *
+     * Runs count by the branches they covered (round 9,
+     * AutoCreditRunCoverage), so a cycle one branch ran never reads as done
+     * for another:
+     * - `cycle_branches`: each branch of the caller's members on auto-credit,
+     *   by name, with the cycle's latest run that covered it (or nulls). For a
+     *   view_all caller with members on auto-credit who have no branch, one
+     *   last "No branch" row (`branch_id` null), covered only by `all` runs
+     *   and runs made before; branch users never get it;
+     * - `cycle_run`: once those runs cover every row, the latest of them; null
+     *   until then;
+     * - `last_run`: the latest run that covered one of the caller's branches,
+     *   its totals shown to view_all, and to a branch user only for a
+     *   branch-scoped run that covered nothing outside their branches.
+     * A run's `scope` says what it covered: `all` every branch, `branches`
+     * exactly its recorded ones. A run made before (no scope) counts for a
+     * `branches:view_all` caller as covering everything, never for a branch
+     * user.
+     *
      * @return array<string, mixed>
      */
     public function getAutoCreditStatus(?User $scopeTo = null, ?string $cycleDate = null): array
@@ -642,15 +693,48 @@ class ShareCapitalService
         $disabledMembers = $allPledges->filter(fn ($p) => ! $p->auto_credit);
         $noPledgeMembers = $allPledges->filter(fn ($p) => (float) $p->amount === 0.0);
 
-        $lastRun = AutoCreditRun::latest('processed_at')->first();
-        // The chosen cycle's own run, if it has one (finish run round 8). Runs
-        // made before cycles were recorded belong to no cycle.
-        $cycleRun = AutoCreditRun::query()->whereDate('cycle_date', $cycle->toDateString())->latest('processed_at')->latest('id')->first();
+        // Which runs count for this caller (round 9): those that covered their
+        // branches. R is the current branches of their visible members on
+        // auto-credit, the members the run would credit; members with no
+        // branch (visible to view_all only) are the "No branch" row.
+        $access = $scopeTo === null ? null : app(BranchAccess::class)->for($scopeTo);
+        $required = $onAutoCredit->map(fn ($p) => $p->borrower?->branch_id)->filter(fn ($id) => $id !== null)
+            ->map(fn ($id): int => (int) $id)->unique()->values()->all();
+        $noBranchRow = $access === null && $onAutoCredit->contains(fn ($p) => $p->borrower?->branch_id === null);
+        $runs = new AutoCreditRunCoverage($access);
+        $cycleRuns = AutoCreditRun::query()->with('branches:branches.id')->whereDate('cycle_date', $cycle->toDateString())
+            ->latest('processed_at')->latest('id')->get();
+        $row = function (?int $branchId, string $name) use ($runs, $cycleRuns): array {
+            $run = $cycleRuns->first(fn (AutoCreditRun $run): bool => $runs->covers($run, $branchId));
 
-        // A run records no branches, so its totals cover whatever its caller
-        // could see, often the whole organisation. A caller limited to some
-        // branches gets the run's date and status but not those totals.
-        $runTotalsVisible = $scopeTo === null || app(BranchAccess::class)->for($scopeTo) === null;
+            return [
+                'branch_id' => $branchId,
+                'branch_name' => $name,
+                'run_id' => $run?->id,
+                'processed_at' => $run?->processed_at?->toDateTimeString(),
+            ];
+        };
+
+        $cycleBranches = Branch::query()->whereKey($required)->orderBy('name')->orderBy('id')->get(['id', 'name'])
+            ->map(fn (Branch $branch): array => $row($branch->id, $branch->name))->values()->all();
+
+        if ($noBranchRow) {
+            $cycleBranches[] = $row(null, self::NO_BRANCH_LABEL);
+        }
+
+        // The chosen cycle's own run (finish run round 8), once the cycle's runs
+        // cover every row of `cycle_branches`: the latest of those runs. With no
+        // row, the cycle's latest run that covered any of the caller's
+        // branches. Runs made before cycles were recorded belong to no cycle.
+        $rowIds = array_map(fn (array $branch): ?int => $branch['branch_id'], $cycleBranches);
+        $cycleRun = $cycleBranches === []
+            ? $cycleRuns->first(fn (AutoCreditRun $run): bool => $runs->coversAny($run))
+            : (collect($cycleBranches)->contains(fn (array $branch): bool => $branch['run_id'] === null)
+                ? null
+                : $cycleRuns->first(fn (AutoCreditRun $run): bool => collect($rowIds)->contains(fn (?int $id): bool => $runs->covers($run, $id))));
+
+        $lastRun = $runs->latestCovering();
+        $runTotalsVisible = $lastRun !== null && $runs->totalsVisible($lastRun);
 
         return [
             'cycle_date' => $cycle->toDateString(),
@@ -667,6 +751,8 @@ class ShareCapitalService
                 'processed_at' => $cycleRun->processed_at?->toDateTimeString(),
                 'status' => $cycleRun->status,
             ] : null,
+            // Each branch in R, by name, with the cycle's latest run that covered it.
+            'cycle_branches' => $cycleBranches,
             'last_run' => $lastRun ? [
                 'id' => $lastRun->id,
                 'total_amount' => $runTotalsVisible ? (float) $lastRun->total_amount : null,
