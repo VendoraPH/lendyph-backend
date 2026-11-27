@@ -135,8 +135,8 @@ final class AutomaticPoster
 
         return $this->write($posting, $loan, [
             'date' => $this->releaseDate($loan),
-            'reference' => $loan->loan_account_number ?? $loan->application_number,
-            'description' => $this->describe('Loan release', $loan->loan_account_number ?? $loan->application_number),
+            'reference' => $loan->displayNumber(),
+            'description' => $this->describe('Loan release', $loan->displayNumber()),
             'branch_id' => $loan->branch_id,
         ], $userId);
     }
@@ -345,7 +345,7 @@ final class AutomaticPoster
         return $this->write($posting, $repayment, [
             'date' => $this->dateOf($repayment->payment_date),
             'reference' => $repayment->receipt_number,
-            'description' => $this->describe('Loan collection', $repayment->receipt_number),
+            'description' => $this->describe('Loan collection', $this->collectionReference($repayment)),
             'branch_id' => $repayment->loan?->branch_id,
         ], $userId);
     }
@@ -807,8 +807,8 @@ final class AutomaticPoster
         $this->warnAboutTaxFallbacks($new, $map);
 
         $date = $this->releaseDate($new);
-        $newNumber = $new->loan_account_number ?? $new->application_number;
-        $sourceNumber = $source->loan_account_number ?? $source->application_number;
+        $newNumber = $new->displayNumber();
+        $sourceNumber = $source->displayNumber();
 
         return [
             'release' => $this->write($release, $new, [
@@ -1868,6 +1868,23 @@ final class AutomaticPoster
         }
 
         return class_basename($owner);
+    }
+
+    /**
+     * What a collection's description names: its receipt and the loan by its
+     * display number (round 9), "RCP-000031 (Loan LN-000154)", so a payment on
+     * an imported loan reads the file's Loan No.
+     */
+    private function collectionReference(Repayment $repayment): ?string
+    {
+        $receipt = $repayment->receipt_number;
+        $loan = $repayment->loan?->displayNumber();
+
+        if ($loan === null) {
+            return $receipt;
+        }
+
+        return $receipt === null || $receipt === '' ? "Loan {$loan}" : "{$receipt} (Loan {$loan})";
     }
 
     /** "Loan release — LN-000154", clamped to the column's 500 characters. */

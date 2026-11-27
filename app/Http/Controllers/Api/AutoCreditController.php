@@ -14,6 +14,13 @@ class AutoCreditController extends Controller
 {
     public function __construct(private ShareCapitalService $shareCapitalService) {}
 
+    /**
+     * The auto-credit preview for a cycle, for the caller's branches. A run
+     * records the branches it covered (round 9), so a branch reads its cycle
+     * as done only when a run covered it (`cycle_branches`, `cycle_run`), and
+     * `last_run`'s totals show only when that run covered nothing outside the
+     * caller's branches (always for branches:view_all).
+     */
     #[OA\Get(
         path: '/api/auto-credit/status',
         summary: 'Get auto-credit status and member breakdown',
@@ -23,7 +30,7 @@ class AutoCreditController extends Controller
             new OA\Parameter(name: 'cycle_date', in: 'query', required: false, description: 'The cycle the run would be for: a month\'s 15th or its 30th (last day), the current one or one up to 92 days ago. Defaults to the current cycle: the latest 15th or month\'s last day on or before today in Manila.', schema: new OA\Schema(type: 'string', format: 'date')),
         ],
         responses: [
-            new OA\Response(response: 200, description: 'Auto-credit status: the run\'s preview for `data.cycle_date` (`cycle_label` in words), with the pledges it would skip and why, `cycle_run` (that cycle\'s own latest run, or null), and `cycle_options`, the cycles a run may take now, the current one first.'),
+            new OA\Response(response: 200, description: 'Auto-credit status: the run\'s preview for `data.cycle_date` (`cycle_label` in words), with the pledges it would skip and why, and `cycle_options`, the cycles a run may take now, the current one first. Runs count by the branches they covered (a run covers its caller\'s branches, every branch for branches:view_all; runs made before branches were recorded count for branches:view_all only). `cycle_branches` lists each branch of the caller\'s members on auto-credit, by name, as {branch_id, branch_name, run_id, processed_at}, with the cycle\'s latest run that covered it (run_id and processed_at null when none), `[]` when there are none. `cycle_run` ({id, processed_at, status}) is the latest of those runs once every listed branch has one, else null; with no listed branch, the cycle\'s latest run that covered one of the caller\'s branches. `last_run` is the latest run that covered one of the caller\'s branches (any run for branches:view_all); its total_amount, member_count and skipped_count are null unless the caller holds branches:view_all or the run covered only the caller\'s branches.'),
             new OA\Response(response: 422, description: 'Not a 15th or a month\'s last day, a future cycle, or one more than 92 days ago, in words'),
             new OA\Response(response: 401, description: 'Unauthenticated'),
         ],
@@ -34,7 +41,8 @@ class AutoCreditController extends Controller
 
         $data = $request->validate(['cycle_date' => ProcessAutoCreditRequest::cycleRules(required: false)], ProcessAutoCreditRequest::cycleMessages());
 
-        // Only the caller's branches' members (BranchAccess; all with view_all).
+        // Only the caller's branches' members (BranchAccess; all with view_all),
+        // and only the runs that covered those branches.
         return response()->json(['data' => $this->shareCapitalService->getAutoCreditStatus($request->user(), $data['cycle_date'] ?? null)]);
     }
 
@@ -63,7 +71,8 @@ class AutoCreditController extends Controller
     )]
     public function process(ProcessAutoCreditRequest $request): JsonResponse
     {
-        // Credits only the caller's branches' members (all with view_all).
+        // Credits only the caller's branches' members (all with view_all), and
+        // records those branches on the run.
         $run = $this->shareCapitalService->processAutoCredit(
             $request->user(),
             $request->input('cycle_date'),
