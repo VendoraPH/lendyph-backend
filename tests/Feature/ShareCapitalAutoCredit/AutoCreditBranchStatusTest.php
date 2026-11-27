@@ -171,6 +171,11 @@ class AutoCreditBranchStatusTest extends TestCase
         $this->statusAs($mainStaff)->assertJsonPath('data.cycle_run', null)->assertJsonPath('data.last_run', null);
         $this->statusAs($this->admin)->assertJsonPath('data.cycle_branches.1.run_id', $old->id);
 
+        // An old run also covers the members with no branch, for head office.
+        $this->member(null, 'Cy', 200);
+        $this->statusAs($this->admin)
+            ->assertJsonPath('data.cycle_branches.2.branch_name', 'No branch')
+            ->assertJsonPath('data.cycle_branches.2.run_id', $old->id);
     }
 
     public function test_last_run_and_its_totals_follow_the_branches_it_covered(): void

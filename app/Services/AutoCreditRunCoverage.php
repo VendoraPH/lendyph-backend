@@ -36,6 +36,10 @@ final class AutoCreditRunCoverage
             return false;
         }
 
+        // An `all` run covers every branch without reading its rows, which are
+        // kept only as the record of the branches that existed at run time. So
+        // a branch created later reads that cycle as covered; the once-per-cycle
+        // rule still skips anyone the run credited.
         return match ($run->scope) {
             AutoCreditRun::SCOPE_ALL => true,
             AutoCreditRun::SCOPE_BRANCHES => $branchId !== null && in_array($branchId, $this->branchIdsOf($run), true),

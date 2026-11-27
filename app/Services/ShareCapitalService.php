@@ -391,7 +391,9 @@ class ShareCapitalService
                 'scope' => $scope,
             ]);
             // The branches it covered (round 9), in its own transaction: the
-            // status reads a branch's cycle from these.
+            // status reads a branch's cycle from these. An `all` run writes
+            // them too, on purpose, as the record of which branches existed at
+            // run time; its coverage doesn't read them (AutoCreditRunCoverage).
             $run->branches()->attach($coveredBranchIds);
 
             $rows = [];
