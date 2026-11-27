@@ -25,7 +25,11 @@ use Tests\Traits\SetupLendyPH;
  * - `cycle_run`: the latest of those runs once every listed branch has one;
  * - `last_run`: the latest run that covered one of the caller's branches, its
  *   totals shown only when it covered nothing outside them;
- * - runs made before branches were recorded count for view_all only.
+ * - a run's `scope` says what it covered: `all` (view_all) every branch and
+ *   members with no branch, who are a last "No branch" row for view_all;
+ *   `branches` exactly its recorded ones;
+ * - runs made before (no scope) count for view_all only;
+ * - a caller with no branch and no view_all can't run it (422).
  */
 class AutoCreditBranchStatusTest extends TestCase
 {
@@ -66,11 +70,13 @@ class AutoCreditBranchStatusTest extends TestCase
 
         $branchRun = $this->runAs($this->staff($this->main))->json('data.id');
         $this->assertSame([$this->main->id], $this->branchesOf($branchRun));
+        $this->assertSame(AutoCreditRun::SCOPE_BRANCHES, AutoCreditRun::query()->findOrFail($branchRun)->scope);
 
         $this->at('2026-11-16 10:00:00');
         $wholeRun = $this->runAs($this->admin)->json('data.id');
         $this->assertSame(Branch::query()->orderBy('id')->pluck('id')->all(), $this->branchesOf($wholeRun));
         $this->assertContains($closed->id, $this->branchesOf($wholeRun));
+        $this->assertSame(AutoCreditRun::SCOPE_ALL, AutoCreditRun::query()->findOrFail($wholeRun)->scope);
     }
 
     public function test_a_run_in_branch_a_leaves_branch_b_not_done(): void
@@ -165,9 +171,6 @@ class AutoCreditBranchStatusTest extends TestCase
         $this->statusAs($mainStaff)->assertJsonPath('data.cycle_run', null)->assertJsonPath('data.last_run', null);
         $this->statusAs($this->admin)->assertJsonPath('data.cycle_branches.1.run_id', $old->id);
 
-        // A run with no branches after recording began (its caller had none) covers nothing.
-        $this->oldRun('2026-11-16 12:00:00');
-        $this->statusAs($this->admin)->assertJsonPath('data.cycle_branches.1.run_id', $old->id);
     }
 
     public function test_last_run_and_its_totals_follow_the_branches_it_covered(): void
@@ -202,6 +205,111 @@ class AutoCreditBranchStatusTest extends TestCase
         $this->statusAs($nobody, '2026-11-30')->assertJsonPath('data.last_run', null)->assertJsonPath('data.cycle_branches', []);
     }
 
+    public function test_a_user_of_two_branches_sees_the_totals_of_a_run_by_one_of_them(): void
+    {
+        $run = $this->runAs($this->staff($this->main))->json('data.id');
+
+        $this->statusAs($this->staff($this->main, $this->east))
+            ->assertJsonPath('data.last_run.id', $run)
+            ->assertJsonPath('data.last_run.total_amount', 500)
+            ->assertJsonPath('data.last_run.member_count', 1)
+            ->assertJsonPath('data.last_run.skipped_count', 0)
+            ->assertJsonPath('data.cycle_run', null);
+    }
+
+    public function test_a_one_branch_user_never_sees_the_totals_of_a_wider_run_or_a_head_office_run(): void
+    {
+        $mainStaff = $this->staff($this->main);
+        $wider = $this->runAs($this->staff($this->main, $this->east))->json('data.id');
+        $this->assertSame([$this->main->id, $this->east->id], $this->branchesOf($wider));
+
+        $this->statusAs($mainStaff)
+            ->assertJsonPath('data.last_run.id', $wider)
+            ->assertJsonPath('data.last_run.total_amount', null)
+            ->assertJsonPath('data.last_run.member_count', null)
+            ->assertJsonPath('data.last_run.skipped_count', null)
+            ->assertJsonPath('data.cycle_run.id', $wider);
+
+        $this->at('2026-11-30 10:00:00');
+        $headOffice = $this->runAs($this->admin, '2026-11-30')->json('data.id');
+
+        $this->statusAs($mainStaff, '2026-11-30')
+            ->assertJsonPath('data.last_run.id', $headOffice)
+            ->assertJsonPath('data.last_run.total_amount', null)
+            ->assertJsonPath('data.last_run.member_count', null)
+            ->assertJsonPath('data.cycle_run.id', $headOffice);
+    }
+
+    public function test_members_with_no_branch_are_a_head_office_row_only_a_head_office_run_covers(): void
+    {
+        $this->member(null, 'Cy', 200);
+        $mainStaff = $this->staff($this->main);
+        $noBranch = ['branch_id' => null, 'branch_name' => 'No branch', 'run_id' => null, 'processed_at' => null];
+
+        $this->statusAs($this->admin)
+            ->assertJsonCount(3, 'data.cycle_branches')
+            ->assertJsonPath('data.cycle_branches.2', $noBranch)
+            ->assertJsonPath('data.cycle_run', null);
+
+        $this->runAs($mainStaff);
+        $this->runAs($this->staff($this->east));
+
+        $this->statusAs($this->admin)
+            ->assertJsonPath('data.cycle_branches.2', $noBranch)
+            ->assertJsonPath('data.cycle_run', null);
+        $this->statusAs($mainStaff)
+            ->assertJsonCount(1, 'data.cycle_branches')
+            ->assertJsonPath('data.cycle_branches.0.branch_name', 'Main Branch');
+
+        $this->at('2026-11-16 12:00:00');
+        $headOffice = $this->runAs($this->admin)->json('data.id');
+
+        $this->statusAs($this->admin)
+            ->assertJsonPath('data.cycle_branches.2', [...$noBranch, 'run_id' => $headOffice, 'processed_at' => '2026-11-16 12:00:00'])
+            ->assertJsonPath('data.cycle_run.id', $headOffice);
+        $this->statusAs($mainStaff)->assertJsonCount(1, 'data.cycle_branches');
+    }
+
+    public function test_the_status_reads_a_moved_member_by_their_current_branch(): void
+    {
+        $mainStaff = $this->staff($this->main);
+        $run = $this->runAs($mainStaff)->json('data.id');
+        $this->ana->update(['branch_id' => $this->east->id]);
+
+        $this->statusAs($this->staff($this->east))
+            ->assertJsonPath('data.cycle_branches', [
+                ['branch_id' => $this->east->id, 'branch_name' => 'East Branch', 'run_id' => null, 'processed_at' => null],
+            ])
+            ->assertJsonPath('data.cycle_run', null);
+        $this->statusAs($this->admin)
+            ->assertJsonCount(1, 'data.cycle_branches')
+            ->assertJsonPath('data.cycle_branches.0.branch_id', $this->east->id)
+            ->assertJsonPath('data.cycle_run', null);
+        // Main has no member on auto-credit now; its own run still counts for it.
+        $this->statusAs($mainStaff)
+            ->assertJsonPath('data.cycle_branches', [])
+            ->assertJsonPath('data.cycle_run.id', $run);
+    }
+
+    public function test_a_run_by_a_user_with_no_branch_is_refused_and_writes_nothing(): void
+    {
+        $nobody = User::factory()->create(['branch_id' => null]);
+        $nobody->givePermissionTo(['share_capital:view', 'auto_credit:process']);
+
+        $this->actingAs($nobody)->postJson('/api/auto-credit/process', ['cycle_date' => self::CYCLE])
+            ->assertUnprocessable()
+            ->assertJsonPath('errors.branch.0', 'No branch is assigned to your account, so there are no members to credit.');
+
+        $this->assertSame(0, AutoCreditRun::query()->count());
+        $this->assertSame(0, DB::table('auto_credit_run_branches')->count());
+        $this->assertSame(0, ShareCapitalLedger::query()->count());
+        $this->statusAs($this->admin)
+            ->assertJsonPath('data.cycle_run', null)
+            ->assertJsonPath('data.cycle_branches.0.run_id', null)
+            ->assertJsonPath('data.cycle_branches.1.run_id', null)
+            ->assertJsonPath('data.last_run', null);
+    }
+
     public function test_a_run_that_fails_records_no_branches(): void
     {
         ShareCapitalLedger::creating(fn () => throw new RuntimeException('Posting failed.'));
@@ -225,18 +333,18 @@ class AutoCreditBranchStatusTest extends TestCase
         Carbon::setTestNow(Carbon::parse($moment, 'Asia/Manila'));
     }
 
-    private function member(Branch $branch, string $first, int $amount): Borrower
+    private function member(?Branch $branch, string $first, int $amount): Borrower
     {
-        $member = Borrower::factory()->create(['branch_id' => $branch->id, 'first_name' => $first, 'status' => 'active']);
+        $member = Borrower::factory()->create(['branch_id' => $branch?->id, 'first_name' => $first, 'status' => 'active']);
         $member->shareCapitalPledge->update(['amount' => $amount, 'auto_credit' => true, 'schedule' => '15/30']);
 
         return $member;
     }
 
-    /** A staff member of `$branch` only (no branches:view_all) who can run auto-credit. */
-    private function staff(Branch $branch): User
+    /** A staff member of `$branches` only (no branches:view_all) who can run auto-credit. */
+    private function staff(Branch ...$branches): User
     {
-        $user = User::factory()->inBranches($branch)->create();
+        $user = User::factory()->inBranches(...$branches)->create();
         $user->givePermissionTo(['share_capital:view', 'auto_credit:process']);
 
         return $user;

@@ -10,8 +10,11 @@ use Illuminate\Support\Facades\Schema;
  * `branches:view_all`), written in the run's own transaction, so the status
  * can tell a branch's cycle from another branch's.
  *
- * New runs only. Runs made before have no rows and count only for callers with
- * `branches:view_all`, as they did; nothing is backfilled.
+ * `auto_credit_runs.scope` says what a run covered: `all` for a
+ * `branches:view_all` run (every branch, and members with no branch),
+ * `branches` for a branch-scoped run (exactly its recorded branches). Null on
+ * runs made before: they count only for callers with `branches:view_all`, as
+ * they did; nothing is backfilled.
  *
  * Only adds, skipped when already there, so running it again changes nothing.
  */
@@ -19,21 +22,31 @@ return new class extends Migration
 {
     public function up(): void
     {
-        if (Schema::hasTable('auto_credit_run_branches')) {
-            return;
+        if (! Schema::hasColumn('auto_credit_runs', 'scope')) {
+            Schema::table('auto_credit_runs', function (Blueprint $table): void {
+                $table->string('scope', 16)->nullable()->after('cycle_date');
+            });
         }
 
-        Schema::create('auto_credit_run_branches', function (Blueprint $table): void {
-            $table->id();
-            $table->foreignId('auto_credit_run_id')->constrained('auto_credit_runs')->restrictOnDelete();
-            $table->foreignId('branch_id')->constrained('branches')->restrictOnDelete();
-            $table->unique(['auto_credit_run_id', 'branch_id']);
-            $table->index('branch_id');
-        });
+        if (! Schema::hasTable('auto_credit_run_branches')) {
+            Schema::create('auto_credit_run_branches', function (Blueprint $table): void {
+                $table->id();
+                $table->foreignId('auto_credit_run_id')->constrained('auto_credit_runs')->restrictOnDelete();
+                $table->foreignId('branch_id')->constrained('branches')->restrictOnDelete();
+                $table->unique(['auto_credit_run_id', 'branch_id']);
+                $table->index('branch_id');
+            });
+        }
     }
 
     public function down(): void
     {
         Schema::dropIfExists('auto_credit_run_branches');
+
+        if (Schema::hasColumn('auto_credit_runs', 'scope')) {
+            Schema::table('auto_credit_runs', function (Blueprint $table): void {
+                $table->dropColumn('scope');
+            });
+        }
     }
 };

@@ -135,7 +135,8 @@ final class AutomaticPoster
 
         return $this->write($posting, $loan, [
             'date' => $this->releaseDate($loan),
-            'reference' => $loan->displayNumber(),
+            'reference' => $loan->loan_account_number ?? $loan->application_number,
+            // The loan by its display number (round 9); the reference stays.
             'description' => $this->describe('Loan release', $loan->displayNumber()),
             'branch_id' => $loan->branch_id,
         ], $userId);
@@ -807,19 +808,23 @@ final class AutomaticPoster
         $this->warnAboutTaxFallbacks($new, $map);
 
         $date = $this->releaseDate($new);
+        // References stay as they were; descriptions name each loan by its
+        // display number (round 9).
+        $newReference = $new->loan_account_number ?? $new->application_number;
+        $sourceReference = $source->loan_account_number ?? $source->application_number;
         $newNumber = $new->displayNumber();
         $sourceNumber = $source->displayNumber();
 
         return [
             'release' => $this->write($release, $new, [
                 'date' => $date,
-                'reference' => $newNumber,
+                'reference' => $newReference,
                 'description' => $this->describe('Loan release (restructure)', $newNumber),
                 'branch_id' => $new->branch_id,
             ], $userId),
             'write_off' => $writeOff === null ? null : $this->write($writeOff, $source, [
                 'date' => $date,
-                'reference' => $sourceNumber,
+                'reference' => $sourceReference,
                 'description' => $this->describe('Restructure write-off', "{$sourceNumber} into {$newNumber}"),
                 'branch_id' => $source->branch_id,
             ], $userId),

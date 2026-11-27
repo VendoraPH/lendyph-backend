@@ -12,6 +12,12 @@ class AutoCreditRun extends Model
 {
     use HasFactory;
 
+    /** A branches:view_all run: every branch, and members with no branch. */
+    public const SCOPE_ALL = 'all';
+
+    /** A branch-scoped run: exactly its recorded branches. */
+    public const SCOPE_BRANCHES = 'branches';
+
     protected $fillable = [
         'total_amount',
         'member_count',
@@ -26,6 +32,9 @@ class AutoCreditRun extends Model
         // The cycle the run is for, a month's 15th or its 30th (finish run
         // round 8). Null on runs made before: their rows count by their date.
         'cycle_date',
+        // What the run covered (round 9): SCOPE_ALL or SCOPE_BRANCHES. Null on
+        // runs made before, which count for branches:view_all only.
+        'scope',
     ];
 
     protected function casts(): array

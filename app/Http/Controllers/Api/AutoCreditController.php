@@ -16,10 +16,14 @@ class AutoCreditController extends Controller
 
     /**
      * The auto-credit preview for a cycle, for the caller's branches. A run
-     * records the branches it covered (round 9), so a branch reads its cycle
-     * as done only when a run covered it (`cycle_branches`, `cycle_run`), and
-     * `last_run`'s totals show only when that run covered nothing outside the
-     * caller's branches (always for branches:view_all).
+     * records what it covered (round 9): its scope (`all` for view_all, every
+     * branch and members with no branch; `branches`, exactly its recorded
+     * branches). A branch reads its cycle as done only when a run covered it
+     * (`cycle_branches`, with a last "No branch" row for view_all when some
+     * members on auto-credit have no branch; `cycle_run`). `last_run`'s totals
+     * show to view_all, and to a branch user only for a `branches` run that
+     * covered nothing outside their branches. Runs made before count for
+     * view_all only.
      */
     #[OA\Get(
         path: '/api/auto-credit/status',
@@ -30,7 +34,7 @@ class AutoCreditController extends Controller
             new OA\Parameter(name: 'cycle_date', in: 'query', required: false, description: 'The cycle the run would be for: a month\'s 15th or its 30th (last day), the current one or one up to 92 days ago. Defaults to the current cycle: the latest 15th or month\'s last day on or before today in Manila.', schema: new OA\Schema(type: 'string', format: 'date')),
         ],
         responses: [
-            new OA\Response(response: 200, description: 'Auto-credit status: the run\'s preview for `data.cycle_date` (`cycle_label` in words), with the pledges it would skip and why, and `cycle_options`, the cycles a run may take now, the current one first. Runs count by the branches they covered (a run covers its caller\'s branches, every branch for branches:view_all; runs made before branches were recorded count for branches:view_all only). `cycle_branches` lists each branch of the caller\'s members on auto-credit, by name, as {branch_id, branch_name, run_id, processed_at}, with the cycle\'s latest run that covered it (run_id and processed_at null when none), `[]` when there are none. `cycle_run` ({id, processed_at, status}) is the latest of those runs once every listed branch has one, else null; with no listed branch, the cycle\'s latest run that covered one of the caller\'s branches. `last_run` is the latest run that covered one of the caller\'s branches (any run for branches:view_all); its total_amount, member_count and skipped_count are null unless the caller holds branches:view_all or the run covered only the caller\'s branches.'),
+            new OA\Response(response: 200, description: 'Auto-credit status: the run\'s preview for `data.cycle_date` (`cycle_label` in words), with the pledges it would skip and why, and `cycle_options`, the cycles a run may take now, the current one first. Runs count by what they covered, their scope: `all` (a branches:view_all run) covers every branch and members with no branch; `branches` (a branch user\'s run) covers exactly the branches it recorded; runs made before scopes were recorded count for branches:view_all only. `cycle_branches` lists each branch of the caller\'s members on auto-credit, by name, as {branch_id, branch_name, run_id, processed_at}, with the cycle\'s latest run that covered it (run_id and processed_at null when none), `[]` when there are none. For a branches:view_all caller with members on auto-credit who have no branch, one last row {branch_id: null, branch_name: "No branch"}, covered only by `all` runs and runs made before; branch users never get it. `cycle_run` ({id, processed_at, status}) is the latest of those runs once every row has one, else null; with no row, the cycle\'s latest run that covered one of the caller\'s branches. `last_run` is the latest run that covered one of the caller\'s branches (any run for branches:view_all); its total_amount, member_count and skipped_count are null unless the caller holds branches:view_all, or the run was a `branches` run that covered only the caller\'s branches.'),
             new OA\Response(response: 422, description: 'Not a 15th or a month\'s last day, a future cycle, or one more than 92 days ago, in words'),
             new OA\Response(response: 401, description: 'Unauthenticated'),
         ],
@@ -63,8 +67,8 @@ class AutoCreditController extends Controller
             ),
         ),
         responses: [
-            new OA\Response(response: 201, description: 'Auto-credit processed, and each member\'s credit posted Dr the method\'s account / Cr 3060 Share Capital when the organisation keeps books. A pledge the run doesn\'t credit is skipped: its schedule is credited in the other half, a run already credited it for this cycle, or its instalments for the cycle\'s month are all in. `data.skipped` lists each with its reason, and `data.skipped_count` counts them. `data.cycle_date` is the run\'s cycle.'),
-            new OA\Response(response: 422, description: 'No cycle, not a 15th or a month\'s last day, a future cycle or one more than 92 days ago, a method outside the list, or a reference over 100 characters, in words'),
+            new OA\Response(response: 201, description: 'Auto-credit processed for the caller\'s branches (the run records its scope and branches: `all` for branches:view_all, else `branches`), and each member\'s credit posted Dr the method\'s account / Cr 3060 Share Capital when the organisation keeps books. A pledge the run doesn\'t credit is skipped: its schedule is credited in the other half, a run already credited it for this cycle, or its instalments for the cycle\'s month are all in. `data.skipped` lists each with its reason, and `data.skipped_count` counts them. `data.cycle_date` is the run\'s cycle.'),
+            new OA\Response(response: 422, description: 'No cycle, not a 15th or a month\'s last day, a future cycle or one more than 92 days ago, a method outside the list, or a reference over 100 characters, in words. A caller with no branch and no branches:view_all is refused on `branch`, with nothing written: "No branch is assigned to your account, so there are no members to credit."'),
             new OA\Response(response: 409, description: 'Collided with another save taking the next reference. Not tried again, so overlapping runs cannot credit a pledge twice. Nothing was posted; check the last run before running again.'),
             new OA\Response(response: 403, description: 'Forbidden'),
         ],
