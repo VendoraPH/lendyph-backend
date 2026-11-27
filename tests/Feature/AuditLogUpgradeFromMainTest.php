@@ -136,5 +136,8 @@ class AuditLogUpgradeFromMainTest extends TestCase
             $table->dropConstrainedForeignId('portal_user_id');
             $table->dropColumn('actor_type');
         });
+
+        // A migration's down() is followed by MigrationEnded, which clears the list.
+        AuditLogService::forgetColumns();
     }
 }
