@@ -5,6 +5,7 @@ namespace App\Providers;
 use App\Models\CsvImportRun;
 use App\Models\PortalUser;
 use App\Models\User;
+use App\Services\AuditLogService;
 use App\Services\BorrowerSubmissionTokenService;
 use App\Services\CsvImport\CsvImportUploadService;
 use App\Services\CsvImport\ImportErrorDigest;
@@ -12,6 +13,9 @@ use App\Services\Linda\LindaHttpError;
 use App\Services\TokenIdleWindow;
 use App\Services\TokenTimeout;
 use Illuminate\Cache\RateLimiting\Limit;
+use Illuminate\Database\Events\MigrationEnded;
+use Illuminate\Database\Events\MigrationsEnded;
+use Illuminate\Database\Events\MigrationsStarted;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Event;
@@ -195,6 +199,23 @@ class AppServiceProvider extends ServiceProvider
         // to the permission checks, which grant them nothing.
         Gate::before(function ($user) {
             return $user instanceof User && $user->hasRole('super_admin') ? true : null;
+        });
+
+        /**
+         * The promotion upgrades from main in one run, so a migration's audit
+         * row can land before audit_logs has its later columns. During a
+         * migrate run the audit writer leaves out the ones the table lacks,
+         * and reads them again after each migration, since one may add them.
+         * Outside a run it writes every column. See AuditLogService.
+         */
+        Event::listen(MigrationsStarted::class, static function (): void {
+            AuditLogService::migrationsStarted();
+        });
+        Event::listen(MigrationEnded::class, static function (): void {
+            AuditLogService::forgetColumns();
+        });
+        Event::listen(MigrationsEnded::class, static function (): void {
+            AuditLogService::migrationsEnded();
         });
 
         /**
