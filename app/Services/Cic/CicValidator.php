@@ -531,6 +531,10 @@ final class CicValidator implements ValidatesCicCapture
             $out['findings'][] = [$f(15), 'error', 'DATE_ORDER', 'Contract End Planned Date must be later than the Contract Start Date.'];
         }
 
+        if ($actualEnd !== null && $reference !== null && $actualEnd > $reference) {
+            $out['findings'][] = [$f(16), 'error', 'END_AFTER_REFERENCE_DATE', 'Contract End Actual Date is later than the Contract Reference Date: a closure after the month end goes in a later month\'s file.'];
+        }
+
         if ($start !== null && $actualEnd !== null && $actualEnd < $start) {
             $out['findings'][] = [$f(16), 'error', 'DATE_ORDER', 'Contract End Actual Date can\'t be earlier than the Contract Start Date.'];
         }

@@ -24,6 +24,7 @@ final class CicIssueWords
         'DUPLICATE_RECORD' => 'Record listed twice',
         'DUPLICATE_SUBJECT' => 'Subject listed twice',
         'EMPTY_FILE' => 'No records to report',
+        'END_AFTER_REFERENCE_DATE' => 'Closed after the reference date',
         'FIXED_VALUE' => 'Wrong fixed value',
         'FULL_ADDRESS_IGNORED' => 'Full address not used',
         'GUARANTEE_CURRENCY' => 'Guarantee currency',

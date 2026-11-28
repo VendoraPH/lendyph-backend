@@ -137,6 +137,17 @@ final class ContractRecordBuilder
                 return null;
             }
 
+            // A closure recorded after the reference date belongs to a later
+            // month (a correction re-checking a held-back loan fixed since):
+            // left out again, with the issue it was held back with.
+            if ((CicFormat::dateKey($endDate) ?? 0) > (int) $this->context->reference->format('Ymd')) {
+                $this->leaveOut($loan, $wasActive ? 'error' : 'warning', 'NO_CLOSING_EVENT', $wasActive
+                    ? 'This loan was reported active last month, but its closure is recorded after this file\'s reference date, so it can\'t be reported in this month\'s file. It goes in the file of the month it closed.'
+                    : 'This loan\'s closure is recorded after this file\'s reference date, so it is left out of this month\'s file. It goes in the file of the month it closed.');
+
+                return null;
+            }
+
             $sameDay = $endDate === CicFormat::date($loan->released_at);
 
             // A closure is reported once: in the month it ended, or in the

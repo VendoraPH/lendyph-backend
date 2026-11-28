@@ -171,6 +171,19 @@ it('refuses control and invisible characters, and text that isn\'t valid, in any
         ->and(implode(' ', array_column($control, 'message')))->not->toContain('Rizal');
 });
 
+it('refuses an actual end date after the reference date', function () {
+    $issues = cicValidate([
+        ['ID', 'BRW-000001', cicSubjectValues()],
+        ['CI', 'LN-8', cicContractValues(['CI7' => 'LN-8', 'CI9' => 'CL', 'CI16' => '02122026', 'CI31' => null, 'CI32' => null])],
+        ['CI', 'LN-9', cicContractValues(['CI7' => 'LN-9', 'CI9' => 'CA', 'CI16' => '30112026', 'CI31' => null, 'CI32' => null])],
+    ]);
+    $of = fn (string $key) => array_values(array_filter($issues, fn (array $i) => $i['record_key'] === $key && $i['code'] === 'END_AFTER_REFERENCE_DATE'));
+
+    expect($of('LN-8'))->toHaveCount(1)
+        ->and($of('LN-8')[0])->toMatchArray(['field_id' => 'CI16', 'severity' => 'error'])
+        ->and($of('LN-9'))->toBe([]);
+});
+
 it('checks the provider code once on the header, puts errors first, and reads an empty file as a warning', function () {
     $issues = cicValidate([], ['mfi' => false, 'provider_code' => 'ABC', 'reference_date' => '30112026']);
 

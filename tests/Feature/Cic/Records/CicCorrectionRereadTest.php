@@ -127,3 +127,22 @@ it('checks the loans the month end left out again, so a held-back closure never 
         ->and($closure->values['CI9'])->toBe('CA')
         ->and($closure->values['CI16'])->toBe('30102026');
 });
+
+it('leaves a held-back loan out again when its closure is recorded after the month end', function () {
+    $loan = $this->cicLoan();
+    $previous = CicCapture::factory()->monthEnd('2026-10-31')->create();
+    $values = ['CI1' => 'CI', 'CI7' => $loan->loan_account_number, 'CI9' => 'AC'];
+    CicCaptureRecord::factory()->for($previous, 'capture')->create(['record_type' => 'CI', 'record_key' => $loan->loan_account_number, 'loan_id' => $loan->id, 'values' => $values, 'checksum' => CicCaptureRecord::checksumOf($values)]);
+    $previous->forceFill(['status' => CicCapture::STATUS_COMPLETE, 'checksum' => $previous->computeChecksum(), 'finished_at' => now()])->save();
+    DB::table('loans')->where('id', $loan->id)->update(['status' => 'completed']);
+    $monthEnd = cicReread(CicCapture::KIND_MONTH_END);
+
+    // Fixed after the month end: the closing payment is dated December.
+    Repayment::factory()->create(['loan_id' => $loan->id, 'payment_date' => '2026-12-02', 'amount_paid' => 30900, 'status' => 'posted']);
+    $correction = cicReread(CicCapture::KIND_CORRECTION, $monthEnd);
+
+    expect(CicCaptureRecord::query()->where('capture_id', $correction->id)->where('loan_id', $loan->id)->exists())->toBeFalse()
+        ->and($correction->left_out)->toHaveCount(1)
+        ->and($correction->left_out[0])->toMatchArray(['code' => 'NO_CLOSING_EVENT', 'severity' => 'error', 'loan_id' => $loan->id])
+        ->and($correction->left_out[0]['message'])->toContain('after this file\'s reference date');
+});
