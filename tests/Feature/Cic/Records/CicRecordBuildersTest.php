@@ -81,12 +81,45 @@ it('sends a one-line address as FullAddress, maps "others" IDs only through staf
     $this->cicLoan($member);
 
     $before = cicRecordOf(cicBuild(), 'ID', $member->borrower_code)->values;
-    CicCodeMapping::factory()->create(['domain' => CicCodeMapping::DOMAIN_ID_KIND, 'lendy_value' => 'gsis', 'cic_code' => '12']);
+    CicCodeMapping::factory()->create(['domain' => CicCodeMapping::DOMAIN_ID_KIND, 'lendy_value' => 'GSIS', 'cic_domain' => 'IdentificationTypeDomain', 'cic_code' => '12']);
     $after = cicRecordOf(cicBuild(), 'ID', $member->borrower_code)->values;
 
     expect($before)->toMatchArray(['ID32' => 'MI', 'ID33' => '45 Mabini St, Iriga', 'ID43' => 'AI', 'ID44' => '45 Mabini St, Iriga', 'ID78' => '1'])
         ->and($before)->not->toHaveKey('ID34')->not->toHaveKey('ID54')
         ->and($after)->toMatchArray(['ID54' => '12', 'ID55' => 'G-1']);
+});
+
+it('routes each valid-ID kind by its mapping\'s code list, and falls back to the built-in defaults', function () {
+    $member = $this->cicMember();
+    $document = fn (string $label, string $number, ?string $custom = null) => Document::query()->forceCreate([
+        'documentable_type' => Borrower::class, 'documentable_id' => $member->id, 'type' => 'valid_id', 'label' => $label,
+        'custom_type_name' => $custom, 'id_number' => $number, 'file_path' => $number, 'original_filename' => 'x.jpg', 'mime_type' => 'image/jpeg', 'file_size' => 1,
+    ]);
+    $document('drivers_license', 'N01-23-456789');
+    $document('sss', '34-1234567-8');
+    $document('umid', '0111-2222333-4');
+    $document('others', 'PH-5', 'PhilHealth');
+    $document('others', '9-9', 'Card 12');
+    $document('others', 'X-1');
+    $this->cicLoan($member);
+
+    $defaults = cicRecordOf(cicBuild(), 'ID', $member->borrower_code)->values;
+
+    // sss moves to the ID types (code 10 there is a driver's licence, not a TIN), the licence moves to the
+    // identifications, and PhilHealth (an "others" name) is mapped as an ID type. umid keeps its default.
+    CicCodeMapping::factory()->create(['domain' => CicCodeMapping::DOMAIN_ID_KIND, 'lendy_value' => 'sss', 'cic_domain' => 'IDTypeDomain', 'cic_code' => '14']);
+    CicCodeMapping::factory()->create(['domain' => CicCodeMapping::DOMAIN_ID_KIND, 'lendy_value' => 'drivers_license', 'cic_domain' => 'IdentificationTypeDomain', 'cic_code' => '19']);
+    CicCodeMapping::factory()->create(['domain' => CicCodeMapping::DOMAIN_ID_KIND, 'lendy_value' => 'PhilHealth', 'cic_domain' => 'IDTypeDomain', 'cic_code' => '20']);
+    $mapped = cicRecordOf(cicBuild(), 'ID', $member->borrower_code)->values;
+
+    expect($defaults)->toMatchArray([
+        'ID54' => '11', 'ID55' => '34-1234567-8', 'ID56' => '15', 'ID57' => '0111-2222333-4',
+        'ID60' => '10', 'ID61' => 'N01-23-456789',
+    ])->and($defaults)->not->toHaveKey('ID58')->not->toHaveKey('ID66')
+        ->and($mapped)->toMatchArray([
+            'ID54' => '19', 'ID55' => 'N01-23-456789', 'ID56' => '15', 'ID57' => '0111-2222333-4',
+            'ID60' => '14', 'ID61' => '34-1234567-8', 'ID66' => '20', 'ID67' => 'PH-5',
+        ])->and($mapped)->not->toHaveKey('ID58')->not->toHaveKey('ID72');
 });
 
 it('builds an instalment loan\'s CI record from the existing figures', function () {

@@ -4,6 +4,8 @@ namespace App\Services\Cic\Records;
 
 use App\Models\Borrower;
 use App\Models\CicCodeMapping;
+use App\Services\Cic\Settings\CicCodeMappingService;
+use App\Services\Cic\Settings\CicIdKinds;
 use App\Services\ValidIdService;
 use Illuminate\Support\Facades\DB;
 
@@ -11,14 +13,17 @@ use Illuminate\Support\Facades\DB;
  * A member's valid IDs as CSDF identifications (ID54–ID59, IdentificationTypeDomain)
  * and IDs (ID60–ID77, IDTypeDomain), read from their valid-ID documents.
  *
- * - Identifications: tin_id 10, sss 11, umid 15 by default. Staff's `id_kind`
- *   code mappings add or replace kinds, matched on the document's kind, or on
- *   its own type name for "others" (GSIS, PhilHealth, Senior Citizen): never a
- *   guess. A mapping's code is an IdentificationTypeDomain code. TIN comes
- *   first, then the rest in upload order, one per type, at most 3.
- * - IDs: philippine_id 32, drivers_license 10, passport 12, prc_id 13,
- *   postal_id 16, voters_id 11 (the mapping's defaults), one per type, at
- *   most 3. A kind used as an identification isn't repeated as an ID.
+ * - A document's kind is read with CicIdKinds::valueOf(), the value the
+ *   settings screen maps: a standard kind, or the "others" name typed on it
+ *   (never one holding a digit, never a bare "others").
+ * - Staff's `id_kind` code mapping for that kind decides the list by its
+ *   `cic_domain`: IdentificationTypeDomain goes to ID54–ID59, IDTypeDomain to
+ *   ID60–ID77. A kind with no mapping takes the built-in defaults:
+ *   identifications tin_id 10, sss 11, umid 15; IDs philippine_id 32,
+ *   drivers_license 10, passport 12, prc_id 13, postal_id 16, voters_id 11.
+ *   Any other unmapped kind is left out: never a guess.
+ * - TIN comes first among identifications, then the rest in upload order, one
+ *   per code, at most 3 in each list.
  * - The front and back of one ID share a number, so a kind counts once. A
  *   document with no number is left out.
  */
@@ -40,8 +45,8 @@ final class CicIdentifications
     /** CIC's TIN code, sent first. */
     private const TIN = '10';
 
-    /** @var array<string, string>|null kind or "others" name, lower case → identification code */
-    private ?array $identificationCodes = null;
+    /** @var array<string, array{list: string, code: string}>|null kind, lower case → its mapped code list and code */
+    private ?array $mappedCodes = null;
 
     /**
      * Each member's identifications and IDs, in one query for the whole list.
@@ -83,25 +88,18 @@ final class CicIdentifications
 
         foreach ($documents as $document) {
             $number = CicFormat::text($document->id_number);
+            $kind = CicIdKinds::valueOf($document->label, $document->custom_type_name);
 
-            if ($number === '') {
+            if ($number === '' || $kind === null) {
                 continue;
             }
 
-            $kind = mb_strtolower(trim((string) $document->label));
-            $name = mb_strtolower(CicFormat::text($document->custom_type_name));
-            $identification = $this->identificationCode($kind, $name);
+            [$list, $code] = $this->codeFor($kind);
 
-            if ($identification !== null) {
-                $identifications[$identification] ??= $number;
-
-                continue;
-            }
-
-            $idType = self::ID_TYPE_DEFAULTS[$kind] ?? null;
-
-            if ($idType !== null) {
-                $ids[$idType] ??= $number;
+            if ($list === CicCodeMappingService::IDENTIFICATION_TYPES) {
+                $identifications[$code] ??= $number;
+            } elseif ($list === CicCodeMappingService::ID_TYPES) {
+                $ids[$code] ??= $number;
             }
         }
 
@@ -116,30 +114,41 @@ final class CicIdentifications
         return ['identifications' => $pairs($identifications), 'ids' => $pairs($ids)];
     }
 
-    private function identificationCode(string $kind, string $customName): ?string
+    /**
+     * The code list and code a kind reports under: staff's mapping, else the
+     * built-in defaults, else none.
+     *
+     * @return array{0: string|null, 1: string|null}
+     */
+    private function codeFor(string $kind): array
     {
-        $codes = $this->identificationCodes();
+        $mapped = $this->mappedCodes()[mb_strtolower($kind)] ?? null;
 
-        if ($kind === 'others') {
-            return $customName === '' ? null : ($codes[$customName] ?? null);
+        if ($mapped !== null) {
+            return [$mapped['list'], $mapped['code']];
         }
 
-        return $codes[$kind] ?? null;
+        if (array_key_exists($kind, self::IDENTIFICATION_DEFAULTS)) {
+            return [CicCodeMappingService::IDENTIFICATION_TYPES, self::IDENTIFICATION_DEFAULTS[$kind]];
+        }
+
+        if (array_key_exists($kind, self::ID_TYPE_DEFAULTS)) {
+            return [CicCodeMappingService::ID_TYPES, self::ID_TYPE_DEFAULTS[$kind]];
+        }
+
+        return [null, null];
     }
 
-    /** @return array<string, string> */
-    private function identificationCodes(): array
+    /** @return array<string, array{list: string, code: string}> */
+    private function mappedCodes(): array
     {
-        if ($this->identificationCodes === null) {
-            $mapped = CicCodeMapping::query()
-                ->where('domain', CicCodeMapping::DOMAIN_ID_KIND)
-                ->get(['lendy_value', 'cic_code'])
-                ->mapWithKeys(fn (CicCodeMapping $mapping) => [mb_strtolower(CicFormat::text($mapping->lendy_value)) => (string) $mapping->cic_code])
-                ->all();
-
-            $this->identificationCodes = [...self::IDENTIFICATION_DEFAULTS, ...$mapped];
-        }
-
-        return $this->identificationCodes;
+        return $this->mappedCodes ??= CicCodeMapping::query()
+            ->where('domain', CicCodeMapping::DOMAIN_ID_KIND)
+            ->whereIn('cic_domain', CicCodeMappingService::CODE_LISTS[CicCodeMapping::DOMAIN_ID_KIND])
+            ->get(['lendy_value', 'cic_domain', 'cic_code'])
+            ->mapWithKeys(fn (CicCodeMapping $mapping) => [
+                mb_strtolower(trim((string) $mapping->lendy_value)) => ['list' => (string) $mapping->cic_domain, 'code' => (string) $mapping->cic_code],
+            ])
+            ->all();
     }
 }

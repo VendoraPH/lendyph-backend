@@ -18,6 +18,7 @@ class CicCodeMappingFactory extends Factory
         return [
             'domain' => CicCodeMapping::DOMAIN_ID_KIND,
             'lendy_value' => 'Test ID '.$this->faker->unique()->numberBetween(1, 999999),
+            'cic_domain' => 'IdentificationTypeDomain',
             'cic_code' => '10',
             'updated_by' => User::factory(),
         ];
@@ -28,6 +29,7 @@ class CicCodeMappingFactory extends Factory
         return $this->state([
             'domain' => CicCodeMapping::DOMAIN_COLLATERAL_TYPE,
             'lendy_value' => (string) $collateralTypeId,
+            'cic_domain' => 'GuaranteesDomain',
             'cic_code' => $cicCode,
         ]);
     }
