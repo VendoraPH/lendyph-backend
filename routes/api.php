@@ -59,6 +59,7 @@ use App\Http\Controllers\Api\StaffController;
 use App\Http\Controllers\Api\UserController;
 use App\Http\Middleware\AllowAuthOrSubmissionToken;
 use App\Http\Middleware\CheckTokenExpiry;
+use App\Http\Middleware\EnsureCicEnabled;
 use App\Http\Middleware\EnsureUserIsActive;
 use App\Http\Middleware\OptionalSanctumAuth;
 use App\Http\Middleware\ReceiptShare\EnsureReceiptShareLinksEnabled;
@@ -879,6 +880,23 @@ Route::middleware(['auth:sanctum', CheckTokenExpiry::class, EnsureUserIsActive::
     foreach ($portalAdminPartials as $portalAdminPartial) {
         require $portalAdminPartial;
     }
+
+    /*
+     * CIC reporting partials (routes/api/cic/*.php), in file-name order: each
+     * CIC slice adds its own file and never edits this one. Each file sets the
+     * `/cic` prefix. Every route here answers 404 while CIC_ENABLED is off
+     * (EnsureCicEnabled) or while Menu Visibility hides `cic`
+     * (BlockHiddenModules). Authorization stays in the controllers
+     * (CicController::authorizeCic()). An empty folder adds nothing.
+     */
+    Route::middleware(EnsureCicEnabled::class)->group(function () {
+        $cicPartials = glob(__DIR__.'/api/cic/*.php') ?: [];
+        sort($cicPartials);
+
+        foreach ($cicPartials as $cicPartial) {
+            require $cicPartial;
+        }
+    });
 
     // Branding (organization logo + identity printed on reports and documents)
     Route::get('/settings/branding', [BrandingController::class, 'show']);

@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Models\Borrower;
+use App\Models\CicSubject;
 use App\Models\CsvImportRow;
 use App\Models\LindaQuestion;
 use App\Models\PortalUser;
@@ -49,6 +50,9 @@ class BorrowerPurgeService
      */
     public const RECORDS_KEPT = 'This member\'s records must be kept, so the record can\'t be deleted.';
 
+    /** The refusal for a member the lender reports to CIC (the subject register). */
+    public const CIC_REPORTED = 'This member is reported to the Credit Information Corporation, so the record must be kept and can\'t be deleted.';
+
     public function __construct(private readonly CsvImportRowRedactor $redactor) {}
 
     /**
@@ -80,6 +84,16 @@ class BorrowerPurgeService
         if (app(AmlaMemberRecords::class)->holdsMember((int) $borrower->getKey())) {
             throw ValidationException::withMessages([
                 'borrower' => [self::RECORDS_KEPT],
+            ]);
+        }
+
+        // A member in the CIC subject register (reported, or captured for
+        // reporting) keeps their record, so CIC's subject number always names
+        // the same person (the CIC build plan, decision 3). Refused in words,
+        // before anything is touched, never a 500 naming a table.
+        if (CicSubject::holdsMember((int) $borrower->getKey())) {
+            throw ValidationException::withMessages([
+                'borrower' => [self::CIC_REPORTED],
             ]);
         }
 

@@ -417,6 +417,15 @@ class AppServiceProvider extends ServiceProvider
                 return Limit::perMinute(self::FILE_READS_PER_MINUTE)->by('files:'.$key);
             }
 
+            // CIC reads, staff only: their own bucket, apart from the rest of
+            // the app, answering in CIC's words, so a CIC screen's 429 always
+            // reads the same (the route-level `cic` limiter, at 30, is the
+            // one a screen meets first).
+            if ($caller instanceof User && $request->isMethod('GET') && $request->is('api/cic/*')) {
+                return Limit::perMinute(CicServiceProvider::API_READS_PER_MINUTE)->by('cic-reads:'.$caller->getKey())
+                    ->response(CicServiceProvider::tooMany(...));
+            }
+
             // Dashboard and report reads, staff only (REPORT_READS_PER_MINUTE).
             // Writes on these paths, exports' own 5/min and every other route
             // keep their limits.
