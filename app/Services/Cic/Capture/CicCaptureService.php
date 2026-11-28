@@ -17,6 +17,7 @@ use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Validation\ValidationException;
+use RuntimeException;
 use Throwable;
 
 /**
@@ -183,16 +184,24 @@ final class CicCaptureService
 
         foreach (['ID', 'CI', 'CN', 'NE'] as $type) {
             foreach (array_chunk($set->ofType($type), self::BATCH) as $batch) {
-                DB::transaction(fn () => CicCaptureRecord::query()->insert(array_map(
-                    fn (CicRecord $record) => $this->row($capture, $record, $subjectIds),
-                    $batch,
-                )));
+                DB::transaction(function () use ($capture, $batch, $subjectIds): void {
+                    $this->holdCapturing($capture);
+                    CicCaptureRecord::query()->insert(array_map(
+                        fn (CicRecord $record) => $this->row($capture, $record, $subjectIds),
+                        $batch,
+                    ));
+                });
             }
         }
 
         $leftOut = $set->leftOut;
 
         DB::transaction(function () use ($capture, $leftOut): void {
+            // Complete only a capture still capturing, read under its lock:
+            // the hourly sweep may have failed it meanwhile (delta re-review).
+            $this->holdCapturing($capture);
+            $capture->refresh();
+
             $counts = DB::table('cic_capture_records')->where('capture_id', $capture->id)
                 ->groupBy('record_type')->selectRaw('record_type, COUNT(*) as total')->pluck('total', 'record_type');
 
@@ -420,25 +429,59 @@ final class CicCaptureService
         ];
     }
 
-    private function fail(CicCapture $capture, ?User $by): void
+    /**
+     * Locks the capture's row and checks it is still capturing, then marks
+     * the progress (`updated_at`), which the hourly sweep reads. A capture
+     * failed meanwhile stops its run.
+     */
+    private function holdCapturing(CicCapture $capture): void
     {
-        $capture->refresh();
+        $status = CicCapture::query()->whereKey($capture->id)->lockForUpdate()->value('status');
 
-        if ($capture->status !== CicCapture::STATUS_CAPTURING) {
-            return;
+        if ($status !== CicCapture::STATUS_CAPTURING) {
+            throw new RuntimeException('The capture stopped before it finished.');
         }
 
-        // Nothing of a failed capture is kept: its partial records hold
-        // members' data and can never be filed. They go while it's still
-        // capturing, the only time a record can be removed.
-        CicCaptureRecord::query()->where('capture_id', $capture->id)->select(['id', 'capture_id'])
-            ->lazyById(self::BATCH)->each(fn (CicCaptureRecord $record) => $record->delete());
+        DB::table('cic_captures')->where('id', $capture->id)->update(['updated_at' => now()]);
+    }
 
-        $capture->forceFill([
-            'status' => CicCapture::STATUS_FAILED,
-            'finished_at' => now(),
-            'error' => self::FAILURE,
-        ])->save();
+    /**
+     * Fails a capture still capturing, under its lock, deleting its records.
+     * With `$idleSince`, only when it has shown no progress since then (the
+     * sweep re-checks under the lock, so a capture that just wrote a batch
+     * carries on). Returns whether it failed the capture.
+     */
+    private function fail(CicCapture $capture, ?User $by, ?Carbon $idleSince = null): bool
+    {
+        $failed = DB::transaction(function () use ($capture, $idleSince): bool {
+            $row = CicCapture::query()->whereKey($capture->id)->lockForUpdate()->first(['id', 'status', 'updated_at']);
+
+            if ($row === null || $row->status !== CicCapture::STATUS_CAPTURING
+                || ($idleSince !== null && $row->updated_at !== null && $row->updated_at->greaterThanOrEqualTo($idleSince))) {
+                return false;
+            }
+
+            $capture->refresh();
+
+            // Nothing of a failed capture is kept: its partial records hold
+            // members' data and can never be filed. They go while it's still
+            // capturing, the only time a record can be removed, under the
+            // capture's lock, so no batch slips in between.
+            CicCaptureRecord::query()->where('capture_id', $capture->id)->select(['id', 'capture_id'])
+                ->lazyById(self::BATCH)->each(fn (CicCaptureRecord $record) => $record->delete());
+
+            $capture->forceFill([
+                'status' => CicCapture::STATUS_FAILED,
+                'finished_at' => now(),
+                'error' => self::FAILURE,
+            ])->save();
+
+            return true;
+        });
+
+        if (! $failed) {
+            return false;
+        }
 
         AuditLogService::log('cic_capture_failed', $capture, null, [
             'capture_id' => $capture->id,
@@ -447,29 +490,38 @@ final class CicCaptureService
             'status' => CicCapture::STATUS_FAILED,
         ], sprintf('CIC %s capture #%d for %s failed; nothing in it can be used.', self::kindWords($capture->kind), $capture->id, $capture->reference_date->format('M j, Y')),
             $by?->id, asSystem: $by === null);
+
+        return true;
     }
 
-    /** A capture still capturing after this long was killed mid-run. */
+    /** A capture that has shown no progress for this long was killed mid-run. */
     public const STUCK_MINUTES = 60;
 
     /**
-     * Fails every capture stuck in `capturing` for over an hour (a killed
-     * process), deleting its partial records (security re-review SN4). Run by
-     * the hourly `cic:clear-temp`. Returns how many it failed.
+     * Fails every capture in `capturing` that has shown no progress (its
+     * `updated_at`, marked at every batch) for over an hour: a killed process
+     * (security re-review SN4, delta re-review). Its partial records are
+     * deleted. A capture still writing is never touched. Run by the hourly
+     * `cic:clear-temp`. Returns how many it failed.
      */
     public function failStuck(): int
     {
+        $idleSince = now()->subMinutes(self::STUCK_MINUTES);
+        $failed = 0;
+
         $stuck = CicCapture::query()
             ->where('status', CicCapture::STATUS_CAPTURING)
-            ->where('started_at', '<', now()->subMinutes(self::STUCK_MINUTES))
+            ->where('updated_at', '<', $idleSince)
             ->get();
 
         foreach ($stuck as $capture) {
-            Log::warning('CIC capture stuck; marked failed.', ['capture_id' => $capture->id]);
-            $this->fail($capture, null);
+            if ($this->fail($capture, null, $idleSince)) {
+                Log::warning('CIC capture stuck; marked failed.', ['capture_id' => $capture->id]);
+                $failed++;
+            }
         }
 
-        return $stuck->count();
+        return $failed;
     }
 
     public static function kindWords(string $kind): string

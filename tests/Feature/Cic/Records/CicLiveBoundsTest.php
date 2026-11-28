@@ -1,5 +1,6 @@
 <?php
 
+use App\Models\AuditLog;
 use App\Models\CicCapture;
 use App\Models\CicCaptureRecord;
 use App\Services\Cic\Capture\CicCaptureService;
@@ -72,19 +73,42 @@ it('deletes the database cache store\'s expired cic rows every hour', function (
         ->toBe(['cic:validation:1:abc:def', 'other:key']);
 });
 
-it('fails a capture stuck for over an hour and deletes its records, leaving a running one alone', function () {
+it('fails a capture that has shown no progress for over an hour and deletes its records, leaving a working one alone', function () {
     $stuck = CicCapture::factory()->create(['reference_date' => '2026-11-30']);
-    $stuck->forceFill(['started_at' => now()->subMinutes(61)])->save();
     CicCaptureRecord::factory()->for($stuck, 'capture')->create();
-    $running = CicCapture::factory()->create(['reference_date' => '2026-11-29']);
-    $running->forceFill(['started_at' => now()->subMinutes(10)])->save();
+    DB::table('cic_captures')->where('id', $stuck->id)->update(['started_at' => now()->subHours(3), 'updated_at' => now()->subMinutes(61)]);
+    $working = CicCapture::factory()->create(['reference_date' => '2026-11-29']);
+    DB::table('cic_captures')->where('id', $working->id)->update(['started_at' => now()->subHours(3), 'updated_at' => now()->subMinutes(5)]);
 
     $this->artisan('cic:clear-temp')->expectsOutput('Marked 1 stuck CIC capture failed.')->assertSuccessful();
 
     expect($stuck->fresh()->status)->toBe('failed')
         ->and(CicCaptureRecord::query()->where('capture_id', $stuck->id)->count())->toBe(0)
-        ->and($running->fresh()->status)->toBe('capturing')
+        ->and($working->fresh()->status)->toBe('capturing')
         ->and(app(CicCaptureService::class)->failStuck())->toBe(0);
+});
+
+it('never completes a capture the sweep failed while it was running', function () {
+    config(['cic.test_captures' => true]);
+    $this->cicLoan();
+    $swept = false;
+
+    DB::listen(function ($query) use (&$swept) {
+        if (! $swept && str_starts_with($query->sql, 'insert into `cic_capture_records`')) {
+            $swept = true;
+            $id = (int) DB::table('cic_captures')->where('status', 'capturing')->value('id');
+            DB::table('cic_captures')->where('id', $id)->update(['updated_at' => now()->subMinutes(61)]);
+            app(CicCaptureService::class)->failStuck();
+        }
+    });
+
+    $capture = app(CicCaptureService::class)->capture(Carbon::parse('2026-11-30'), CicCapture::KIND_TEST, null);
+
+    expect($swept)->toBeTrue()
+        ->and($capture->status)->toBe('failed')
+        ->and($capture->checksum)->toBeNull()
+        ->and(CicCaptureRecord::query()->where('capture_id', $capture->id)->count())->toBe(0)
+        ->and(AuditLog::query()->where('action', 'cic_capture_completed')->exists())->toBeFalse();
 });
 
 it('refuses a capture on readiness, which is always live, and never caches a refused date', function () {
