@@ -149,7 +149,7 @@ it('refuses when gpg is missing, never falling back', function () {
         ->and(Storage::disk('private')->allFiles())->toBe([]);
 });
 
-it('refuses with 409 when the rebuilt file differs from the generated one', function (string $change) {
+it('refuses with 409 when the capture or the rebuilt file differs from the generated one', function (string $change, string $code) {
     $key = $this->makeTestKey();
     $this->activateTestKey($key);
     $user = $this->cicAll();
@@ -163,12 +163,12 @@ it('refuses with 409 when the rebuilt file differs from the generated one', func
     }
 
     $this->actingAs($user)->postJson("/api/cic/submissions/{$submission->id}/encrypt", ['confirm' => true])
-        ->assertConflict()->assertJsonPath('code', 'file_changed');
+        ->assertConflict()->assertJsonPath('code', $code);
 
     expect($submission->fresh()->status)->toBe('generated')
         ->and(Storage::disk('private')->allFiles())->toBe([])
         ->and($this->leftoverEncryptionFolders())->toBe([]);
-})->with(['a changed capture' => 'records', 'a changed provider code' => 'provider']);
+})->with(['a changed capture' => ['records', 'capture_changed'], 'a changed provider code' => ['provider', 'file_changed']]);
 
 it('refuses a key whose material does not match its recorded fingerprint', function () {
     $key = $this->makeTestKey();

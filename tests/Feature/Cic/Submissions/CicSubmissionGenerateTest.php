@@ -138,7 +138,7 @@ it('validates the body in words', function () {
     $this->actingAs($user)->postJson('/api/cic/submissions', ['capture_id' => $capture->id, 'submission_type' => 2])
         ->assertUnprocessable()->assertJsonValidationErrors(['submission_type' => 'The submission type is 0 (standard reporting) or 1 (correction).']);
     $this->actingAs($user)->postJson('/api/cic/submissions', ['capture_id' => $capture->id, 'submission_type' => 0, 'comments' => 'a|b'])
-        ->assertUnprocessable()->assertJsonValidationErrors(['comments' => 'The comments can\'t hold a "|" or a line break.']);
+        ->assertUnprocessable()->assertJsonValidationErrors(['comments' => 'The comments can\'t hold a "|", a line break, or a control or invisible character.']);
     $this->actingAs($user)->postJson('/api/cic/submissions', ['capture_id' => $capture->id, 'submission_type' => 0, 'comments' => str_repeat('a', 101)])
         ->assertUnprocessable()->assertJsonValidationErrors('comments');
     $this->actingAs($user)->postJson('/api/cic/submissions', ['capture_id' => $capture->id, 'submission_type' => 0, 'correction_reason' => 'x'])

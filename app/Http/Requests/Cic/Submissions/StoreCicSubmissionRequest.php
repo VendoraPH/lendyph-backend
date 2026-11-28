@@ -11,7 +11,9 @@ use Illuminate\Foundation\Http\FormRequest;
  * POST /cic/submissions {capture_id, submission_type 0|1, comments?,
  * confirm_warnings?, corrects_submission_id?, correction_reason?}. Needs
  * `cic:prepare` and `branches:view_all`, checked before validation so a
- * caller without them gets 403, never field errors. A correction (type 1)
+ * caller without them gets 403, never field errors. Comments refuse a "|"
+ * and any control, invisible format, line or paragraph separator character,
+ * as the file builder does (review S-L4). A correction (type 1)
  * names the file it corrects and why; a standard file names neither.
  */
 class StoreCicSubmissionRequest extends FormRequest
@@ -31,7 +33,7 @@ class StoreCicSubmissionRequest extends FormRequest
         return [
             'capture_id' => ['required', 'integer', 'exists:cic_captures,id'],
             'submission_type' => ['required', 'integer', 'in:0,1'],
-            'comments' => ['nullable', 'string', 'max:100', 'not_regex:/[|\r\n]/'],
+            'comments' => ['nullable', 'string', 'max:100', 'not_regex:/[|\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u'],
             'confirm_warnings' => ['sometimes', 'boolean'],
             'corrects_submission_id' => ["required_if:submission_type,{$correction}", "prohibited_unless:submission_type,{$correction}", 'nullable', 'integer', 'exists:cic_submissions,id'],
             'correction_reason' => ["required_if:submission_type,{$correction}", "prohibited_unless:submission_type,{$correction}", 'nullable', 'bail', 'string', 'max:500', 'regex:'.Sentence::HAS_WORDS],
@@ -50,7 +52,7 @@ class StoreCicSubmissionRequest extends FormRequest
             'submission_type.in' => 'The submission type is 0 (standard reporting) or 1 (correction).',
             'comments.string' => 'The comments are text.',
             'comments.max' => 'The comments take up to 100 characters.',
-            'comments.not_regex' => 'The comments can\'t hold a "|" or a line break.',
+            'comments.not_regex' => 'The comments can\'t hold a "|", a line break, or a control or invisible character.',
             'confirm_warnings.boolean' => 'Say whether to go ahead despite the warnings.',
             'corrects_submission_id.required_if' => 'Choose the file this correction corrects.',
             'corrects_submission_id.prohibited_unless' => 'Only a correction names a file it corrects.',

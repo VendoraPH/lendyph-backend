@@ -24,6 +24,12 @@ use Carbon\CarbonInterface;
  * - A record's own Provider Code field is the setting's code, as HD2; its
  *   record-type field is the layout's fixed code.
  * - Fields joined by `|`, every line ended by CRLF, UTF-8 with no BOM.
+ * - No field, HD and FT included, may hold a `|`, a control character
+ *   (\p{Cc}, line breaks and NUL included), an invisible format character
+ *   (\p{Cf}, the BOM included) or a line or paragraph separator (\p{Zl},
+ *   \p{Zp}); such a file is refused (review S-L4).
+ * - Each record's values must still match its stored checksum, or the file
+ *   is refused (409 `capture_changed`, review S-L6).
  * - The filename is `{provider}_CSDF_{YYYYMMDDhhmmss}.txt`, from the
  *   generation time in Manila.
  *
@@ -48,6 +54,11 @@ final class CicFileBuilder
 
     /** The issue code for a value that would break the file's structure. */
     public const UNSAFE_VALUE = 'unsafe_value';
+
+    /** Control, invisible format, line and paragraph separator characters. */
+    public const UNSAFE_CHARACTERS = '/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u';
+
+    public const UNSAFE_MESSAGE = 'This value holds a "|", a line break, a control or invisible character, or text that is not UTF-8, which would break the file.';
 
     /** The current provider code, refused in words unless it is 8 letters or digits. */
     public function providerCode(): string
@@ -76,8 +87,8 @@ final class CicFileBuilder
     }
 
     /**
-     * The values that would break the file: a `|`, a line break or text that
-     * isn't UTF-8. Issues in the validator's shape, naming the field and the
+     * The values that would break the file: a `|`, a control or invisible
+     * character (line breaks included) or text that isn't UTF-8. Issues in the validator's shape, naming the field and the
      * record key only.
      *
      * @return list<array{record_type: string, record_key: string, field_id: string|null, severity: 'error', code: string, message: string}>
@@ -95,7 +106,7 @@ final class CicFileBuilder
                         'field_id' => (string) $fieldId,
                         'severity' => 'error',
                         'code' => self::UNSAFE_VALUE,
-                        'message' => 'This value holds a "|", a line break or characters that are not UTF-8, which would break the file.',
+                        'message' => self::UNSAFE_MESSAGE,
                     ];
                 }
             }
@@ -129,6 +140,13 @@ final class CicFileBuilder
         $counts = array_fill_keys(self::DATA_TYPES, 0);
 
         foreach ($this->records($capture) as $record) {
+            if (! hash_equals((string) $record->checksum, CicCaptureRecord::checksumOf($record->values ?? []))) {
+                throw CicSubmissionRefusal::conflict(
+                    "A record of capture #{$capture->id} no longer matches its checksum, so no file was made from it. Take a new capture.",
+                    'capture_changed',
+                );
+            }
+
             $lines[] = $this->line($this->fields($record, $provider));
             $counts[$record->record_type]++;
         }
@@ -179,9 +197,20 @@ final class CicFileBuilder
         return $fields;
     }
 
-    /** @param  list<string>  $fields */
+    /**
+     * One line of the file. Every field is checked here, HD's and FT's
+     * included, so nothing unsafe reaches the file whatever its source.
+     *
+     * @param  list<string>  $fields
+     */
     private function line(array $fields): string
     {
+        foreach ($fields as $field) {
+            if (! self::isSafe($field)) {
+                throw CicSubmissionRefusal::unprocessable('A value in the file (a captured value or the comments) holds a "|", a line break, or a control or invisible character, which would break the file, so it can\'t be generated.', self::UNSAFE_VALUE);
+            }
+        }
+
         return implode(self::SEPARATOR, $fields).self::LINE_END;
     }
 
@@ -198,7 +227,7 @@ final class CicFileBuilder
         $value = (string) $value;
 
         return mb_check_encoding($value, 'UTF-8')
-            && strpbrk($value, "|\r\n") === false
-            && ! str_contains($value, "\u{FEFF}");
+            && ! str_contains($value, self::SEPARATOR)
+            && preg_match(self::UNSAFE_CHARACTERS, $value) === 0;
     }
 }

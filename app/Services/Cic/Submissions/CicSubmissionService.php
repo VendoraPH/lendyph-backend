@@ -12,6 +12,9 @@ use App\Services\Cic\File\CicEncryptionFailed;
 use App\Services\Cic\File\CicEncryptor;
 use App\Services\Cic\File\CicFile;
 use App\Services\Cic\File\CicFileBuilder;
+use Carbon\CarbonInterface;
+use Illuminate\Database\UniqueConstraintViolationException;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
 use Throwable;
@@ -29,6 +32,12 @@ use Throwable;
  *   one audit row naming ids, counts, filenames, fingerprints and statuses,
  *   never a member's values.
  * - Refusals read in words (CicSubmissionRefusal); nothing is written.
+ * - Generating and encrypting re-check the capture's checksum (and the file
+ *   builder each record's), so a changed capture never reaches a file.
+ * - A month's family is its month-end capture and every correction capture of
+ *   it. A standard file may come from a correction capture of a month-end
+ *   while no file of that family has gone to CIC, and only one standard file
+ *   per family is ever marked submitted (review M-H1).
  */
 final class CicSubmissionService
 {
@@ -42,6 +51,12 @@ final class CicSubmissionService
 
     /** @var list<string> the statuses a correction may correct */
     public const CORRECTABLE = [CicSubmission::STATUS_SUBMITTED, CicSubmission::STATUS_ACCEPTED, CicSubmission::STATUS_REJECTED];
+
+    /** @var list<string> a file's statuses once it has gone to CIC */
+    public const FILED = self::CORRECTABLE;
+
+    /** How long the file screens keep a capture's validation (captures never change; generate and encrypt re-validate). */
+    public const VALIDATION_CACHE_SECONDS = 600;
 
     public function __construct(
         private readonly CicFileBuilder $builder,
@@ -73,6 +88,7 @@ final class CicSubmissionService
             : $this->standardTarget($capture);
 
         $this->builder->providerCode();
+        $this->assertCaptureIntact($capture);
 
         $validation = $this->validate($capture);
 
@@ -95,51 +111,73 @@ final class CicSubmissionService
         $generatedAt = now()->startOfSecond();
         $file = $this->builder->build($capture, $type, $comments, $generatedAt);
 
-        $submission = DB::transaction(function () use ($user, $capture, $type, $comments, $original, $input, $file, $generatedAt, $validation, $affected): CicSubmission {
-            if (CicSubmission::query()->where('filename', $file->filename)->lockForUpdate()->exists()) {
-                throw CicSubmissionRefusal::conflict('Another file with the same name was made this second. Try again in a moment.', 'filename_taken');
-            }
-
-            $submission = new CicSubmission;
-            $submission->forceFill([
-                'capture_id' => $capture->id,
-                'reference_date' => $capture->reference_date->toDateString(),
-                'submission_type' => $type,
-                'corrects_submission_id' => $original?->id,
-                'correction_reason' => $original === null ? null : trim((string) $input['correction_reason']),
-                'filename' => $file->filename,
-                'record_count' => $file->recordCount,
-                'txt_sha256' => $file->sha256(),
-                'status' => CicSubmission::STATUS_GENERATED,
-                'comments' => $comments,
-                'generated_by' => $user->id,
-                'generated_at' => $generatedAt,
-            ])->save();
-
-            $counts = self::countsInWords($file);
-            $description = $original === null
-                ? "CIC file {$file->filename} generated from capture #{$capture->id} (reference date {$capture->reference_date->toDateString()}, standard reporting): {$file->recordCount} records ({$counts})"
-                : "CIC correction file {$file->filename} generated from capture #{$capture->id}, correcting submission #{$original->id} ({$original->filename}): {$file->recordCount} records ({$counts}), ".count($affected).' affected';
-
-            AuditLogService::log('cic_file_generated', $submission, null, [
-                'capture_id' => $capture->id,
-                'reference_date' => $capture->reference_date->toDateString(),
-                'submission_type' => $type,
-                'corrects_submission_id' => $original?->id,
-                'filename' => $file->filename,
-                'record_count' => $file->recordCount,
-                'counts_by_type' => $file->countsByType,
-                'txt_sha256' => $file->sha256(),
-                'errors' => $validation['errors'],
-                'warnings' => $validation['warnings'],
-                'warnings_confirmed' => $validation['warnings'] > 0,
-                'affected_count' => $original === null ? null : count($affected),
-            ], $description);
-
-            return $submission;
-        });
+        try {
+            $submission = DB::transaction(fn (): CicSubmission => $this->store($user, $capture, $type, $comments, $original, $input, $file, $generatedAt, $validation, $affected));
+        } catch (UniqueConstraintViolationException) {
+            throw self::filenameTaken();
+        }
 
         return ['submission' => $submission, 'affected' => $affected, 'validation' => $validation];
+    }
+
+    /**
+     * Save the generated file and its audit row, inside generate()'s
+     * transaction. A standard file from a correction capture locks its
+     * month-end capture and re-checks that nothing of the month was filed.
+     *
+     * @param  array<string, mixed>  $input
+     * @param  array{errors: int, warnings: int, top_issues: list<array<string, mixed>>}  $validation
+     * @param  list<array{record_type: string, record_key: string, change: string}>  $affected
+     */
+    private function store(User $user, CicCapture $capture, int $type, ?string $comments, ?CicSubmission $original, array $input, CicFile $file, CarbonInterface $generatedAt, array $validation, array $affected): CicSubmission
+    {
+        if ($original === null && $capture->kind === CicCapture::KIND_CORRECTION) {
+            $this->assertMonthNotFiled($this->lockedFamilyRoot($capture));
+        }
+
+        if (CicSubmission::query()->where('filename', $file->filename)->exists()) {
+            throw self::filenameTaken();
+        }
+
+        $submission = new CicSubmission;
+        $submission->forceFill([
+            'capture_id' => $capture->id,
+            'reference_date' => $capture->reference_date->toDateString(),
+            'submission_type' => $type,
+            'corrects_submission_id' => $original?->id,
+            'correction_reason' => $original === null ? null : trim((string) $input['correction_reason']),
+            'affected_records' => $original === null ? null : $affected,
+            'filename' => $file->filename,
+            'record_count' => $file->recordCount,
+            'txt_sha256' => $file->sha256(),
+            'status' => CicSubmission::STATUS_GENERATED,
+            'comments' => $comments,
+            'generated_by' => $user->id,
+            'generated_at' => $generatedAt,
+        ])->save();
+
+        $counts = self::countsInWords($file);
+        $description = $original === null
+            ? "CIC file {$file->filename} generated from ".($capture->kind === CicCapture::KIND_CORRECTION ? 'correction ' : '')."capture #{$capture->id} (reference date {$capture->reference_date->toDateString()}, standard reporting): {$file->recordCount} records ({$counts})"
+            : "CIC correction file {$file->filename} generated from capture #{$capture->id}, correcting submission #{$original->id} ({$original->filename}): {$file->recordCount} records ({$counts}), ".count($affected).' affected';
+
+        AuditLogService::log('cic_file_generated', $submission, null, [
+            'capture_id' => $capture->id,
+            'capture_kind' => $capture->kind,
+            'reference_date' => $capture->reference_date->toDateString(),
+            'submission_type' => $type,
+            'corrects_submission_id' => $original?->id,
+            'filename' => $file->filename,
+            'record_count' => $file->recordCount,
+            'counts_by_type' => $file->countsByType,
+            'txt_sha256' => $file->sha256(),
+            'errors' => $validation['errors'],
+            'warnings' => $validation['warnings'],
+            'warnings_confirmed' => $validation['warnings'] > 0,
+            'affected_count' => $original === null ? null : count($affected),
+        ], $description);
+
+        return $submission;
     }
 
     /** Encrypt a generated file to the active, verified, unexpired key; keep only the `.zip.gpg`. */
@@ -161,6 +199,7 @@ final class CicSubmissionService
 
             /** @var CicCapture $capture */
             $capture = $submission->capture()->firstOrFail();
+            $this->assertCaptureIntact($capture);
             $validation = $this->validate($capture);
 
             if ($validation['errors'] > 0) {
@@ -257,10 +296,20 @@ final class CicSubmissionService
     public function markSubmitted(User $user, int $submissionId): CicSubmission
     {
         return DB::transaction(function () use ($user, $submissionId): CicSubmission {
+            // The month's capture is locked before the file, as generate()
+            // locks it, so two standard files of one month are never both
+            // marked submitted.
+            $captureId = CicSubmission::query()->whereKey($submissionId)->value('capture_id');
+            $capture = $captureId === null ? null : CicCapture::query()->find($captureId);
+            $root = $capture === null ? null : $this->lockedFamilyRoot($capture);
             $submission = $this->locked($submissionId);
 
             if ($submission->status !== CicSubmission::STATUS_ENCRYPTED) {
                 throw CicSubmissionRefusal::unprocessable('Only an encrypted file can be marked submitted; this one is '.CicSubmissionPresenter::statusWords($submission->status).'.', 'not_encrypted');
+            }
+
+            if (! $submission->isCorrection() && $root !== null) {
+                $this->assertMonthNotFiled($root, standardOnly: true);
             }
 
             $submission->forceFill([
@@ -333,7 +382,30 @@ final class CicSubmissionService
     }
 
     /**
-     * The records a correction changes, against the file it corrects.
+     * validate() for the file screens (the history and a file's page), kept
+     * for a while by capture id and checksum: a complete capture never
+     * changes, so a page view never re-validates the whole capture. Generate
+     * and encrypt always validate afresh.
+     *
+     * @return array{errors: int, warnings: int, top_issues: list<array<string, mixed>>}
+     */
+    public function reviewValidation(CicCapture $capture): array
+    {
+        if (! $capture->isComplete() || $capture->checksum === null) {
+            return $this->validate($capture);
+        }
+
+        return Cache::remember(
+            "cic:submission-validation:{$capture->id}:{$capture->checksum}",
+            self::VALIDATION_CACHE_SECONDS,
+            fn (): array => $this->validate($capture),
+        );
+    }
+
+    /**
+     * The records a correction changes, against the file it corrects: kept on
+     * the submission when it was generated (both captures are frozen), and
+     * worked out again only for a correction saved before that was kept.
      *
      * @return list<array{record_type: string, record_key: string, change: string}>
      */
@@ -343,20 +415,108 @@ final class CicSubmissionService
             return [];
         }
 
+        if (is_array($correction->affected_records)) {
+            return array_map(fn (array $row): array => [
+                'record_type' => (string) $row['record_type'],
+                'record_key' => (string) $row['record_key'],
+                'change' => (string) $row['change'],
+            ], $correction->affected_records);
+        }
+
         /** @var CicSubmission $original */
         $original = $correction->corrects()->firstOrFail();
 
         return CicCorrectionDiff::affected($correction->capture()->firstOrFail(), $original->capture()->firstOrFail());
     }
 
-    /** @return array{0: null, 1: list<never>} */
+    /**
+     * A standard file comes from a month-end or test capture, or from a
+     * correction capture of a month-end while nothing of that month has gone
+     * to CIC (review M-H1: a month whose capture had errors is refiled from a
+     * correction). The file reads that correction capture's records.
+     *
+     * @return array{0: null, 1: list<never>}
+     */
     private function standardTarget(CicCapture $capture): array
     {
         if ($capture->kind === CicCapture::KIND_CORRECTION) {
-            throw CicSubmissionRefusal::unprocessable('A correction capture makes correction files only. Choose Correction and the file it corrects.', 'correction_capture');
+            /** @var CicCapture|null $root */
+            $root = $capture->corrects_capture_id === null ? null : CicCapture::query()->find($capture->corrects_capture_id);
+
+            if ($root === null || $root->kind !== CicCapture::KIND_MONTH_END) {
+                throw CicSubmissionRefusal::unprocessable('This correction capture doesn\'t correct a month-end capture, so it makes correction files only. Choose Correction and the file it corrects.', 'correction_capture');
+            }
+
+            $this->assertMonthNotFiled($root);
         }
 
         return [null, []];
+    }
+
+    /** The month-end capture at the root of this capture's family, locked. */
+    private function lockedFamilyRoot(CicCapture $capture): ?CicCapture
+    {
+        $rootId = $capture->kind === CicCapture::KIND_CORRECTION ? $capture->corrects_capture_id : $capture->id;
+
+        if ($rootId === null) {
+            return null;
+        }
+
+        /** @var CicCapture|null $root */
+        $root = CicCapture::query()->whereKey($rootId)->lockForUpdate()->first();
+
+        return $root !== null && $root->kind === CicCapture::KIND_MONTH_END ? $root : null;
+    }
+
+    /**
+     * Refuse while a file of the month (from its month-end capture or any
+     * correction capture of it) has gone to CIC: submitted, accepted or
+     * rejected. With $standardOnly, only standard files count (a month may
+     * still be marked submitted after its corrections, which follow it).
+     */
+    private function assertMonthNotFiled(?CicCapture $root, bool $standardOnly = false): void
+    {
+        if ($root === null) {
+            return;
+        }
+
+        $filed = CicSubmission::query()
+            ->whereIn('capture_id', CicCapture::query()->select('id')
+                ->whereKey($root->id)
+                ->orWhere('corrects_capture_id', $root->id))
+            ->whereIn('status', self::FILED)
+            ->when($standardOnly, fn ($query) => $query->where('submission_type', CicSubmission::TYPE_STANDARD))
+            ->orderBy('id')
+            ->first();
+
+        if ($filed !== null) {
+            throw CicSubmissionRefusal::unprocessable(
+                "The {$root->reference_date->toDateString()} file {$filed->filename} was already ".match ($filed->status) {
+                    CicSubmission::STATUS_ACCEPTED => 'accepted by CIC',
+                    CicSubmission::STATUS_REJECTED => 'rejected by CIC',
+                    default => 'submitted to CIC',
+                }.', so no new standard file can be made or submitted for that month. Make a correction file of it instead.',
+                'month_already_filed',
+            );
+        }
+    }
+
+    /** The capture's records still match its checksum (review S-L6). */
+    private function assertCaptureIntact(CicCapture $capture): void
+    {
+        $stored = (string) $capture->checksum;
+
+        if ($stored === '' || ! hash_equals($stored, $capture->computeChecksum())) {
+            throw CicSubmissionRefusal::conflict(
+                "Capture #{$capture->id}'s records no longer match its checksum, so no file was made or encrypted from it. Take a new capture.",
+                'capture_changed',
+            );
+        }
+    }
+
+    private static function filenameTaken(): CicSubmissionRefusal
+    {
+        return CicSubmissionRefusal::conflict('Another file with the same name was made this second. Try again in a moment.', 'filename_taken');
     }
 
     /**
