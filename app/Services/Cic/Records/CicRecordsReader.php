@@ -6,15 +6,14 @@ use App\Models\Borrower;
 use App\Models\CicCapture;
 use App\Models\CicCaptureRecord;
 use App\Models\CicSetting;
+use App\Services\Cic\CicCache;
 use App\Services\Cic\CicIssueWords;
 use App\Services\Cic\CicLayouts;
 use App\Services\Cic\CicValidator;
 use Illuminate\Contracts\Encryption\DecryptException;
 use Illuminate\Support\Carbon;
-use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\DB;
-use Throwable;
 
 /**
  * What the CIC record screens read, from a capture or from a live build:
@@ -25,9 +24,10 @@ use Throwable;
  *
  * A live build, and a capture's validation, is made once per request (the
  * reader is a request-scoped instance), never once per row. A live build is
- * also cached for 60 seconds per reference date (security review S-M2),
- * encrypted, since it holds members' values; the key carries the CIC
- * settings, mappings and overrides, so changing one reads afresh. One
+ * also cached for 60 seconds under one key per reference date (security
+ * reviews S-M2 and SN1), encrypted, since it holds members' values; the value
+ * carries a fingerprint of the CIC settings, mappings and overrides, so
+ * changing one reads afresh and overwrites it. One
  * record's live view builds only that record's loans (liveRecord()).
  *
  * @phpstan-import-type Issue from CicValidator
@@ -53,28 +53,44 @@ final class CicRecordsReader
             return $this->live[$key];
         }
 
-        $cacheKey = self::liveCacheKey($reference);
-        $cached = Cache::get($cacheKey);
+        $fingerprint = self::liveFingerprint();
+        $cached = $this->cachedLive($reference, $fingerprint);
 
-        if (is_string($cached)) {
-            try {
-                return $this->live[$key] = Crypt::decrypt($cached);
-            } catch (DecryptException) {
-                Cache::forget($cacheKey);
-            }
+        if ($cached !== null) {
+            return $this->live[$key] = $cached;
         }
 
         $set = $this->builder->build($reference);
         $this->live[$key] = ['set' => $set, 'issues' => $this->validator->issuesForSet($set)];
 
-        try {
-            Cache::put($cacheKey, Crypt::encrypt($this->live[$key]), self::LIVE_SECONDS);
-        } catch (Throwable) {
-            // Too large for the cache store, or the store is down: the build
-            // stands for this request, uncached.
-        }
+        // One key per date (security re-review SN1): a newer fingerprint
+        // overwrites it, never adding another; too big for the store, it
+        // isn't cached at all.
+        CicCache::put(self::liveCacheKey($reference), Crypt::encrypt(['fingerprint' => $fingerprint, 'build' => $this->live[$key]]), self::LIVE_SECONDS);
 
         return $this->live[$key];
+    }
+
+    /**
+     * The cached live build for the date, when its fingerprint is today's.
+     *
+     * @return array{set: CicRecordSet, issues: list<Issue>}|null
+     */
+    private function cachedLive(Carbon $reference, ?string $fingerprint = null): ?array
+    {
+        $cached = CicCache::get(self::liveCacheKey($reference));
+
+        if (! is_string($cached)) {
+            return null;
+        }
+
+        try {
+            $payload = Crypt::decrypt($cached);
+        } catch (DecryptException) {
+            return null;
+        }
+
+        return is_array($payload) && ($payload['fingerprint'] ?? null) === ($fingerprint ?? self::liveFingerprint()) ? $payload['build'] : null;
     }
 
     /**
@@ -91,7 +107,7 @@ final class CicRecordsReader
     {
         $full = fn (): ?array => $this->recordIn($this->live($reference), $type, $key);
 
-        if (isset($this->live[$reference->toDateString()]) || Cache::has(self::liveCacheKey($reference))) {
+        if (isset($this->live[$reference->toDateString()]) || $this->cachedLive($reference) !== null) {
             return $full();
         }
 
@@ -151,22 +167,29 @@ final class CicRecordsReader
             ->pluck('id')->map(fn (mixed $id) => (int) $id)->all();
     }
 
-    /**
-     * The live cache key: the reference date and what a build reads besides
-     * loans and members (settings, mappings, overrides, the latest month-end
-     * capture), so a settings change is never served stale.
-     */
+    /** The live cache key: one per reference date. */
     public static function liveCacheKey(Carbon $reference): string
     {
+        return CicCache::PREFIX.'live:'.$reference->toDateString();
+    }
+
+    /**
+     * What a live build reads besides loans and members (the CIC settings,
+     * mappings and overrides, the latest month-end capture), kept inside the
+     * cached value: a change reads afresh.
+     */
+    public static function liveFingerprint(): string
+    {
         $setting = CicSetting::current();
+
         // These tables are small (one row per product, mapped value or
-        // overridden loan), so their rows themselves go into the key.
+        // overridden loan), so their rows themselves go into the fingerprint.
         $tables = collect(['cic_product_mappings', 'cic_loan_overrides', 'cic_code_mappings'])
             ->map(fn (string $table) => hash('sha256', DB::table($table)->orderBy('id')->get()->toJson()));
         $monthEnd = DB::table('cic_captures')->where('kind', CicCapture::KIND_MONTH_END)->where('status', CicCapture::STATUS_COMPLETE)->max('id');
 
-        return 'cic:live:'.$reference->toDateString().':'.hash('sha256', json_encode([
-            $setting->provider_code, (bool) $setting->is_mfi, (string) $setting->updated_at, $tables->all(), $monthEnd,
+        return hash('sha256', json_encode([
+            $setting->provider_code, (bool) $setting->is_mfi, (string) $setting->updated_at, $tables->all(), $monthEnd, CicValidator::RULES_VERSION,
         ], JSON_THROW_ON_ERROR));
     }
 

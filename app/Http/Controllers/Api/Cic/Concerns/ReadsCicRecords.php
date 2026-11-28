@@ -6,17 +6,33 @@ use App\Models\CicCapture;
 use Illuminate\Http\Request;
 use Illuminate\Support\Carbon;
 use Illuminate\Validation\Rule;
+use Illuminate\Validation\ValidationException;
 
 /**
  * The query parameters the CIC record screens share, validated in words:
- * `reference_date` (a live build's date, today by default, never later than
- * today), `capture_id` (a capture to read instead), `record_type` and `page`.
+ * `reference_date` (a live build's date: today by default, or a month's last
+ * day within the last 92 days; 422 otherwise), `capture_id` (a capture to read
+ * instead, any date), `record_type` and `page`.
  */
 trait ReadsCicRecords
 {
     public const RECORD_TYPES = ['ID', 'CI', 'CN', 'NE'];
 
     public const PER_PAGE = 25;
+
+    /** How far back a live view may read a month end. */
+    public const LIVE_DAYS_BACK = 92;
+
+    public const LIVE_DATE_REFUSAL = 'Choose today, or the last day of a month within the last 92 days. Older months are read from their captures.';
+
+    /** Today, or a month's last day within the last 92 days. */
+    public static function liveDateAllowed(Carbon $date): bool
+    {
+        $today = Carbon::today();
+
+        return $date->isSameDay($today)
+            || ($date->isLastOfMonth() && $date->lessThan($today) && $date->greaterThanOrEqualTo($today->copy()->subDays(self::LIVE_DAYS_BACK)));
+    }
 
     /**
      * @return array{reference_date: Carbon, capture: CicCapture|null, record_type: string|null, severity: string|null, page: int}
@@ -41,6 +57,13 @@ trait ReadsCicRecords
         ]);
 
         $capture = null;
+        $reference = isset($data['reference_date']) ? Carbon::createFromFormat('!Y-m-d', $data['reference_date']) : Carbon::today();
+
+        // A live build is for today or a recent month end only (security
+        // re-review SN1): each date is a full build, cached once.
+        if (! isset($data['capture_id']) && ! self::liveDateAllowed($reference)) {
+            throw ValidationException::withMessages(['reference_date' => self::LIVE_DATE_REFUSAL]);
+        }
 
         if (isset($data['capture_id'])) {
             $capture = CicCapture::query()->find((int) $data['capture_id']);
@@ -48,7 +71,7 @@ trait ReadsCicRecords
         }
 
         return [
-            'reference_date' => isset($data['reference_date']) ? Carbon::createFromFormat('!Y-m-d', $data['reference_date']) : Carbon::today(),
+            'reference_date' => $reference,
             'capture' => $capture,
             'record_type' => $data['record_type'] ?? null,
             'severity' => $data['severity'] ?? null,

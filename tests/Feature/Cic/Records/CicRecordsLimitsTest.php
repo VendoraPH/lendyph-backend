@@ -51,7 +51,7 @@ it('allows 30 CIC screen reads a minute per user, across the screens and submiss
     $this->actingAs($this->reader)->getJson('/api/cic/readiness')->assertOk();
 });
 
-it('caches the live build for 60 seconds, encrypted, and reads afresh when a mapping changes', function () {
+it('caches the live build for 60 seconds under one key per date, encrypted, and rebuilds it when a mapping changes', function () {
     $member = $this->cicMember(['first_name' => 'Rosalinda']);
     $loan = $this->cicLoan($member);
     $key = CicRecordsReader::liveCacheKey(Carbon::parse('2026-11-30'));
@@ -64,9 +64,11 @@ it('caches the live build for 60 seconds, encrypted, and reads afresh when a map
     $this->cicLoan($this->cicMember(['first_name' => 'Teodora']), $loan->loanProduct);
     expect($names())->toBe(['Rosalinda Santos Cruz']);
 
-    // ... but a mapping change is, and so is everything once the minute is up.
+    // ... but a mapping change is: the same key is rebuilt and overwritten.
+    $fingerprint = CicRecordsReader::liveFingerprint();
     CicProductMapping::query()->where('loan_product_id', $loan->loan_product_id)->sole()->forceFill(['contract_type' => '15'])->save();
-    expect(CicRecordsReader::liveCacheKey(Carbon::parse('2026-11-30')))->not->toBe($key)
+    expect(CicRecordsReader::liveFingerprint())->not->toBe($fingerprint)
+        ->and(CicRecordsReader::liveCacheKey(Carbon::parse('2026-11-30')))->toBe($key)
         ->and($names())->toHaveCount(2);
 });
 

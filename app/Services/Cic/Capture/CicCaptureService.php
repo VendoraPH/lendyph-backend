@@ -449,6 +449,29 @@ final class CicCaptureService
             $by?->id, asSystem: $by === null);
     }
 
+    /** A capture still capturing after this long was killed mid-run. */
+    public const STUCK_MINUTES = 60;
+
+    /**
+     * Fails every capture stuck in `capturing` for over an hour (a killed
+     * process), deleting its partial records (security re-review SN4). Run by
+     * the hourly `cic:clear-temp`. Returns how many it failed.
+     */
+    public function failStuck(): int
+    {
+        $stuck = CicCapture::query()
+            ->where('status', CicCapture::STATUS_CAPTURING)
+            ->where('started_at', '<', now()->subMinutes(self::STUCK_MINUTES))
+            ->get();
+
+        foreach ($stuck as $capture) {
+            Log::warning('CIC capture stuck; marked failed.', ['capture_id' => $capture->id]);
+            $this->fail($capture, null);
+        }
+
+        return $stuck->count();
+    }
+
     public static function kindWords(string $kind): string
     {
         return match ($kind) {
