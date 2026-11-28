@@ -20,6 +20,12 @@ use Illuminate\Validation\Validator;
  * override's own, else the loan's structure (one lump sum is CN, else CI). A
  * product mapped to the other record type gives no codes, so the override
  * must then carry its own contract and transaction types.
+ *
+ * `contract_no` (review M-H1) is the contract number CIC reads the loan by,
+ * for a loan whose display number is too long or collides: up to 38 letters,
+ * digits and dashes. On PUT, absent keeps the stored number and null or ""
+ * clears it. Its uniqueness and its freeze once a submitted file carries it
+ * are checked by CicLoanOverrideService under the override's lock.
  */
 class CicLoanOverrideRequest extends CicFormRequest
 {
@@ -35,6 +41,7 @@ class CicLoanOverrideRequest extends CicFormRequest
             'record_type' => ['nullable', 'string', Rule::in(CicClassificationCodes::RECORD_TYPES)],
             'contract_type' => ['nullable', 'string', 'max:3'],
             'transaction_type' => ['nullable', 'string', 'max:10'],
+            'contract_no' => ['nullable', 'string', 'max:'.CicLoanOverrideService::CONTRACT_NO_MAX, 'regex:'.CicLoanOverrideService::CONTRACT_NO_PATTERN],
             'reason' => self::reasonRules(),
         ];
     }
@@ -58,8 +65,8 @@ class CicLoanOverrideRequest extends CicFormRequest
                 return;
             }
 
-            if (! $this->filled('record_type') && ! $this->filled('contract_type') && ! $this->filled('transaction_type')) {
-                $validator->errors()->add('record_type', 'Set at least one of the record type, contract type or transaction type to override.');
+            if (! $this->filled('record_type') && ! $this->filled('contract_type') && ! $this->filled('transaction_type') && ! $this->carriesContractNo()) {
+                $validator->errors()->add('record_type', 'Set at least one of the record type, contract type, transaction type or contract number to override.');
 
                 return;
             }
@@ -95,6 +102,9 @@ class CicLoanOverrideRequest extends CicFormRequest
             'loan_id.exists' => 'That loan doesn\'t exist.',
             'loan_id.prohibited' => 'An override stays on its loan; remove it and add one on the other loan instead.',
             'record_type.in' => 'The record type is CI (instalment) or CN (non-instalment).',
+            'contract_no.string' => 'The contract number is text.',
+            'contract_no.max' => 'The contract number takes up to '.CicLoanOverrideService::CONTRACT_NO_MAX.' characters, CIC\'s limit.',
+            'contract_no.regex' => 'The contract number takes letters, digits and dashes only.',
             'reason.required' => 'Give a reason for the override.',
         ];
     }
@@ -106,6 +116,7 @@ class CicLoanOverrideRequest extends CicFormRequest
             'record_type' => 'record type',
             'contract_type' => 'contract type',
             'transaction_type' => 'transaction type',
+            'contract_no' => 'contract number',
             'reason' => 'reason',
         ];
     }
@@ -121,10 +132,23 @@ class CicLoanOverrideRequest extends CicFormRequest
             return Loan::query()->find((int) $this->input('loan_id'));
         }
 
-        /** @var CicLoanOverride $override */
-        $override = $this->route('override');
+        // The id is looked up only after the caller is authorized (review
+        // S-L7); a missing override answers 404 from the controller.
+        return CicLoanOverride::query()->with('loan')->find((int) $this->route('override'))?->loan;
+    }
 
-        return $override->loan;
+    /**
+     * Whether the override (as it will be saved) carries a contract number:
+     * the one sent, or on PUT without one, the stored one.
+     */
+    private function carriesContractNo(): bool
+    {
+        if ($this->has('contract_no')) {
+            return $this->filled('contract_no');
+        }
+
+        return ! $this->isCreate()
+            && CicLoanOverride::query()->whereKey((int) $this->route('override'))->whereNotNull('contract_no')->exists();
     }
 
     private static function statusWords(string $status): string
@@ -139,9 +163,14 @@ class CicLoanOverrideRequest extends CicFormRequest
         };
     }
 
-    /** @return array<string, mixed> */
+    /**
+     * The validated fields; `contract_no` only when it was sent, so a PUT
+     * without it keeps the stored number.
+     *
+     * @return array<string, mixed>
+     */
     public function values(): array
     {
-        return $this->safe()->only(['loan_id', 'record_type', 'contract_type', 'transaction_type', 'reason']);
+        return $this->safe()->only(['loan_id', 'record_type', 'contract_type', 'transaction_type', 'contract_no', 'reason']);
     }
 }

@@ -72,7 +72,7 @@ it('checks codes against the record type the loan reports as', function () {
         ->assertUnprocessable()->assertJsonPath('errors.transaction_type.0', '"ZZ" isn\'t one of CIC\'s transaction type codes for a CI contract.');
 
     cicOverride($this, ['loan_id' => $this->loan->id, 'reason' => 'Nothing'])
-        ->assertUnprocessable()->assertJsonPath('errors.record_type.0', 'Set at least one of the record type, contract type or transaction type to override.');
+        ->assertUnprocessable()->assertJsonPath('errors.record_type.0', 'Set at least one of the record type, contract type, transaction type or contract number to override.');
 
     cicOverride($this, ['loan_id' => $this->loan->id, 'record_type' => 'CN', 'contract_type' => '48', 'reason' => 'Single payment'])
         ->assertUnprocessable()->assertJsonValidationErrors('transaction_type');
