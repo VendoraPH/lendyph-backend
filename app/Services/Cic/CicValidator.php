@@ -562,8 +562,13 @@ final class CicValidator implements ValidatesCicCapture
             $overdueCount = $number('CI33');
             $days = $values['CI35'] ?? '';
 
-            if ($overdueCount !== null && $overdueAmount !== null && ($overdueCount > 0) !== ($overdueAmount > 0)) {
-                $out['findings'][] = ['CI34', 'error', 'OVERDUE_INCONSISTENT', 'Overdue Payments Number and Overdue Payments Amount disagree: one is zero and the other isn\'t.'];
+            // An overdue period can owe less than half a peso, which reads "0"
+            // in whole pesos: a warning. An amount with no overdue period is an
+            // error.
+            if ($overdueCount !== null && $overdueAmount !== null && $overdueCount > 0 && $overdueAmount === 0) {
+                $out['findings'][] = ['CI34', 'warning', 'OVERDUE_INCONSISTENT', 'Overdue Payments Number is above zero but Overdue Payments Amount rounds to zero pesos: the overdue periods owe less than half a peso.'];
+            } elseif ($overdueCount === 0 && $overdueAmount !== null && $overdueAmount > 0) {
+                $out['findings'][] = ['CI34', 'error', 'OVERDUE_INCONSISTENT', 'Overdue Payments Amount is above zero but Overdue Payments Number is zero.'];
             }
 
             if ($overdueCount !== null && $days !== '' && ($overdueCount > 0) === in_array($days, ['N', '0'], true)) {

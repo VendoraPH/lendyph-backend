@@ -143,6 +143,21 @@ it('checks contract dates and overdue figures, and warns on an open loan with no
         ->and($of('LN-5'))->toBe(['OPEN_NOTHING_OWED']);
 });
 
+it('reads a sub-peso overdue remainder as a warning, and an overdue amount with no overdue period as an error', function () {
+    $issues = cicValidate([
+        ['ID', 'BRW-000001', cicSubjectValues()],
+        ['CI', 'LN-6', cicContractValues(['CI7' => 'LN-6', 'CI33' => '1', 'CI34' => '0'])],
+        ['CI', 'LN-7', cicContractValues(['CI7' => 'LN-7', 'CI33' => '0', 'CI34' => '150', 'CI35' => '0'])],
+    ]);
+    $of = fn (string $key) => array_values(array_filter($issues, fn (array $i) => $i['record_key'] === $key && $i['code'] === 'OVERDUE_INCONSISTENT'));
+
+    expect($of('LN-6'))->toHaveCount(1)
+        ->and($of('LN-6')[0])->toMatchArray(['field_id' => 'CI34', 'severity' => 'warning'])
+        ->and($of('LN-6')[0]['message'])->toContain('less than half a peso')
+        ->and($of('LN-7'))->toHaveCount(1)
+        ->and($of('LN-7')[0]['severity'])->toBe('error');
+});
+
 it('checks the provider code once on the header, puts errors first, and reads an empty file as a warning', function () {
     $issues = cicValidate([], ['mfi' => false, 'provider_code' => 'ABC', 'reference_date' => '30112026']);
 
