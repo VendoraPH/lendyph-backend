@@ -29,12 +29,15 @@ afterEach(function () {
 /** An encrypted file whose .zip.gpg is on the (fake) private disk. */
 function cicEncrypted(object $test, string $state = 'encrypted'): CicSubmission
 {
+    // File names are unique, so each file made here is a second later.
+    static $second = 10;
+    $base = 'TEST1234_CSDF_202611251430'.str_pad((string) $second++, 2, '0', STR_PAD_LEFT);
     $bytes = "\x85\x01\x0c".random_bytes(64);
     $submission = CicSubmission::factory()->{$state}()->create([
         'capture_id' => $test->simpleCapture(CicCapture::KIND_TEST)->id,
         'reference_date' => '2026-10-31',
-        'filename' => 'TEST1234_CSDF_20261125143010.txt',
-        'gpg_path' => 'cic/submissions/'.bin2hex(random_bytes(4)).'/TEST1234_CSDF_20261125143010.zip.gpg',
+        'filename' => "{$base}.txt",
+        'gpg_path' => 'cic/submissions/'.bin2hex(random_bytes(4))."/{$base}.zip.gpg",
         'gpg_sha256' => hash('sha256', $bytes),
     ]);
     Storage::disk('private')->put($submission->gpg_path, $bytes);
@@ -48,7 +51,7 @@ it('streams only the encrypted file, counting and auditing every download', func
 
     $first = $this->actingAs($user)->get("/api/cic/submissions/{$submission->id}/download", ['Accept' => 'application/json'])->assertOk();
     expect($first->streamedContent())->toBe(Storage::disk('private')->get($submission->gpg_path))
-        ->and($first->headers->get('Content-Disposition'))->toContain('TEST1234_CSDF_20261125143010.zip.gpg')
+        ->and($first->headers->get('Content-Disposition'))->toContain(str_replace('.txt', '.zip.gpg', $submission->filename))
         ->and($first->headers->get('Content-Type'))->toBe('application/pgp-encrypted');
 
     $this->actingAs($user)->get("/api/cic/submissions/{$submission->id}/download", ['Accept' => 'application/json'])->assertOk();

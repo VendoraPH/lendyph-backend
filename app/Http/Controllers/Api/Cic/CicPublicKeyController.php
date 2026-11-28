@@ -63,9 +63,9 @@ class CicPublicKeyController extends CicController
         requestBody: new OA\RequestBody(required: true, content: new OA\JsonContent(properties: [new OA\Property(property: 'fingerprint', type: 'string')])),
         responses: [new OA\Response(response: 200, description: 'The active key'), new OA\Response(response: 403, description: 'No access, or the uploader'), new OA\Response(response: 409, description: 'A simultaneous change'), new OA\Response(response: 422, description: 'Refused, in words')],
     )]
-    public function verify(VerifyCicPublicKeyRequest $request, CicPublicKey $key, CicPublicKeyService $service): JsonResponse
+    public function verify(VerifyCicPublicKeyRequest $request, int $key, CicPublicKeyService $service): JsonResponse
     {
-        $key = $service->verify($key, (string) $request->validated('fingerprint'), $request->user());
+        $key = $service->verify(self::findKey($key), (string) $request->validated('fingerprint'), $request->user());
 
         return response()->json(['success' => true, 'message' => 'Key verified and active. New files are encrypted to it.', 'data' => CicSettingsPresenter::publicKey($key->refresh(), $request->user())]);
     }
@@ -80,10 +80,19 @@ class CicPublicKeyController extends CicController
         requestBody: new OA\RequestBody(required: true, content: new OA\JsonContent(properties: [new OA\Property(property: 'reason', type: 'string')])),
         responses: [new OA\Response(response: 200, description: 'The retired key'), new OA\Response(response: 403, description: 'No access, in words'), new OA\Response(response: 422, description: 'Refused, in words')],
     )]
-    public function retire(RetireCicPublicKeyRequest $request, CicPublicKey $key, CicPublicKeyService $service): JsonResponse
+    public function retire(RetireCicPublicKeyRequest $request, int $key, CicPublicKeyService $service): JsonResponse
     {
-        $key = $service->retire($key, (string) $request->validated('reason'), $request->user());
+        $key = $service->retire(self::findKey($key), (string) $request->validated('reason'), $request->user());
 
         return response()->json(['success' => true, 'message' => 'Key retired.', 'data' => CicSettingsPresenter::publicKey($key->refresh(), $request->user())]);
+    }
+
+    /**
+     * The key, looked up only after the form request authorized the caller,
+     * so an id's existence can't be probed without access (review S-L7).
+     */
+    private static function findKey(int $id): CicPublicKey
+    {
+        return CicPublicKey::query()->find($id) ?? abort(404, 'There is no such CIC public key.');
     }
 }

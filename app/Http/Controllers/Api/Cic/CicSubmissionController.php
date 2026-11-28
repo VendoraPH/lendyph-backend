@@ -63,7 +63,7 @@ class CicSubmissionController extends CicController
                 $request->user(),
                 $submission,
                 function () use ($submission, &$validations) {
-                    return $validations[$submission->capture_id] ??= $this->submissions->validate($submission->capture()->firstOrFail());
+                    return $validations[$submission->capture_id] ??= $this->submissions->reviewValidation($submission->capture()->firstOrFail());
                 },
             )),
             'meta' => [
@@ -78,7 +78,7 @@ class CicSubmissionController extends CicController
     #[OA\Get(
         path: '/api/cic/submissions/{id}',
         summary: 'A CIC file and its pre-encryption review',
-        description: 'Needs `cic:view` and `branches:view_all`. The file\'s counts by record type, dates, type, filename and checksums, the live validation summary, the active key and whether it can encrypt, the correction link and affected records, the status history and the caller\'s actions. No member data.',
+        description: 'Needs `cic:view` and `branches:view_all`. The file\'s counts by record type, dates, type, filename and checksums, the capture\'s validation summary (kept up to 10 minutes per capture and checksum; generate and encrypt always re-validate), the active key and whether it can encrypt, the correction link and affected records, the status history and the caller\'s actions. No member data.',
         tags: ['CIC'],
         security: [['sanctum' => []]],
         parameters: [new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer'))],
@@ -95,7 +95,7 @@ class CicSubmissionController extends CicController
     #[OA\Post(
         path: '/api/cic/submissions',
         summary: 'Generate a CIC file from a complete capture',
-        description: 'Needs `cic:prepare` and `branches:view_all`. Body {capture_id, submission_type 0|1, comments? (≤100), confirm_warnings?, corrects_submission_id?, correction_reason?}. Refused (422, in words, with `data.validation` counts and top issues by field) while the capture isn\'t complete, the provider code isn\'t 8 letters or digits, any error remains, or warnings aren\'t confirmed. A correction comes from a correction capture of the corrected file\'s reference date, corrects a submitted, accepted or rejected file and lists the affected records. Audited.',
+        description: 'Needs `cic:prepare` and `branches:view_all`. Body {capture_id, submission_type 0|1, comments? (≤100), confirm_warnings?, corrects_submission_id?, correction_reason?}. Refused (422, in words, with `data.validation` counts and top issues by field) while the capture isn\'t complete, its records don\'t match its checksum (409 `capture_changed`), a standard file is asked of a correction capture whose month already went to CIC (`month_already_filed`), the provider code isn\'t 8 letters or digits, any error remains, or warnings aren\'t confirmed. A correction comes from a correction capture of the corrected file\'s reference date, corrects a submitted, accepted or rejected file and lists the affected records. Audited.',
         tags: ['CIC'],
         security: [['sanctum' => []]],
         responses: [new OA\Response(response: 201, description: 'The generated file'), new OA\Response(response: 403, description: 'Missing cic:prepare or branches:view_all'), new OA\Response(response: 409, description: 'A file of the same name was made this second'), new OA\Response(response: 422, description: 'Refused, in words')],
@@ -116,7 +116,7 @@ class CicSubmissionController extends CicController
     #[OA\Post(
         path: '/api/cic/submissions/{id}/encrypt',
         summary: 'Encrypt a generated CIC file to CIC\'s active key',
-        description: 'Needs `cic:submit` and `branches:view_all`, and {confirm: true} after the pre-encryption review. The file must be generated, the active key verified and unexpired, and gpg installed. The TXT is rebuilt (409 when its checksum differs), zipped and encrypted in a temporary folder that is deleted; only the `.zip.gpg` is kept. Audited.',
+        description: 'Needs `cic:submit` and `branches:view_all`, and {confirm: true} after the pre-encryption review. The file must be generated, the active key verified and unexpired, and gpg installed. The capture\'s checksum is re-checked (409 `capture_changed`) and the TXT rebuilt (409 when its checksum differs), zipped and encrypted in a temporary folder that is deleted; only the `.zip.gpg` is kept. Audited.',
         tags: ['CIC'],
         security: [['sanctum' => []]],
         parameters: [new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer'))],
@@ -155,11 +155,11 @@ class CicSubmissionController extends CicController
     #[OA\Post(
         path: '/api/cic/submissions/{id}/mark-submitted',
         summary: 'Mark an encrypted CIC file submitted',
-        description: 'Needs `cic:submit` and `branches:view_all`. Moves an encrypted file to submitted, after staff upload it on CIC\'s portal. Audited.',
+        description: 'Needs `cic:submit` and `branches:view_all`. Moves an encrypted file to submitted, after staff upload it on CIC\'s portal. A standard file is refused (422 `month_already_filed`) when another standard file of the same month (its month-end capture or a correction of it) already went to CIC. Audited.',
         tags: ['CIC'],
         security: [['sanctum' => []]],
         parameters: [new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer'))],
-        responses: [new OA\Response(response: 200, description: 'The file'), new OA\Response(response: 403, description: 'Missing cic:submit or branches:view_all'), new OA\Response(response: 422, description: 'Not encrypted')],
+        responses: [new OA\Response(response: 200, description: 'The file'), new OA\Response(response: 403, description: 'Missing cic:submit or branches:view_all'), new OA\Response(response: 422, description: 'Not encrypted, or the month already filed')],
     )]
     public function markSubmitted(Request $request, int $id): JsonResponse
     {
@@ -204,7 +204,7 @@ class CicSubmissionController extends CicController
         $submission->refresh();
         /** @var CicCapture $capture */
         $capture = $submission->capture()->firstOrFail();
-        $validation ??= $this->submissions->validate($capture);
+        $validation ??= $this->submissions->reviewValidation($capture);
         $affected ??= $this->submissions->affected($submission);
         $actions = $this->actions($user, $submission, fn () => $validation);
 

@@ -94,10 +94,12 @@ final class CicSettingsPresenter
 
     /**
      * @param  array<int, CicProductMapping|null>|null  $mappings  product mappings by loan product id, when the caller read them for a page
+     * @param  array<string, true>|null  $reported  override contract numbers a submitted file carries (CicLoanOverrideService::reportedContractNos()), when read for a page
      * @return array<string, mixed>
      */
-    public static function loanOverride(CicLoanOverride $override, ?array $mappings = null): array
+    public static function loanOverride(CicLoanOverride $override, ?array $mappings = null, ?array $reported = null): array
     {
+        $reported ??= $override->contract_no === null ? [] : CicLoanOverrideService::reportedContractNos([$override->contract_no]);
         $override->loadMissing(['loan.loanProduct', 'creator', 'updater']);
         $loan = $override->loan;
         $mapping = match (true) {
@@ -120,6 +122,8 @@ final class CicSettingsPresenter
             'contract_type_label' => CicClassificationCodes::label($recordType, 'contract_type', $override->contract_type),
             'transaction_type' => $override->transaction_type,
             'transaction_type_label' => CicClassificationCodes::label($recordType, 'transaction_type', $override->transaction_type),
+            'contract_no' => $override->contract_no,
+            'contract_no_reported' => $override->contract_no !== null && isset($reported[$override->contract_no]),
             'product_mapping' => self::productMapping($mapping),
             'reason' => $override->reason,
             'created_by' => self::user($override->creator),

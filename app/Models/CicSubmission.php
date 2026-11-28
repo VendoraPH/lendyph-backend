@@ -3,6 +3,7 @@
 namespace App\Models;
 
 use App\Exceptions\CicRecordIsFrozenException;
+use App\Traits\GuardsCicWrites;
 use Database\Factories\CicSubmissionFactory;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
@@ -20,6 +21,10 @@ use Illuminate\Support\Carbon;
  *   reason, filename, record count, TXT checksum, generator) never changes.
  *   Each later step's fields are written once.
  * - `download_count` only goes up. Rows are never deleted.
+ * - Every write goes through these checks (GuardsCicWrites), saveQuietly()
+ *   included; bulk updates and deletes are refused.
+ * - A correction's affected records are worked out once, at generation, and
+ *   kept in `affected_records` (record types and keys only).
  * - Only the `.zip.gpg` is kept (`gpg_path`, private disk); the plain TXT and
  *   ZIP never are.
  *
@@ -29,6 +34,7 @@ use Illuminate\Support\Carbon;
  * @property int $submission_type 0 standard, 1 correction
  * @property int|null $corrects_submission_id
  * @property string|null $correction_reason
+ * @property list<array{record_type: string, record_key: string, change: string}>|null $affected_records
  * @property string $filename
  * @property int $record_count
  * @property string $txt_sha256
@@ -53,7 +59,7 @@ use Illuminate\Support\Carbon;
 class CicSubmission extends Model
 {
     /** @use HasFactory<CicSubmissionFactory> */
-    use HasFactory;
+    use GuardsCicWrites, HasFactory;
 
     public const TYPE_STANDARD = 0;
 
@@ -81,7 +87,7 @@ class CicSubmission extends Model
     /** Fixed when the file is generated. */
     private const FIXED = [
         'capture_id', 'reference_date', 'submission_type', 'corrects_submission_id', 'correction_reason',
-        'filename', 'record_count', 'txt_sha256', 'comments', 'generated_by', 'generated_at',
+        'affected_records', 'filename', 'record_count', 'txt_sha256', 'comments', 'generated_by', 'generated_at',
     ];
 
     /** Written once by a later step, then kept. */
@@ -106,6 +112,7 @@ class CicSubmission extends Model
             'reference_date' => 'date:Y-m-d',
             'submission_type' => 'integer',
             'corrects_submission_id' => 'integer',
+            'affected_records' => 'array',
             'record_count' => 'integer',
             'generated_by' => 'integer',
             'generated_at' => 'datetime',
@@ -119,15 +126,9 @@ class CicSubmission extends Model
         ];
     }
 
-    protected static function booted(): void
+    protected function cicGuardDelete(): void
     {
-        static::updating(function (CicSubmission $submission): void {
-            $submission->assertAllowedChange();
-        });
-
-        static::deleting(function (CicSubmission $submission): void {
-            throw CicRecordIsFrozenException::because($submission->getTable(), $submission->getKey(), 'the submission history is kept for good.');
-        });
+        throw CicRecordIsFrozenException::because($this->getTable(), $this->getKey(), 'the submission history is kept for good.');
     }
 
     public function isCorrection(): bool
@@ -135,9 +136,9 @@ class CicSubmission extends Model
         return $this->submission_type === self::TYPE_CORRECTION;
     }
 
-    private function assertAllowedChange(): void
+    protected function cicGuardUpdate(): void
     {
-        $dirty = array_keys($this->getDirty());
+        $dirty = $this->cicDirtyColumns();
 
         if (array_intersect($dirty, self::FIXED) !== []) {
             throw CicRecordIsFrozenException::because($this->getTable(), $this->getKey(), 'what a submission was built from never changes; make a correction instead.');

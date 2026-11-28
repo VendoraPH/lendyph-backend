@@ -215,7 +215,7 @@ it('moves a submission forward only and keeps what it was built from', function 
         ->and(fn () => $submission->delete())->toThrow(CicRecordIsFrozenException::class);
 
     $submission->refresh()->forceFill(['status' => 'encrypted', 'gpg_path' => 'cic/a.zip.gpg', 'encrypted_at' => now()])->save();
-    $submission->increment('download_count');
+    $submission->refresh()->forceFill(['download_count' => 1])->save();
 
     expect(fn () => $submission->refresh()->forceFill(['gpg_path' => 'cic/b.zip.gpg'])->save())->toThrow(CicRecordIsFrozenException::class)
         ->and(fn () => $submission->refresh()->forceFill(['download_count' => 0])->save())->toThrow(CicRecordIsFrozenException::class)
