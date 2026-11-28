@@ -29,6 +29,10 @@ Schedule::command('portfolio:snapshot')->dailyAt('23:55')->timezone('Asia/Manila
 // leaves a month end that already has a complete capture as it is.
 Schedule::command('cic:capture-month-end')->lastDayOfMonth('23:58')->timezone('Asia/Manila');
 
+// CIC reporting: remove encryption temporary folders a killed run left
+// behind, once over an hour old. Each run removes its own folder when it ends.
+Schedule::command('cic:clear-temp')->hourly()->timezone('Asia/Manila');
+
 // Database backup daily at 2 AM, keep last 7
 Schedule::command('db:backup --keep=7')->dailyAt('02:00')->timezone('Asia/Manila');
 

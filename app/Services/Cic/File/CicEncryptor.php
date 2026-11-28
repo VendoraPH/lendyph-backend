@@ -17,10 +17,13 @@ use ZipArchive;
  * signed, one recipient.
  *
  * - Everything happens in a folder of its own (0700) under the app's private
- *   `storage/app/cic-tmp`, never the shared /tmp: the TXT, the ZIP, the key
- *   and a temporary `GNUPGHOME` holding only that key. The folder is removed
- *   in a `finally`, and folders an interrupted run left there for over an hour
- *   are removed before each run (never following a symlink).
+ *   `storage/app/cic-tmp`, never the shared /tmp: the ZIP, the key and a
+ *   temporary `GNUPGHOME` holding only that key. The TXT never touches disk:
+ *   it goes into the ZIP from memory (review S-L3).
+ * - The folder is removed in a `finally`, and again by a shutdown function
+ *   should the request die before it (a fatal error or a timeout). Folders a
+ *   killed run still left behind are removed once over an hour old: before
+ *   each run and by the hourly `cic:clear-temp` (never following a symlink).
  * - The ZIP holds exactly the TXT under its filename, and is read back to
  *   prove it.
  * - The imported key must be one key, with the stored fingerprint, able to
@@ -81,14 +84,16 @@ final class CicEncryptor
             throw new CicEncryptionFailed('The temporary folder for encryption could not be made. Nothing was saved.');
         }
 
+        register_shutdown_function(function () use ($folder): void {
+            $this->remove($folder);
+        });
+
         try {
-            $txtPath = $folder.'/'.$file->filename;
             $zipPath = $folder.'/'.$file->zipName();
             $gpgPath = $folder.'/'.$file->encryptedName();
             $keyPath = $folder.'/key.asc';
 
-            $this->write($txtPath, $file->contents);
-            $zipSha = $this->zip($file, $txtPath, $zipPath);
+            $zipSha = $this->zip($file, $zipPath);
 
             $this->write($home.'/common.conf', '');
             $this->write($keyPath, $key->armored);
@@ -115,13 +120,13 @@ final class CicEncryptor
         }
     }
 
-    /** ZIP the TXT under its filename, read it back, and give the ZIP's SHA-256. */
-    private function zip(CicFile $file, string $txtPath, string $zipPath): string
+    /** ZIP the TXT, from memory, under its filename, read it back, and give the ZIP's SHA-256. */
+    private function zip(CicFile $file, string $zipPath): string
     {
         $zip = new ZipArchive;
 
         if ($zip->open($zipPath, ZipArchive::CREATE | ZipArchive::EXCL) !== true
-            || ! $zip->addFile($txtPath, $file->filename)
+            || ! $zip->addFromString($file->filename, $file->contents)
             || ! $zip->close()) {
             throw new CicEncryptionFailed('The file could not be zipped. Nothing was saved.');
         }
@@ -234,8 +239,21 @@ final class CicEncryptor
         return $root;
     }
 
-    private function clearStaleFolders(string $root): void
+    /**
+     * Remove the temporary folders an interrupted run left behind, once over
+     * an hour old (the hourly `cic:clear-temp`). Gives how many were removed.
+     */
+    public function clearStale(): int
     {
+        $root = storage_path('app/cic-tmp');
+
+        return is_dir($root) && ! is_link($root) ? $this->clearStaleFolders($root) : 0;
+    }
+
+    private function clearStaleFolders(string $root): int
+    {
+        $removed = 0;
+
         foreach (new FilesystemIterator($root) as $entry) {
             /** @var SplFileInfo $entry */
             if ($entry->isLink() || ! $entry->isDir() || ! str_starts_with($entry->getFilename(), self::FOLDER_PREFIX)) {
@@ -244,8 +262,11 @@ final class CicEncryptor
 
             if ($entry->getMTime() < time() - self::STALE_AFTER_SECONDS) {
                 $this->remove($entry->getPathname());
+                $removed++;
             }
         }
+
+        return $removed;
     }
 
     /** Remove a folder and everything in it, never following a symlink. */
