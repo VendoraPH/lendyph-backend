@@ -173,7 +173,7 @@ final class CicCaptureService
                 'finished_at' => now(),
             ])->save();
 
-            AuditLogService::log('cic_capture_completed', null, null, [
+            AuditLogService::log('cic_capture_completed', $capture, null, [
                 'capture_id' => $capture->id,
                 'reference_date' => $capture->reference_date->toDateString(),
                 'kind' => $capture->kind,
@@ -331,7 +331,7 @@ final class CicCaptureService
             'error' => self::FAILURE,
         ])->save();
 
-        AuditLogService::log('cic_capture_failed', null, null, [
+        AuditLogService::log('cic_capture_failed', $capture, null, [
             'capture_id' => $capture->id,
             'reference_date' => $capture->reference_date->toDateString(),
             'kind' => $capture->kind,

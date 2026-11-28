@@ -50,6 +50,7 @@ it('captures every record with checksums, registers subjects and freezes contrac
         ->and($loan->fresh()->cic_contract_no)->toBe($loan->loan_account_number);
 
     $audit = AuditLog::query()->where('action', 'cic_capture_completed')->latest('id')->firstOrFail();
+    expect($audit->auditable_type)->toBe(CicCapture::class)->and($audit->auditable_id)->toBe($capture->id);
     expect($audit->new_values)->toMatchArray(['capture_id' => $capture->id, 'kind' => 'month_end', 'subject_count' => 1, 'contract_count' => 1])
         ->and($audit->description)->toContain("month-end capture #{$capture->id}")
         ->and($audit->description)->not->toContain($loan->borrower->last_name);

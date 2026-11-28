@@ -36,6 +36,7 @@ use App\Models\CdaReportValue;
 use App\Models\CdaSetting;
 use App\Models\CdaSocialProgram;
 use App\Models\CdaSubmission;
+use App\Models\CicCapture;
 use App\Models\CicCodeMapping;
 use App\Models\CicLoanOverride;
 use App\Models\CicProductMapping;
@@ -238,6 +239,9 @@ class AuditLogModules
         // the module filter needs no new entry; each row's description names
         // the file and step in words (ids, counts, filenames, statuses only).
         CicSubmission::class => self::UNMAPPED,
+        // CIC captures (CIC records slice): each capture's completion or
+        // failure, with ids, counts and the checksum. System, as above.
+        CicCapture::class => self::UNMAPPED,
         // Member Portal (Phase 3): access, codes, settings, terms, requests and
         // announcements. A member's own actions are filed here too, through
         // the portal user or record they act on.
