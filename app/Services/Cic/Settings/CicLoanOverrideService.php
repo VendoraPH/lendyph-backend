@@ -35,6 +35,9 @@ final class CicLoanOverrideService
 
     public const CONTRACT_NO_PATTERN = '/^[A-Za-z0-9-]+$/';
 
+    /** The record key form of a loan with no number of its own (loan-{id}), in any case: never an override's number. */
+    public const RESERVED_CONTRACT_NO = '/^loan-\d+$/i';
+
     /** @var list<string> a file's statuses once it has gone to CIC */
     public const FILED_STATUSES = [CicSubmission::STATUS_SUBMITTED, CicSubmission::STATUS_ACCEPTED, CicSubmission::STATUS_REJECTED];
 

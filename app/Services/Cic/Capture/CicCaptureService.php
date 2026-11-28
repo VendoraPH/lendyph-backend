@@ -281,25 +281,31 @@ final class CicCaptureService
     {
         $byNumber = [];
 
+        // Case-folded, as the unique index compares (re-review SN2).
+        $numbers = [];
+
         foreach ($contracts as $record) {
             if ($record->loanId !== null && $record->key !== "loan-{$record->loanId}") {
-                $byNumber[$record->key][] = $record->loanId;
+                $folded = mb_strtolower($record->key);
+                $byNumber[$folded][] = $record->loanId;
+                $numbers[$folded] = $record->key;
             }
         }
 
-        foreach (array_chunk(array_keys($byNumber), self::BATCH) as $numbers) {
-            $held = DB::table('loans')->whereIn('cic_contract_no', $numbers)->pluck('id', 'cic_contract_no')->all();
+        foreach (array_chunk(array_keys($byNumber), self::BATCH) as $folded) {
+            $held = DB::table('loans')->whereIn('cic_contract_no', array_map(fn (string $key) => $numbers[$key], $folded))->pluck('cic_contract_no')
+                ->mapWithKeys(fn (mixed $number) => [mb_strtolower((string) $number) => true])->all();
 
-            DB::transaction(function () use ($numbers, $byNumber, $held): void {
-                foreach ($numbers as $number) {
-                    $loanIds = $byNumber[$number];
+            DB::transaction(function () use ($folded, $byNumber, $numbers, $held): void {
+                foreach ($folded as $key) {
+                    $loanIds = $byNumber[$key];
 
-                    if (count($loanIds) !== 1 || isset($held[$number])) {
+                    if (count($loanIds) !== 1 || isset($held[$key])) {
                         continue;
                     }
 
                     DB::table('loans')->where('id', $loanIds[0])->whereNull('cic_contract_no')
-                        ->update(['cic_contract_no' => (string) $number]);
+                        ->update(['cic_contract_no' => (string) $numbers[$key]]);
                 }
             });
         }

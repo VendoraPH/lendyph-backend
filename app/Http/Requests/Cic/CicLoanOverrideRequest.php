@@ -41,7 +41,7 @@ class CicLoanOverrideRequest extends CicFormRequest
             'record_type' => ['nullable', 'string', Rule::in(CicClassificationCodes::RECORD_TYPES)],
             'contract_type' => ['nullable', 'string', 'max:3'],
             'transaction_type' => ['nullable', 'string', 'max:10'],
-            'contract_no' => ['nullable', 'string', 'max:'.CicLoanOverrideService::CONTRACT_NO_MAX, 'regex:'.CicLoanOverrideService::CONTRACT_NO_PATTERN],
+            'contract_no' => ['nullable', 'string', 'max:'.CicLoanOverrideService::CONTRACT_NO_MAX, 'regex:'.CicLoanOverrideService::CONTRACT_NO_PATTERN, 'not_regex:'.CicLoanOverrideService::RESERVED_CONTRACT_NO],
             'reason' => self::reasonRules(),
         ];
     }
@@ -105,6 +105,7 @@ class CicLoanOverrideRequest extends CicFormRequest
             'contract_no.string' => 'The contract number is text.',
             'contract_no.max' => 'The contract number takes up to '.CicLoanOverrideService::CONTRACT_NO_MAX.' characters, CIC\'s limit.',
             'contract_no.regex' => 'The contract number takes letters, digits and dashes only.',
+            'contract_no.not_regex' => 'The contract number can\'t be "loan-" and digits: CIC Reporting keeps that form for loans with no number of their own.',
             'reason.required' => 'Give a reason for the override.',
         ];
     }

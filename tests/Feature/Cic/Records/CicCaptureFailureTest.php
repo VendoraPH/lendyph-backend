@@ -3,6 +3,7 @@
 use App\Models\CicCapture;
 use App\Models\CicCaptureRecord;
 use App\Services\Cic\Capture\CicCaptureService;
+use App\Services\Cic\CicAccess;
 use App\Services\Cic\CicValidator;
 use App\Services\Cic\Records\CicRecord;
 use App\Services\Cic\Records\CicRecordBuilder;
@@ -88,4 +89,38 @@ it('deletes the records a capture wrote before it failed', function () {
         ->and($capture->status)->toBe('failed')
         ->and(CicCaptureRecord::query()->where('capture_id', $capture->id)->count())->toBe(0);
     Log::shouldHaveReceived('error')->once()->withArgs(fn (string $message, array $context) => $context['exception'] === RuntimeException::class && $context['sqlstate'] === null);
+});
+
+it('treats a number another loan froze as taken, even when that loan isn\'t in the file', function () {
+    $closed = $this->cicLoan(overrides: ['loan_account_number' => 'LN-000045', 'status' => 'completed']);
+    DB::table('loans')->where('id', $closed->id)->update(['cic_contract_no' => 'LN-000045']);
+    $imported = $this->cicLoan(overrides: ['loan_account_number' => null, 'external_loan_no' => 'LN-000045']);
+
+    $set = app(CicRecordBuilder::class)->build(Carbon::parse('2026-11-30'));
+    $byLoan = collect($set->ofType('CI'))->keyBy(fn (CicRecord $r) => $r->loanId);
+
+    expect($byLoan)->not->toHaveKey($closed->id)
+        ->and($byLoan[$imported->id]->key)->toBe("loan-{$imported->id}")
+        ->and(collect($byLoan[$imported->id]->buildIssues)->pluck('code')->all())->toContain('DUPLICATE_CONTRACT');
+});
+
+it('compares contract numbers case-folded, and reserves the loan- and digits form', function () {
+    $native = $this->cicLoan(overrides: ['loan_account_number' => 'LN-000004']);
+    $lower = $this->cicLoan(overrides: ['loan_account_number' => null, 'external_loan_no' => 'ln-000004']);
+    $shaped = $this->cicLoan(overrides: ['loan_account_number' => null, 'external_loan_no' => 'LOAN-'.($native->id)]);
+
+    $capture = app(CicCaptureService::class)->capture(Carbon::parse('2026-11-30'), CicCapture::KIND_TEST, null);
+    $keys = CicCaptureRecord::query()->where('capture_id', $capture->id)->where('record_type', 'CI')->pluck('record_key', 'loan_id');
+
+    expect($capture->status)->toBe('complete')
+        ->and($keys[$native->id])->toBe('LN-000004')
+        ->and($keys[$lower->id])->toBe("loan-{$lower->id}")
+        ->and($keys[$shaped->id])->toBe("loan-{$shaped->id}")
+        ->and($native->fresh()->cic_contract_no)->toBe('LN-000004')
+        ->and($lower->fresh()->cic_contract_no)->toBeNull();
+
+    $preparer = $this->cicUser([CicAccess::PREPARE, 'branches:view_all']);
+    $this->actingAs($preparer)->postJson('/api/cic/loan-overrides', ['loan_id' => $lower->id, 'contract_no' => 'LOAN-7', 'reason' => 'x'])
+        ->assertUnprocessable()
+        ->assertJsonPath('errors.contract_no.0', 'The contract number can\'t be "loan-" and digits: CIC Reporting keeps that form for loans with no number of their own.');
 });
