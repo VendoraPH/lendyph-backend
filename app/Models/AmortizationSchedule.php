@@ -183,6 +183,21 @@ class AmortizationSchedule extends Model
     }
 
     /**
+     * The next instalment due: the unpaid period (pending, partial or overdue)
+     * with the earliest due date. The loan summary's `next_due_date` and the
+     * CIC record's next payment (CI29, CI30) read it, so the two never drift.
+     *
+     * @param  Collection<int, self>  $schedules
+     */
+    public static function nextDue(Collection $schedules): ?self
+    {
+        return $schedules
+            ->filter(fn (self $schedule) => in_array($schedule->status, self::UNPAID_STATUSES, true))
+            ->sortBy('due_date')
+            ->first();
+    }
+
+    /**
      * The already-loaded schedules that are LATE — still owing, and past both
      * the due date and the loan's grace period.
      *

@@ -200,10 +200,7 @@ final class ContractRecordBuilder
 
         if ($type === 'CI') {
             $first = $schedules->first();
-            $next = $active ? $schedules
-                ->filter(fn (AmortizationSchedule $s) => in_array($s->status, AmortizationSchedule::UNPAID_STATUSES, true))
-                ->sortBy('due_date')
-                ->first() : null;
+            $next = $active ? AmortizationSchedule::nextDue($schedules) : null;
 
             $v += [
                 'CI21' => (string) $schedules->count(),
