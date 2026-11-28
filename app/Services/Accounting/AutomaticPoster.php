@@ -1859,11 +1859,18 @@ final class AutomaticPoster
     /**
      * What an operator calls this record: "LN-000154", "RCP-000031".
      *
-     * Falls back through the other issued codes, then to the model name, so a
-     * record with no code yet still produces a message someone can act on.
+     * A loan reads its display number (its LN- number, else the file's Loan
+     * No., else its application number), so an imported loan is named as
+     * staff know it. Other records fall back through the issued codes, then
+     * to the model name, so a record with no code yet still produces a
+     * message someone can act on. Text only: never a reference or a key.
      */
     private function businessIdentifier(Model $owner): string
     {
+        if ($owner instanceof Loan && ($number = $owner->displayNumber()) !== null) {
+            return $number;
+        }
+
         foreach (['loan_account_number', 'receipt_number', 'application_number', 'reference_no', 'adjustment_number', 'reference'] as $column) {
             $value = $owner->getAttribute($column);
 
