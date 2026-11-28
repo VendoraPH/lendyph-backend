@@ -122,7 +122,8 @@ final class CicRecordBuilder
 
     /**
      * Keeps every contract number unique (security review S-M1, re-reviews
-     * MM3 and SN2), comparing case-folded as the unique indexes do:
+     * MM3 and SN2, delta re-review), comparing keys folded as the unique
+     * indexes do, capitals and accents aside (CicFormat::fold()):
      *
      * - a number another loan froze (`cic_contract_no`), in this build or not,
      *   is taken;
@@ -144,7 +145,7 @@ final class CicRecordBuilder
 
         foreach ($records as $index => $record) {
             if ($record->loanId !== null && $record->key !== "loan-{$record->loanId}") {
-                $byKey[mb_strtolower($record->key)][] = $index;
+                $byKey[CicFormat::fold($record->key)][] = $index;
             }
         }
 
@@ -158,11 +159,11 @@ final class CicRecordBuilder
 
         foreach (array_chunk($keys, self::MEMBER_CHUNK) as $chunk) {
             foreach (DB::table('loans')->whereIn('cic_contract_no', $chunk)->get(['id', 'cic_contract_no']) as $row) {
-                $frozen[mb_strtolower((string) $row->cic_contract_no)] = (int) $row->id;
+                $frozen[CicFormat::fold((string) $row->cic_contract_no)] = (int) $row->id;
             }
 
             foreach (DB::table('loans')->whereIn('loan_account_number', $chunk)->get(['id', 'loan_account_number']) as $row) {
-                $native[mb_strtolower((string) $row->loan_account_number)] = (int) $row->id;
+                $native[CicFormat::fold((string) $row->loan_account_number)] = (int) $row->id;
             }
         }
 
@@ -183,7 +184,7 @@ final class CicRecordBuilder
 
                 $records[$index] = $record->rekeyed("loan-{$record->loanId}", [ContractRecordBuilder::issue("{$record->type}7", 'error', 'DUPLICATE_CONTRACT', $reserved
                     ? 'This loan number reads like the key CIC Reporting gives a loan with no number of its own (loan- and digits), so it can\'t be sent under it. Give this loan its own CIC contract number.'
-                    : 'Another loan reported to CIC has the same loan number (capitals aside), so this one can\'t be sent under it. Give this loan its own CIC contract number.')]);
+                    : 'Another loan reported to CIC has the same loan number (capitals and accents aside), so this one can\'t be sent under it. Give this loan its own CIC contract number.')]);
             }
         }
 

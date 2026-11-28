@@ -5,6 +5,7 @@ use App\Models\CicCaptureRecord;
 use App\Services\Cic\Capture\CicCaptureService;
 use App\Services\Cic\CicAccess;
 use App\Services\Cic\CicValidator;
+use App\Services\Cic\Records\CicFormat;
 use App\Services\Cic\Records\CicRecord;
 use App\Services\Cic\Records\CicRecordBuilder;
 use Illuminate\Support\Carbon;
@@ -123,4 +124,24 @@ it('compares contract numbers case-folded, and reserves the loan- and digits for
     $this->actingAs($preparer)->postJson('/api/cic/loan-overrides', ['loan_id' => $lower->id, 'contract_no' => 'LOAN-7', 'reason' => 'x'])
         ->assertUnprocessable()
         ->assertJsonPath('errors.contract_no.0', 'The contract number can\'t be "loan-" and digits: CIC Reporting keeps that form for loans with no number of their own.');
+});
+
+it('folds accents as well as capitals when it compares contract numbers, and keeps other characters', function () {
+    expect(CicFormat::fold('PEÑA-01'))->toBe('pena-01')
+        ->and(CicFormat::fold('Ｃａｆé'))->toBe('cafe')
+        ->and(CicFormat::fold('BC/07-2024'))->toBe('bc/07-2024');
+
+    $frozen = $this->cicLoan(overrides: ['loan_account_number' => 'PENA-01']);
+    DB::table('loans')->where('id', $frozen->id)->update(['cic_contract_no' => 'PENA-01']);
+    $accented = $this->cicLoan(overrides: ['loan_account_number' => null, 'external_loan_no' => 'PEÑA-01']);
+    $slashed = $this->cicLoan(overrides: ['loan_account_number' => null, 'external_loan_no' => 'BC/07-2024']);
+
+    $capture = app(CicCaptureService::class)->capture(Carbon::parse('2026-11-30'), CicCapture::KIND_TEST, null);
+    $keys = CicCaptureRecord::query()->where('capture_id', $capture->id)->where('record_type', 'CI')->pluck('record_key', 'loan_id');
+
+    expect($capture->status)->toBe('complete')
+        ->and($keys[$frozen->id])->toBe('PENA-01')
+        ->and($keys[$accented->id])->toBe("loan-{$accented->id}")
+        ->and($keys[$slashed->id])->toBe('BC/07-2024')
+        ->and($slashed->fresh()->cic_contract_no)->toBe('BC/07-2024');
 });

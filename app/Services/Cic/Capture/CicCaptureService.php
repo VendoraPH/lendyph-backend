@@ -8,6 +8,7 @@ use App\Models\CicSubject;
 use App\Models\User;
 use App\Services\AuditLogService;
 use App\Services\Cic\CicSwitch;
+use App\Services\Cic\Records\CicFormat;
 use App\Services\Cic\Records\CicRecord;
 use App\Services\Cic\Records\CicRecordBuilder;
 use App\Services\Cic\Records\CicRecordSet;
@@ -290,12 +291,13 @@ final class CicCaptureService
     {
         $byNumber = [];
 
-        // Case-folded, as the unique index compares (re-review SN2).
+        // Folded as the unique index compares, capitals and accents aside
+        // (re-review SN2, delta re-review).
         $numbers = [];
 
         foreach ($contracts as $record) {
             if ($record->loanId !== null && $record->key !== "loan-{$record->loanId}") {
-                $folded = mb_strtolower($record->key);
+                $folded = CicFormat::fold($record->key);
                 $byNumber[$folded][] = $record->loanId;
                 $numbers[$folded] = $record->key;
             }
@@ -303,7 +305,7 @@ final class CicCaptureService
 
         foreach (array_chunk(array_keys($byNumber), self::BATCH) as $folded) {
             $held = DB::table('loans')->whereIn('cic_contract_no', array_map(fn (string $key) => $numbers[$key], $folded))->pluck('cic_contract_no')
-                ->mapWithKeys(fn (mixed $number) => [mb_strtolower((string) $number) => true])->all();
+                ->mapWithKeys(fn (mixed $number) => [CicFormat::fold((string) $number) => true])->all();
 
             DB::transaction(function () use ($folded, $byNumber, $numbers, $held): void {
                 foreach ($folded as $key) {

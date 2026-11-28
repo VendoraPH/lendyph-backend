@@ -6,6 +6,8 @@ use Brick\Math\BigDecimal;
 use Brick\Math\RoundingMode;
 use Carbon\CarbonInterface;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Str;
+use Normalizer;
 
 /**
  * CSDF 2016 value formatting, the server's only rules for it:
@@ -70,6 +72,25 @@ final class CicFormat
     public static function compact(array $values): array
     {
         return array_filter($values, fn (?string $value) => $value !== null && $value !== '');
+    }
+
+    /**
+     * A key folded as the database's utf8mb4_unicode_ci unique indexes compare
+     * it: compatibility-decomposed (NFKD), combining marks stripped, lower
+     * case, so "PEÑA-01" and "pena-01" are one number (delta re-review).
+     * Without intl's Normalizer, Str::ascii() transliterates instead. Other
+     * characters ("BC/07-2024") are kept.
+     */
+    public static function fold(string $key): string
+    {
+        if (class_exists(Normalizer::class)) {
+            $decomposed = Normalizer::normalize($key, Normalizer::FORM_KD);
+            $key = is_string($decomposed) ? (string) preg_replace('/\p{Mn}+/u', '', $decomposed) : Str::ascii($key);
+        } else {
+            $key = Str::ascii($key);
+        }
+
+        return mb_strtolower($key);
     }
 
     /** A DDMMYYYY string as a sortable YYYYMMDD integer, or null when it isn't a real date. */
