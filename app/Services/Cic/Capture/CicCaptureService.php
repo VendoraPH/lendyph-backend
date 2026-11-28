@@ -179,9 +179,13 @@ final class CicCaptureService
             $set = $this->builder->build($date);
         }
 
+        // Progress after the build, which writes nothing, and after the
+        // freezes, so a slow build isn't swept as idle (final look, Low 4).
+        $this->markProgress($capture);
         $subjectIds = $this->registerSubjects($set->ofType('ID'));
         $this->freezeContractNumbers([...$set->ofType('CI'), ...$set->ofType('CN')]);
         $this->freezeRecordTypes([...$set->ofType('CI'), ...$set->ofType('CN')]);
+        $this->markProgress($capture);
 
         foreach (['ID', 'CI', 'CN', 'NE'] as $type) {
             foreach (array_chunk($set->ofType($type), self::BATCH) as $batch) {
@@ -444,7 +448,13 @@ final class CicCaptureService
             throw new RuntimeException('The capture stopped before it finished.');
         }
 
-        DB::table('cic_captures')->where('id', $capture->id)->update(['updated_at' => now()]);
+        $this->markProgress($capture);
+    }
+
+    /** Marks progress (`updated_at`, which the hourly sweep reads) on a capture still capturing. */
+    private function markProgress(CicCapture $capture): void
+    {
+        DB::table('cic_captures')->where('id', $capture->id)->where('status', CicCapture::STATUS_CAPTURING)->update(['updated_at' => now()]);
     }
 
     /**

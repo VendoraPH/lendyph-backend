@@ -128,3 +128,26 @@ it('refuses a capture on readiness, which is always live, and never caches a ref
         ->and(Cache::has(CicRecordsReader::liveCacheKey(Carbon::parse('2026-11-15'))))->toBeFalse()
         ->and(Cache::has(CicRecordsReader::liveCacheKey(Carbon::parse('2026-10-31'))))->toBeTrue();
 });
+
+it('marks a capture\'s progress right after the build and after the freezes, before any batch', function () {
+    config(['cic.test_captures' => true]);
+    $this->cicLoan();
+    $steps = [];
+
+    DB::listen(function ($query) use (&$steps) {
+        $steps[] = match (true) {
+            str_starts_with($query->sql, 'update `cic_captures` set `updated_at`') => 'progress',
+            str_starts_with($query->sql, 'insert into `cic_subjects`') => 'subjects',
+            str_starts_with($query->sql, 'update `loans` set `cic_record_type`') => 'freeze',
+            str_starts_with($query->sql, 'insert into `cic_capture_records`') => 'batch',
+            default => null,
+        };
+    });
+
+    $capture = app(CicCaptureService::class)->capture(Carbon::parse('2026-11-30'), CicCapture::KIND_TEST, null);
+    $steps = array_values(array_filter($steps));
+
+    expect($capture->status)->toBe('complete')
+        ->and(array_slice($steps, 0, 4))->toBe(['progress', 'subjects', 'freeze', 'progress'])
+        ->and($steps[array_search('batch', $steps, true) - 1])->toBe('progress');
+});
