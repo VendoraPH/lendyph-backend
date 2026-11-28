@@ -6,11 +6,13 @@ use App\Models\CicSetting;
 use App\Models\CicSubmission;
 use App\Services\Cic\Capture\CicCaptureService;
 use App\Services\Cic\CicAccess;
+use App\Services\Cic\CicCache;
 use App\Services\Cic\CicValidator;
 use App\Services\Cic\Records\CicRecordsReader;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Tests\Feature\Cic\Records\CicRecordsFixtures;
 use Tests\TestCase;
 
@@ -92,21 +94,55 @@ it('builds one record\'s live view from its own loans, with the same values and 
     $this->actingAs($this->reader)->getJson('/api/cic/records/CI/LN-NONE?reference_date=2026-11-30')->assertNotFound();
 });
 
-it('caches a complete capture\'s validation by its id and checksum, and the settings it\'s checked against', function () {
+it('caches a complete capture\'s validation for the screens by its id, checksum, settings and rules version', function () {
     config(['cic.test_captures' => true]);
     $this->cicLoan();
     $capture = app(CicCaptureService::class)->capture(Carbon::parse('2026-11-30'), CicCapture::KIND_TEST, null);
     $validator = app(CicValidator::class);
 
-    $first = $validator->issues($capture);
+    $first = $validator->cachedIssues($capture);
     $queries = 0;
     DB::listen(function () use (&$queries) {
         $queries++;
     });
-    $again = $validator->issues($capture);
+    $again = $validator->cachedIssues($capture);
 
-    expect($again)->toBe($first)->and($queries)->toBeLessThanOrEqual(2);
+    expect($again)->toBe($first)->and($queries)->toBeLessThanOrEqual(2)
+        ->and(Cache::has(sprintf('cic:validation:%d:%s:%s', $capture->id, $capture->checksum, CicValidator::cacheFingerprint())))->toBeTrue();
 
     CicSetting::current()->forceFill(['provider_code' => 'BAD'])->save();
-    expect(collect($validator->issues($capture))->pluck('code')->all())->toContain('PROVIDER_CODE');
+    expect(collect($validator->cachedIssues($capture))->pluck('code')->all())->toContain('PROVIDER_CODE');
+});
+
+it('never validates generate or encrypt from the cache', function () {
+    config(['cic.test_captures' => true]);
+    $this->cicLoan($this->cicMember(['birthdate' => null]));
+    $capture = app(CicCaptureService::class)->capture(Carbon::parse('2026-11-30'), CicCapture::KIND_TEST, null);
+
+    // A cached copy that wrongly says the capture is clean.
+    Cache::put(sprintf('cic:validation:%d:%s:%s', $capture->id, $capture->checksum, CicValidator::cacheFingerprint()), [], 600);
+
+    expect(app(CicValidator::class)->cachedIssues($capture))->toBe([])
+        ->and(collect(app(CicValidator::class)->issues($capture))->where('severity', 'error')->isNotEmpty())->toBeTrue();
+
+    $preparer = $this->cicUser([CicAccess::VIEW, CicAccess::PREPARE, 'branches:view_all']);
+    $this->actingAs($preparer)->postJson('/api/cic/submissions', ['capture_id' => $capture->id, 'submission_type' => 0, 'confirm_warnings' => true])
+        ->assertUnprocessable()->assertJsonPath('code', 'validation_errors');
+});
+
+it('works out a value uncached when the cache fails, logging no values', function () {
+    Log::spy();
+    Cache::shouldReceive('get')->andThrow(new RuntimeException('cache down'));
+    Cache::shouldReceive('put')->andThrow(new RuntimeException('cache down'));
+
+    expect(CicCache::remember('cic:test', 60, fn () => ['answer' => 42]))->toBe(['answer' => 42]);
+    Log::shouldHaveReceived('warning')->twice()->withArgs(fn (string $message, array $context) => $context === ['exception' => RuntimeException::class, 'sqlstate' => null]);
+});
+
+it('never caches a value bigger than the limit', function () {
+    config(['cic.cache_max_bytes' => 100]);
+
+    expect(CicCache::put('cic:big', str_repeat('x', 101), 60))->toBeFalse()
+        ->and(Cache::has('cic:big'))->toBeFalse()
+        ->and(CicCache::put('cic:small', str_repeat('x', 100), 60))->toBeTrue();
 });

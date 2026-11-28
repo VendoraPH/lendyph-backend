@@ -176,7 +176,7 @@ final class CicRecordsReader
     /** @return list<Issue> */
     public function captureIssues(CicCapture $capture): array
     {
-        return $this->captureIssues[$capture->id] ??= $this->validator->issues($capture);
+        return $this->captureIssues[$capture->id] ??= $this->validator->cachedIssues($capture);
     }
 
     /**

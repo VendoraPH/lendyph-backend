@@ -9,7 +9,6 @@ use App\Services\Cic\Contracts\ValidatesCicCapture;
 use App\Services\Cic\Records\CicFormat;
 use App\Services\Cic\Records\CicRecord;
 use App\Services\Cic\Records\CicRecordSet;
-use Illuminate\Support\Facades\Cache;
 
 /**
  * The server's authoritative CSDF 2016 checks, ported from frontend #699's
@@ -75,26 +74,49 @@ final class CicValidator implements ValidatesCicCapture
 
     private const PHASE_LABEL = ['RQ' => 'Requested', 'RN' => 'Renounced', 'RF' => 'Refused', 'AC' => 'Active', 'CL' => 'Closed', 'CA' => 'Closed in advance'];
 
-    /** How long a complete capture's issues are kept (a capture never changes; settings are in the key). */
+    /** How long the screens keep a complete capture's issues (a capture never changes; settings and rules are in the key). */
     public const CACHE_SECONDS = 86400;
 
+    /** Bumped whenever a check changes, so cached issues are never read under older rules. */
+    public const RULES_VERSION = '2026-11-28.3';
+
     /**
-     * A capture's issues. A complete capture's are cached by its id and
-     * checksum, and the settings they're checked against (security review
-     * S-M2): a complete capture never changes.
+     * A capture's issues, always worked out now: generate and encrypt read
+     * these, never a cached copy (re-review SN3).
      *
      * @return list<Issue>
      */
     public function issues(CicCapture $capture): array
     {
+        return $this->captureIssues($capture);
+    }
+
+    /**
+     * A capture's issues for the screens: a complete capture's are cached by
+     * its id and checksum, the settings they're checked against and the rules
+     * version (security review S-M2), through the guarded CIC cache.
+     *
+     * @return list<Issue>
+     */
+    public function cachedIssues(CicCapture $capture): array
+    {
         if (! $capture->isComplete() || $capture->checksum === null) {
             return $this->captureIssues($capture);
         }
 
-        $setting = CicSetting::current();
-        $key = sprintf('cic:validation:%d:%s:%s', $capture->id, $capture->checksum, hash('sha256', json_encode([$setting->provider_code, (bool) $setting->is_mfi], JSON_THROW_ON_ERROR)));
+        return CicCache::remember(
+            sprintf('cic:validation:%d:%s:%s', $capture->id, $capture->checksum, self::cacheFingerprint()),
+            self::CACHE_SECONDS,
+            fn () => $this->captureIssues($capture),
+        );
+    }
 
-        return Cache::remember($key, self::CACHE_SECONDS, fn () => $this->captureIssues($capture));
+    /** What a capture's cached validation depends on besides the capture: the provider code, the MFI flag and the rules version. */
+    public static function cacheFingerprint(): string
+    {
+        $setting = CicSetting::current();
+
+        return hash('sha256', json_encode([$setting->provider_code, (bool) $setting->is_mfi, self::RULES_VERSION], JSON_THROW_ON_ERROR));
     }
 
     /** @return list<Issue> */

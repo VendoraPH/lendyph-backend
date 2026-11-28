@@ -7,6 +7,8 @@ use App\Models\CicPublicKey;
 use App\Models\CicSubmission;
 use App\Models\User;
 use App\Services\AuditLogService;
+use App\Services\Cic\CicCache;
+use App\Services\Cic\CicValidator;
 use App\Services\Cic\Contracts\ValidatesCicCapture;
 use App\Services\Cic\File\CicEncryptionFailed;
 use App\Services\Cic\File\CicEncryptor;
@@ -14,7 +16,6 @@ use App\Services\Cic\File\CicFile;
 use App\Services\Cic\File\CicFileBuilder;
 use Carbon\CarbonInterface;
 use Illuminate\Database\UniqueConstraintViolationException;
-use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
 use Throwable;
@@ -395,8 +396,8 @@ final class CicSubmissionService
             return $this->validate($capture);
         }
 
-        return Cache::remember(
-            "cic:submission-validation:{$capture->id}:{$capture->checksum}",
+        return CicCache::remember(
+            "cic:submission-validation:{$capture->id}:{$capture->checksum}:".CicValidator::cacheFingerprint(),
             self::VALIDATION_CACHE_SECONDS,
             fn (): array => $this->validate($capture),
         );
