@@ -6,6 +6,7 @@ use App\Models\CicLoanOverride;
 use App\Models\CicProductMapping;
 use App\Models\Loan;
 use App\Services\Cic\CicAccess;
+use App\Services\Cic\Records\CicContractClassifier;
 use App\Services\Cic\Settings\CicClassificationCodes;
 use App\Services\Cic\Settings\CicLoanOverrideService;
 use Illuminate\Validation\Rule;
@@ -15,8 +16,10 @@ use Illuminate\Validation\Validator;
  * POST /cic/loan-overrides (with `loan_id`) and PUT /cic/loan-overrides/{id}:
  * a reportable loan's own record type, contract type and transaction type (a
  * null keeps the product's), with a reason. Each code is checked against the
- * record type the loan will be reported as: the override's own, else its
- * product mapping's.
+ * record type the loan will be reported as, by CicContractClassifier: the
+ * override's own, else the loan's structure (one lump sum is CN, else CI). A
+ * product mapped to the other record type gives no codes, so the override
+ * must then carry its own contract and transaction types.
  */
 class CicLoanOverrideRequest extends CicFormRequest
 {
@@ -62,13 +65,8 @@ class CicLoanOverrideRequest extends CicFormRequest
             }
 
             $mapping = CicProductMapping::query()->where('loan_product_id', $loan->loan_product_id)->first();
-            $recordType = $this->input('record_type') ?: $mapping?->record_type;
-
-            if ($recordType === null) {
-                $validator->errors()->add('record_type', 'The loan\'s product has no CIC mapping yet, so choose the record type (CI or CN) too.');
-
-                return;
-            }
+            $class = CicContractClassifier::classify(CicContractClassifier::structure($loan), $this->only(['record_type', 'contract_type', 'transaction_type']), $mapping);
+            $recordType = $class->recordType;
 
             foreach (['contract_type', 'transaction_type'] as $code) {
                 $refusal = CicClassificationCodes::refusal($recordType, $code, $this->input($code));
@@ -78,11 +76,14 @@ class CicLoanOverrideRequest extends CicFormRequest
                 }
             }
 
-            // A new record type needs a contract type from its own list: the
-            // product's code belongs to the other one.
-            if ($mapping !== null && $recordType !== $mapping->record_type && ! $this->filled('contract_type')
-                && CicClassificationCodes::refusal($recordType, 'contract_type', $mapping->contract_type) !== null) {
-                $validator->errors()->add('contract_type', "Choose a contract type for {$recordType}: the product's contract type {$mapping->contract_type} is a {$mapping->record_type} code.");
+            // A product mapped to the other record type gives no codes, so the
+            // override supplies its own.
+            if ($class->mappingMismatch) {
+                foreach (['contract_type', 'transaction_type'] as $code) {
+                    if (! $this->filled($code)) {
+                        $validator->errors()->add($code, "Choose a ".CicClassificationCodes::fieldWords($code)." for {$recordType}: the loan reports as a {$recordType} contract, and its product is mapped to {$mapping->record_type} contracts, so the product's codes don't apply.");
+                    }
+                }
             }
         }];
     }

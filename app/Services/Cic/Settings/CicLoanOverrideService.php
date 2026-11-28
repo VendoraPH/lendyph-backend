@@ -6,6 +6,7 @@ use App\Models\CicLoanOverride;
 use App\Models\Loan;
 use App\Models\User;
 use App\Services\AuditLogService;
+use App\Services\Cic\Records\CicContractClassifier;
 use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Support\Facades\DB;
 
@@ -109,9 +110,8 @@ final class CicLoanOverrideService
     private function words(CicLoanOverride $override): array
     {
         $override->loadMissing('loan');
-        $productType = $override->loan === null ? null
-            : DB::table('cic_product_mappings')->where('loan_product_id', $override->loan->loan_product_id)->value('record_type');
-        $recordType = $override->record_type ?? $productType;
+        $recordType = $override->loan === null ? $override->record_type
+            : ($override->record_type ?? CicContractClassifier::structure($override->loan));
 
         return [
             'record_type' => $override->record_type,

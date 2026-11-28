@@ -64,7 +64,9 @@ it('checks codes against the record type the loan reports as', function () {
         ->assertUnprocessable()->assertJsonPath('errors.contract_type.0', '"48" isn\'t one of CIC\'s contract type codes for a CI contract.');
 
     cicOverride($this, ['loan_id' => $this->loan->id, 'record_type' => 'CN', 'reason' => 'Single payment'])
-        ->assertUnprocessable()->assertJsonPath('errors.contract_type.0', 'Choose a contract type for CN: the product\'s contract type 12 is a CI code.');
+        ->assertUnprocessable()
+        ->assertJsonPath('errors.contract_type.0', 'Choose a contract type for CN: the loan reports as a CN contract, and its product is mapped to CI contracts, so the product\'s codes don\'t apply.')
+        ->assertJsonPath('errors.transaction_type.0', 'Choose a transaction type for CN: the loan reports as a CN contract, and its product is mapped to CI contracts, so the product\'s codes don\'t apply.');
 
     cicOverride($this, ['loan_id' => $this->loan->id, 'transaction_type' => 'ZZ', 'reason' => 'x'])
         ->assertUnprocessable()->assertJsonPath('errors.transaction_type.0', '"ZZ" isn\'t one of CIC\'s transaction type codes for a CI contract.');
@@ -73,14 +75,30 @@ it('checks codes against the record type the loan reports as', function () {
         ->assertUnprocessable()->assertJsonPath('errors.record_type.0', 'Set at least one of the record type, contract type or transaction type to override.');
 
     cicOverride($this, ['loan_id' => $this->loan->id, 'record_type' => 'CN', 'contract_type' => '48', 'reason' => 'Single payment'])
+        ->assertUnprocessable()->assertJsonValidationErrors('transaction_type');
+
+    cicOverride($this, ['loan_id' => $this->loan->id, 'record_type' => 'CN', 'contract_type' => '48', 'transaction_type' => 'DL', 'reason' => 'Single payment'])
         ->assertCreated()->assertJsonPath('data.contract_type_label', 'Demand Loan – Case to Case');
 });
 
-it('asks for the record type when the loan\'s product has no mapping', function () {
-    $loan = Loan::factory()->create(['status' => 'released']);
+it('reads the record type from the loan\'s own structure when the override sets none, whatever the product is mapped to', function () {
+    $unmapped = Loan::factory()->create(['status' => 'released']);
+    cicOverride($this, ['loan_id' => $unmapped->id, 'contract_type' => '12', 'reason' => 'Instalments'])
+        ->assertCreated()->assertJsonPath('data.contract_type_label', 'Personal Loan');
 
-    cicOverride($this, ['loan_id' => $loan->id, 'contract_type' => '12', 'reason' => 'x'])
-        ->assertUnprocessable()->assertJsonPath('errors.record_type.0', 'The loan\'s product has no CIC mapping yet, so choose the record type (CI or CN) too.');
+    // A lump-sum loan reports as CN, so a CI product's codes don't apply and CI codes are refused.
+    $lumpSum = Loan::factory()->create(['status' => 'released', 'frequency' => 'upon_maturity', 'loan_product_id' => $this->loan->loan_product_id]);
+    cicOverride($this, ['loan_id' => $lumpSum->id, 'contract_type' => '12', 'reason' => 'x'])
+        ->assertUnprocessable()
+        ->assertJsonPath('errors.contract_type.0', '"12" isn\'t one of CIC\'s contract type codes for a CN contract.')
+        ->assertJsonPath('errors.transaction_type.0', 'Choose a transaction type for CN: the loan reports as a CN contract, and its product is mapped to CI contracts, so the product\'s codes don\'t apply.');
+
+    cicOverride($this, ['loan_id' => $lumpSum->id, 'contract_type' => '48', 'transaction_type' => 'DL', 'reason' => 'Paid at maturity'])
+        ->assertCreated()->assertJsonPath('data.record_type', null)->assertJsonPath('data.contract_type_label', 'Demand Loan – Case to Case');
+
+    // Its own record type of CI makes the product's codes apply again.
+    $other = Loan::factory()->create(['status' => 'released', 'frequency' => 'upon_maturity', 'loan_product_id' => $this->loan->loan_product_id]);
+    cicOverride($this, ['loan_id' => $other->id, 'record_type' => 'CI', 'reason' => 'Reported as instalment'])->assertCreated();
 });
 
 it('needs a reason of up to 500 characters on every write', function () {

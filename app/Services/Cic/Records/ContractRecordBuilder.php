@@ -19,12 +19,14 @@ use Illuminate\Support\Facades\DB;
  * The CI (Installment) or CN (Non-Installment) record of a reportable loan,
  * per notes/cic/mapping/cic-to-lendy-mapping.csv.
  *
- * - **Record type:** CN when the loan repays in one lump sum (frequency
- *   upon_maturity, or a one-period schedule), else CI (prompt §5.3). A loan
- *   override's record type wins; a product mapped to the other type is a
- *   warning.
- * - **Contract and transaction types:** the loan's override, else its
- *   product's mapping. An unmapped product is an error on the contract.
+ * - **Classification:** CicContractClassifier, the rule the loan override's
+ *   checks use too. The record type is the override's, else the loan's own
+ *   structure (one lump sum is CN, else CI). The product mapping gives the
+ *   contract type, transaction type and purpose of credit only when its
+ *   record type matches; a product mapped to the other type is a warning
+ *   (unless the override set the record type itself), and its codes count as
+ *   missing (an error) unless the override supplies them.
+ *   An unmapped product is an error on the contract.
  * - **Figures** come from the existing services, never new money logic:
  *   outstanding is LoanListTotals::byLoan()'s `total_outstanding`; overdue
  *   periods are AmortizationSchedule::lateUnpaid() from each bare due date;
@@ -127,7 +129,7 @@ final class ContractRecordBuilder
 
         $issues = [];
         $schedules = $loan->amortizationSchedules;
-        [$type, $contractType, $transactionType] = $this->classify($loan, $schedules, $issues);
+        [$type, $contractType, $transactionType, $purposeCode] = $this->classify($loan, $schedules, $issues);
         $t = fn (int $position) => $type.$position;
 
         [$key, $contractNo] = $this->contractNumber($loan, $type, $issues);
@@ -181,6 +183,7 @@ final class ContractRecordBuilder
             $v += [
                 'CI21' => (string) $schedules->count(),
                 'CI22' => $transactionType,
+                'CI23' => $purposeCode,
                 'CI24' => self::PERIODICITY[$loan->frequency] ?? '',
                 'CI26' => $first === null ? '' : CicFormat::amount((string) BigDecimal::of((string) $first->principal_due)->plus((string) $first->interest_due)),
                 'CI27' => $first === null ? '' : CicFormat::date($first->due_date),
@@ -211,43 +214,47 @@ final class ContractRecordBuilder
     }
 
     /**
-     * The record type, contract type and transaction type (prompt §5.3).
+     * The record type, contract type, transaction type and purpose of credit
+     * (prompt §5.3), by CicContractClassifier.
      *
      * @param  Collection<int, AmortizationSchedule>  $schedules
      * @param  list<array<string, mixed>>  $issues
-     * @return array{0: string, 1: string, 2: string}
+     * @return array{0: string, 1: string, 2: string, 3: string}
      */
     private function classify(Loan $loan, Collection $schedules, array &$issues): array
     {
-        $lumpSum = $loan->frequency === 'upon_maturity' || $schedules->count() === 1;
-        $structure = $lumpSum ? 'CN' : 'CI';
-        $override = $loan->cicOverride;
         $mapping = $this->context->productMappings[$loan->loan_product_id] ?? null;
-        $type = $override?->record_type ?? $structure;
-        $repays = $lumpSum ? 'in one lump sum' : 'in instalments';
-
-        if ($override?->record_type !== null && $override->record_type !== $structure) {
-            $issues[] = self::issue("{$type}1", 'warning', 'OVERRIDE_AGAINST_STRUCTURE',
-                "This loan repays {$repays}, but its own CIC classification reports it as a {$type} contract. Check the override is still right.");
-        } elseif ($override?->record_type === null && $mapping !== null && $mapping->record_type !== $structure) {
-            $issues[] = self::issue("{$type}1", 'warning', 'CLASSIFICATION_MISMATCH',
-                "This loan repays {$repays}, so it is reported as a {$type} contract, but its product is mapped to {$mapping->record_type} contracts.");
-        }
-
-        $contractType = $override?->contract_type
-            ?? ($mapping !== null && $mapping->record_type === $type ? $mapping->contract_type : null);
-        $transactionType = $override?->transaction_type ?? $mapping?->transaction_type;
+        $class = CicContractClassifier::forLoan($loan, $mapping, $schedules->count());
+        $type = $class->recordType;
+        $repays = $class->structure === 'CN' ? 'in one lump sum' : 'in instalments';
         $product = $this->context->productNames[$loan->loan_product_id] ?? 'this loan\'s product';
 
-        if ($mapping === null && ($override?->contract_type === null || $override->transaction_type === null)) {
-            $issues[] = self::issue("{$type}8", 'error', 'UNMAPPED_PRODUCT',
-                "The loan product \"{$product}\" has no CIC mapping, so this contract has no contract or transaction type. Map the product in CIC Settings, or give the loan its own classification.");
-        } elseif ($contractType === null) {
-            $issues[] = self::issue("{$type}8", 'error', 'CONTRACT_TYPE_FOR_OTHER_RECORD',
-                "The product \"{$product}\" is mapped to {$mapping->record_type} contracts, so its contract type doesn't fit this {$type} contract. Give the loan its own contract type.");
+        if ($class->overridesRecordType && $type !== $class->structure) {
+            $issues[] = self::issue("{$type}1", 'warning', 'OVERRIDE_AGAINST_STRUCTURE',
+                "This loan repays {$repays}, but its own CIC classification reports it as a {$type} contract. Check the override is still right.");
         }
 
-        return [$type, CicFormat::text($contractType), CicFormat::text($transactionType)];
+        // A record type staff set on the loan already says the product's type
+        // doesn't fit, so only a structure that disagrees with it is warned of.
+        if ($class->mappingMismatch && ! $class->overridesRecordType) {
+            $issues[] = self::issue("{$type}1", 'warning', 'CLASSIFICATION_MISMATCH',
+                "This loan repays {$repays}, so it is reported as a {$type} contract, but its product is mapped to {$class->mappingRecordType} contracts, so the product's codes don't apply.");
+        }
+
+        $missing = array_keys(array_filter([
+            'contract type' => $class->contractType === null,
+            'transaction type' => $class->transactionType === null,
+        ]));
+
+        if ($missing !== [] && ! $class->hasMapping) {
+            $issues[] = self::issue("{$type}8", 'error', 'UNMAPPED_PRODUCT',
+                "The loan product \"{$product}\" has no CIC mapping, so this contract has no contract or transaction type. Map the product in CIC Settings, or give the loan its own classification.");
+        } elseif ($missing !== []) {
+            $issues[] = self::issue("{$type}8", 'error', 'CONTRACT_TYPE_FOR_OTHER_RECORD',
+                "The product \"{$product}\" is mapped to {$class->mappingRecordType} contracts, so its codes don't fit this {$type} contract. Give the loan its own ".implode(' and ', $missing).'.');
+        }
+
+        return [$type, CicFormat::text($class->contractType), CicFormat::text($class->transactionType), CicFormat::text($class->purposeCode)];
     }
 
     /**

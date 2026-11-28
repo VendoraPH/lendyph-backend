@@ -8,6 +8,7 @@ use App\Models\CicPublicKey;
 use App\Models\CicSetting;
 use App\Models\User;
 use App\Services\Cic\CicSwitch;
+use App\Services\Cic\Records\CicContractClassifier;
 
 /**
  * The JSON the CIC settings screens read. Names staff by id and name only;
@@ -104,7 +105,7 @@ final class CicSettingsPresenter
             $mappings !== null => $mappings[$loan->loan_product_id] ?? null,
             default => CicProductMapping::query()->where('loan_product_id', $loan->loan_product_id)->first(),
         };
-        $recordType = $override->record_type ?? $mapping?->record_type;
+        $recordType = $override->record_type ?? ($loan === null ? null : CicContractClassifier::structure($loan));
 
         return [
             'id' => $override->id,

@@ -4,6 +4,7 @@ use App\Models\AmortizationSchedule;
 use App\Models\Borrower;
 use App\Models\CicCodeMapping;
 use App\Models\CicLoanOverride;
+use App\Models\CicProductMapping;
 use App\Models\Collateral;
 use App\Models\CollateralType;
 use App\Models\CoMaker;
@@ -147,8 +148,8 @@ it('reports a lump-sum loan as CN, warns when its product is mapped to CI, and l
 
     $record = cicRecordOf(cicBuild(), 'CN', $loan->loan_account_number);
 
-    expect($record->values)->toMatchArray(['CN1' => 'CN', 'CN9' => 'AC', 'CN20' => '10000', 'CN21' => 'NA', 'CN23' => '10300', 'CN24' => '10300'])
-        ->and($record->values)->not->toHaveKey('CN8')
+    expect($record->values)->toMatchArray(['CN1' => 'CN', 'CN9' => 'AC', 'CN20' => '10000', 'CN23' => '10300', 'CN24' => '10300'])
+        ->and($record->values)->not->toHaveKey('CN8')->not->toHaveKey('CN21')
         ->and(collect($record->buildIssues)->pluck('code')->all())->toBe(['CLASSIFICATION_MISMATCH', 'CONTRACT_TYPE_FOR_OTHER_RECORD']);
 
     CicLoanOverride::factory()->create(['loan_id' => $loan->id, 'record_type' => 'CN', 'contract_type' => '48', 'transaction_type' => 'BUL', 'reason' => 'One payment at maturity.']);
@@ -156,6 +157,28 @@ it('reports a lump-sum loan as CN, warns when its product is mapped to CI, and l
 
     expect($overridden->values)->toMatchArray(['CN8' => '48', 'CN21' => 'BUL'])
         ->and($overridden->buildIssues)->toBe([]);
+});
+
+it('gives the product\'s codes, purpose included, only to the record type it is mapped to', function () {
+    $product = $this->cicProduct('CI');
+    CicProductMapping::query()->where('loan_product_id', $product->id)->sole()->forceFill(['purpose_code' => '10'])->save();
+    $instalments = $this->cicLoan(product: $product);
+    $lumpSum = $this->cicLoan(product: $product, overrides: ['frequency' => 'upon_maturity'], periods: 1);
+    CicLoanOverride::factory()->create(['loan_id' => $lumpSum->id, 'record_type' => null, 'contract_type' => '48', 'reason' => 'One payment at maturity.']);
+    $asCi = $this->cicLoan(product: $product, overrides: ['frequency' => 'upon_maturity'], periods: 1);
+    CicLoanOverride::factory()->create(['loan_id' => $asCi->id, 'record_type' => 'CI', 'reason' => 'Reported as instalment.']);
+
+    $set = cicBuild();
+    $ci = cicRecordOf($set, 'CI', $instalments->loan_account_number);
+    $cn = cicRecordOf($set, 'CN', $lumpSum->loan_account_number);
+    $overridden = cicRecordOf($set, 'CI', $asCi->loan_account_number);
+
+    expect($ci->values)->toMatchArray(['CI8' => '12', 'CI22' => 'NA', 'CI23' => '10'])
+        ->and($cn->values)->toMatchArray(['CN8' => '48'])->and($cn->values)->not->toHaveKey('CN21')
+        ->and(collect($cn->buildIssues)->pluck('code')->all())->toBe(['CLASSIFICATION_MISMATCH', 'CONTRACT_TYPE_FOR_OTHER_RECORD'])
+        ->and($cn->buildIssues[1]['message'])->toEndWith('Give the loan its own transaction type.')
+        ->and($overridden->values)->toMatchArray(['CI8' => '12', 'CI22' => 'NA', 'CI23' => '10'])
+        ->and(collect($overridden->buildIssues)->pluck('code')->all())->toBe(['OVERRIDE_AGAINST_STRUCTURE']);
 });
 
 it('makes an unmapped product an error on the contract, in words', function () {

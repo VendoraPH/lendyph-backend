@@ -36,7 +36,7 @@ class CicLoanOverrideController extends CicController
         ], [], ['loan_id' => 'loan', 'per_page' => 'rows per page']);
 
         $page = CicLoanOverride::query()
-            ->with(['loan.loanProduct', 'creator', 'updater'])
+            ->with(['loan' => fn ($query) => $query->withCount('amortizationSchedules'), 'loan.loanProduct', 'creator', 'updater'])
             ->when($filters['loan_id'] ?? null, fn ($query, $loanId) => $query->where('loan_id', $loanId))
             ->orderByDesc('updated_at')->orderByDesc('id')
             ->paginate((int) ($filters['per_page'] ?? 25));
