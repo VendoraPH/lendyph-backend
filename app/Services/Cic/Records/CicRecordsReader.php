@@ -6,6 +6,7 @@ use App\Models\Borrower;
 use App\Models\CicCapture;
 use App\Models\CicCaptureRecord;
 use App\Models\CicSetting;
+use App\Services\Cic\CicIssueWords;
 use App\Services\Cic\CicLayouts;
 use App\Services\Cic\CicValidator;
 use Illuminate\Contracts\Encryption\DecryptException;
@@ -298,6 +299,7 @@ final class CicRecordsReader
 
         return [
             ...$issue,
+            'code_label' => CicIssueWords::code((string) $issue['code']),
             'field_name' => $field['name'] ?? null,
             'classification' => $field['classification'] ?? null,
         ];

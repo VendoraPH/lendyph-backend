@@ -31,7 +31,7 @@ class CicIssuesController extends CicController
     #[OA\Get(
         path: '/api/cic/issues',
         summary: 'CIC issues',
-        description: 'Needs `cic:view` and `branches:view_all`. `severity` (error, warning), `record_type` (ID, CI, CN, NE), `capture_id` (else live at `reference_date`), `page` (25 a page). {data: [{record_type, record_key, field_id, field_name, classification, severity, code, message, member: {name, code} (only with borrowers:view)}], meta: {current_page, last_page, per_page, total, errors, warnings, source, capture_id, reference_date}}. File-level issues have record_type HD or FT and an empty record_key.',
+        description: 'Needs `cic:view` and `branches:view_all`. `severity` (error, warning), `record_type` (ID, CI, CN, NE), `capture_id` (else live at `reference_date`), `page` (25 a page). {data: [{record_type, record_key, field_id, field_name, classification, severity, code, code_label (the code in words), message, member: {name, code} (only with borrowers:view)}], meta: {current_page, last_page, per_page, total, errors, warnings, source, capture_id, reference_date}}. File-level issues have record_type HD or FT and an empty record_key.',
         tags: ['CIC'],
         security: [['sanctum' => []]],
         responses: [new OA\Response(response: 200, description: 'The issues'), new OA\Response(response: 403, description: 'No access'), new OA\Response(response: 404, description: 'No such capture'), new OA\Response(response: 422, description: 'Bad filter')],

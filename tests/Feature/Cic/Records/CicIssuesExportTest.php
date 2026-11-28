@@ -97,6 +97,19 @@ it('needs cic:view with head-office access, checks its filters in words, and is 
     $this->actingAs($this->viewer)->getJson('/api/cic/issues/export')->assertNotFound();
 });
 
+it('gives each /cic/issues row and each record\'s issue the code in words, as the export does', function () {
+    $member = $this->cicMember(['birthdate' => null]);
+    $this->cicLoan($member);
+
+    $row = collect($this->actingAs($this->viewer)->getJson('/api/cic/issues?reference_date=2026-11-30&record_type=ID')->assertOk()->json('data'))
+        ->firstWhere('field_id', 'ID14');
+    $detail = collect($this->actingAs($this->viewer)->getJson("/api/cic/records/ID/{$member->borrower_code}?reference_date=2026-11-30")->assertOk()->json('data.issues'))
+        ->firstWhere('field_id', 'ID14');
+
+    expect($row)->toMatchArray(['code' => 'MISSING_MANDATORY', 'code_label' => 'Missing required field'])
+        ->and($detail['code_label'])->toBe('Missing required field');
+});
+
 it('has words for every issue code the checks raise', function () {
     $sources = [base_path('app/Services/Cic/CicValidator.php'), ...glob(base_path('app/Services/Cic/Records/*.php')), ...glob(base_path('app/Services/Cic/Capture/*.php'))];
     $codes = [];
