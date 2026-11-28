@@ -1,0 +1,160 @@
+<?php
+
+use App\Models\AuditLog;
+use App\Models\CicCapture;
+use App\Models\CicSubmission;
+use App\Services\Cic\CicAccess;
+use Illuminate\Support\Facades\Storage;
+use Tests\Feature\Cic\Submissions\CicSubmissionsTestHelpers;
+use Tests\TestCase;
+
+uses(TestCase::class, CicSubmissionsTestHelpers::class);
+
+/*
+ * After encryption: the encrypted download (only the .zip.gpg, counted and
+ * audited every time), marking a file submitted, and recording CIC's answer
+ * (never by the file's generator, from submitted only).
+ */
+
+beforeEach(function () {
+    $this->setUpCic();
+    Storage::fake('private');
+});
+
+/** An encrypted file whose .zip.gpg is on the (fake) private disk. */
+function cicEncrypted(object $test, string $state = 'encrypted'): CicSubmission
+{
+    $bytes = "\x85\x01\x0c".random_bytes(64);
+    $submission = CicSubmission::factory()->{$state}()->create([
+        'capture_id' => $test->simpleCapture(CicCapture::KIND_TEST)->id,
+        'reference_date' => '2026-10-31',
+        'filename' => 'TEST1234_CSDF_20261125143010.txt',
+        'gpg_path' => 'cic/submissions/'.bin2hex(random_bytes(4)).'/TEST1234_CSDF_20261125143010.zip.gpg',
+        'gpg_sha256' => hash('sha256', $bytes),
+    ]);
+    Storage::disk('private')->put($submission->gpg_path, $bytes);
+
+    return $submission;
+}
+
+it('streams only the encrypted file, counting and auditing every download', function () {
+    $submission = cicEncrypted($this);
+    $user = $this->cicUser([CicAccess::SUBMIT]);
+
+    $first = $this->actingAs($user)->get("/api/cic/submissions/{$submission->id}/download", ['Accept' => 'application/json'])->assertOk();
+    expect($first->streamedContent())->toBe(Storage::disk('private')->get($submission->gpg_path))
+        ->and($first->headers->get('Content-Disposition'))->toContain('TEST1234_CSDF_20261125143010.zip.gpg')
+        ->and($first->headers->get('Content-Type'))->toBe('application/pgp-encrypted');
+
+    $this->actingAs($user)->get("/api/cic/submissions/{$submission->id}/download", ['Accept' => 'application/json'])->assertOk();
+
+    expect($submission->fresh()->download_count)->toBe(2)
+        ->and(AuditLog::query()->where('auditable_type', CicSubmission::class)->where('auditable_id', $submission->id)->where('action', 'cic_file_downloaded')->pluck('new_values')->pluck('download_count')->all())
+        ->toBe([1, 2]);
+});
+
+it('downloads a submitted, accepted or rejected file too', function () {
+    $submission = cicEncrypted($this, 'submitted');
+
+    $this->actingAs($this->cicUser([CicAccess::SUBMIT]))->get("/api/cic/submissions/{$submission->id}/download", ['Accept' => 'application/json'])->assertOk();
+});
+
+it('has nothing to download before encryption, and never a plain file', function () {
+    $submission = CicSubmission::factory()->create(['capture_id' => $this->simpleCapture()->id, 'reference_date' => '2026-10-31']);
+
+    $this->actingAs($this->cicUser([CicAccess::SUBMIT]))->getJson("/api/cic/submissions/{$submission->id}/download")
+        ->assertUnprocessable()->assertJsonPath('code', 'not_encrypted');
+
+    expect($submission->fresh()->download_count)->toBe(0);
+});
+
+it('refuses a stored file that no longer matches its checksum, or is missing', function () {
+    $submission = cicEncrypted($this);
+    $user = $this->cicUser([CicAccess::SUBMIT]);
+    Storage::disk('private')->put($submission->gpg_path, 'tampered');
+
+    $this->actingAs($user)->getJson("/api/cic/submissions/{$submission->id}/download")->assertConflict()->assertJsonPath('code', 'file_changed');
+
+    Storage::disk('private')->delete($submission->gpg_path);
+    $this->actingAs($user)->getJson("/api/cic/submissions/{$submission->id}/download")->assertConflict()->assertJsonPath('code', 'file_missing');
+
+    expect($submission->fresh()->download_count)->toBe(0);
+});
+
+it('needs cic:submit to download', function () {
+    $submission = cicEncrypted($this);
+
+    $this->actingAs($this->cicUser([CicAccess::VIEW, CicAccess::REVIEW]))->getJson("/api/cic/submissions/{$submission->id}/download")->assertForbidden();
+});
+
+it('marks an encrypted file submitted, once', function () {
+    $submission = cicEncrypted($this);
+    $user = $this->cicUser([CicAccess::SUBMIT]);
+
+    $this->actingAs($user)->postJson("/api/cic/submissions/{$submission->id}/mark-submitted")
+        ->assertOk()->assertJsonPath('data.status', 'submitted')->assertJsonPath('data.submitted_by.id', $user->id)
+        ->assertJsonPath('data.history.2.status', 'submitted');
+
+    $this->actingAs($user)->postJson("/api/cic/submissions/{$submission->id}/mark-submitted")
+        ->assertUnprocessable()->assertJsonPath('code', 'not_encrypted');
+
+    expect(AuditLog::query()->where('auditable_id', $submission->id)->where('action', 'cic_file_submitted')->count())->toBe(1);
+});
+
+it('refuses to mark a file submitted before it is encrypted, or without cic:submit', function () {
+    $generated = CicSubmission::factory()->create(['capture_id' => $this->simpleCapture()->id, 'reference_date' => '2026-10-31']);
+
+    $this->actingAs($this->cicUser([CicAccess::SUBMIT]))->postJson("/api/cic/submissions/{$generated->id}/mark-submitted")
+        ->assertUnprocessable()->assertJsonPath('code', 'not_encrypted');
+    $this->actingAs($this->cicUser([CicAccess::PREPARE]))->postJson("/api/cic/submissions/{$generated->id}/mark-submitted")
+        ->assertForbidden();
+});
+
+it('records CIC\'s answer by a reviewer who did not generate the file', function () {
+    $submission = cicEncrypted($this, 'submitted');
+    $reviewer = $this->cicUser([CicAccess::REVIEW]);
+
+    $this->actingAs($reviewer)->postJson("/api/cic/submissions/{$submission->id}/acknowledgement", ['status' => 'accepted', 'notes' => 'Batch 12 loaded.'])
+        ->assertOk()
+        ->assertJsonPath('data.status', 'accepted')
+        ->assertJsonPath('data.status_label', 'Accepted by CIC')
+        ->assertJsonPath('data.acknowledged_by.id', $reviewer->id)
+        ->assertJsonPath('data.acknowledgement_notes', 'Batch 12 loaded.')
+        ->assertJsonPath('data.history.3.status', 'accepted');
+
+    $audit = AuditLog::query()->where('auditable_id', $submission->id)->where('action', 'cic_file_acknowledged')->sole();
+    expect($audit->new_values)->toBe(['status' => 'accepted', 'notes_length' => 16]);
+
+    $this->actingAs($reviewer)->postJson("/api/cic/submissions/{$submission->id}/acknowledgement", ['status' => 'rejected', 'notes' => 'Again.'])
+        ->assertUnprocessable()->assertJsonPath('code', 'not_submitted');
+});
+
+it('never lets the generator record CIC\'s answer', function () {
+    $submission = cicEncrypted($this, 'submitted');
+    $generator = $submission->generator;
+    $generator->givePermissionTo([CicAccess::REVIEW, 'branches:view_all']);
+
+    $this->actingAs($generator)->postJson("/api/cic/submissions/{$submission->id}/acknowledgement", ['status' => 'accepted'])
+        ->assertForbidden()
+        ->assertJsonPath('message', 'The person who generated a file can\'t record CIC\'s answer to it. Ask another reviewer.');
+
+    expect($submission->fresh()->status)->toBe('submitted');
+});
+
+it('needs notes for a rejection, and a submitted file', function () {
+    $submission = cicEncrypted($this, 'submitted');
+    $reviewer = $this->cicUser([CicAccess::REVIEW]);
+
+    $this->actingAs($reviewer)->postJson("/api/cic/submissions/{$submission->id}/acknowledgement", ['status' => 'rejected'])
+        ->assertUnprocessable()->assertJsonValidationErrors(['notes' => 'Give CIC\'s reason for rejecting the file.']);
+    $this->actingAs($reviewer)->postJson("/api/cic/submissions/{$submission->id}/acknowledgement", ['status' => 'pending'])
+        ->assertUnprocessable()->assertJsonValidationErrors(['status' => 'CIC\'s answer is accepted or rejected.']);
+    $this->actingAs($reviewer)->postJson("/api/cic/submissions/{$submission->id}/acknowledgement", ['status' => 'rejected', 'notes' => 'Wrong format of CI33.'])
+        ->assertOk()->assertJsonPath('data.status', 'rejected');
+
+    $encrypted = cicEncrypted($this);
+    $this->actingAs($reviewer)->postJson("/api/cic/submissions/{$encrypted->id}/acknowledgement", ['status' => 'accepted'])
+        ->assertUnprocessable()->assertJsonPath('code', 'not_submitted');
+    $this->actingAs($this->cicUser([CicAccess::SUBMIT]))->postJson("/api/cic/submissions/{$submission->id}/acknowledgement", ['status' => 'accepted'])
+        ->assertForbidden();
+});

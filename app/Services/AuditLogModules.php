@@ -36,6 +36,7 @@ use App\Models\CdaReportValue;
 use App\Models\CdaSetting;
 use App\Models\CdaSocialProgram;
 use App\Models\CdaSubmission;
+use App\Models\CicSubmission;
 use App\Models\Collateral;
 use App\Models\CollateralType;
 use App\Models\CoMaker;
@@ -227,6 +228,11 @@ class AuditLogModules
         CdaMediationCase::class => 'cda',
         CdaNoticeSent::class => 'cda',
         CdaComplianceRequirement::class => 'cda',
+        // CIC files (CIC submissions slice): generation, encryption, downloads,
+        // submission and CIC's answer. System, like the CIC settings models, so
+        // the module filter needs no new entry; each row's description names
+        // the file and step in words (ids, counts, filenames, statuses only).
+        CicSubmission::class => self::UNMAPPED,
         // Member Portal (Phase 3): access, codes, settings, terms, requests and
         // announcements. A member's own actions are filed here too, through
         // the portal user or record they act on.
