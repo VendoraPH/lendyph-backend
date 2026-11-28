@@ -97,6 +97,12 @@ final class CicBuildContext
         return $branchId === null ? '' : ($this->branchCodes[$branchId] ?? '');
     }
 
+    /** The last day of the month before the reference date's. */
+    public function previousMonthEnd(): Carbon
+    {
+        return $this->reference->copy()->startOfMonth()->subDay();
+    }
+
     /** Whether the previous complete month-end capture held the loan as active. */
     public function wasActive(int $loanId): bool
     {

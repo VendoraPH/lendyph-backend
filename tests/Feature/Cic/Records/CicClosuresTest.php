@@ -140,3 +140,18 @@ it('freezes what it left out with the capture, and its validation reads it', fun
         ->and($capture->left_out[0])->toMatchArray(['record_key' => $sameDay->loan_account_number, 'code' => 'SAME_DAY_PAYOFF'])
         ->and(collect(app(CicValidator::class)->issues($capture))->where('code', 'SAME_DAY_PAYOFF')->count())->toBe(1);
 });
+
+it('warns next month of a same-day payoff on a loan released on the previous month end', function () {
+    $loan = $this->cicLoan(releasedAt: '2026-10-31 09:00:00');
+    cicClosuresComplete($loan, '2026-10-31');
+    $later = $this->cicLoan(releasedAt: '2026-10-31 10:00:00');
+    cicClosuresComplete($later, '2026-11-03');
+
+    $november = cicClosuresBuild();
+    $december = cicClosuresBuild('2026-12-31');
+
+    expect(cicClosuresRecord($november, $loan))->toBeNull()
+        ->and(collect($november->leftOut)->where('loan_id', $loan->id)->sole())->toMatchArray(['code' => 'SAME_DAY_PAYOFF', 'severity' => 'warning'])
+        ->and(cicClosuresRecord($november, $later))->not->toBeNull()
+        ->and(collect($december->leftOut)->where('loan_id', $loan->id)->all())->toBe([]);
+});

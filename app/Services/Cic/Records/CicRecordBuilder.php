@@ -268,6 +268,11 @@ final class CicRecordBuilder
                                 ->where('loan_adjustments.adjustment_type', 'balance_adjustment')
                                 ->where('loan_adjustments.status', 'applied'))
                             ->whereBetween('loans.updated_at', [$monthStart, $endOfDay]))))
+                // Released on the previous month end, so held for this month
+                // (Q17), and closed since: its same-day payoff is warned of.
+                ->orWhere(fn (Builder $held) => $held
+                    ->whereIn('status', ['completed', 'restructured'])
+                    ->whereDate('released_at', $context->previousMonthEnd()->toDateString()))
                 ->when($previouslyActive !== [], fn (Builder $query) => $query->orWhere(fn (Builder $closed) => $closed
                     ->whereIn('status', ['completed', 'restructured'])
                     ->whereIn('loans.id', $previouslyActive))));

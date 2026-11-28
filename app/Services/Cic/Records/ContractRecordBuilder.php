@@ -137,14 +137,19 @@ final class ContractRecordBuilder
                 return null;
             }
 
+            $sameDay = $endDate === CicFormat::date($loan->released_at);
+
             // A closure is reported once: in the month it ended, or in the
             // first file after a capture that still held the loan as active
-            // (a backdated last payment), with its true end date.
-            if (! $this->endedInReferenceMonth($endDate) && ! $wasActive) {
+            // (a backdated last payment), with its true end date. A loan
+            // released on the previous month end waited for this month (Q17),
+            // so its same-day payoff is warned of here (re-review ML3).
+            if (! $this->endedInReferenceMonth($endDate) && ! $wasActive
+                && ! ($sameDay && CicFormat::date($loan->released_at) === CicFormat::date($this->context->previousMonthEnd()))) {
                 return null;
             }
 
-            if (! $wasActive && $endDate === CicFormat::date($loan->released_at)) {
+            if (! $wasActive && $sameDay) {
                 $this->leaveOut($loan, 'warning', 'SAME_DAY_PAYOFF',
                     'This loan was released and closed on the same day; it is left out until CIC confirms how to send it (Q17).');
 
