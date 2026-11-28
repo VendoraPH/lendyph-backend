@@ -326,11 +326,16 @@ class Loan extends Model
                 : SequenceCode::after(self::CODE_PREFIX, $last->application_number, "loans.id {$last->id}");
         });
 
-        // The CIC Provider Contract No is set once, by the first capture that
-        // reports the loan, and never changes: CIC reads the contract by it.
+        // The CIC Provider Contract No and record type are set once, by the
+        // first capture that reports the loan, and never change: CIC reads the
+        // contract by them.
         static::updating(function (Loan $loan) {
             if ($loan->isDirty('cic_contract_no') && $loan->getOriginal('cic_contract_no') !== null) {
                 throw CicRecordIsFrozenException::because('loans', $loan->getKey(), 'a loan\'s CIC contract number never changes once set.');
+            }
+
+            if ($loan->isDirty('cic_record_type') && $loan->getOriginal('cic_record_type') !== null) {
+                throw CicRecordIsFrozenException::because('loans', $loan->getKey(), 'a loan\'s CIC record type never changes once set.');
             }
         });
     }

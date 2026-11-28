@@ -10,8 +10,9 @@ use App\Models\Loan;
  * The one rule for a reported loan's CIC classification (prompt §3.3, §5.3),
  * used by the contract record builder and by the loan override's checks:
  *
- * - **Structure:** CN when the loan repays in one lump sum (frequency
- *   upon_maturity, or a one-period schedule), else CI.
+ * - **Structure:** the record type frozen at the loan's first capture
+ *   (`loans.cic_record_type`), else CN when the loan repays in one lump sum
+ *   (frequency upon_maturity, or a one-period schedule), else CI.
  * - **Record type:** the loan override's `record_type` when set, else the
  *   structure.
  * - **Codes:** the product mapping gives its contract type, transaction type
@@ -22,9 +23,19 @@ use App\Models\Loan;
  */
 final class CicContractClassifier
 {
-    /** CI or CN by the loan's own repayment structure. */
+    /**
+     * CI or CN by the loan's own repayment structure: the record type its
+     * first capture froze (`loans.cic_record_type`), else worked out now, so
+     * an extension that adds a period never turns a CN contract into CI.
+     */
     public static function structure(Loan $loan, ?int $periods = null): string
     {
+        $frozen = $loan->getAttribute('cic_record_type');
+
+        if ($frozen === 'CI' || $frozen === 'CN') {
+            return $frozen;
+        }
+
         $periods ??= match (true) {
             $loan->relationLoaded('amortizationSchedules') => $loan->amortizationSchedules->count(),
             $loan->getAttribute('amortization_schedules_count') !== null => (int) $loan->getAttribute('amortization_schedules_count'),

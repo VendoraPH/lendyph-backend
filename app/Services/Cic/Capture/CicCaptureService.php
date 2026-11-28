@@ -31,8 +31,8 @@ use Throwable;
  *
  * The first capture that reports a member gives them a subject register row
  * (subject_no = their member code, first_captured_at set once), and the first
- * that reports a loan freezes `loans.cic_contract_no` from its display
- * number, unless that is over 38 characters (an issue) or another loan
+ * that reports a loan freezes its record type (`loans.cic_record_type`) and
+ * `loans.cic_contract_no` from its display number, unless that is over 38 characters (an issue) or another loan
  * already holds it.
  *
  * Records are written in batches, one transaction each, and the capture is
@@ -146,6 +146,7 @@ final class CicCaptureService
 
         $subjectIds = $this->registerSubjects($set->ofType('ID'));
         $this->freezeContractNumbers([...$set->ofType('CI'), ...$set->ofType('CN')]);
+        $this->freezeRecordTypes([...$set->ofType('CI'), ...$set->ofType('CN')]);
 
         foreach (['ID', 'CI', 'CN', 'NE'] as $type) {
             foreach (array_chunk($set->ofType($type), self::BATCH) as $batch) {
@@ -272,6 +273,29 @@ final class CicCaptureService
                         ->update(['cic_contract_no' => (string) $number]);
                 }
             });
+        }
+    }
+
+    /**
+     * Freezes `loans.cic_record_type` the first time a loan is reported: the
+     * record type its own structure gave it then (CicRecord::$structure).
+     *
+     * @param  list<CicRecord>  $contracts
+     */
+    private function freezeRecordTypes(array $contracts): void
+    {
+        $byType = [];
+
+        foreach ($contracts as $record) {
+            if ($record->loanId !== null && in_array($record->structure, ['CI', 'CN'], true)) {
+                $byType[$record->structure][] = $record->loanId;
+            }
+        }
+
+        foreach ($byType as $type => $loanIds) {
+            foreach (array_chunk($loanIds, self::BATCH) as $chunk) {
+                DB::table('loans')->whereIn('id', $chunk)->whereNull('cic_record_type')->update(['cic_record_type' => $type]);
+            }
         }
     }
 
