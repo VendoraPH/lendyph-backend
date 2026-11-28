@@ -128,6 +128,20 @@ it('refuses a correction of anything but a complete month-end capture of the sam
         ->and(fn () => cicCapture(CicCapture::KIND_CORRECTION))->toThrow(ValidationException::class);
 });
 
+it('corrects a complete test capture only while test captures are on', function () {
+    $this->cicLoan();
+    $test = CicCapture::factory()->complete()->create(['reference_date' => '2026-11-30']);
+
+    expect(fn () => cicCapture(CicCapture::KIND_CORRECTION, corrects: $test))->toThrow(ValidationException::class, 'test captures on');
+
+    config(['cic.test_captures' => true]);
+    $correction = cicCapture(CicCapture::KIND_CORRECTION, corrects: $test);
+
+    expect($correction->status)->toBe('complete')
+        ->and($correction->corrects_capture_id)->toBe($test->id)
+        ->and($correction->reference_date->toDateString())->toBe('2026-11-30');
+});
+
 it('marks a capture that can\'t finish as failed, in words, and audits it', function () {
     $loan = $this->cicLoan();
     DB::table('borrowers')->where('id', $loan->borrower_id)->update(['borrower_code' => '']);

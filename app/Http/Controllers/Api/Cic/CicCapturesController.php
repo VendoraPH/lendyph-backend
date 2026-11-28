@@ -84,9 +84,9 @@ class CicCapturesController extends CicController
         ], [
             'kind.required' => 'Choose a test or correction capture.',
             'kind.in' => 'Choose a test or correction capture.',
-            'corrects_capture_id.required_if' => 'Choose the month-end capture to correct.',
-            'corrects_capture_id.integer' => 'Choose the month-end capture to correct.',
-            'corrects_capture_id.min' => 'Choose the month-end capture to correct.',
+            'corrects_capture_id.required_if' => 'Choose the capture to correct.',
+            'corrects_capture_id.integer' => 'Choose the capture to correct.',
+            'corrects_capture_id.min' => 'Choose the capture to correct.',
             'corrects_capture_id.prohibited_unless' => 'Only a correction names a capture to correct.',
         ]);
 
@@ -95,7 +95,7 @@ class CicCapturesController extends CicController
         if (isset($data['corrects_capture_id'])) {
             $corrects = CicCapture::query()->find((int) $data['corrects_capture_id']);
             if ($corrects === null) {
-                throw ValidationException::withMessages(['corrects_capture_id' => 'Choose the month-end capture to correct.']);
+                throw ValidationException::withMessages(['corrects_capture_id' => 'Choose the capture to correct.']);
             }
         }
 

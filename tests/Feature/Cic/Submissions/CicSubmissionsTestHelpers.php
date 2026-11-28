@@ -68,10 +68,14 @@ trait CicSubmissionsTestHelpers
      *
      * @param  list<array{0: string, 1: string, 2?: array<string, string>}>  $records
      */
-    public function captureWith(array $records, string $kind = CicCapture::KIND_MONTH_END, string $date = '2026-10-31', bool $complete = true): CicCapture
+    public function captureWith(array $records, string $kind = CicCapture::KIND_MONTH_END, string $date = '2026-10-31', bool $complete = true, ?CicCapture $corrects = null): CicCapture
     {
         /** @var CicCapture $capture */
         $capture = CicCapture::factory()->create(['kind' => $kind, 'reference_date' => $date]);
+
+        if ($corrects !== null) {
+            $capture->forceFill(['corrects_capture_id' => $corrects->id])->save();
+        }
 
         foreach ($records as $record) {
             [$type, $key] = $record;
@@ -99,9 +103,9 @@ trait CicSubmissionsTestHelpers
         return $capture->refresh();
     }
 
-    public function simpleCapture(string $kind = CicCapture::KIND_MONTH_END, string $date = '2026-10-31'): CicCapture
+    public function simpleCapture(string $kind = CicCapture::KIND_MONTH_END, string $date = '2026-10-31', ?CicCapture $corrects = null): CicCapture
     {
-        return $this->captureWith([['ID', 'BRW-00000001'], ['CI', 'LN-000001']], $kind, $date);
+        return $this->captureWith([['ID', 'BRW-00000001'], ['CI', 'LN-000001']], $kind, $date, corrects: $corrects);
     }
 
     /**

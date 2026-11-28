@@ -167,7 +167,7 @@ function cicCorrectionSetup(object $test): array
         ['ID', 'BRW-00000002', ['ID5' => 'BRW-00000002']],
         ['CI', 'LN-000001'],
         ['CN', 'LN-000009'],
-    ], CicCapture::KIND_CORRECTION);
+    ], CicCapture::KIND_CORRECTION, corrects: $originalCapture);
 
     return [$original, $correction];
 }
@@ -234,9 +234,30 @@ it('refuses a correction that changes nothing', function () {
     $original = CicSubmission::factory()->submitted()->create(['capture_id' => $capture->id, 'reference_date' => '2026-10-31']);
 
     $this->actingAs($this->cicAll())->postJson('/api/cic/submissions', [
-        'capture_id' => $this->simpleCapture(CicCapture::KIND_CORRECTION)->id, 'submission_type' => 1,
+        'capture_id' => $this->simpleCapture(CicCapture::KIND_CORRECTION, corrects: $capture)->id, 'submission_type' => 1,
         'corrects_submission_id' => $original->id, 'correction_reason' => 'Wrong birthdate.',
     ])->assertUnprocessable()->assertJsonPath('code', 'nothing_to_correct');
+});
+
+it('refuses a correction capture that corrects a different capture from the corrected file\'s', function () {
+    [$original, $correction] = cicCorrectionSetup($this);
+    $user = $this->cicAll();
+    $body = ['submission_type' => 1, 'corrects_submission_id' => $original->id, 'correction_reason' => 'Wrong birthdate.'];
+    $otherCapture = $this->simpleCapture(CicCapture::KIND_TEST);
+    $unlinked = $this->captureWith([['ID', 'BRW-00000001', ['ID5' => 'BRW-00000001', 'ID9' => '03011990']]], CicCapture::KIND_CORRECTION);
+    $elsewhere = $this->captureWith([['ID', 'BRW-00000001', ['ID5' => 'BRW-00000001', 'ID9' => '03011990']]], CicCapture::KIND_CORRECTION, corrects: $otherCapture);
+
+    foreach ([$unlinked, $elsewhere] as $capture) {
+        $this->actingAs($user)->postJson('/api/cic/submissions', [...$body, 'capture_id' => $capture->id])
+            ->assertUnprocessable()->assertJsonPath('code', 'capture_mismatch');
+    }
+
+    // A correction of the correction re-reads the same root capture.
+    $first = CicSubmission::factory()->submitted()->correcting($original)->create(['capture_id' => $correction->id, 'reference_date' => '2026-10-31'])->id;
+    $again = $this->captureWith([['ID', 'BRW-00000001', ['ID5' => 'BRW-00000001', 'ID9' => '04011990']]], CicCapture::KIND_CORRECTION, corrects: $original->capture);
+
+    $this->actingAs($user)->postJson('/api/cic/submissions', [...$body, 'corrects_submission_id' => $first, 'capture_id' => $again->id])
+        ->assertCreated()->assertJsonPath('data.correction.corrects.id', $first);
 });
 
 it('serves the pre-encryption review with the key and no personal data', function () {

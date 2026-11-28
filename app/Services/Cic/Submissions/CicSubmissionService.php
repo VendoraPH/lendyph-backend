@@ -379,6 +379,14 @@ final class CicSubmissionService
 
         /** @var CicCapture $originalCapture */
         $originalCapture = $original->capture()->firstOrFail();
+
+        // The capture this correction re-reads must be the one the corrected
+        // file came from (a correction of a correction shares its root).
+        if ($capture->corrects_capture_id === null
+            || $capture->corrects_capture_id !== ($originalCapture->corrects_capture_id ?? $originalCapture->id)) {
+            throw CicSubmissionRefusal::unprocessable('That correction capture corrects a different capture from the one the corrected file was made from. Take a correction capture of the corrected file\'s capture.', 'capture_mismatch');
+        }
+
         $affected = CicCorrectionDiff::affected($capture, $originalCapture);
 
         if ($affected === []) {

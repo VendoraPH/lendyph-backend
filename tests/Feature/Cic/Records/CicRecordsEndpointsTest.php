@@ -143,7 +143,7 @@ it('refuses a test capture while test captures are off, in words', function () {
     $this->actingAs($this->preparer)->postJson('/api/cic/captures', ['kind' => 'month_end'])->assertUnprocessable()
         ->assertJsonPath('errors.kind.0', 'Choose a test or correction capture.');
     $this->actingAs($this->preparer)->postJson('/api/cic/captures', ['kind' => 'correction'])->assertUnprocessable()
-        ->assertJsonPath('errors.corrects_capture_id.0', 'Choose the month-end capture to correct.');
+        ->assertJsonPath('errors.corrects_capture_id.0', 'Choose the capture to correct.');
 });
 
 it('builds, captures and reports issues end to end', function () {

@@ -22,9 +22,12 @@ use Throwable;
  * - `month_end`: the schedule's capture. Idempotent: a date that already has
  *   a complete month-end capture gets that capture back, untouched.
  * - `test`: staging only, while `cic.test_captures` is on.
- * - `correction`: for a complete month-end capture's date. Subject and event
+ * - `correction`: for a complete month-end capture's date (or, while test
+ *   captures are on, a complete test capture's). Subject and event
  *   records are rebuilt from today's member data for the members it held;
- *   contract records are copied from it unchanged (prompt §14).
+ *   contract records are copied from it unchanged (prompt §14). A correction
+ *   file made from it corrects a file made from that capture (or from an
+ *   earlier correction of it).
  *
  * The first capture that reports a member gives them a subject register row
  * (subject_no = their member code, first_captured_at set once), and the first
@@ -92,6 +95,17 @@ final class CicCaptureService
             ->first();
     }
 
+    /**
+     * A correction corrects a month-end capture, or, while test captures are
+     * on (never in production), a test capture, so staging can rehearse a
+     * correction of a file it made.
+     */
+    public static function correctable(CicCapture $capture): bool
+    {
+        return $capture->kind === CicCapture::KIND_MONTH_END
+            || ($capture->kind === CicCapture::KIND_TEST && app(CicSwitch::class)->testCaptures());
+    }
+
     private function assertAllowed(Carbon $date, string $kind, ?CicCapture $corrects): void
     {
         if (! in_array($kind, self::KINDS, true)) {
@@ -103,12 +117,12 @@ final class CicCaptureService
         }
 
         if ($kind === CicCapture::KIND_CORRECTION) {
-            if ($corrects === null || $corrects->kind !== CicCapture::KIND_MONTH_END || ! $corrects->isComplete()) {
-                throw ValidationException::withMessages(['corrects_capture_id' => 'A correction corrects a complete month-end capture. Choose one.']);
+            if ($corrects === null || ! $corrects->isComplete() || ! self::correctable($corrects)) {
+                throw ValidationException::withMessages(['corrects_capture_id' => 'A correction corrects a complete month-end capture. On a server with test captures on, it may correct a complete test capture too. Choose one.']);
             }
 
             if ($corrects->reference_date->toDateString() !== $date->toDateString()) {
-                throw ValidationException::withMessages(['corrects_capture_id' => 'A correction is for the same reference date as the month-end capture it corrects.']);
+                throw ValidationException::withMessages(['corrects_capture_id' => 'A correction is for the same reference date as the capture it corrects.']);
             }
         } elseif ($corrects !== null) {
             throw ValidationException::withMessages(['corrects_capture_id' => 'Only a correction names a capture to correct.']);
