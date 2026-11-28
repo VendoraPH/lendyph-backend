@@ -13,7 +13,9 @@ use App\Services\Cic\Records\CicRecordBuilder;
 use App\Services\Cic\Records\CicRecordSet;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Collection;
+use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Validation\ValidationException;
 use Throwable;
 
@@ -81,7 +83,13 @@ final class CicCaptureService
         try {
             $this->fill($capture, $date, $corrects);
         } catch (Throwable $e) {
-            report($e);
+            // Never report() the exception itself: a failed insert's message
+            // holds its SQL with members' values filled in.
+            Log::error('CIC capture failed.', [
+                'capture_id' => $capture->id,
+                'exception' => $e::class,
+                'sqlstate' => $e instanceof QueryException ? ($e->errorInfo[0] ?? null) : null,
+            ]);
             $this->fail($capture, $by);
 
             return $capture->refresh();
@@ -370,6 +378,12 @@ final class CicCaptureService
         if ($capture->status !== CicCapture::STATUS_CAPTURING) {
             return;
         }
+
+        // Nothing of a failed capture is kept: its partial records hold
+        // members' data and can never be filed. They go while it's still
+        // capturing, the only time a record can be removed.
+        CicCaptureRecord::query()->where('capture_id', $capture->id)->select(['id', 'capture_id'])
+            ->lazyById(self::BATCH)->each(fn (CicCaptureRecord $record) => $record->delete());
 
         $capture->forceFill([
             'status' => CicCapture::STATUS_FAILED,

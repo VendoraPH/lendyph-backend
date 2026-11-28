@@ -189,7 +189,9 @@ final class CicValidator implements ValidatesCicCapture
             if (in_array($type, self::CONTRACT_TYPES, true)) {
                 $contractNo = $values["{$type}7"] ?? '';
 
-                if ($contractNo !== '') {
+                $flagged = in_array('DUPLICATE_CONTRACT', array_column($record['build_issues'], 'code'), true);
+
+                if ($contractNo !== '' && ! $flagged) {
                     if (isset($seenContracts[$contractNo])) {
                         $push("{$type}7", 'error', 'DUPLICATE_CONTRACT', 'This contract number is reported more than once.');
                     }

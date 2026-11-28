@@ -92,6 +92,8 @@ final class CicRecordBuilder
             }, 'loans.id', 'id');
         }
 
+        $contractRecords = $this->withUniqueContractNumbers($contractRecords);
+
         $subjects = new SubjectRecordBuilder($context);
         $events = new EventRecordBuilder($context);
         $subjectRecords = [];
@@ -115,6 +117,53 @@ final class CicRecordBuilder
             'CN' => array_values(array_filter($contractRecords, fn (CicRecord $r) => $r->type === 'CN')),
             EventRecordBuilder::TYPE => $eventRecords,
         ], $contracts->leftOut);
+    }
+
+    /**
+     * Keeps every contract number unique (security review S-M1): when loans
+     * share one (an imported Loan No. equal to an LN- number, or any other
+     * repeat), the loan that already froze it keeps it (else the loan whose
+     * own LN- number it is), and every other is keyed `loan-{id}` with an
+     * error, so the capture never breaks on a
+     * duplicate key. The Provider Contract No keeps the shared number until
+     * the loan is given its own (a loan override's contract number).
+     *
+     * @param  list<CicRecord>  $records
+     * @return list<CicRecord>
+     */
+    private function withUniqueContractNumbers(array $records): array
+    {
+        $byKey = [];
+
+        foreach ($records as $index => $record) {
+            $byKey[$record->key][] = $index;
+        }
+
+        $shared = array_filter($byKey, fn (array $indexes) => count($indexes) > 1);
+
+        if ($shared === []) {
+            return $records;
+        }
+
+        $keys = array_map('strval', array_keys($shared));
+        $frozen = DB::table('loans')->whereIn('cic_contract_no', $keys)->pluck('id', 'cic_contract_no')->all();
+        $native = DB::table('loans')->whereIn('loan_account_number', array_diff($keys, array_keys($frozen)))->pluck('id', 'loan_account_number')->all();
+        $holders = $frozen + $native;
+
+        foreach ($shared as $key => $indexes) {
+            foreach ($indexes as $index) {
+                $record = $records[$index];
+
+                if ($record->loanId === null || (int) ($holders[$key] ?? 0) === $record->loanId) {
+                    continue;
+                }
+
+                $records[$index] = $record->rekeyed("loan-{$record->loanId}", [ContractRecordBuilder::issue("{$record->type}7", 'error', 'DUPLICATE_CONTRACT',
+                    'Another loan reported to CIC has the same loan number, so this one can\'t be sent under it. Give this loan its own CIC contract number.')]);
+            }
+        }
+
+        return $records;
     }
 
     /**
