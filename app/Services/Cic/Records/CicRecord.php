@@ -13,6 +13,8 @@ use App\Models\CicCaptureRecord;
  *   validator's issue shape without the record type and key.
  * - `borrowerId`: the member the record is about (the subject, the contract's
  *   member or the event's member), for the screens' masked name and code.
+ * - `structure`: a contract's record type by its own structure (CI or CN),
+ *   which the first capture freezes in `loans.cic_record_type`.
  *
  * @phpstan-type BuildIssue array{field_id: string|null, severity: 'error'|'warning', code: string, message: string}
  */
@@ -29,7 +31,14 @@ final class CicRecord
         public readonly array $buildIssues = [],
         public readonly ?int $borrowerId = null,
         public readonly ?int $loanId = null,
+        public readonly ?string $structure = null,
     ) {}
+
+    /** The same record under another key, with more build issues. */
+    public function rekeyed(string $key, array $issues = []): self
+    {
+        return new self($this->type, $key, $this->values, [...$this->buildIssues, ...$issues], $this->borrowerId, $this->loanId, $this->structure);
+    }
 
     public function checksum(): string
     {

@@ -55,6 +55,9 @@ final class ContractRecordBuilder
         'CN' => ['guarantees' => 26, 'linked' => 110],
     ];
 
+    /** @var list<array{record_type: string, record_key: string, field_id: string|null, severity: string, code: string, message: string}> the loans left out of the file, as issues */
+    public array $leftOut = [];
+
     public function __construct(
         private readonly CicBuildContext $context,
         private readonly LoanListTotals $totals,
@@ -122,9 +125,31 @@ final class ContractRecordBuilder
     {
         $closed = in_array($loan->status, ['completed', 'restructured'], true);
         $endDate = $closed ? ($facts['endDates'][$loan->id] ?? '') : '';
+        $forced = $this->context->isForced($loan->id);
+        $wasActive = $this->context->wasActive($loan->id);
 
-        if ($closed && ! $this->endedInReferenceMonth($endDate)) {
-            return null;
+        if ($closed && ! $forced) {
+            if ($endDate === '') {
+                $this->leaveOut($loan, $wasActive ? 'error' : 'warning', 'NO_CLOSING_EVENT', $wasActive
+                    ? 'This loan was reported active last month and is now closed, but no closing payment or balance adjustment is recorded, so its closure can\'t be reported. Record how it was closed.'
+                    : 'This loan is closed, but no closing payment or balance adjustment is recorded, so it has no end date and is left out of the file. Check how it was closed.');
+
+                return null;
+            }
+
+            // A closure is reported once: in the month it ended, or in the
+            // first file after a capture that still held the loan as active
+            // (a backdated last payment), with its true end date.
+            if (! $this->endedInReferenceMonth($endDate) && ! $wasActive) {
+                return null;
+            }
+
+            if (! $wasActive && $endDate === CicFormat::date($loan->released_at)) {
+                $this->leaveOut($loan, 'warning', 'SAME_DAY_PAYOFF',
+                    'This loan was released and closed on the same day; it is left out until CIC confirms how to send it (Q17).');
+
+                return null;
+            }
         }
 
         $issues = [];
@@ -210,7 +235,21 @@ final class ContractRecordBuilder
         $v += $this->guarantees($type, $facts['pledges'][$loan->id] ?? [], $issues);
         $v += $this->linkedSubjects($type, $loan->coMakers, $memberCodes, $issues);
 
-        return new CicRecord($type, $key, CicFormat::compact($v), $issues, $loan->borrower_id, $loan->id);
+        return new CicRecord($type, $key, CicFormat::compact($v), $issues, $loan->borrower_id, $loan->id, CicContractClassifier::structure($loan, $schedules->count()));
+    }
+
+    /**
+     * Records a loan the file leaves out, as an issue under the record type
+     * and contract number it would have had.
+     */
+    private function leaveOut(Loan $loan, string $severity, string $code, string $message): void
+    {
+        $mapping = $this->context->productMappings[$loan->loan_product_id] ?? null;
+        $type = CicContractClassifier::forLoan($loan, $mapping, $loan->amortizationSchedules->count())->recordType;
+        $ignored = [];
+        [$key] = $this->contractNumber($loan, $type, $ignored);
+
+        $this->leftOut[] = ['record_type' => $type, 'record_key' => $key, 'field_id' => "{$type}16", 'severity' => $severity, 'code' => $code, 'message' => $message];
     }
 
     /**

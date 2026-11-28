@@ -99,7 +99,7 @@ final class CicValidator implements ValidatesCicCapture
             }
         })();
 
-        return $this->validate($records, $subjectKeys, $context);
+        return $this->validate($records, $subjectKeys, $context, self::leftOut($capture->left_out ?? []));
     }
 
     /**
@@ -118,18 +118,32 @@ final class CicValidator implements ValidatesCicCapture
             }
         })();
 
-        return $this->validate($records, $subjectKeys, $context);
+        return $this->validate($records, $subjectKeys, $context, self::leftOut($set->leftOut));
+    }
+
+    /**
+     * The loans a build left out of the file, as issues (they hold their
+     * record type, key, field, severity, code and message already).
+     *
+     * @param  list<array<string, mixed>>  $leftOut
+     * @return list<Issue>
+     */
+    private static function leftOut(array $leftOut): array
+    {
+        return array_map(fn (array $i) => self::issue((string) $i['record_type'], (string) $i['record_key'], $i['field_id'] ?? null,
+            ($i['severity'] ?? 'warning') === 'error' ? 'error' : 'warning', (string) $i['code'], (string) $i['message']), array_values($leftOut));
     }
 
     /**
      * @param  iterable<Rec>  $records
      * @param  list<string>  $subjectKeys  every ID record's key (its subject number)
      * @param  array{mfi: bool, provider_code: string, reference_date: string}  $context
+     * @param  list<Issue>  $leftOut  issues about loans the file leaves out
      * @return list<Issue>
      */
-    public function validate(iterable $records, array $subjectKeys, array $context): array
+    public function validate(iterable $records, array $subjectKeys, array $context, array $leftOut = []): array
     {
-        $issues = [];
+        $issues = $leftOut;
 
         if (preg_match('/^[A-Za-z0-9]{8}$/', $context['provider_code']) !== 1) {
             $issues[] = self::issue('HD', '', 'HD2', 'error', 'PROVIDER_CODE', 'The CIC provider code must be exactly 8 letters or digits. Set it in CIC Settings.');

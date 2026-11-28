@@ -81,6 +81,7 @@ class CicCapture extends Model
             'finished_at' => 'datetime',
             'created_by' => 'integer',
             'corrects_capture_id' => 'integer',
+            'left_out' => 'array',
         ];
     }
 

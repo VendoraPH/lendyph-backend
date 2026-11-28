@@ -160,7 +160,9 @@ final class CicCaptureService
             $this->copyContracts($capture, $corrects);
         }
 
-        DB::transaction(function () use ($capture): void {
+        $leftOut = $set->leftOut;
+
+        DB::transaction(function () use ($capture, $leftOut): void {
             $counts = DB::table('cic_capture_records')->where('capture_id', $capture->id)
                 ->groupBy('record_type')->selectRaw('record_type, COUNT(*) as total')->pluck('total', 'record_type');
 
@@ -168,6 +170,7 @@ final class CicCaptureService
                 'subject_count' => (int) ($counts['ID'] ?? 0),
                 'contract_count' => (int) ($counts['CI'] ?? 0) + (int) ($counts['CN'] ?? 0),
                 'event_count' => (int) ($counts['NE'] ?? 0),
+                'left_out' => $leftOut === [] ? null : $leftOut,
                 'checksum' => $capture->computeChecksum(),
                 'status' => CicCapture::STATUS_COMPLETE,
                 'finished_at' => now(),

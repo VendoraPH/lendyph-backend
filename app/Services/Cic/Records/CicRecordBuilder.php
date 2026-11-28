@@ -3,6 +3,7 @@
 namespace App\Services\Cic\Records;
 
 use App\Models\Borrower;
+use App\Models\CicCapture;
 use App\Models\Loan;
 use App\Services\Accounting\LoanAgingBuilder;
 use App\Services\LoanListTotals;
@@ -14,10 +15,16 @@ use Illuminate\Support\Facades\DB;
  * Builds every CSDF record a file for the reference date holds, from today's
  * rows (plan decisions 5 and 6):
  *
- * - **CI/CN:** released, ongoing and defaulted loans released on or before
- *   the reference date, plus loans completed or restructured within the
- *   reference month. Drafts, approved, void and rejected loans are never
- *   reported.
+ * - **CI/CN:** released, ongoing and defaulted loans released before the
+ *   reference date (a loan released on it waits for the next month, Q17),
+ *   plus loans completed or restructured within the reference month, and
+ *   closed loans the previous complete month-end capture still held as
+ *   active (a backdated last payment), so every closure is reported once.
+ *   Drafts, approved, void and rejected loans are never reported.
+ * - **Left out, never silently** (`CicRecordSet::$leftOut`): a loan released
+ *   and closed on the same day (a warning, Q17), and a completed loan with no
+ *   recorded closing payment or adjustment (a warning; an error when the
+ *   previous capture held it as active, since its closure can't be sent).
  * - **ID:** the members of those loans, and members who are co-makers on them.
  * - **NE:** those members recorded as deceased.
  *
@@ -44,7 +51,8 @@ final class CicRecordBuilder
      */
     public function build(Carbon $reference, bool $withContracts = true, ?array $memberIds = null): CicRecordSet
     {
-        $context = new CicBuildContext($reference->copy()->startOfDay());
+        $reference = $reference->copy()->startOfDay();
+        $context = new CicBuildContext($reference, $this->previouslyActive($reference));
         $contracts = new ContractRecordBuilder($context, $this->totals, $this->aging);
         $subjectIds = $memberIds === null ? [] : array_fill_keys($memberIds, true);
         $contractRecords = [];
@@ -97,7 +105,36 @@ final class CicRecordBuilder
             'CI' => array_values(array_filter($contractRecords, fn (CicRecord $r) => $r->type === 'CI')),
             'CN' => array_values(array_filter($contractRecords, fn (CicRecord $r) => $r->type === 'CN')),
             EventRecordBuilder::TYPE => $eventRecords,
-        ]);
+        ], $contracts->leftOut);
+    }
+
+    /**
+     * The loans the latest complete month-end capture before the reference
+     * date held as active contracts (phase AC), by loan id.
+     *
+     * @return array<int, true>
+     */
+    public function previouslyActive(Carbon $reference): array
+    {
+        $previous = CicCapture::query()
+            ->where('kind', CicCapture::KIND_MONTH_END)
+            ->where('status', CicCapture::STATUS_COMPLETE)
+            ->whereDate('reference_date', '<', $reference->toDateString())
+            ->orderByDesc('reference_date')
+            ->value('id');
+
+        if ($previous === null) {
+            return [];
+        }
+
+        return DB::table('cic_capture_records')
+            ->where('capture_id', $previous)
+            ->whereIn('record_type', ['CI', 'CN'])
+            ->whereNotNull('loan_id')
+            ->whereRaw("JSON_UNQUOTE(JSON_EXTRACT(`values`, CONCAT('$.', record_type, '9'))) = 'AC'")
+            ->pluck('loan_id')
+            ->mapWithKeys(fn (mixed $id) => [(int) $id => true])
+            ->all();
     }
 
     /** @return Builder<Loan> */
@@ -105,6 +142,7 @@ final class CicRecordBuilder
     {
         $monthStart = $context->reference->copy()->startOfMonth();
         $endOfDay = $context->endOfReferenceDay();
+        $previouslyActive = array_keys($context->previouslyActive);
 
         return Loan::query()
             ->with([
@@ -116,7 +154,7 @@ final class CicRecordBuilder
             ->where(fn (Builder $query) => $query
                 ->where(fn (Builder $open) => $open
                     ->whereIn('status', Loan::COLLECTIBLE_STATUSES)
-                    ->where(fn (Builder $released) => $released->whereNull('released_at')->orWhere('released_at', '<=', $endOfDay)))
+                    ->where(fn (Builder $released) => $released->whereNull('released_at')->orWhere('released_at', '<', $context->reference)))
                 ->orWhere(fn (Builder $restructured) => $restructured
                     ->where('status', 'restructured')
                     ->whereBetween('restructured_at', [$monthStart, $endOfDay]))
@@ -131,6 +169,20 @@ final class CicRecordBuilder
                             ->whereColumn('loan_adjustments.loan_id', 'loans.id')
                             ->where('loan_adjustments.adjustment_type', 'balance_adjustment')
                             ->where('loan_adjustments.status', 'applied')
-                            ->where('loan_adjustments.applied_at', '>=', $monthStart)))));
+                            ->where('loan_adjustments.applied_at', '>=', $monthStart))
+                        // No closing event at all: a completed loan last changed
+                        // this month, left out with a warning, never silently.
+                        ->orWhere(fn (Builder $silent) => $silent
+                            ->whereNotExists(fn ($payments) => $payments->selectRaw('1')->from('repayments')
+                                ->whereColumn('repayments.loan_id', 'loans.id')
+                                ->where('repayments.status', 'posted'))
+                            ->whereNotExists(fn ($adjustments) => $adjustments->selectRaw('1')->from('loan_adjustments')
+                                ->whereColumn('loan_adjustments.loan_id', 'loans.id')
+                                ->where('loan_adjustments.adjustment_type', 'balance_adjustment')
+                                ->where('loan_adjustments.status', 'applied'))
+                            ->whereBetween('loans.updated_at', [$monthStart, $endOfDay]))))
+                ->when($previouslyActive !== [], fn (Builder $query) => $query->orWhere(fn (Builder $closed) => $closed
+                    ->whereIn('status', ['completed', 'restructured'])
+                    ->whereIn('loans.id', $previouslyActive))));
     }
 }

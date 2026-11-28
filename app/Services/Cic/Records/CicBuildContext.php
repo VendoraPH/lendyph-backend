@@ -48,8 +48,15 @@ final class CicBuildContext
     /** @var array<int, string> collateral type id → guarantee code */
     public readonly array $guaranteeCodes;
 
-    public function __construct(public readonly Carbon $reference)
-    {
+    /**
+     * @param  array<int, true>  $previouslyActive  loans the previous complete month-end capture held as active (AC)
+     * @param  array<int, true>  $forced  loans built whatever their state, for a correction's re-read
+     */
+    public function __construct(
+        public readonly Carbon $reference,
+        public readonly array $previouslyActive = [],
+        public readonly array $forced = [],
+    ) {
         $setting = CicSetting::current();
 
         $this->referenceDate = CicFormat::date($reference);
@@ -88,6 +95,17 @@ final class CicBuildContext
     public function branchCode(?int $branchId): string
     {
         return $branchId === null ? '' : ($this->branchCodes[$branchId] ?? '');
+    }
+
+    /** Whether the previous complete month-end capture held the loan as active. */
+    public function wasActive(int $loanId): bool
+    {
+        return isset($this->previouslyActive[$loanId]);
+    }
+
+    public function isForced(int $loanId): bool
+    {
+        return isset($this->forced[$loanId]);
     }
 
     /** The reference date's last moment, for "on or before" checks on datetimes. */
