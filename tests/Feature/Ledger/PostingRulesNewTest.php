@@ -6,6 +6,7 @@ use App\Exceptions\CannotPostToTheBooksException;
 use App\Models\AccountingAccountMapping;
 use App\Models\AccountingJournal;
 use App\Models\Borrower;
+use App\Models\Branch;
 use App\Models\GCashTransaction;
 use App\Models\Loan;
 use App\Models\LoanAdjustment;
@@ -199,6 +200,76 @@ class PostingRulesNewTest extends TestCase
         }
 
         $this->assertSame(0, AccountingJournal::count());
+    }
+
+    /** An imported loan, as the CSV importer stores it: no LN- number, the file's Loan No. */
+    private function imported(Loan $loan, string $loanNo): Loan
+    {
+        DB::table('loans')->where('id', $loan->id)->update(['loan_account_number' => null, 'external_loan_no' => $loanNo]);
+
+        return $loan->fresh();
+    }
+
+    /** Refusals name an imported source by the file's Loan No., the number staff know it by. */
+    public function test_restructure_refusals_name_an_imported_source_by_its_file_loan_number(): void
+    {
+        $source = $this->createReleasedLoan();
+        $other = $this->imported($this->createReleasedLoan(), 'OLD-0077');
+        $new = $this->restructureOf($this->createReleasedLoan(), $source, 6_000_000, 0, 0, 500_000);
+        $this->seedChartOfAccounts();
+
+        try {
+            $this->poster()->restructureRelease($new, $other, $this->admin->id, 'cash');
+            $this->fail('A restructure posted against the wrong source was accepted.');
+        } catch (CannotPostToTheBooksException $e) {
+            $this->assertStringContainsString('is not a restructure of OLD-0077, so', $e->getMessage());
+            $this->assertStringNotContainsString($other->application_number, $e->getMessage());
+        }
+
+        $source = $this->imported($source, 'OLD-0078');
+        $new->update(['branch_id' => Branch::factory()->create()->id]);
+
+        try {
+            $this->poster()->restructureRelease($new->fresh(), $source, $this->admin->id, 'cash');
+            $this->fail('A restructure across two branches was posted.');
+        } catch (CannotPostToTheBooksException $e) {
+            $this->assertStringContainsString('in a different branch from OLD-0078, the loan', $e->getMessage());
+            $this->assertStringNotContainsString($source->application_number, $e->getMessage());
+        }
+
+        $this->assertSame(0, AccountingJournal::count());
+    }
+
+    /** "Has no usable …" names an imported loan by the file's Loan No. */
+    public function test_an_unusable_amount_on_an_imported_loan_names_its_file_loan_number(): void
+    {
+        $source = $this->createReleasedLoan();
+        $new = $this->imported($this->restructureOf($this->createReleasedLoan(), $source, 5_000_000, 700_000, 300_000, 0), 'OLD-0079');
+        DB::table('loans')->where('id', $new->id)->update(['total_deductions' => -1]);
+        $this->seedChartOfAccounts();
+
+        try {
+            $this->poster()->restructureRelease($new->fresh(), $source, $this->admin->id, 'cash');
+            $this->fail('A negative total deductions was posted.');
+        } catch (CannotPostToTheBooksException $e) {
+            $this->assertStringStartsWith('OLD-0079 has no usable total deductions', $e->getMessage());
+        }
+
+        $this->assertSame(0, AccountingJournal::count());
+    }
+
+    /** J1's carried and capitalised lines name an imported source by its file's Loan No.; the reference is unchanged. */
+    public function test_restructure_line_descriptions_name_an_imported_source_by_its_file_loan_number(): void
+    {
+        $source = $this->imported($this->createReleasedLoan(), 'OLD-0080');
+        $new = $this->restructureOf($this->createReleasedLoan(), $source, 5_000_000, 700_000, 300_000, 0);
+        $this->seedChartOfAccounts();
+
+        $release = $this->poster()->restructureRelease($new, $source, $this->admin->id, 'cash')['release'];
+
+        $this->assertSame(5_000_000, $this->described($release, PostingRules::carriedPrincipalLine('OLD-0080'), 'credit'));
+        $this->assertSame(1_000_000, $this->described($release, PostingRules::capitalisedLine('OLD-0080'), 'credit'));
+        $this->assertSame($new->loan_account_number, $release->reference);
     }
 
     // ── Restructure: J2 on the source ──
