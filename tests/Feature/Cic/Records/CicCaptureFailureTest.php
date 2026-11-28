@@ -129,7 +129,9 @@ it('compares contract numbers case-folded, and reserves the loan- and digits for
 it('folds accents as well as capitals when it compares contract numbers, and keeps other characters', function () {
     expect(CicFormat::fold('PEÑA-01'))->toBe('pena-01')
         ->and(CicFormat::fold('Ｃａｆé'))->toBe('cafe')
-        ->and(CicFormat::fold('BC/07-2024'))->toBe('bc/07-2024');
+        ->and(CicFormat::fold('BC/07-2024'))->toBe('bc/07-2024')
+        ->and(CicFormat::fold("LN-\xC3"))->toBe(mb_strtolower("LN-\xC3"))
+        ->and(class_exists(Normalizer::class))->toBeTrue();
 
     $frozen = $this->cicLoan(overrides: ['loan_account_number' => 'PENA-01']);
     DB::table('loans')->where('id', $frozen->id)->update(['cic_contract_no' => 'PENA-01']);
