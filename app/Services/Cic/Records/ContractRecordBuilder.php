@@ -295,15 +295,16 @@ final class ContractRecordBuilder
 
     /**
      * The record key and the Provider Contract No: the frozen number, else the
-     * display number. A number CIC can't take is kept whole (an error) and
-     * the record is keyed by the loan's id instead.
+     * loan override's own contract number (`cic_loan_overrides.contract_no`),
+     * else the display number. A number CIC can't take is kept whole (an
+     * error) and the record is keyed by the loan's id instead.
      *
      * @param  list<array<string, mixed>>  $issues
      * @return array{0: string, 1: string}
      */
     private function contractNumber(Loan $loan, string $type, array &$issues): array
     {
-        $number = CicFormat::text($loan->cic_contract_no ?? $loan->displayNumber());
+        $number = CicFormat::text($loan->cic_contract_no ?? $loan->cicOverride?->getAttribute('contract_no') ?? $loan->displayNumber());
 
         if ($number === '') {
             return ["loan-{$loan->id}", ''];

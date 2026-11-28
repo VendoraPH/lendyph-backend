@@ -10,7 +10,9 @@ use App\Services\AuditLogService;
 use App\Services\Cic\CicSwitch;
 use App\Services\Cic\Records\CicRecord;
 use App\Services\Cic\Records\CicRecordBuilder;
+use App\Services\Cic\Records\CicRecordSet;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
 use Throwable;
@@ -24,8 +26,11 @@ use Throwable;
  * - `test`: staging only, while `cic.test_captures` is on.
  * - `correction`: for a complete month-end capture's date (or, while test
  *   captures are on, a complete test capture's). Subject and event
- *   records are rebuilt from today's member data for the members it held;
- *   contract records are copied from it unchanged (prompt §14). A correction
+ *   records are rebuilt from today's member data for the members it held.
+ *   Its contract records keep the corrected capture's money and date fields,
+ *   and re-read their classification and key from today (record type,
+ *   CI7/CN7, CI8/CN8, CI22/CN21, CI23; CicCorrectionOverlay), so a month whose
+ *   file couldn't be made can still be filed (prompt §14, money review M-H1). A correction
  *   file made from it corrects a file made from that capture (or from an
  *   earlier correction of it).
  *
@@ -139,7 +144,16 @@ final class CicCaptureService
                 ->whereNotNull('cic_subjects.borrower_id')
                 ->pluck('cic_subjects.borrower_id')->map(fn (mixed $id) => (int) $id)->all();
 
-            $set = $this->builder->build($date, withContracts: false, memberIds: $memberIds);
+            $frozen = CicCaptureRecord::query()->where('capture_id', $corrects->id)->whereIn('record_type', ['CI', 'CN'])
+                ->get(['id', 'record_type', 'cic_subject_id', 'loan_id', 'record_key', 'values', 'build_issues']);
+            $loanIds = $frozen->pluck('loan_id')->filter()->map(fn (mixed $id) => (int) $id)->values()->all();
+
+            $live = $this->builder->build($date, withContracts: $loanIds !== [], memberIds: $memberIds, loanIds: $loanIds, force: true);
+            $set = new CicRecordSet($live->context, [
+                'ID' => $live->ofType('ID'),
+                ...$this->correctedContracts($frozen, $live),
+                'NE' => $live->ofType('NE'),
+            ]);
         } else {
             $set = $this->builder->build($date);
         }
@@ -155,10 +169,6 @@ final class CicCaptureService
                     $batch,
                 )));
             }
-        }
-
-        if ($corrects !== null) {
-            $this->copyContracts($capture, $corrects);
         }
 
         $leftOut = $set->leftOut;
@@ -299,27 +309,36 @@ final class CicCaptureService
         }
     }
 
-    /** A correction keeps the corrected month-end capture's contract records as they were. */
-    private function copyContracts(CicCapture $capture, CicCapture $corrects): void
+    /**
+     * A correction's contracts: each of the corrected capture's contract
+     * records, its figures kept and its classification and key re-read from
+     * today's build (CicCorrectionOverlay). A record whose loan today's build
+     * can't read is kept as it was.
+     *
+     * @param  Collection<int, CicCaptureRecord>  $frozen
+     * @return array{CI: list<CicRecord>, CN: list<CicRecord>}
+     */
+    private function correctedContracts(Collection $frozen, CicRecordSet $live): array
     {
-        CicCaptureRecord::query()->where('capture_id', $corrects->id)->whereIn('record_type', ['CI', 'CN'])
-            ->select(['id', 'record_type', 'cic_subject_id', 'loan_id', 'record_key', 'values', 'build_issues', 'checksum'])
-            ->chunkById(self::BATCH, function ($rows) use ($capture): void {
-                $now = now();
+        $byLoan = [];
 
-                DB::transaction(fn () => CicCaptureRecord::query()->insert($rows->map(fn (CicCaptureRecord $row) => [
-                    'capture_id' => $capture->id,
-                    'record_type' => $row->record_type,
-                    'cic_subject_id' => $row->cic_subject_id,
-                    'loan_id' => $row->loan_id,
-                    'record_key' => $row->record_key,
-                    'values' => self::json($row->values),
-                    'build_issues' => $row->build_issues === null ? null : self::json($row->build_issues),
-                    'checksum' => $row->checksum,
-                    'created_at' => $now,
-                    'updated_at' => $now,
-                ])->all()));
-            });
+        foreach ([...$live->ofType('CI'), ...$live->ofType('CN')] as $record) {
+            $byLoan[$record->loanId] = $record;
+        }
+
+        $borrowers = DB::table('loans')->whereIn('id', $frozen->pluck('loan_id')->filter()->all())->pluck('borrower_id', 'id')->all();
+        $contracts = ['CI' => [], 'CN' => []];
+
+        foreach ($frozen as $row) {
+            $today = $row->loan_id === null ? null : ($byLoan[$row->loan_id] ?? null);
+            $record = $today === null
+                ? new CicRecord($row->record_type, $row->record_key, $row->values, $row->build_issues ?? [], isset($borrowers[$row->loan_id]) ? (int) $borrowers[$row->loan_id] : null, $row->loan_id)
+                : CicCorrectionOverlay::merge($row->record_type, $row->values, $row->build_issues ?? [], $today);
+
+            $contracts[$record->type][] = $record;
+        }
+
+        return $contracts;
     }
 
     /**

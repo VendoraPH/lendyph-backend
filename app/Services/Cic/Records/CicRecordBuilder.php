@@ -46,19 +46,28 @@ final class CicRecordBuilder
     /**
      * Every record, in the file's order: ID, CI, CN, NE, each by key.
      *
-     * @param  bool  $withContracts  false: subjects and events only (a correction keeps its month-end contracts)
-     * @param  list<int>|null  $memberIds  the members to report when contracts aren't built
+     * @param  bool  $withContracts  false: subjects and events only
+     * @param  list<int>|null  $memberIds  more members to report, whether or not a built contract names them
+     * @param  list<int>|null  $loanIds  only these loans' contracts (a single record, or a correction's re-read)
+     * @param  bool  $force  build the named loans whatever their state (a correction re-reads every contract it holds)
      */
-    public function build(Carbon $reference, bool $withContracts = true, ?array $memberIds = null): CicRecordSet
+    public function build(Carbon $reference, bool $withContracts = true, ?array $memberIds = null, ?array $loanIds = null, bool $force = false): CicRecordSet
     {
         $reference = $reference->copy()->startOfDay();
-        $context = new CicBuildContext($reference, $this->previouslyActive($reference));
+        $forced = $force && $loanIds !== null ? array_fill_keys($loanIds, true) : [];
+        $context = new CicBuildContext($reference, $this->previouslyActive($reference), $forced);
         $contracts = new ContractRecordBuilder($context, $this->totals, $this->aging);
         $subjectIds = $memberIds === null ? [] : array_fill_keys($memberIds, true);
         $contractRecords = [];
 
         if ($withContracts) {
-            $this->reportableLoans($context)->chunkById(self::LOAN_CHUNK, function ($loans) use ($contracts, &$contractRecords, &$subjectIds): void {
+            $loans = $forced !== [] ? $this->loans()->whereKey($loanIds) : $this->reportableLoans($context);
+
+            if ($loanIds !== null && $forced === []) {
+                $loans->whereKey($loanIds);
+            }
+
+            $loans->chunkById(self::LOAN_CHUNK, function ($loans) use ($contracts, &$contractRecords, &$subjectIds): void {
                 $memberCoMakers = $loans->flatMap(fn (Loan $loan) => $loan->coMakers->pluck('member_borrower_id'))->filter()->unique()->values()->all();
                 $memberCodes = $memberCoMakers === [] ? [] : DB::table('borrowers')->whereIn('id', $memberCoMakers)->pluck('borrower_code', 'id')->all();
 
@@ -137,6 +146,17 @@ final class CicRecordBuilder
             ->all();
     }
 
+    /** @return Builder<Loan> loans with what the contract builder reads */
+    private function loans(): Builder
+    {
+        return Loan::query()->with([
+            'borrower:id,borrower_code',
+            'amortizationSchedules',
+            'coMakers' => fn ($query) => $query->orderBy('co_maker_loan.id'),
+            'cicOverride',
+        ]);
+    }
+
     /** @return Builder<Loan> */
     private function reportableLoans(CicBuildContext $context): Builder
     {
@@ -144,13 +164,7 @@ final class CicRecordBuilder
         $endOfDay = $context->endOfReferenceDay();
         $previouslyActive = array_keys($context->previouslyActive);
 
-        return Loan::query()
-            ->with([
-                'borrower:id,borrower_code',
-                'amortizationSchedules',
-                'coMakers' => fn ($query) => $query->orderBy('co_maker_loan.id'),
-                'cicOverride',
-            ])
+        return $this->loans()
             ->where(fn (Builder $query) => $query
                 ->where(fn (Builder $open) => $open
                     ->whereIn('status', Loan::COLLECTIBLE_STATUSES)
