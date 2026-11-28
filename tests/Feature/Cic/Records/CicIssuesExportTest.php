@@ -3,9 +3,9 @@
 use App\Models\AuditLog;
 use App\Models\CicCapture;
 use App\Models\LoanProduct;
+use App\Services\Cic\Capture\CicCaptureService;
 use App\Services\Cic\CicAccess;
 use App\Services\Cic\CicIssueWords;
-use App\Services\Cic\Capture\CicCaptureService;
 use Tests\Feature\Cic\Records\CicRecordsFixtures;
 use Tests\TestCase;
 

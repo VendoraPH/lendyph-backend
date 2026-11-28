@@ -15,8 +15,8 @@ use App\Services\Cic\Records\CicRecordsReader;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Carbon;
-use Symfony\Component\HttpFoundation\StreamedResponse;
 use OpenApi\Attributes as OA;
+use Symfony\Component\HttpFoundation\StreamedResponse;
 
 /**
  * Every CIC issue, errors first, from a capture or a live build, filtered by

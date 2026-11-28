@@ -2,7 +2,6 @@
 
 namespace App\Services\Cic\Submissions;
 
-use Closure;
 use App\Models\CicCapture;
 use App\Models\CicCaptureRecord;
 use App\Models\CicPublicKey;
@@ -12,6 +11,7 @@ use App\Services\Cic\CicSwitch;
 use App\Services\Cic\File\CicEncryptor;
 use App\Services\Cic\File\CicFile;
 use App\Services\Cic\File\CicFileBuilder;
+use Closure;
 
 /**
  * How the CIC file screens read a submission: the history row, and the

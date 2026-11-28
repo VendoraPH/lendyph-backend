@@ -1,5 +1,6 @@
 <?php
 
+use App\Exceptions\CicRecordIsFrozenException;
 use App\Models\AuditLog;
 use App\Models\CicCapture;
 use App\Models\CicSubmission;
@@ -153,7 +154,7 @@ it('records CIC\'s own reference number with its answer, shows it on the row and
     expect($audit->new_values)->toBe(['status' => 'accepted', 'notes_length' => 0, 'cic_reference_no' => 'CSDF-2026/11 0042'])
         ->and($audit->description)->toEndWith('(CIC reference CSDF-2026/11 0042)');
 
-    expect(fn () => $submission->fresh()->forceFill(['cic_reference_no' => 'OTHER'])->save())->toThrow(App\Exceptions\CicRecordIsFrozenException::class);
+    expect(fn () => $submission->fresh()->forceFill(['cic_reference_no' => 'OTHER'])->save())->toThrow(CicRecordIsFrozenException::class);
 
     $blank = cicEncrypted($this, 'submitted');
     $this->actingAs($reviewer)->postJson("/api/cic/submissions/{$blank->id}/acknowledgement", ['status' => 'rejected', 'notes' => 'Bad CI33.', 'cic_reference_no' => '   '])
