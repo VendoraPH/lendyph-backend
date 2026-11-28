@@ -69,10 +69,10 @@ class CicCapturesController extends CicController
     #[OA\Post(
         path: '/api/cic/captures',
         summary: 'Take a test or correction capture',
-        description: 'Needs `cic:prepare` and `branches:view_all`. {kind: test|correction, corrects_capture_id (correction only: a complete month-end capture)}. A test capture is dated today and only allowed while test captures are on (staging); a correction is dated on the capture it corrects. 201 {data: capture}; 500 {message, data: capture} when the capture failed.',
+        description: 'Needs `cic:prepare` and `branches:view_all`. {kind: test|correction, corrects_capture_id (correction only: a complete month-end capture, or a complete test capture while test captures are on)}. A test capture is dated today and only allowed while test captures are on (staging); a correction is dated on the capture it corrects. 201 {data: capture}; 422 {success: false, message (in words), code: capture_failed, data: capture} when the capture failed.',
         tags: ['CIC'],
         security: [['sanctum' => []]],
-        responses: [new OA\Response(response: 201, description: 'Captured'), new OA\Response(response: 403, description: 'No access'), new OA\Response(response: 422, description: 'Refused'), new OA\Response(response: 500, description: 'The capture failed')],
+        responses: [new OA\Response(response: 201, description: 'Captured'), new OA\Response(response: 403, description: 'No access'), new OA\Response(response: 422, description: 'Refused, or the capture failed (code capture_failed), in words')],
     )]
     public function store(Request $request, CicCaptureService $captures): JsonResponse
     {
@@ -103,7 +103,7 @@ class CicCapturesController extends CicController
         $capture = $captures->capture($date, $data['kind'], $user, $corrects)->load('creator:id,first_name,last_name');
 
         if (! $capture->isComplete()) {
-            return response()->json(['message' => $capture->error, 'data' => self::summary($capture)], 500);
+            return response()->json(['success' => false, 'message' => $capture->error, 'code' => 'capture_failed', 'data' => self::summary($capture)], 422);
         }
 
         return response()->json(['success' => true, 'data' => self::summary($capture)], 201);

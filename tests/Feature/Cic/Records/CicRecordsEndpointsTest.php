@@ -2,7 +2,9 @@
 
 use App\Models\CicCapture;
 use App\Models\LoanProduct;
+use App\Services\Cic\Capture\CicCaptureService;
 use App\Services\Cic\CicAccess;
+use Illuminate\Support\Facades\DB;
 use Tests\Feature\Cic\Records\CicRecordsFixtures;
 use Tests\TestCase;
 
@@ -144,6 +146,20 @@ it('refuses a test capture while test captures are off, in words', function () {
         ->assertJsonPath('errors.kind.0', 'Choose a test or correction capture.');
     $this->actingAs($this->preparer)->postJson('/api/cic/captures', ['kind' => 'correction'])->assertUnprocessable()
         ->assertJsonPath('errors.corrects_capture_id.0', 'Choose the capture to correct.');
+});
+
+it('answers a capture that couldn\'t finish with 422 and its message in words', function () {
+    config(['cic.test_captures' => true]);
+    $loan = $this->cicLoan();
+    DB::table('borrowers')->where('id', $loan->borrower_id)->update(['borrower_code' => '']);
+
+    $this->actingAs($this->preparer)->postJson('/api/cic/captures', ['kind' => 'test'])
+        ->assertUnprocessable()
+        ->assertJsonPath('success', false)
+        ->assertJsonPath('code', 'capture_failed')
+        ->assertJsonPath('message', CicCaptureService::FAILURE)
+        ->assertJsonPath('data.status', 'failed')
+        ->assertJsonPath('data.error', CicCaptureService::FAILURE);
 });
 
 it('builds, captures and reports issues end to end', function () {
