@@ -98,7 +98,7 @@ it('needs cic:view with head-office access, checks its filters in words, and is 
 });
 
 it('has words for every issue code the checks raise', function () {
-    $sources = [base_path('app/Services/Cic/CicValidator.php'), ...glob(base_path('app/Services/Cic/Records/*.php'))];
+    $sources = [base_path('app/Services/Cic/CicValidator.php'), ...glob(base_path('app/Services/Cic/Records/*.php')), ...glob(base_path('app/Services/Cic/Capture/*.php'))];
     $codes = [];
 
     foreach ($sources as $file) {

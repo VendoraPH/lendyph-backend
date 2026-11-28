@@ -158,6 +158,19 @@ it('reads a sub-peso overdue remainder as a warning, and an overdue amount with 
         ->and($of('LN-7')[0]['severity'])->toBe('error');
 });
 
+it('refuses control and invisible characters, and text that isn\'t valid, in any field', function () {
+    $issues = cicValidate([
+        ['ID', 'BRW-000001', cicSubjectValues(['ID7' => "Ma\u{200B}ria", 'ID8' => "Cruz\x0B", 'ID34' => "12 Rizal\u{2028}St", 'ID38' => "Naga\xC3"])],
+        ['ID', 'BRW-000002', cicSubjectValues(['ID5' => 'BRW-000002', 'ID7' => 'Señora'])],
+    ]);
+    $control = array_values(array_filter($issues, fn (array $i) => $i['code'] === 'CONTROL_CHARACTER'));
+
+    expect(array_column($control, 'field_id'))->toEqualCanonicalizing(['ID7', 'ID8', 'ID34', 'ID38'])
+        ->and(array_unique(array_column($control, 'record_key')))->toBe(['BRW-000001'])
+        ->and(array_unique(array_column($control, 'severity')))->toBe(['error'])
+        ->and(implode(' ', array_column($control, 'message')))->not->toContain('Rizal');
+});
+
 it('checks the provider code once on the header, puts errors first, and reads an empty file as a warning', function () {
     $issues = cicValidate([], ['mfi' => false, 'provider_code' => 'ABC', 'reference_date' => '30112026']);
 

@@ -261,6 +261,14 @@ final class CicValidator implements ValidatesCicCapture
                 continue;
             }
 
+            // A control or invisible character (or bytes that aren't UTF-8)
+            // could break the file's lines or fields (security review S-L4).
+            if (preg_match('/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u', $value) !== 0) {
+                $push($id, 'error', 'CONTROL_CHARACTER', "{$name} holds a control or invisible character, or text that isn't valid, which the file can't carry. Correct it in Lendy.");
+
+                continue;
+            }
+
             if (isset($rules['empty'][$id])) {
                 $push($id, 'error', 'MUST_BE_EMPTY', "{$name} must be left empty because {$rules['empty'][$id]}.");
             }
