@@ -14,9 +14,11 @@ use App\Models\User;
  * Every page is listed, the module pages shown only while their screens are
  * switched on (Savings, CDA, Credit Scoring, Member Portal, Linda,
  * Penalties) included: the backend can't read the frontend's build flags.
+ * CIC Reporting has a backend switch too (`CIC_ENABLED`): while it is off,
+ * LindaVisibility treats its pages as hidden, so no answer names or links them.
  * Each module's settings page sits under Settings (frontend #650: Settings →
- * Accounting, Savings Products, Savings, CDA, Scorecard Configuration and
- * Credit Scoring), with its module's permissions as before.
+ * Accounting, Savings Products, Savings, CDA, Scorecard Configuration,
+ * Credit Scoring and CIC), with its module's permissions as before.
  * Two pages are left out: Amortization BINHS (one cooperative's page) and
  * Loan Origination (no permission behind it on the server yet).
  *
@@ -70,6 +72,20 @@ final class LindaMenu
         ['Credit Scoring', 'Credit Assessment', '/credit-scoring/assessment', ['credit_scoring:view']],
         ['Credit Scoring', 'Risk Monitoring', '/credit-scoring/risk-monitoring', ['credit_scoring:view']],
         ['Credit Scoring', 'Score History', '/credit-scoring/score-history', ['credit_scoring:view']],
+        // CIC Reporting (Phase 10): every page also needs every branch, as its API does.
+        // "Issues", "Corrections" and "Generate Report" alone name no CIC page.
+        ['CIC Reporting', 'Data Readiness', '/cic', ['cic:view', 'branches:view_all'], ['cic', 'cic readiness', 'credit information', 'credit information corporation']],
+        ['CIC Reporting', 'Subject Records', '/cic/subjects', ['cic:view', 'branches:view_all'], ['cic subject', 'cic subject records']],
+        ['CIC Reporting', 'Contract Records', '/cic/contracts', ['cic:view', 'branches:view_all'], ['cic contract', 'cic contract records']],
+        ['CIC Reporting', 'Issues', '/cic/issues', ['cic:view', 'branches:view_all'], ['cic issue', 'cic error'], false],
+        ['CIC Reporting', 'Generate Report', '/cic/generate', ['cic:view', 'branches:view_all', 'cic:prepare'], [
+            'cic report', 'cic file', 'generate cic report', 'generate cic file', 'create cic report', 'create cic file', 'prepare cic report', 'prepare cic file',
+            'submit cic', 'submit cic report', 'submit cic file', 'credit information report', 'submit credit information',
+        ], false],
+        ['CIC Reporting', 'Corrections', '/cic/corrections', ['cic:view', 'branches:view_all'], ['cic correction', 'add cic correction', 'prepare cic correction', 'correct cic', 'correct cic report'], false],
+        ['CIC Reporting', 'Submission History', '/cic/submissions', ['cic:view', 'branches:view_all'], [
+            'submit cic', 'submit cic report', 'submit cic file', 'submit credit information', 'cic submission', 'cic submission history',
+        ]],
         ['CDA Compliance', 'CDA Dashboard', '/cda', ['cda:view', 'branches:view_all']],
         ['CDA Compliance', 'Compliance Calendar', '/cda/calendar', ['cda:view', 'branches:view_all'], ['cda calendar']],
         ['CDA Compliance', 'CAPR', '/cda/capr', ['cda:view', 'branches:view_all']],
@@ -122,6 +138,7 @@ final class LindaMenu
         ['Settings', 'CDA', '/settings/cda', ['cda:view', 'branches:view_all'], ['cda settings'], false],
         ['Settings', 'Scorecard Configuration', '/settings/scorecard-configuration', ['credit_scoring:view', 'credit_scoring:settings'], ['scorecard']],
         ['Settings', 'Credit Scoring', '/settings/credit-scoring', ['credit_scoring:view', 'credit_scoring:settings'], ['credit scoring settings'], false],
+        ['Settings', 'CIC', '/settings/cic', ['cic:settings', 'branches:view_all'], ['cic settings', 'cic setting'], false],
         ['Settings', 'Member Portal', '/settings/member-portal', ['settings:view', 'member_portal:settings', 'branches:view_all'], ['member portal setting']],
         ['Settings', 'Linda', '/settings/linda', ['settings:view', 'linda:settings', 'branches:view_all'], ['linda setting', 'linda model']],
         ['Settings', 'Data Import', '/settings/data-import', ['settings:view', 'imports:process'], ['import', 'csv import', 'import member', 'import loan']],
@@ -249,7 +266,7 @@ final class LindaMenu
     {
         return in_array($section.' '.$url, [
             'Members /borrowers', 'Loans /loans', 'Payments /payments', 'Savings /savings', 'Collateral /collaterals',
-            'Credit Scoring /credit-scoring', 'CDA Compliance /cda', 'Member Portal /member-portal', 'Accounting /accounting',
+            'Credit Scoring /credit-scoring', 'CIC Reporting /cic', 'CDA Compliance /cda', 'Member Portal /member-portal', 'Accounting /accounting',
         ], true);
     }
 

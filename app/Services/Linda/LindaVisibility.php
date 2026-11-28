@@ -2,6 +2,7 @@
 
 namespace App\Services\Linda;
 
+use App\Services\Cic\CicSwitch;
 use App\Services\MenuVisibility\MenuModules;
 use App\Services\MenuVisibility\MenuVisibility;
 
@@ -11,15 +12,28 @@ use App\Services\MenuVisibility\MenuVisibility;
  * or a link, and no answer links or names a hidden page. Read through the
  * MenuVisibility service, from this deployment's own database and default
  * cache (LindaStaysInItsDeploymentArchTest).
+ *
+ * CIC Reporting also has a backend switch (`CIC_ENABLED`, CicSwitch): while it
+ * is off, its API answers 404 and Linda reads the module as hidden, so no
+ * answer names or links its pages.
  */
 final class LindaVisibility
 {
-    public function __construct(private readonly MenuVisibility $visibility) {}
+    public function __construct(
+        private readonly MenuVisibility $visibility,
+        private readonly CicSwitch $cic,
+    ) {}
 
-    /** @return list<string> the hidden modules, submenus of a hidden menu included */
+    /** @return list<string> the hidden modules, submenus of a hidden menu included, and CIC while it is switched off */
     public function hidden(): array
     {
-        return $this->visibility->hidden();
+        $hidden = $this->visibility->hidden();
+
+        if (! $this->cic->enabled() && ! in_array(CicSwitch::MENU_KEY, $hidden, true)) {
+            $hidden[] = CicSwitch::MENU_KEY;
+        }
+
+        return $hidden;
     }
 
     public function hides(?string $module): bool

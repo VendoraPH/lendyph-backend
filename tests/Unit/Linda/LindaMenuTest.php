@@ -50,6 +50,13 @@ class LindaMenuTest extends TestCase
             'Credit Scoring → Credit Assessment' => '/credit-scoring/assessment',
             'Credit Scoring → Risk Monitoring' => '/credit-scoring/risk-monitoring',
             'Credit Scoring → Score History' => '/credit-scoring/score-history',
+            'CIC Reporting → Data Readiness' => '/cic',
+            'CIC Reporting → Subject Records' => '/cic/subjects',
+            'CIC Reporting → Contract Records' => '/cic/contracts',
+            'CIC Reporting → Issues' => '/cic/issues',
+            'CIC Reporting → Generate Report' => '/cic/generate',
+            'CIC Reporting → Corrections' => '/cic/corrections',
+            'CIC Reporting → Submission History' => '/cic/submissions',
             'CDA Compliance → CDA Dashboard' => '/cda',
             'CDA Compliance → Compliance Calendar' => '/cda/calendar',
             'CDA Compliance → CAPR' => '/cda/capr',
@@ -102,6 +109,7 @@ class LindaMenuTest extends TestCase
             'Settings → CDA' => '/settings/cda',
             'Settings → Scorecard Configuration' => '/settings/scorecard-configuration',
             'Settings → Credit Scoring' => '/settings/credit-scoring',
+            'Settings → CIC' => '/settings/cic',
             'Settings → Member Portal' => '/settings/member-portal',
             'Settings → Linda' => '/settings/linda',
             'Settings → Data Import' => '/settings/data-import',
@@ -124,6 +132,14 @@ class LindaMenuTest extends TestCase
         $this->assertSame(['cda:view', 'branches:view_all'], $needs['Settings → CDA']);
         $this->assertSame(['credit_scoring:view', 'credit_scoring:settings'], $needs['Settings → Scorecard Configuration']);
         $this->assertSame(['credit_scoring:view', 'credit_scoring:settings'], $needs['Settings → Credit Scoring']);
+
+        // CIC: the menu needs cic:view and every branch, Generate Report also
+        // cic:prepare, and Settings → CIC its own key and every branch.
+        foreach (['Data Readiness', 'Subject Records', 'Contract Records', 'Issues', 'Corrections', 'Submission History'] as $page) {
+            $this->assertSame(['cic:view', 'branches:view_all'], $needs['CIC Reporting → '.$page], $page);
+        }
+        $this->assertSame(['cic:view', 'branches:view_all', 'cic:prepare'], $needs['CIC Reporting → Generate Report']);
+        $this->assertSame(['cic:settings', 'branches:view_all'], $needs['Settings → CIC']);
     }
 
     /**
@@ -161,6 +177,27 @@ class LindaMenuTest extends TestCase
             'en savings' => ['Where is savings?', ['Savings → Savings Accounts']],
             'en accounting' => ['Where is accounting?', ['Accounting → Dashboard']],
             'en credit scoring' => ['Where is credit scoring?', ['Credit Scoring → Dashboard']],
+            // CIC Reporting, in English, Taglish and Bisaya.
+            'en submit to cic' => ['How do I submit to CIC?', ['CIC Reporting → Generate Report', 'CIC Reporting → Submission History']],
+            'en where is cic' => ['Where is CIC?', ['CIC Reporting → Data Readiness']],
+            'en cic reporting' => ['Where is CIC Reporting?', ['CIC Reporting → Data Readiness']],
+            'en cic report' => ['Where is the CIC report?', ['CIC Reporting → Generate Report']],
+            'en create a cic file' => ['How do I create a CIC file?', ['CIC Reporting → Generate Report']],
+            'en credit information' => ['Where is credit information?', ['CIC Reporting → Data Readiness']],
+            'en credit information corporation' => ['Where is the Credit Information Corporation page?', ['CIC Reporting → Data Readiness']],
+            'en cic issues' => ['Where are the CIC issues?', ['CIC Reporting → Issues']],
+            'en cic corrections' => ['How do I make a CIC correction?', ['CIC Reporting → Corrections']],
+            'en subject records' => ['Where are the subject records?', ['CIC Reporting → Subject Records']],
+            'en cic subject records' => ['Where are the CIC subject records?', ['CIC Reporting → Subject Records']],
+            'en contract records' => ['Where can I see the CIC contract records?', ['CIC Reporting → Contract Records']],
+            'en cic settings' => ['Where are the CIC settings?', ['Settings → CIC']],
+            'en submission history, two places' => ['Where is the submission history?', ['CIC Reporting → Submission History', 'CDA Compliance → Submission History']],
+            'tl paano mag-submit sa cic' => ['Paano mag-submit sa CIC?', ['CIC Reporting → Generate Report', 'CIC Reporting → Submission History']],
+            'tl saan ang cic report' => ['Saan makikita ang CIC report?', ['CIC Reporting → Generate Report']],
+            'tl saan ang cic settings' => ['Saan ang CIC settings?', ['Settings → CIC']],
+            'ceb asa ang cic' => ['Asa ang CIC?', ['CIC Reporting → Data Readiness']],
+            'ceb unsaon pag-submit sa cic' => ['Unsaon pag-submit sa CIC?', ['CIC Reporting → Generate Report', 'CIC Reporting → Submission History']],
+            'ceb asa makita ang cic report' => ['Asa makita ang CIC report?', ['CIC Reporting → Generate Report']],
         ];
     }
 
@@ -184,6 +221,10 @@ class LindaMenuTest extends TestCase
             'an unknown task' => ['How do I approve a loan?'],
             'nothing asked' => ['Where?'],
             'a module settings page by its bare name' => ['Where is CDA?'],
+            // Generic page titles alone never send a user to CIC.
+            'a generic report' => ['How do I generate a report?'],
+            'generic issues' => ['Where are the issues?'],
+            'generic corrections' => ['Where are the corrections?'],
         ];
     }
 
