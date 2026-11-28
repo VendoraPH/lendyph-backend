@@ -28,6 +28,7 @@ Route::prefix('cic')->group(function () {
 
     Route::get('/product-mappings', [CicProductMappingController::class, 'index']);
     Route::put('/product-mappings', [CicProductMappingController::class, 'update']);
+    Route::delete('/product-mappings/{loanProductId}', [CicProductMappingController::class, 'destroy'])->whereNumber('loanProductId');
 
     Route::get('/loan-overrides', [CicLoanOverrideController::class, 'index']);
     Route::post('/loan-overrides', [CicLoanOverrideController::class, 'store']);

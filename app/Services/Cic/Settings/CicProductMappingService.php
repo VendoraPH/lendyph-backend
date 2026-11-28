@@ -59,6 +59,36 @@ final class CicProductMappingService
         }
     }
 
+    /**
+     * Clears a product's mapping, audited in words. Its loans then report the
+     * unmapped-product error until it's mapped again or a loan gets its own
+     * classification. A product with no mapping answers 404.
+     */
+    public function clear(int $loanProductId, User $user): void
+    {
+        DB::transaction(function () use ($loanProductId, $user) {
+            /** @var CicProductMapping|null $mapping */
+            $mapping = CicProductMapping::query()->where('loan_product_id', $loanProductId)->lockForUpdate()->first();
+            abort_if($mapping === null, 404, 'This loan product has no CIC mapping to clear.');
+
+            $productName = (string) (LoanProduct::query()->whereKey($loanProductId)->value('name') ?? 'Loan product #'.$loanProductId);
+            $before = self::words($mapping->only(['record_type', ...self::CODES]));
+            $mapping->delete();
+
+            AuditLogService::log(
+                'deleted',
+                $mapping,
+                ['loan_product' => $productName, ...$before],
+                null,
+                "CIC mapping for loan product \"{$productName}\" cleared (was ".implode('; ', array_map(
+                    fn (string $field) => self::fieldWords($field).' '.($before[$field] ?? 'none'),
+                    array_keys($before),
+                )).'). Its loans have no contract or transaction type until it is mapped again or a loan gets its own classification.',
+                $user->id,
+            );
+        });
+    }
+
     /** @param  array{loan_product_id: int, record_type: string, contract_type: string, transaction_type: string, purpose_code?: string|null}  $entry */
     private function saveOne(array $entry, User $user, string $productName): void
     {

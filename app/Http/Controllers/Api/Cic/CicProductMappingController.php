@@ -41,4 +41,21 @@ class CicProductMappingController extends CicController
 
         return response()->json(['success' => true, 'message' => 'CIC product mappings saved.', 'data' => $service->listing()]);
     }
+
+    #[OA\Delete(
+        path: '/api/cic/product-mappings/{loan_product_id}',
+        summary: 'Clear a CIC product mapping',
+        description: 'Needs `cic:settings` and `branches:view_all`. Removes the product\'s mapping (404 in words when it has none); its loans then show the unmapped-product error until it is mapped again or a loan gets its own classification. Audited in words. Answers with the GET shape.',
+        tags: ['CIC'],
+        security: [['sanctum' => []]],
+        parameters: [new OA\Parameter(name: 'loan_product_id', in: 'path', required: true, schema: new OA\Schema(type: 'integer'))],
+        responses: [new OA\Response(response: 200, description: 'Every product with its mapping'), new OA\Response(response: 403, description: 'No access, in words'), new OA\Response(response: 404, description: 'No mapping')],
+    )]
+    public function destroy(Request $request, int $loanProductId, CicProductMappingService $service): JsonResponse
+    {
+        $user = $this->authorizeCic($request, CicAccess::SETTINGS);
+        $service->clear($loanProductId, $user);
+
+        return response()->json(['success' => true, 'message' => 'CIC product mapping cleared.', 'data' => $service->listing()]);
+    }
 }
