@@ -36,6 +36,11 @@ use App\Models\CdaReportValue;
 use App\Models\CdaSetting;
 use App\Models\CdaSocialProgram;
 use App\Models\CdaSubmission;
+use App\Models\CicCodeMapping;
+use App\Models\CicLoanOverride;
+use App\Models\CicProductMapping;
+use App\Models\CicPublicKey;
+use App\Models\CicSetting;
 use App\Models\Collateral;
 use App\Models\CollateralType;
 use App\Models\CoMaker;
@@ -256,6 +261,15 @@ class AuditLogModules
         // Linda's model, so the module filter needs no new entry; the row's
         // description names the change in words.
         DashboardSetting::class => self::UNMAPPED,
+        // CIC reporting's settings, public keys, product and code mappings and
+        // loan overrides (CIC settings slice). System, like Linda's model, so
+        // the module filter needs no new entry; each row's description names
+        // the change in words.
+        CicSetting::class => self::UNMAPPED,
+        CicPublicKey::class => self::UNMAPPED,
+        CicProductMapping::class => self::UNMAPPED,
+        CicLoanOverride::class => self::UNMAPPED,
+        CicCodeMapping::class => self::UNMAPPED,
         // Deliberately system: an import run is housekeeping, not a record
         // any module's screen shows.
         CsvImportRun::class => self::UNMAPPED,
