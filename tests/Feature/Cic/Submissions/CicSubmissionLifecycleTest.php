@@ -5,6 +5,7 @@ use App\Models\AuditLog;
 use App\Models\CicCapture;
 use App\Models\CicSubmission;
 use App\Services\Cic\CicAccess;
+use App\Services\Cic\Submissions\CicSubmissionPresenter;
 use Illuminate\Support\Facades\Storage;
 use Tests\Feature\Cic\Submissions\CicSubmissionsTestHelpers;
 use Tests\TestCase;
@@ -224,4 +225,20 @@ it('offers no encryption on a list row whose capture has errors', function () {
         ->assertJsonPath('data.0.id', $generated->id)
         ->assertJsonPath('data.0.actions.encrypt', false)
         ->assertJsonPath('data.0.actions.download', false);
+});
+
+it('writes CIC in capitals in refusals and audit text that name a status', function () {
+    $submitted = cicEncrypted($this, 'submitted');
+    $reviewer = $this->cicUser([CicAccess::REVIEW]);
+
+    $this->actingAs($this->cicUser([CicAccess::SUBMIT]))->postJson("/api/cic/submissions/{$submitted->id}/mark-submitted")
+        ->assertUnprocessable()->assertJsonPath('message', 'Only an encrypted file can be marked submitted; this one is submitted to CIC.');
+
+    $this->actingAs($reviewer)->postJson("/api/cic/submissions/{$submitted->id}/acknowledgement", ['status' => 'accepted'])->assertOk();
+    $this->actingAs($reviewer)->postJson("/api/cic/submissions/{$submitted->id}/acknowledgement", ['status' => 'accepted'])
+        ->assertUnprocessable()->assertJsonPath('message', 'CIC\'s answer can be recorded only for a file marked submitted; this one is accepted by CIC.');
+
+    expect(AuditLog::query()->where('auditable_id', $submitted->id)->where('action', 'cic_file_acknowledged')->sole()->description)
+        ->toEndWith(': accepted by CIC')
+        ->and(CicSubmissionPresenter::statusWords('generated'))->toBe('generated');
 });

@@ -34,9 +34,15 @@ final class CicSubmissionPresenter
         CicSubmission::TYPE_CORRECTION => 'Correction',
     ];
 
+    /**
+     * A status in words inside a sentence ("submitted to CIC"): only the first
+     * letter is lowered, so "CIC" keeps its capitals.
+     */
     public static function statusWords(string $status): string
     {
-        return mb_strtolower(self::STATUS_WORDS[$status] ?? str_replace('_', ' ', $status));
+        $words = self::STATUS_WORDS[$status] ?? str_replace('_', ' ', $status);
+
+        return mb_strtolower(mb_substr($words, 0, 1)).mb_substr($words, 1);
     }
 
     /** The internal submission reference (§15): CIC-000012. */
