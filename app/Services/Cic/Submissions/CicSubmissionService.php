@@ -277,9 +277,9 @@ final class CicSubmissionService
         });
     }
 
-    public function acknowledge(User $user, int $submissionId, string $status, ?string $notes): CicSubmission
+    public function acknowledge(User $user, int $submissionId, string $status, ?string $notes, ?string $cicReferenceNo = null): CicSubmission
     {
-        return DB::transaction(function () use ($user, $submissionId, $status, $notes): CicSubmission {
+        return DB::transaction(function () use ($user, $submissionId, $status, $notes, $cicReferenceNo): CicSubmission {
             $submission = $this->locked($submissionId);
 
             if ($submission->status !== CicSubmission::STATUS_SUBMITTED) {
@@ -295,12 +295,15 @@ final class CicSubmissionService
                 'acknowledged_by' => $user->id,
                 'acknowledged_at' => now(),
                 'acknowledgement_notes' => $notes,
+                'cic_reference_no' => $cicReferenceNo,
             ])->save();
 
             AuditLogService::log('cic_file_acknowledged', $submission, ['status' => CicSubmission::STATUS_SUBMITTED], [
                 'status' => $status,
                 'notes_length' => $notes === null ? 0 : mb_strlen($notes),
-            ], "CIC's answer recorded for {$submission->filename}: ".CicSubmissionPresenter::statusWords($status));
+                'cic_reference_no' => $cicReferenceNo,
+            ], "CIC's answer recorded for {$submission->filename}: ".CicSubmissionPresenter::statusWords($status)
+                .($cicReferenceNo === null ? '' : " (CIC reference {$cicReferenceNo})"));
 
             return $submission;
         });

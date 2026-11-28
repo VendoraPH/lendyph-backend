@@ -172,7 +172,7 @@ class CicSubmissionController extends CicController
     #[OA\Post(
         path: '/api/cic/submissions/{id}/acknowledgement',
         summary: 'Record CIC\'s answer to a submitted file',
-        description: 'Needs `cic:review` and `branches:view_all`, and never the file\'s generator (403 in words). Body {status: accepted|rejected, notes (required when rejected, ≤2000)}. From submitted only. Audited (the notes\' length, never their text).',
+        description: 'Needs `cic:review` and `branches:view_all`, and never the file\'s generator (403 in words). Body {status: accepted|rejected, notes (required when rejected, ≤2000), cic_reference_no? (CIC\'s own reference, ≤60: letters, digits, spaces and - _ / . # :)}. From submitted only. Audited (the notes\' length, never their text, and CIC\'s reference number).',
         tags: ['CIC'],
         security: [['sanctum' => []]],
         parameters: [new OA\Parameter(name: 'id', in: 'path', required: true, schema: new OA\Schema(type: 'integer'))],
@@ -183,7 +183,13 @@ class CicSubmissionController extends CicController
         /** @var User $user */
         $user = $request->user();
         $notes = $request->validated('notes');
-        $submission = $this->submissions->acknowledge($user, $id, $request->validated('status'), is_string($notes) && trim($notes) !== '' ? trim($notes) : null);
+        $submission = $this->submissions->acknowledge(
+            $user,
+            $id,
+            $request->validated('status'),
+            is_string($notes) && trim($notes) !== '' ? trim($notes) : null,
+            $request->validated('cic_reference_no'),
+        );
 
         return response()->json(['success' => true, 'message' => 'CIC\'s answer recorded.', 'data' => $this->detail($user, $submission)]);
     }

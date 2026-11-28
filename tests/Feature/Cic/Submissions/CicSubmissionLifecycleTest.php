@@ -127,10 +127,37 @@ it('records CIC\'s answer by a reviewer who did not generate the file', function
         ->assertJsonPath('data.history.3.status', 'accepted');
 
     $audit = AuditLog::query()->where('auditable_id', $submission->id)->where('action', 'cic_file_acknowledged')->sole();
-    expect($audit->new_values)->toBe(['status' => 'accepted', 'notes_length' => 16]);
+    expect($audit->new_values)->toBe(['status' => 'accepted', 'notes_length' => 16, 'cic_reference_no' => null]);
 
     $this->actingAs($reviewer)->postJson("/api/cic/submissions/{$submission->id}/acknowledgement", ['status' => 'rejected', 'notes' => 'Again.'])
         ->assertUnprocessable()->assertJsonPath('code', 'not_submitted');
+});
+
+it('records CIC\'s own reference number with its answer, shows it on the row and detail, and audits it', function () {
+    $submission = cicEncrypted($this, 'submitted');
+    $reviewer = $this->cicUser([CicAccess::VIEW, CicAccess::REVIEW]);
+
+    $this->actingAs($reviewer)->postJson("/api/cic/submissions/{$submission->id}/acknowledgement", ['status' => 'accepted', 'cic_reference_no' => '=cmd|x'])
+        ->assertUnprocessable()->assertJsonValidationErrors(['cic_reference_no' => 'CIC\'s reference number takes letters, digits, spaces and - _ / . # : only, starting with a letter or digit.']);
+    $this->actingAs($reviewer)->postJson("/api/cic/submissions/{$submission->id}/acknowledgement", ['status' => 'accepted', 'cic_reference_no' => str_repeat('A', 61)])
+        ->assertUnprocessable()->assertJsonValidationErrors(['cic_reference_no' => 'CIC\'s reference number takes up to 60 characters.']);
+
+    $this->actingAs($reviewer)->postJson("/api/cic/submissions/{$submission->id}/acknowledgement", ['status' => 'accepted', 'cic_reference_no' => '  CSDF-2026/11   0042 '])
+        ->assertOk()->assertJsonPath('data.cic_reference_no', 'CSDF-2026/11 0042');
+
+    $this->actingAs($reviewer)->getJson('/api/cic/submissions')->assertOk()
+        ->assertJsonPath('data.0.id', $submission->id)
+        ->assertJsonPath('data.0.cic_reference_no', 'CSDF-2026/11 0042');
+
+    $audit = AuditLog::query()->where('auditable_id', $submission->id)->where('action', 'cic_file_acknowledged')->sole();
+    expect($audit->new_values)->toBe(['status' => 'accepted', 'notes_length' => 0, 'cic_reference_no' => 'CSDF-2026/11 0042'])
+        ->and($audit->description)->toEndWith('(CIC reference CSDF-2026/11 0042)');
+
+    expect(fn () => $submission->fresh()->forceFill(['cic_reference_no' => 'OTHER'])->save())->toThrow(App\Exceptions\CicRecordIsFrozenException::class);
+
+    $blank = cicEncrypted($this, 'submitted');
+    $this->actingAs($reviewer)->postJson("/api/cic/submissions/{$blank->id}/acknowledgement", ['status' => 'rejected', 'notes' => 'Bad CI33.', 'cic_reference_no' => '   '])
+        ->assertOk()->assertJsonPath('data.cic_reference_no', null);
 });
 
 it('never lets the generator record CIC\'s answer', function () {

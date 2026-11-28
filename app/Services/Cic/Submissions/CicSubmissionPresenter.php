@@ -219,6 +219,7 @@ final class CicSubmissionPresenter
             'acknowledged_at' => $submission->acknowledged_at?->toJSON(),
             'acknowledged_by' => $person($submission->acknowledged_by),
             'acknowledgement_notes' => $submission->acknowledgement_notes,
+            'cic_reference_no' => $submission->cic_reference_no,
         ];
     }
 

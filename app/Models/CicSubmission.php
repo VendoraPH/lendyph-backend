@@ -47,6 +47,7 @@ use Illuminate\Support\Carbon;
  * @property int|null $acknowledged_by
  * @property Carbon|null $acknowledged_at
  * @property string|null $acknowledgement_notes
+ * @property string|null $cic_reference_no CIC's own reference for its answer (§14.8)
  * @property int $download_count
  */
 class CicSubmission extends Model
@@ -87,6 +88,7 @@ class CicSubmission extends Model
     private const SET_ONCE = [
         'zip_sha256', 'gpg_sha256', 'gpg_path', 'key_fingerprint', 'encrypted_by', 'encrypted_at',
         'submitted_by', 'submitted_at', 'acknowledged_by', 'acknowledged_at', 'acknowledgement_notes',
+        'cic_reference_no',
     ];
 
     /** The submission services set every field; nothing comes from a request. */
