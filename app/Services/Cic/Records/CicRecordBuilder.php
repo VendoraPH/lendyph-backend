@@ -50,8 +50,9 @@ final class CicRecordBuilder
      * @param  list<int>|null  $memberIds  more members to report, whether or not a built contract names them
      * @param  list<int>|null  $loanIds  only these loans' contracts (a single record, or a correction's re-read)
      * @param  bool  $force  build the named loans whatever their state (a correction re-reads every contract it holds)
+     * @param  bool  $onlyReportable  with `$loanIds` and no force: false reads the named loans without the reportable-loan query, so each still goes through the left-out checks (a correction re-checks the loans its month end left out)
      */
-    public function build(Carbon $reference, bool $withContracts = true, ?array $memberIds = null, ?array $loanIds = null, bool $force = false): CicRecordSet
+    public function build(Carbon $reference, bool $withContracts = true, ?array $memberIds = null, ?array $loanIds = null, bool $force = false, bool $onlyReportable = true): CicRecordSet
     {
         $reference = $reference->copy()->startOfDay();
         $forced = $force && $loanIds !== null ? array_fill_keys($loanIds, true) : [];
@@ -61,9 +62,9 @@ final class CicRecordBuilder
         $contractRecords = [];
 
         if ($withContracts) {
-            $loans = $forced !== [] ? $this->loans()->whereKey($loanIds) : $this->reportableLoans($context);
+            $loans = $forced !== [] || ($loanIds !== null && ! $onlyReportable) ? $this->loans()->whereKey($loanIds) : $this->reportableLoans($context);
 
-            if ($loanIds !== null && $forced === []) {
+            if ($loanIds !== null && $forced === [] && $onlyReportable) {
                 $loans->whereKey($loanIds);
             }
 

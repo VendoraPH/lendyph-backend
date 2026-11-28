@@ -29,10 +29,12 @@ use Throwable;
  * - `correction`: for a complete month-end capture's date (or, while test
  *   captures are on, a complete test capture's). Subject and event
  *   records are rebuilt from today's member data for the members it held.
- *   Its contract records keep the corrected capture's money and date fields,
- *   and re-read their classification and key from today (record type,
- *   CI7/CN7, CI8/CN8, CI22/CN21, CI23; CicCorrectionOverlay), so a month whose
- *   file couldn't be made can still be filed (prompt §14, money review M-H1). A correction
+ *   Its contract records keep the corrected capture's record type and money
+ *   and date fields, and re-read their branch, key and classification from
+ *   today (CI3/CN3, CI7/CN7, CI8/CN8, CI22/CN21, CI23; CicCorrectionOverlay),
+ *   so a month whose file couldn't be made can still be filed (prompt §14,
+ *   money review M-H1). The loans the month end left out are checked again
+ *   (re-review MM1). A correction
  *   file made from it corrects a file made from that capture (or from an
  *   earlier correction of it).
  *
@@ -157,11 +159,20 @@ final class CicCaptureService
             $loanIds = $frozen->pluck('loan_id')->filter()->map(fn (mixed $id) => (int) $id)->values()->all();
 
             $live = $this->builder->build($date, withContracts: $loanIds !== [], memberIds: $memberIds, loanIds: $loanIds, force: true);
+            $contracts = $this->correctedContracts($frozen, $live);
+
+            // The loans the month end left out are checked again, never
+            // dropped (money re-review MM1): each is left out again with its
+            // issue, or, once fixed, reported as an added contract.
+            $heldBack = array_values(array_diff(array_map('intval', array_filter(array_column($corrects->left_out ?? [], 'loan_id'))), $loanIds));
+            $rechecked = $heldBack === [] ? null : $this->builder->build($date, loanIds: $heldBack, onlyReportable: false);
+
             $set = new CicRecordSet($live->context, [
-                'ID' => $live->ofType('ID'),
-                ...$this->correctedContracts($frozen, $live),
-                'NE' => $live->ofType('NE'),
-            ]);
+                'ID' => self::union($live->ofType('ID'), $rechecked?->ofType('ID') ?? []),
+                'CI' => [...$contracts['CI'], ...($rechecked?->ofType('CI') ?? [])],
+                'CN' => [...$contracts['CN'], ...($rechecked?->ofType('CN') ?? [])],
+                'NE' => self::union($live->ofType('NE'), $rechecked?->ofType('NE') ?? []),
+            ], self::leftOutOf($corrects, $rechecked));
         } else {
             $set = $this->builder->build($date);
         }
@@ -347,6 +358,38 @@ final class CicCaptureService
         }
 
         return $contracts;
+    }
+
+    /**
+     * Records of two builds, each key once.
+     *
+     * @param  list<CicRecord>  $first
+     * @param  list<CicRecord>  $second
+     * @return list<CicRecord>
+     */
+    private static function union(array $first, array $second): array
+    {
+        $byKey = [];
+
+        foreach ([...$first, ...$second] as $record) {
+            $byKey[$record->key] ??= $record;
+        }
+
+        return array_values($byKey);
+    }
+
+    /**
+     * What a correction leaves out: the re-check of the loans its month end
+     * left out, plus any of the month end's left-out issues that name no loan
+     * (kept as they were).
+     *
+     * @return list<array<string, mixed>>
+     */
+    private static function leftOutOf(CicCapture $corrects, ?CicRecordSet $rechecked): array
+    {
+        $unnamed = array_values(array_filter($corrects->left_out ?? [], fn (array $issue) => empty($issue['loan_id'])));
+
+        return [...$unnamed, ...($rechecked?->leftOut ?? [])];
     }
 
     /**

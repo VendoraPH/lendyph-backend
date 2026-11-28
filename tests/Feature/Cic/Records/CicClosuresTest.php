@@ -85,6 +85,7 @@ it('leaves a loan released and closed on the same day out, with a warning', func
         ->and($set->leftOut)->toBe([[
             'record_type' => 'CI', 'record_key' => $loan->loan_account_number, 'field_id' => 'CI16', 'severity' => 'warning', 'code' => 'SAME_DAY_PAYOFF',
             'message' => 'This loan was released and closed on the same day; it is left out until CIC confirms how to send it (Q17).',
+            'loan_id' => $loan->id,
         ]])
         ->and(collect($issues)->where('code', 'SAME_DAY_PAYOFF')->sole())->toMatchArray(['record_key' => $loan->loan_account_number, 'severity' => 'warning']);
 });

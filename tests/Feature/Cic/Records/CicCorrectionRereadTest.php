@@ -76,19 +76,54 @@ it('re-reads a contract number CIC can\'t take once the loan has one it can', fu
         ->and($loan->fresh()->cic_contract_no)->toBe('BC-777001');
 });
 
-it('moves the frozen figures to the other layout when the record type changes', function () {
+it('keeps the month end\'s record type and figures when the record type changed, with a warning', function () {
     $loan = $this->cicLoan();
     $monthEnd = cicReread(CicCapture::KIND_MONTH_END);
-    $before = cicRereadRecord($monthEnd, $loan->id)->values;
+    $before = cicRereadRecord($monthEnd, $loan->id);
 
     CicLoanOverride::factory()->create(['loan_id' => $loan->id, 'record_type' => 'CN', 'contract_type' => '48', 'transaction_type' => 'DL', 'reason' => 'Demand loan.']);
     $after = cicRereadRecord(cicReread(CicCapture::KIND_CORRECTION, $monthEnd), $loan->id);
 
-    expect($after->record_type)->toBe('CN')
-        ->and($after->values)->toMatchArray([
-            'CN1' => 'CN', 'CN7' => $before['CI7'], 'CN8' => '48', 'CN21' => 'DL',
-            'CN9' => $before['CI9'], 'CN13' => $before['CI13'], 'CN15' => $before['CI15'], 'CN20' => $before['CI20'],
-            'CN23' => $before['CI32'], 'CN24' => $before['CI34'],
-        ])
-        ->and($after->values)->not->toHaveKey('CN32')->not->toHaveKey('CN22');
+    expect($after->record_type)->toBe('CI')
+        ->and($after->values)->toEqual($before->values)
+        ->and(collect($after->build_issues)->where('code', 'CORRECTION_RECORD_TYPE_CHANGED')->sole())->toMatchArray(['field_id' => 'CI1', 'severity' => 'warning'])
+        ->and(collect($after->build_issues)->sole()['message'])->toContain('now classified as a CN contract');
+});
+
+it('re-reads the branch code, which isn\'t money', function () {
+    $branch = $this->cicBranch('TOOLONG');
+    $member = $this->cicMember(['branch_id' => $branch->id]);
+    $loan = $this->cicLoan($member);
+    $monthEnd = cicReread(CicCapture::KIND_MONTH_END);
+
+    expect(cicRereadRecord($monthEnd, $loan->id)->values)->not->toHaveKey('CI3');
+
+    DB::table('branches')->where('id', $branch->id)->update(['code' => 'NAGA']);
+    expect(cicRereadRecord(cicReread(CicCapture::KIND_CORRECTION, $monthEnd), $loan->id)->values['CI3'])->toBe('NAGA');
+});
+
+it('checks the loans the month end left out again, so a held-back closure never disappears', function () {
+    $loan = $this->cicLoan();
+    $previous = CicCapture::factory()->monthEnd('2026-10-31')->create();
+    $values = ['CI1' => 'CI', 'CI7' => $loan->loan_account_number, 'CI9' => 'AC'];
+    CicCaptureRecord::factory()->for($previous, 'capture')->create(['record_type' => 'CI', 'record_key' => $loan->loan_account_number, 'loan_id' => $loan->id, 'values' => $values, 'checksum' => CicCaptureRecord::checksumOf($values)]);
+    $previous->forceFill(['status' => CicCapture::STATUS_COMPLETE, 'checksum' => $previous->computeChecksum(), 'finished_at' => now()])->save();
+    DB::table('loans')->where('id', $loan->id)->update(['status' => 'completed']);
+
+    $monthEnd = cicReread(CicCapture::KIND_MONTH_END);
+    expect($monthEnd->left_out)->toHaveCount(1)
+        ->and($monthEnd->left_out[0])->toMatchArray(['code' => 'NO_CLOSING_EVENT', 'severity' => 'error', 'loan_id' => $loan->id]);
+
+    // Not fixed yet: the correction holds the same error.
+    $still = cicReread(CicCapture::KIND_CORRECTION, $monthEnd);
+    expect(collect(app(CicValidator::class)->issues($still))->where('code', 'NO_CLOSING_EVENT')->where('severity', 'error')->count())->toBe(1);
+
+    // Fixed: the closing payment is recorded, and the closure is reported.
+    Repayment::factory()->create(['loan_id' => $loan->id, 'payment_date' => '2026-10-30', 'amount_paid' => 30900, 'status' => 'posted']);
+    $fixed = cicReread(CicCapture::KIND_CORRECTION, $monthEnd);
+    $closure = cicRereadRecord($fixed, $loan->id);
+
+    expect($fixed->left_out)->toBeNull()
+        ->and($closure->values['CI9'])->toBe('CA')
+        ->and($closure->values['CI16'])->toBe('30102026');
 });

@@ -246,7 +246,7 @@ final class ContractRecordBuilder
         $ignored = [];
         [$key] = $this->contractNumber($loan, $type, $ignored);
 
-        $this->leftOut[] = ['record_type' => $type, 'record_key' => $key, 'field_id' => "{$type}16", 'severity' => $severity, 'code' => $code, 'message' => $message];
+        $this->leftOut[] = ['record_type' => $type, 'record_key' => $key, 'field_id' => "{$type}16", 'severity' => $severity, 'code' => $code, 'message' => $message, 'loan_id' => $loan->id];
     }
 
     /**
