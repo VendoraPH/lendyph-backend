@@ -35,6 +35,7 @@ use Illuminate\Support\Carbon;
  * @property Carbon|null $finished_at
  * @property string|null $error
  * @property int|null $created_by null when the schedule made it
+ * @property int|null $corrects_capture_id the month-end capture a correction corrects
  */
 class CicCapture extends Model
 {
@@ -79,6 +80,7 @@ class CicCapture extends Model
             'started_at' => 'datetime',
             'finished_at' => 'datetime',
             'created_by' => 'integer',
+            'corrects_capture_id' => 'integer',
         ];
     }
 
@@ -171,6 +173,12 @@ class CicCapture extends Model
     public function submissions(): HasMany
     {
         return $this->hasMany(CicSubmission::class, 'capture_id');
+    }
+
+    /** The complete month-end capture a correction capture corrects. */
+    public function corrects(): BelongsTo
+    {
+        return $this->belongsTo(self::class, 'corrects_capture_id');
     }
 
     public function creator(): BelongsTo
