@@ -21,7 +21,6 @@ trait ReadsCicRecords
 
     public const PER_PAGE = 25;
 
-
     /**
      * @return array{reference_date: Carbon, capture: CicCapture|null, record_type: string|null, severity: string|null, page: int}
      */
