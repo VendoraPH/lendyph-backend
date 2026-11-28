@@ -2,6 +2,7 @@
 
 namespace App\Services\Cic\Submissions;
 
+use Closure;
 use App\Models\CicCapture;
 use App\Models\CicCaptureRecord;
 use App\Models\CicPublicKey;
@@ -45,17 +46,22 @@ final class CicSubmissionPresenter
     }
 
     /**
-     * History rows, with their staff read in one query.
+     * History rows, with their staff read in one query, and each row's
+     * `actions` for the caller when given.
      *
      * @param  iterable<CicSubmission>  $submissions
+     * @param  (Closure(CicSubmission): array<string, bool>)|null  $actions
      * @return list<array<string, mixed>>
      */
-    public static function rows(iterable $submissions): array
+    public static function rows(iterable $submissions, ?Closure $actions = null): array
     {
         $submissions = collect($submissions);
         $users = self::users($submissions->flatMap(fn (CicSubmission $s) => [$s->generated_by, $s->encrypted_by, $s->submitted_by, $s->acknowledged_by])->all());
 
-        return $submissions->map(fn (CicSubmission $s) => self::rowWith($s, $users))->values()->all();
+        return $submissions->map(fn (CicSubmission $s) => [
+            ...self::rowWith($s, $users),
+            ...($actions === null ? [] : ['actions' => $actions($s)]),
+        ])->values()->all();
     }
 
     /**

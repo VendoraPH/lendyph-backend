@@ -21,6 +21,10 @@ beforeEach(function () {
     Storage::fake('private');
 });
 
+afterEach(function () {
+    $this->tearDownTestKeys();
+});
+
 /** An encrypted file whose .zip.gpg is on the (fake) private disk. */
 function cicEncrypted(object $test, string $state = 'encrypted'): CicSubmission
 {
@@ -157,4 +161,36 @@ it('needs notes for a rejection, and a submitted file', function () {
         ->assertUnprocessable()->assertJsonPath('code', 'not_submitted');
     $this->actingAs($this->cicUser([CicAccess::SUBMIT]))->postJson("/api/cic/submissions/{$submission->id}/acknowledgement", ['status' => 'accepted'])
         ->assertForbidden();
+});
+
+it('gives each list row the caller\'s actions, the same object as the detail', function () {
+    $this->activateTestKey($this->makeTestKey());
+    $generated = CicSubmission::factory()->create(['capture_id' => $this->simpleCapture(CicCapture::KIND_TEST)->id, 'reference_date' => '2026-10-31']);
+    $encrypted = cicEncrypted($this);
+    $submitted = cicEncrypted($this, 'submitted');
+
+    foreach ([$this->cicAll(), $this->cicUser([CicAccess::VIEW]), $submitted->generator->givePermissionTo([...CicAccess::PERMISSIONS, 'branches:view_all'])] as $user) {
+        $rows = collect($this->actingAs($user)->getJson('/api/cic/submissions')->assertOk()->json('data'))->keyBy('id');
+
+        foreach ([$generated, $encrypted, $submitted] as $submission) {
+            expect($rows[$submission->id]['actions'])
+                ->toBe($this->actingAs($user)->getJson("/api/cic/submissions/{$submission->id}")->assertOk()->json('data.actions'));
+        }
+    }
+
+    $all = collect($this->actingAs($this->cicAll())->getJson('/api/cic/submissions')->json('data'))->keyBy('id');
+    expect($all[$generated->id]['actions'])->toBe(['encrypt' => true, 'download' => false, 'mark_submitted' => false, 'acknowledge' => false, 'correct' => false])
+        ->and($all[$encrypted->id]['actions'])->toBe(['encrypt' => false, 'download' => true, 'mark_submitted' => true, 'acknowledge' => false, 'correct' => false])
+        ->and($all[$submitted->id]['actions'])->toBe(['encrypt' => false, 'download' => true, 'mark_submitted' => false, 'acknowledge' => true, 'correct' => true]);
+});
+
+it('offers no encryption on a list row whose capture has errors', function () {
+    $this->activateTestKey($this->makeTestKey());
+    $this->fakeIssues([['record_type' => 'ID', 'record_key' => 'BRW-00000001', 'field_id' => 'ID7', 'severity' => 'error', 'code' => 'MISSING_MANDATORY', 'message' => 'x']]);
+    $generated = CicSubmission::factory()->create(['capture_id' => $this->simpleCapture(CicCapture::KIND_TEST)->id, 'reference_date' => '2026-10-31']);
+
+    $this->actingAs($this->cicAll())->getJson('/api/cic/submissions')->assertOk()
+        ->assertJsonPath('data.0.id', $generated->id)
+        ->assertJsonPath('data.0.actions.encrypt', false)
+        ->assertJsonPath('data.0.actions.download', false);
 });

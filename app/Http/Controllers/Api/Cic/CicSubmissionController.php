@@ -14,6 +14,7 @@ use App\Services\Cic\CicAccess;
 use App\Services\Cic\File\CicEncryptor;
 use App\Services\Cic\Submissions\CicSubmissionPresenter;
 use App\Services\Cic\Submissions\CicSubmissionService;
+use Closure;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
@@ -28,6 +29,8 @@ use Symfony\Component\HttpFoundation\StreamedResponse;
  */
 class CicSubmissionController extends CicController
 {
+    private ?bool $keyUsable = null;
+
     public function __construct(
         private readonly CicSubmissionService $submissions,
         private readonly CicEncryptor $encryptor,
@@ -36,7 +39,7 @@ class CicSubmissionController extends CicController
     #[OA\Get(
         path: '/api/cic/submissions',
         summary: 'CIC submission history',
-        description: 'Needs `cic:view` and `branches:view_all`. Filters `status`, `reference_date` (YYYY-MM-DD), `submission_type` (0|1); paged (`per_page` ≤ 100), newest first. {success, data: row[], meta}.',
+        description: 'Needs `cic:view` and `branches:view_all`. Filters `status`, `reference_date` (YYYY-MM-DD), `submission_type` (0|1); paged (`per_page` ≤ 100), newest first. {success, data: row[], meta}; each row carries the caller\'s `actions` {encrypt, download, mark_submitted, acknowledge, correct}, the same object as the detail\'s.',
         tags: ['CIC'],
         security: [['sanctum' => []]],
         responses: [new OA\Response(response: 200, description: 'The history'), new OA\Response(response: 403, description: 'Missing cic:view or branches:view_all'), new OA\Response(response: 422, description: 'A bad filter')],
@@ -44,6 +47,7 @@ class CicSubmissionController extends CicController
     public function index(ListCicSubmissionsRequest $request): JsonResponse
     {
         $filters = $request->validated();
+        $validations = [];
 
         $page = CicSubmission::query()
             ->when(isset($filters['status']), fn ($query) => $query->where('status', $filters['status']))
@@ -55,7 +59,13 @@ class CicSubmissionController extends CicController
 
         return response()->json([
             'success' => true,
-            'data' => CicSubmissionPresenter::rows($page->getCollection()),
+            'data' => CicSubmissionPresenter::rows($page->getCollection(), fn (CicSubmission $submission) => $this->actions(
+                $request->user(),
+                $submission,
+                function () use ($submission, &$validations) {
+                    return $validations[$submission->capture_id] ??= $this->submissions->validate($submission->capture()->firstOrFail());
+                },
+            )),
             'meta' => [
                 'current_page' => $page->currentPage(),
                 'last_page' => $page->lastPage(),
@@ -190,14 +200,29 @@ class CicSubmissionController extends CicController
         $capture = $submission->capture()->firstOrFail();
         $validation ??= $this->submissions->validate($capture);
         $affected ??= $this->submissions->affected($submission);
+        $actions = $this->actions($user, $submission, fn () => $validation);
+
+        return CicSubmissionPresenter::detail($submission, $validation, $affected, $this->encryptor, $actions);
+    }
+
+    /**
+     * What the caller can do next with a file: the same object on the list's
+     * rows and the detail. Encrypting also needs a capture with no errors,
+     * so the capture is validated only when everything else allows it.
+     *
+     * @param  Closure(): array{errors: int, warnings: int, top_issues: list<array<string, mixed>>}  $validation
+     * @return array{encrypt: bool, download: bool, mark_submitted: bool, acknowledge: bool, correct: bool}
+     */
+    private function actions(User $user, CicSubmission $submission, Closure $validation): array
+    {
         $access = app(CicAccess::class);
 
-        $actions = [
+        return [
             'encrypt' => $submission->status === CicSubmission::STATUS_GENERATED
                 && $access->allows($user, CicAccess::SUBMIT)
-                && $validation['errors'] === 0
-                && CicSubmissionService::keyProblem(CicPublicKey::activeKey()) === null
-                && $this->encryptor->available(),
+                && $this->keyUsable()
+                && $this->encryptor->available()
+                && $validation()['errors'] === 0,
             'download' => in_array($submission->status, CicSubmissionService::DOWNLOADABLE, true)
                 && $submission->gpg_path !== null
                 && $access->allows($user, CicAccess::SUBMIT),
@@ -207,7 +232,10 @@ class CicSubmissionController extends CicController
                 && $submission->generated_by !== $user->id,
             'correct' => in_array($submission->status, CicSubmissionService::CORRECTABLE, true) && $access->allows($user, CicAccess::PREPARE),
         ];
+    }
 
-        return CicSubmissionPresenter::detail($submission, $validation, $affected, $this->encryptor, $actions);
+    private function keyUsable(): bool
+    {
+        return $this->keyUsable ??= CicSubmissionService::keyProblem(CicPublicKey::activeKey()) === null;
     }
 }
