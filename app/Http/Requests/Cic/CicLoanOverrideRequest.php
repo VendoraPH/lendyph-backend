@@ -81,7 +81,7 @@ class CicLoanOverrideRequest extends CicFormRequest
             if ($class->mappingMismatch) {
                 foreach (['contract_type', 'transaction_type'] as $code) {
                     if (! $this->filled($code)) {
-                        $validator->errors()->add($code, "Choose a ".CicClassificationCodes::fieldWords($code)." for {$recordType}: the loan reports as a {$recordType} contract, and its product is mapped to {$mapping->record_type} contracts, so the product's codes don't apply.");
+                        $validator->errors()->add($code, 'Choose a '.CicClassificationCodes::fieldWords($code)." for {$recordType}: the loan reports as a {$recordType} contract, and its product is mapped to {$mapping->record_type} contracts, so the product's codes don't apply.");
                     }
                 }
             }

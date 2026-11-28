@@ -104,8 +104,8 @@ it('captures, files, encrypts, submits, acknowledges and corrects a month with t
         ->and(substr_count($txt, "\r"))->toBe(substr_count($txt, "\r\n"))
         ->and($lines)->toHaveCount(5)
         ->and($lines[0])->toBe('HD|LENDY001|30112026|1.0|0|')
-        ->and($lines[1])->toStartWith("ID|LENDY001|")->toContain("|{$member->borrower_code}|")->toContain('|Maria|')
-        ->and($lines[2])->toStartWith("CI|LENDY001|")->toContain("|{$loan->loan_account_number}|")
+        ->and($lines[1])->toStartWith('ID|LENDY001|')->toContain("|{$member->borrower_code}|")->toContain('|Maria|')
+        ->and($lines[2])->toStartWith('CI|LENDY001|')->toContain("|{$loan->loan_account_number}|")
         ->and($lines[3])->toBe('FT|LENDY001|30112026|2')
         ->and($lines[4])->toBe('');
 
