@@ -16,13 +16,15 @@ use RuntimeException;
  * the test-code mode: a test capture is dated today on any day, so it could
  * never be a real month-end figure.
  *
- * The `cic` limiter (security review S-M2): 10 requests a minute per staff
+ * The `cic` limiter (security review S-M2): 30 requests a minute per staff
  * user on the CIC screens that build or validate a whole book (readiness,
- * records, one record, issues, and the submissions detail).
+ * records, one record, issues, and the submissions list and detail). The
+ * 60-second live cache makes repeats cheap, so the limit leaves room for a
+ * screen's several calls and its paging.
  */
 class CicServiceProvider extends ServiceProvider
 {
-    public const PER_MINUTE = 10;
+    public const PER_MINUTE = 30;
 
     public function boot(): void
     {

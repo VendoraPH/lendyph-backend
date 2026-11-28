@@ -14,9 +14,9 @@ use Illuminate\Support\Facades\Route;
 | permission plus branches:view_all in the controller or its form request.
 */
 Route::prefix('cic')->group(function () {
-    Route::get('/submissions', [CicSubmissionController::class, 'index']);
+    Route::get('/submissions', [CicSubmissionController::class, 'index'])->middleware('throttle:cic');
     Route::post('/submissions', [CicSubmissionController::class, 'store']);
-    Route::get('/submissions/{id}', [CicSubmissionController::class, 'show'])->whereNumber('id');
+    Route::get('/submissions/{id}', [CicSubmissionController::class, 'show'])->whereNumber('id')->middleware('throttle:cic');
     Route::post('/submissions/{id}/encrypt', [CicSubmissionController::class, 'encrypt'])->whereNumber('id');
     Route::get('/submissions/{id}/download', [CicSubmissionController::class, 'download'])->whereNumber('id');
     Route::post('/submissions/{id}/mark-submitted', [CicSubmissionController::class, 'markSubmitted'])->whereNumber('id');

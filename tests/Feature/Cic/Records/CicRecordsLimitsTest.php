@@ -3,6 +3,7 @@
 use App\Models\CicCapture;
 use App\Models\CicProductMapping;
 use App\Models\CicSetting;
+use App\Models\CicSubmission;
 use App\Services\Cic\Capture\CicCaptureService;
 use App\Services\Cic\CicAccess;
 use App\Services\Cic\CicValidator;
@@ -16,7 +17,7 @@ use Tests\TestCase;
 uses(TestCase::class, CicRecordsFixtures::class);
 
 /*
- * Security review S-M2, records side: the `cic` limiter (10 a minute per
+ * Security review S-M2: the `cic` limiter (30 a minute per
  * user) on the screens that build a whole book, a 60-second encrypted cache
  * of the live build per reference date, cached capture validation, and a
  * single-record build for one record's live view.
@@ -27,17 +28,20 @@ beforeEach(function () {
     $this->reader = $this->cicUser([CicAccess::VIEW, 'branches:view_all', 'borrowers:view']);
 });
 
-it('allows 10 CIC screen reads a minute per user, across the screens, then answers 429 in words', function () {
+it('allows 30 CIC screen reads a minute per user, across the screens and submissions, then answers 429 in words', function () {
+    config(['cic.test_captures' => true]);
     $this->cicLoan();
+    $capture = app(CicCaptureService::class)->capture(Carbon::parse('2026-11-30'), CicCapture::KIND_TEST, null);
+    $submission = CicSubmission::factory()->create(['capture_id' => $capture->id, 'reference_date' => '2026-11-30']);
     $other = $this->cicUser([CicAccess::VIEW, 'branches:view_all']);
 
-    foreach (['/api/cic/readiness', '/api/cic/records', '/api/cic/issues'] as $i => $url) {
-        foreach (range(1, $i === 0 ? 4 : 3) as $ignored) {
+    foreach (['/api/cic/readiness', '/api/cic/records', '/api/cic/issues', '/api/cic/submissions', "/api/cic/submissions/{$submission->id}"] as $url) {
+        foreach (range(1, 6) as $ignored) {
             $this->actingAs($this->reader)->getJson($url)->assertOk();
         }
     }
 
-    $this->actingAs($this->reader)->getJson('/api/cic/issues')
+    $this->actingAs($this->reader)->getJson('/api/cic/submissions')
         ->assertTooManyRequests()->assertJsonPath('message', 'Too many CIC requests. Wait a minute and try again.');
     $this->actingAs($other)->getJson('/api/cic/readiness')->assertOk();
 
