@@ -155,3 +155,28 @@ it('warns next month of a same-day payoff on a loan released on the previous mon
         ->and(cicClosuresRecord($november, $later))->not->toBeNull()
         ->and(collect($december->leftOut)->where('loan_id', $loan->id)->all())->toBe([]);
 });
+
+it('files a month end captured late with a later closure as a warning, and reports the closure in its own month', function () {
+    $loan = $this->cicLoan();
+    cicClosuresMonthEnd('2026-10-31', [$loan->id => 'AC']);
+    cicClosuresComplete($loan, '2026-12-03');
+
+    // November's month end is captured late, on Dec 5, after the loan closed.
+    Carbon::setTestNow('2026-12-05 09:00:00');
+    $november = app(CicCaptureService::class)->capture(Carbon::parse('2026-11-30'), CicCapture::KIND_MONTH_END, null);
+    $issues = collect(app(CicValidator::class)->issues($november));
+
+    expect($november->status)->toBe('complete')
+        ->and(CicCaptureRecord::query()->where('capture_id', $november->id)->where('loan_id', $loan->id)->exists())->toBeFalse()
+        ->and($november->left_out[0])->toMatchArray(['code' => 'CLOSED_AFTER_REFERENCE_DATE', 'severity' => 'warning', 'loan_id' => $loan->id])
+        ->and($issues->where('severity', 'error')->where('record_key', $loan->loan_account_number)->all())->toBe([]);
+
+    // December reports the closure once, with its true end date.
+    Carbon::setTestNow('2026-12-31 23:58:00');
+    $december = app(CicCaptureService::class)->capture(Carbon::parse('2026-12-31'), CicCapture::KIND_MONTH_END, null);
+    $closure = CicCaptureRecord::query()->where('capture_id', $december->id)->where('loan_id', $loan->id)->sole();
+
+    expect($closure->values['CI9'])->toBe('CA')
+        ->and($closure->values['CI16'])->toBe('03122026')
+        ->and($december->left_out)->toBeNull();
+});
