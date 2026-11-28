@@ -23,6 +23,7 @@ Route::prefix('cic')->group(function () {
     Route::get('/records/{type}/{key}', [CicRecordsController::class, 'show'])
         ->where(['type' => 'ID|CI|CN|NE', 'key' => '[^/]{1,38}']);
     Route::get('/issues', [CicIssuesController::class, 'index']);
+    Route::get('/issues/export', [CicIssuesController::class, 'export'])->middleware('throttle:exports');
     Route::get('/captures', [CicCapturesController::class, 'index']);
     Route::post('/captures', [CicCapturesController::class, 'store']);
     Route::get('/captures/{id}', [CicCapturesController::class, 'show'])->whereNumber('id');

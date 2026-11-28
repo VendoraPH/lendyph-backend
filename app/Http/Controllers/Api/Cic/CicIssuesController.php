@@ -3,12 +3,19 @@
 namespace App\Http\Controllers\Api\Cic;
 
 use App\Http\Controllers\Api\Cic\Concerns\ReadsCicRecords;
+use App\Http\Controllers\Api\Traits\CsvExportTrait;
+use App\Models\CicCapture;
 use App\Models\CicCaptureRecord;
+use App\Services\AuditLogService;
 use App\Services\Cic\CicAccess;
+use App\Services\Cic\CicIssueWords;
 use App\Services\Cic\Records\CicRecord;
+use App\Services\Cic\Records\CicRecordSet;
 use App\Services\Cic\Records\CicRecordsReader;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Carbon;
+use Symfony\Component\HttpFoundation\StreamedResponse;
 use OpenApi\Attributes as OA;
 
 /**
@@ -18,6 +25,7 @@ use OpenApi\Attributes as OA;
  */
 class CicIssuesController extends CicController
 {
+    use CsvExportTrait;
     use ReadsCicRecords;
 
     #[OA\Get(
@@ -32,17 +40,7 @@ class CicIssuesController extends CicController
     {
         $this->authorizeCic($request, CicAccess::VIEW);
         $filters = $this->recordFilters($request);
-        $capture = $filters['capture'];
-        $set = null;
-
-        if ($capture !== null) {
-            $issues = $reader->captureIssues($capture);
-        } else {
-            ['set' => $set, 'issues' => $issues] = $reader->live($filters['reference_date']);
-        }
-
-        $matching = array_values(array_filter($issues, fn (array $i) => ($filters['severity'] === null || $i['severity'] === $filters['severity'])
-            && ($filters['record_type'] === null || $i['record_type'] === $filters['record_type'])));
+        ['capture' => $capture, 'set' => $set, 'matching' => $matching] = $this->matching($filters, $reader);
         $pageRows = array_slice($matching, ($filters['page'] - 1) * self::PER_PAGE, self::PER_PAGE);
         $members = $this->seesPersonalData($request) ? $this->membersOf($pageRows, $capture?->id, $set?->all()) : null;
 
@@ -58,6 +56,100 @@ class CicIssuesController extends CicController
             'capture_id' => $capture?->id,
             'reference_date' => ($capture?->reference_date ?? $filters['reference_date'])->toDateString(),
         ]));
+    }
+
+    #[OA\Get(
+        path: '/api/cic/issues/export',
+        summary: 'Export CIC issues as CSV',
+        description: 'Needs `cic:view` and `branches:view_all`; throttled like other exports (5 a minute). The filters of /cic/issues (`severity`, `record_type`, `capture_id`, `reference_date`; no paging). A CSV built on the server, every matching issue, errors first: Record type, Record key, Field ID, Field name, Classification, Severity, Issue, Message, and Member (name and code) only with borrowers:view. Codes read in words. One audit row per export: the filters and the row count, no values.',
+        tags: ['CIC'],
+        security: [['sanctum' => []]],
+        responses: [new OA\Response(response: 200, description: 'text/csv'), new OA\Response(response: 403, description: 'No access'), new OA\Response(response: 422, description: 'Bad filter, in words')],
+    )]
+    public function export(Request $request, CicRecordsReader $reader): StreamedResponse
+    {
+        $user = $this->authorizeCic($request, CicAccess::VIEW);
+        $filters = $this->recordFilters($request);
+        ['capture' => $capture, 'set' => $set, 'matching' => $matching] = $this->matching($filters, $reader);
+        $withMembers = $this->seesPersonalData($request);
+        $members = $withMembers ? $this->membersOf($matching, $capture?->id, $set?->all()) : [];
+        $referenceDate = ($capture?->reference_date ?? $filters['reference_date'])->toDateString();
+
+        $headers = ['Record type', 'Record key', 'Field ID', 'Field name', 'Classification', 'Severity', 'Issue', 'Message'];
+
+        if ($withMembers) {
+            $headers[] = 'Member';
+        }
+
+        $rows = array_map(function (array $issue) use ($withMembers, $members) {
+            $issue = CicRecordsReader::present($issue);
+            $row = [
+                CicIssueWords::recordType($issue['record_type']),
+                $issue['record_key'],
+                (string) ($issue['field_id'] ?? ''),
+                (string) ($issue['field_name'] ?? ''),
+                CicIssueWords::classification($issue['classification']),
+                CicIssueWords::severity($issue['severity']),
+                CicIssueWords::code($issue['code']),
+                $issue['message'],
+            ];
+
+            if ($withMembers) {
+                $member = $members["{$issue['record_type']}|{$issue['record_key']}"] ?? null;
+                $row[] = $member === null ? '' : "{$member['name']} ({$member['code']})";
+            }
+
+            return $row;
+        }, $matching);
+
+        $source = $capture === null ? "live build as of {$referenceDate}" : "capture #{$capture->id} ({$referenceDate})";
+        AuditLogService::log('cic_issues_exported', $capture, null, [
+            'source' => $capture === null ? 'live' : 'capture',
+            'capture_id' => $capture?->id,
+            'reference_date' => $referenceDate,
+            'severity' => $filters['severity'],
+            'record_type' => $filters['record_type'],
+            'rows' => count($rows),
+            'with_member_names' => $withMembers,
+        ], sprintf('CIC issues exported from the %s: %d %s%s.', $source, count($rows), count($rows) === 1 ? 'row' : 'rows', self::filterWords($filters)), $user->id);
+
+        $name = $capture === null ? "cic-issues-{$referenceDate}.csv" : "cic-issues-capture-{$capture->id}-{$referenceDate}.csv";
+
+        return $this->streamCsv($name, $headers, $rows, responseHeaders: ['Cache-Control' => 'no-store, private']);
+    }
+
+    /**
+     * The issues the filters select, errors first, from the capture or a live build.
+     *
+     * @param  array{reference_date: Carbon, capture: CicCapture|null, record_type: string|null, severity: string|null, page: int}  $filters
+     * @return array{capture: CicCapture|null, set: CicRecordSet|null, matching: list<array<string, mixed>>}
+     */
+    private function matching(array $filters, CicRecordsReader $reader): array
+    {
+        $capture = $filters['capture'];
+        $set = null;
+
+        if ($capture !== null) {
+            $issues = $reader->captureIssues($capture);
+        } else {
+            ['set' => $set, 'issues' => $issues] = $reader->live($filters['reference_date']);
+        }
+
+        $matching = array_values(array_filter($issues, fn (array $i) => ($filters['severity'] === null || $i['severity'] === $filters['severity'])
+            && ($filters['record_type'] === null || $i['record_type'] === $filters['record_type'])));
+
+        return ['capture' => $capture, 'set' => $set, 'matching' => $matching];
+    }
+
+    /** @param  array{record_type: string|null, severity: string|null}  $filters */
+    private static function filterWords(array $filters): string
+    {
+        $parts = array_filter([
+            $filters['severity'] === null ? null : ($filters['severity'] === 'error' ? 'errors only' : 'warnings only'),
+            $filters['record_type'] === null ? null : CicIssueWords::recordType($filters['record_type']).' records only',
+        ]);
+
+        return $parts === [] ? '' : ' ('.implode(', ', $parts).')';
     }
 
     /**
@@ -90,17 +182,20 @@ class CicIssuesController extends CicController
                 }
             }
         } else {
-            CicCaptureRecord::query()->where('capture_id', $captureId)
-                ->where(function ($query) use ($wanted) {
-                    foreach ($wanted as [$type, $key]) {
-                        $query->orWhere(fn ($q) => $q->where('record_type', $type)->where('record_key', $key));
-                    }
-                })
-                ->with(['subject:id,borrower_id', 'loan:id,borrower_id'])
-                ->get(['id', 'record_type', 'record_key', 'cic_subject_id', 'loan_id'])
-                ->each(function (CicCaptureRecord $r) use (&$borrowers) {
-                    $borrowers["{$r->record_type}|{$r->record_key}"] = $r->subject?->borrower_id ?? $r->loan?->borrower_id;
-                });
+            // An export asks for every issue's record, so look them up in chunks.
+            foreach (array_chunk($wanted, 500) as $chunk) {
+                CicCaptureRecord::query()->where('capture_id', $captureId)
+                    ->where(function ($query) use ($chunk) {
+                        foreach ($chunk as [$type, $key]) {
+                            $query->orWhere(fn ($q) => $q->where('record_type', $type)->where('record_key', $key));
+                        }
+                    })
+                    ->with(['subject:id,borrower_id', 'loan:id,borrower_id'])
+                    ->get(['id', 'record_type', 'record_key', 'cic_subject_id', 'loan_id'])
+                    ->each(function (CicCaptureRecord $r) use (&$borrowers) {
+                        $borrowers["{$r->record_type}|{$r->record_key}"] = $r->subject?->borrower_id ?? $r->loan?->borrower_id;
+                    });
+            }
         }
 
         $members = CicRecordsReader::members(array_values($borrowers));
