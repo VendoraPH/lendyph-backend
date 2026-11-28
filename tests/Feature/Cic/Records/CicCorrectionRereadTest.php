@@ -143,6 +143,6 @@ it('leaves a held-back loan out again when its closure is recorded after the mon
 
     expect(CicCaptureRecord::query()->where('capture_id', $correction->id)->where('loan_id', $loan->id)->exists())->toBeFalse()
         ->and($correction->left_out)->toHaveCount(1)
-        ->and($correction->left_out[0])->toMatchArray(['code' => 'NO_CLOSING_EVENT', 'severity' => 'error', 'loan_id' => $loan->id])
+        ->and($correction->left_out[0])->toMatchArray(['code' => 'CLOSED_AFTER_REFERENCE_DATE', 'severity' => 'error', 'loan_id' => $loan->id])
         ->and($correction->left_out[0]['message'])->toContain('after this file\'s reference date');
 });

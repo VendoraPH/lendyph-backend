@@ -15,6 +15,7 @@ final class CicIssueWords
         'ADDRESS_TYPE_UNEXPECTED' => 'Unexpected address type',
         'AFTER_FILE_REFERENCE_DATE' => 'Date after the reference date',
         'CLASSIFICATION_MISMATCH' => 'Product mapped to the other record type',
+        'CLOSED_AFTER_REFERENCE_DATE' => 'Closed after the month end; reported next month',
         'CONTRACT_NO_TOO_LONG' => 'Loan number too long',
         'CONTROL_CHARACTER' => 'Control or invisible character',
         'CONTRACT_TYPE_FOR_OTHER_RECORD' => 'Contract codes missing for this record type',

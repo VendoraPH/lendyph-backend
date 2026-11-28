@@ -123,5 +123,6 @@ it('has words for every issue code the checks raise', function () {
 
     expect($codes)->not->toBeEmpty()
         ->and(array_values(array_diff($codes, array_keys(CicIssueWords::CODES))))->toBe([])
-        ->and(CicIssueWords::code('SOMETHING_NEW'))->toBe('CIC format check');
+        ->and(CicIssueWords::code('SOMETHING_NEW'))->toBe('CIC format check')
+        ->and(CicIssueWords::code('CLOSED_AFTER_REFERENCE_DATE'))->toBe('Closed after the month end; reported next month');
 });
