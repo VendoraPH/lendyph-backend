@@ -2,6 +2,7 @@
 
 namespace App\Services\Cic;
 
+use Illuminate\Support\Facades\Cache;
 use App\Models\CicCapture;
 use App\Models\CicCaptureRecord;
 use App\Models\CicSetting;
@@ -74,8 +75,30 @@ final class CicValidator implements ValidatesCicCapture
 
     private const PHASE_LABEL = ['RQ' => 'Requested', 'RN' => 'Renounced', 'RF' => 'Refused', 'AC' => 'Active', 'CL' => 'Closed', 'CA' => 'Closed in advance'];
 
-    /** @return list<Issue> */
+    /** How long a complete capture's issues are kept (a capture never changes; settings are in the key). */
+    public const CACHE_SECONDS = 86400;
+
+    /**
+     * A capture's issues. A complete capture's are cached by its id and
+     * checksum, and the settings they're checked against (security review
+     * S-M2): a complete capture never changes.
+     *
+     * @return list<Issue>
+     */
     public function issues(CicCapture $capture): array
+    {
+        if (! $capture->isComplete() || $capture->checksum === null) {
+            return $this->captureIssues($capture);
+        }
+
+        $setting = CicSetting::current();
+        $key = sprintf('cic:validation:%d:%s:%s', $capture->id, $capture->checksum, hash('sha256', json_encode([$setting->provider_code, (bool) $setting->is_mfi], JSON_THROW_ON_ERROR)));
+
+        return Cache::remember($key, self::CACHE_SECONDS, fn () => $this->captureIssues($capture));
+    }
+
+    /** @return list<Issue> */
+    private function captureIssues(CicCapture $capture): array
     {
         $setting = CicSetting::current();
         $context = ['mfi' => (bool) $setting->is_mfi, 'provider_code' => CicFormat::text($setting->provider_code), 'reference_date' => CicFormat::date($capture->reference_date)];

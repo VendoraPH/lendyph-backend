@@ -18,11 +18,11 @@ use Illuminate\Support\Facades\Route;
 | 404 while CIC is off or hidden in Menu Visibility.
 */
 Route::prefix('cic')->group(function () {
-    Route::get('/readiness', [CicReadinessController::class, 'show']);
-    Route::get('/records', [CicRecordsController::class, 'index']);
-    Route::get('/records/{type}/{key}', [CicRecordsController::class, 'show'])
+    Route::get('/readiness', [CicReadinessController::class, 'show'])->middleware('throttle:cic');
+    Route::get('/records', [CicRecordsController::class, 'index'])->middleware('throttle:cic');
+    Route::get('/records/{type}/{key}', [CicRecordsController::class, 'show'])->middleware('throttle:cic')
         ->where(['type' => 'ID|CI|CN|NE', 'key' => '[^/]{1,38}']);
-    Route::get('/issues', [CicIssuesController::class, 'index']);
+    Route::get('/issues', [CicIssuesController::class, 'index'])->middleware('throttle:cic');
     Route::get('/issues/export', [CicIssuesController::class, 'export'])->middleware('throttle:exports');
     Route::get('/captures', [CicCapturesController::class, 'index']);
     Route::post('/captures', [CicCapturesController::class, 'store']);

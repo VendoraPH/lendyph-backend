@@ -92,9 +92,9 @@ class CicRecordsController extends CicController
             $issues = $reader->captureIssues($capture);
             [$values, $borrowerId] = [$record['values'], $record['borrower_id']];
         } else {
-            ['set' => $set, 'issues' => $issues] = $reader->live($filters['reference_date']);
-            $found = collect($set->ofType($type))->first(fn (CicRecord $r) => $r->key === $key);
-            abort_if($found === null, 404, 'Not found.');
+            $live = $reader->liveRecord($filters['reference_date'], $type, $key);
+            abort_if($live === null, 404, 'Not found.');
+            ['record' => $found, 'issues' => $issues] = $live;
             [$values, $borrowerId] = [$found->values, $found->borrowerId];
         }
 
