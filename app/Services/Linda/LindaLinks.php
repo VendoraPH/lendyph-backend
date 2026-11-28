@@ -50,6 +50,16 @@ final class LindaLinks
         'cda_documents' => ['label' => 'Open Compliance Documents', 'url' => '/cda/documents', 'needs' => ['cda:view', 'branches:view_all']],
         // Finish run round 2: the Credit Scoring dashboard.
         'credit_scoring' => ['label' => 'Open Credit Scoring Dashboard', 'url' => '/credit-scoring', 'needs' => ['credit_scoring:view']],
+        // CIC Reporting: each page's own permission plus every branch, as its page
+        // guard and its API need. Left out while CIC is off (LindaVisibility).
+        'cic_readiness' => ['label' => 'Open Data Readiness', 'url' => '/cic', 'needs' => ['cic:view', 'branches:view_all']],
+        'cic_subjects' => ['label' => 'Open Subject Records', 'url' => '/cic/subjects', 'needs' => ['cic:view', 'branches:view_all']],
+        'cic_contracts' => ['label' => 'Open Contract Records', 'url' => '/cic/contracts', 'needs' => ['cic:view', 'branches:view_all']],
+        'cic_issues' => ['label' => 'Open Issues', 'url' => '/cic/issues', 'needs' => ['cic:view', 'branches:view_all']],
+        'cic_generate' => ['label' => 'Open Generate Report', 'url' => '/cic/generate', 'needs' => ['cic:prepare', 'branches:view_all']],
+        'cic_corrections' => ['label' => 'Open Corrections', 'url' => '/cic/corrections', 'needs' => ['cic:view', 'branches:view_all']],
+        'cic_submissions' => ['label' => 'Open Submission History', 'url' => '/cic/submissions', 'needs' => ['cic:view', 'branches:view_all']],
+        'cic_settings' => ['label' => 'Open CIC Settings', 'url' => '/settings/cic', 'needs' => ['cic:settings', 'branches:view_all']],
     ];
 
     /**
