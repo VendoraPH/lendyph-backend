@@ -12,9 +12,10 @@ final class CicRecordSet
     public readonly array $byType;
 
     /**
+     * `$leftOut`: the loans the build left out of the file, as issues in words.
+     *
      * @param  array<string, list<CicRecord>>  $byType
      * @param  list<array{record_type: string, record_key: string, field_id: string|null, severity: string, code: string, message: string}>  $leftOut
-     *                                                                                                                                         the loans the build left out of the file, as issues in words
      */
     public function __construct(public readonly CicBuildContext $context, array $byType, public readonly array $leftOut = [])
     {

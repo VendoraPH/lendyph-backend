@@ -2,7 +2,6 @@
 
 namespace App\Services\Cic;
 
-use Illuminate\Support\Facades\Cache;
 use App\Models\CicCapture;
 use App\Models\CicCaptureRecord;
 use App\Models\CicSetting;
@@ -10,6 +9,7 @@ use App\Services\Cic\Contracts\ValidatesCicCapture;
 use App\Services\Cic\Records\CicFormat;
 use App\Services\Cic\Records\CicRecord;
 use App\Services\Cic\Records\CicRecordSet;
+use Illuminate\Support\Facades\Cache;
 
 /**
  * The server's authoritative CSDF 2016 checks, ported from frontend #699's
