@@ -4,6 +4,13 @@ use App\Models\AccountingAccount;
 use App\Models\AccountingAccountMapping;
 use App\Models\AccountingJournal;
 use App\Models\Borrower;
+use App\Models\CicCapture;
+use App\Models\CicCodeMapping;
+use App\Models\CicLoanOverride;
+use App\Models\CicProductMapping;
+use App\Models\CicPublicKey;
+use App\Models\CicSetting;
+use App\Models\CicSubmission;
 use App\Models\CoMaker;
 use App\Models\CsvImportRun;
 use App\Models\GCashNonMember;
@@ -44,6 +51,13 @@ function explicitAuditWriters(): array
         AccountingJournal::class,        // RecordOpeningBalances
         Borrower::class,                 // PruneAbandonedRegistrations, DocumentController
         CoMaker::class,                  // DocumentController (a document's owner)
+        CicCapture::class,               // CicCaptureService
+        CicCodeMapping::class,           // CicCodeMappingService
+        CicLoanOverride::class,          // CicLoanOverrideService
+        CicProductMapping::class,        // CicProductMappingService
+        CicPublicKey::class,             // CicPublicKeyService
+        CicSetting::class,               // CicSettingsService
+        CicSubmission::class,            // CicSubmissionService
         CsvImportRun::class,             // CsvImportMappingController, CsvImportProcessor
         GCashNonMember::class,           // GCashNonMemberController
         GCashTransaction::class,         // GCashService, GCashCashInPaidAtBackfill, BranchAttributionBackfill

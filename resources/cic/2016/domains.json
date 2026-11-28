@@ -1,0 +1,3282 @@
+{
+    "AddressTypeDomain": [
+        {
+            "code": "MI",
+            "label": "Individual - Main Address (Residence, Permanent)"
+        },
+        {
+            "code": "AI",
+            "label": "Individual - Additional Address (Mailing)"
+        }
+    ],
+    "AnnualMonthlyDomain": [
+        {
+            "code": "M",
+            "label": "Monthly"
+        },
+        {
+            "code": "Y",
+            "label": "Annual"
+        }
+    ],
+    "CC:ContractStatusDomain": [
+        {
+            "code": "",
+            "label": "No info / Inactive"
+        },
+        {
+            "code": "DS",
+            "label": "Previous delinquency settled"
+        },
+        {
+            "code": "VS",
+            "label": "Voluntary surrender. No Renewal"
+        },
+        {
+            "code": "PA",
+            "label": "Pre-Activated"
+        },
+        {
+            "code": "DA",
+            "label": "Debt Assumption"
+        },
+        {
+            "code": "NS",
+            "label": "There are unpaid amounts, Negotiated Settlement"
+        },
+        {
+            "code": "PD",
+            "label": "Past Due"
+        },
+        {
+            "code": "DI",
+            "label": "Dispute / Litigation contested"
+        },
+        {
+            "code": "RP",
+            "label": "Repossession"
+        },
+        {
+            "code": "FC",
+            "label": "Foreclosure"
+        },
+        {
+            "code": "BC",
+            "label": "Blocked by the Bank due to Credit Reasons"
+        },
+        {
+            "code": "BF",
+            "label": "Blocked by the Bank due to fraud"
+        },
+        {
+            "code": "BL",
+            "label": "Blocked by the Bank due to card lost/stolen"
+        },
+        {
+            "code": "CV",
+            "label": "Blocked or Closed voluntary by the Customer"
+        },
+        {
+            "code": "CR",
+            "label": "Blocked or Closed due to Restructuring"
+        },
+        {
+            "code": "WO",
+            "label": "Write-off (BLW)"
+        },
+        {
+            "code": "WF",
+            "label": "Write-off and Fully Settled"
+        },
+        {
+            "code": "LT",
+            "label": "Under litigation / Delinquent"
+        },
+        {
+            "code": "PI",
+            "label": "Passed to Insurance"
+        },
+        {
+            "code": "WC",
+            "label": "Write-off and Credit transferred to third party / Collection"
+        }
+    ],
+    "CC:ContractTypeDomain": [
+        {
+            "code": "30",
+            "label": "Revolving Credit"
+        },
+        {
+            "code": "31",
+            "label": "Credit Card"
+        },
+        {
+            "code": "32",
+            "label": "Credit Card - Shared Limit"
+        },
+        {
+            "code": "33",
+            "label": "Credit Card - MultiCurrency"
+        }
+    ],
+    "CI:ContractStatusDomain": [
+        {
+            "code": "",
+            "label": "No info"
+        },
+        {
+            "code": "DS",
+            "label": "Previous delinquency settled"
+        },
+        {
+            "code": "DA",
+            "label": "Debt Assumption"
+        },
+        {
+            "code": "NS",
+            "label": "There are unpaid amounts, Negotiated Settlement"
+        },
+        {
+            "code": "NP",
+            "label": "Under dispute / non performing"
+        },
+        {
+            "code": "PD",
+            "label": "Past Due"
+        },
+        {
+            "code": "DI",
+            "label": "Dispute / Litigation contested"
+        },
+        {
+            "code": "CI",
+            "label": "Court injunction"
+        },
+        {
+            "code": "RP",
+            "label": "Repossession"
+        },
+        {
+            "code": "FC",
+            "label": "Foreclosure"
+        },
+        {
+            "code": "BR",
+            "label": "Bankruptcy request"
+        },
+        {
+            "code": "CR",
+            "label": "Blocked or Closed due to Restructuring"
+        },
+        {
+            "code": "WO",
+            "label": "Write-off (BLW)"
+        },
+        {
+            "code": "LT",
+            "label": "Under litigation / Delinquent"
+        },
+        {
+            "code": "WC",
+            "label": "Write-off and Credit transferred to third party / Collection"
+        }
+    ],
+    "CI:ContractTypeDomain": [
+        {
+            "code": "10",
+            "label": "Agricultural Loan"
+        },
+        {
+            "code": "11",
+            "label": "Loan Line"
+        },
+        {
+            "code": "12",
+            "label": "Personal Loan"
+        },
+        {
+            "code": "13",
+            "label": "Mortgage/Real Estate"
+        },
+        {
+            "code": "14",
+            "label": "Syndicated Loan"
+        },
+        {
+            "code": "15",
+            "label": "Term Loan"
+        },
+        {
+            "code": "16",
+            "label": "Short Term Loan"
+        },
+        {
+            "code": "17",
+            "label": "Vehicle Loan"
+        },
+        {
+            "code": "18",
+            "label": "Unsecured loan"
+        },
+        {
+            "code": "19",
+            "label": "Home equity loan"
+        },
+        {
+            "code": "20",
+            "label": "Salary loan"
+        },
+        {
+            "code": "21",
+            "label": "Provident Loan"
+        },
+        {
+            "code": "22",
+            "label": "Business Loan"
+        },
+        {
+            "code": "23",
+            "label": "Vehicle leasing"
+        },
+        {
+            "code": "24",
+            "label": "Real estate leasing"
+        },
+        {
+            "code": "25",
+            "label": "Equipment leasing"
+        },
+        {
+            "code": "26",
+            "label": "APEX Loan"
+        },
+        {
+            "code": "27",
+            "label": "Trust Loan"
+        },
+        {
+            "code": "28",
+            "label": "Benefit Loan"
+        },
+        {
+            "code": "29",
+            "label": "Time Loan"
+        },
+        {
+            "code": "60",
+            "label": "Student Loan"
+        }
+    ],
+    "CN:ContractStatusDomain": [
+        {
+            "code": "",
+            "label": "No info"
+        },
+        {
+            "code": "DS",
+            "label": "Previous delinquency settled"
+        },
+        {
+            "code": "DA",
+            "label": "Debt Assumption"
+        },
+        {
+            "code": "NS",
+            "label": "There are unpaid amounts, Negotiated Settlement"
+        },
+        {
+            "code": "NP",
+            "label": "Under dispute / non performing"
+        },
+        {
+            "code": "CI",
+            "label": "Court injunction"
+        },
+        {
+            "code": "RP",
+            "label": "Repossession"
+        },
+        {
+            "code": "FC",
+            "label": "Foreclosure"
+        },
+        {
+            "code": "BR",
+            "label": "Bankruptcy request"
+        },
+        {
+            "code": "WO",
+            "label": "Write-off (BLW)"
+        },
+        {
+            "code": "LT",
+            "label": "Under litigation / Delinquent"
+        },
+        {
+            "code": "WC",
+            "label": "Write-off and Credit transferred to third party / Collection"
+        }
+    ],
+    "CN:ContractTypeDomain": [
+        {
+            "code": "40",
+            "label": "L/C"
+        },
+        {
+            "code": "41",
+            "label": "Export Bills Purchased"
+        },
+        {
+            "code": "42",
+            "label": "Omnibus Line"
+        },
+        {
+            "code": "43",
+            "label": "Commercial Paper Purchased"
+        },
+        {
+            "code": "44",
+            "label": "InterBank Call Loan"
+        },
+        {
+            "code": "45",
+            "label": "Money Market"
+        },
+        {
+            "code": "46",
+            "label": "SWAP Loan"
+        },
+        {
+            "code": "47",
+            "label": "Domestic Bills Purchased – Case to Case"
+        },
+        {
+            "code": "48",
+            "label": "Demand Loan – Case to Case"
+        },
+        {
+            "code": "49",
+            "label": "Foreign Bills Purchased – Case to Case"
+        }
+    ],
+    "CardPremiumDomain": [
+        {
+            "code": "0",
+            "label": "Non Premium"
+        },
+        {
+            "code": "1",
+            "label": "Premium"
+        }
+    ],
+    "CivilStatusDomain": [
+        {
+            "code": "1",
+            "label": "Single"
+        },
+        {
+            "code": "2",
+            "label": "Married"
+        },
+        {
+            "code": "3",
+            "label": "Divorced/Separated"
+        },
+        {
+            "code": "4",
+            "label": "Widow"
+        }
+    ],
+    "CompanyRoleDomain": [
+        {
+            "code": "P",
+            "label": "Partner"
+        },
+        {
+            "code": "D",
+            "label": "Director"
+        },
+        {
+            "code": "O",
+            "label": "Officer"
+        },
+        {
+            "code": "H",
+            "label": "Stockholder"
+        },
+        {
+            "code": "R",
+            "label": "Related Interest"
+        },
+        {
+            "code": "A",
+            "label": "Affiliate (share of the holding/mother company is from 10% to not more than 50%)"
+        },
+        {
+            "code": "S",
+            "label": "Subsidiary (share of the holding/mother company is not less than 51%)"
+        },
+        {
+            "code": "M",
+            "label": "Parent Company"
+        }
+    ],
+    "ContactTypeDomain": [
+        {
+            "code": "1",
+            "label": "Main phone"
+        },
+        {
+            "code": "2",
+            "label": "Additional phone"
+        },
+        {
+            "code": "3",
+            "label": "Mobile phone"
+        },
+        {
+            "code": "4",
+            "label": "Additional Mobile phone"
+        },
+        {
+            "code": "5",
+            "label": "Fax"
+        },
+        {
+            "code": "6",
+            "label": "Additional Fax"
+        },
+        {
+            "code": "7",
+            "label": "E-mail"
+        },
+        {
+            "code": "8",
+            "label": "Additional e-mail"
+        },
+        {
+            "code": "9",
+            "label": "Social Network Link"
+        }
+    ],
+    "ContractPhaseDomain": [
+        {
+            "code": "RQ",
+            "label": "Requested"
+        },
+        {
+            "code": "RN",
+            "label": "Renounced"
+        },
+        {
+            "code": "RF",
+            "label": "Refused"
+        },
+        {
+            "code": "AC",
+            "label": "Active"
+        },
+        {
+            "code": "CL",
+            "label": "Closed"
+        },
+        {
+            "code": "CA",
+            "label": "Closed in advance"
+        }
+    ],
+    "CountryDomain": [
+        {
+            "code": "AF",
+            "label": null
+        },
+        {
+            "code": "AX",
+            "label": null
+        },
+        {
+            "code": "AL",
+            "label": null
+        },
+        {
+            "code": "DZ",
+            "label": null
+        },
+        {
+            "code": "AS",
+            "label": null
+        },
+        {
+            "code": "AD",
+            "label": null
+        },
+        {
+            "code": "AO",
+            "label": null
+        },
+        {
+            "code": "AI",
+            "label": null
+        },
+        {
+            "code": "AQ",
+            "label": null
+        },
+        {
+            "code": "AG",
+            "label": null
+        },
+        {
+            "code": "AR",
+            "label": null
+        },
+        {
+            "code": "AM",
+            "label": null
+        },
+        {
+            "code": "AW",
+            "label": null
+        },
+        {
+            "code": "AU",
+            "label": null
+        },
+        {
+            "code": "AT",
+            "label": null
+        },
+        {
+            "code": "AZ",
+            "label": null
+        },
+        {
+            "code": "BS",
+            "label": null
+        },
+        {
+            "code": "BH",
+            "label": null
+        },
+        {
+            "code": "BD",
+            "label": null
+        },
+        {
+            "code": "BB",
+            "label": null
+        },
+        {
+            "code": "BY",
+            "label": null
+        },
+        {
+            "code": "BE",
+            "label": null
+        },
+        {
+            "code": "BZ",
+            "label": null
+        },
+        {
+            "code": "BJ",
+            "label": null
+        },
+        {
+            "code": "BM",
+            "label": null
+        },
+        {
+            "code": "BT",
+            "label": null
+        },
+        {
+            "code": "BO",
+            "label": null
+        },
+        {
+            "code": "BA",
+            "label": null
+        },
+        {
+            "code": "BW",
+            "label": null
+        },
+        {
+            "code": "BV",
+            "label": null
+        },
+        {
+            "code": "BR",
+            "label": null
+        },
+        {
+            "code": "IO",
+            "label": null
+        },
+        {
+            "code": "BN",
+            "label": null
+        },
+        {
+            "code": "BG",
+            "label": null
+        },
+        {
+            "code": "BF",
+            "label": null
+        },
+        {
+            "code": "BI",
+            "label": null
+        },
+        {
+            "code": "KH",
+            "label": null
+        },
+        {
+            "code": "CM",
+            "label": null
+        },
+        {
+            "code": "CA",
+            "label": null
+        },
+        {
+            "code": "CV",
+            "label": null
+        },
+        {
+            "code": "KY",
+            "label": null
+        },
+        {
+            "code": "CF",
+            "label": null
+        },
+        {
+            "code": "TD",
+            "label": null
+        },
+        {
+            "code": "CL",
+            "label": null
+        },
+        {
+            "code": "CN",
+            "label": null
+        },
+        {
+            "code": "CX",
+            "label": null
+        },
+        {
+            "code": "CC",
+            "label": null
+        },
+        {
+            "code": "CO",
+            "label": null
+        },
+        {
+            "code": "KM",
+            "label": null
+        },
+        {
+            "code": "CG",
+            "label": null
+        },
+        {
+            "code": "CD",
+            "label": null
+        },
+        {
+            "code": "CK",
+            "label": null
+        },
+        {
+            "code": "CR",
+            "label": null
+        },
+        {
+            "code": "CI",
+            "label": null
+        },
+        {
+            "code": "HR",
+            "label": null
+        },
+        {
+            "code": "CU",
+            "label": null
+        },
+        {
+            "code": "CY",
+            "label": null
+        },
+        {
+            "code": "CZ",
+            "label": null
+        },
+        {
+            "code": "DK",
+            "label": null
+        },
+        {
+            "code": "DJ",
+            "label": null
+        },
+        {
+            "code": "DM",
+            "label": null
+        },
+        {
+            "code": "DO",
+            "label": null
+        },
+        {
+            "code": "TP",
+            "label": null
+        },
+        {
+            "code": "EC",
+            "label": null
+        },
+        {
+            "code": "EG",
+            "label": null
+        },
+        {
+            "code": "SV",
+            "label": null
+        },
+        {
+            "code": "GQ",
+            "label": null
+        },
+        {
+            "code": "ER",
+            "label": null
+        },
+        {
+            "code": "EE",
+            "label": null
+        },
+        {
+            "code": "ET",
+            "label": null
+        },
+        {
+            "code": "FK",
+            "label": null
+        },
+        {
+            "code": "FO",
+            "label": null
+        },
+        {
+            "code": "FJ",
+            "label": null
+        },
+        {
+            "code": "FI",
+            "label": null
+        },
+        {
+            "code": "FR",
+            "label": null
+        },
+        {
+            "code": "GF",
+            "label": null
+        },
+        {
+            "code": "PF",
+            "label": null
+        },
+        {
+            "code": "TF",
+            "label": null
+        },
+        {
+            "code": "GA",
+            "label": null
+        },
+        {
+            "code": "GM",
+            "label": null
+        },
+        {
+            "code": "GE",
+            "label": null
+        },
+        {
+            "code": "DE",
+            "label": null
+        },
+        {
+            "code": "GH",
+            "label": null
+        },
+        {
+            "code": "GI",
+            "label": null
+        },
+        {
+            "code": "GR",
+            "label": null
+        },
+        {
+            "code": "GL",
+            "label": null
+        },
+        {
+            "code": "GD",
+            "label": null
+        },
+        {
+            "code": "GP",
+            "label": null
+        },
+        {
+            "code": "GU",
+            "label": null
+        },
+        {
+            "code": "GT",
+            "label": null
+        },
+        {
+            "code": "GG",
+            "label": null
+        },
+        {
+            "code": "GN",
+            "label": null
+        },
+        {
+            "code": "GW",
+            "label": null
+        },
+        {
+            "code": "GY",
+            "label": null
+        },
+        {
+            "code": "HT",
+            "label": null
+        },
+        {
+            "code": "HM",
+            "label": null
+        },
+        {
+            "code": "VA",
+            "label": null
+        },
+        {
+            "code": "HN",
+            "label": null
+        },
+        {
+            "code": "HK",
+            "label": null
+        },
+        {
+            "code": "HU",
+            "label": null
+        },
+        {
+            "code": "IS",
+            "label": null
+        },
+        {
+            "code": "IN",
+            "label": null
+        },
+        {
+            "code": "ID",
+            "label": null
+        },
+        {
+            "code": "IR",
+            "label": null
+        },
+        {
+            "code": "IQ",
+            "label": null
+        },
+        {
+            "code": "IE",
+            "label": null
+        },
+        {
+            "code": "IL",
+            "label": null
+        },
+        {
+            "code": "IT",
+            "label": null
+        },
+        {
+            "code": "JM",
+            "label": null
+        },
+        {
+            "code": "JP",
+            "label": null
+        },
+        {
+            "code": "JE",
+            "label": null
+        },
+        {
+            "code": "JO",
+            "label": null
+        },
+        {
+            "code": "KZ",
+            "label": null
+        },
+        {
+            "code": "KE",
+            "label": null
+        },
+        {
+            "code": "KI",
+            "label": null
+        },
+        {
+            "code": "KP",
+            "label": null
+        },
+        {
+            "code": "KR",
+            "label": null
+        },
+        {
+            "code": "KW",
+            "label": null
+        },
+        {
+            "code": "KG",
+            "label": null
+        },
+        {
+            "code": "LA",
+            "label": null
+        },
+        {
+            "code": "LV",
+            "label": null
+        },
+        {
+            "code": "LB",
+            "label": null
+        },
+        {
+            "code": "LS",
+            "label": null
+        },
+        {
+            "code": "LR",
+            "label": null
+        },
+        {
+            "code": "LY",
+            "label": null
+        },
+        {
+            "code": "LI",
+            "label": null
+        },
+        {
+            "code": "LT",
+            "label": null
+        },
+        {
+            "code": "LU",
+            "label": null
+        },
+        {
+            "code": "MO",
+            "label": null
+        },
+        {
+            "code": "MK",
+            "label": null
+        },
+        {
+            "code": "MG",
+            "label": null
+        },
+        {
+            "code": "MW",
+            "label": null
+        },
+        {
+            "code": "MY",
+            "label": null
+        },
+        {
+            "code": "MV",
+            "label": null
+        },
+        {
+            "code": "ML",
+            "label": null
+        },
+        {
+            "code": "MT",
+            "label": null
+        },
+        {
+            "code": "IM",
+            "label": null
+        },
+        {
+            "code": "MH",
+            "label": null
+        },
+        {
+            "code": "MQ",
+            "label": null
+        },
+        {
+            "code": "MR",
+            "label": null
+        },
+        {
+            "code": "MU",
+            "label": null
+        },
+        {
+            "code": "YT",
+            "label": null
+        },
+        {
+            "code": "ME",
+            "label": null
+        },
+        {
+            "code": "MX",
+            "label": null
+        },
+        {
+            "code": "FM",
+            "label": null
+        },
+        {
+            "code": "MD",
+            "label": null
+        },
+        {
+            "code": "MC",
+            "label": null
+        },
+        {
+            "code": "MN",
+            "label": null
+        },
+        {
+            "code": "MS",
+            "label": null
+        },
+        {
+            "code": "MA",
+            "label": null
+        },
+        {
+            "code": "MZ",
+            "label": null
+        },
+        {
+            "code": "MM",
+            "label": null
+        },
+        {
+            "code": "NA",
+            "label": null
+        },
+        {
+            "code": "NR",
+            "label": null
+        },
+        {
+            "code": "NP",
+            "label": null
+        },
+        {
+            "code": "NL",
+            "label": null
+        },
+        {
+            "code": "AN",
+            "label": null
+        },
+        {
+            "code": "NC",
+            "label": null
+        },
+        {
+            "code": "NZ",
+            "label": null
+        },
+        {
+            "code": "NI",
+            "label": null
+        },
+        {
+            "code": "NE",
+            "label": null
+        },
+        {
+            "code": "NG",
+            "label": null
+        },
+        {
+            "code": "NU",
+            "label": null
+        },
+        {
+            "code": "NF",
+            "label": null
+        },
+        {
+            "code": "MP",
+            "label": null
+        },
+        {
+            "code": "NO",
+            "label": null
+        },
+        {
+            "code": "OM",
+            "label": null
+        },
+        {
+            "code": "PK",
+            "label": null
+        },
+        {
+            "code": "PW",
+            "label": null
+        },
+        {
+            "code": "PS",
+            "label": null
+        },
+        {
+            "code": "PA",
+            "label": null
+        },
+        {
+            "code": "PG",
+            "label": null
+        },
+        {
+            "code": "PY",
+            "label": null
+        },
+        {
+            "code": "PE",
+            "label": null
+        },
+        {
+            "code": "PH",
+            "label": null
+        },
+        {
+            "code": "PN",
+            "label": null
+        },
+        {
+            "code": "PL",
+            "label": null
+        },
+        {
+            "code": "PT",
+            "label": null
+        },
+        {
+            "code": "PR",
+            "label": null
+        },
+        {
+            "code": "QA",
+            "label": null
+        },
+        {
+            "code": "RE",
+            "label": null
+        },
+        {
+            "code": "RO",
+            "label": null
+        },
+        {
+            "code": "RU",
+            "label": null
+        },
+        {
+            "code": "RW",
+            "label": null
+        },
+        {
+            "code": "BL",
+            "label": null
+        },
+        {
+            "code": "SH",
+            "label": null
+        },
+        {
+            "code": "KN",
+            "label": null
+        },
+        {
+            "code": "LC",
+            "label": null
+        },
+        {
+            "code": "MF",
+            "label": null
+        },
+        {
+            "code": "PM",
+            "label": null
+        },
+        {
+            "code": "VC",
+            "label": null
+        },
+        {
+            "code": "WS",
+            "label": null
+        },
+        {
+            "code": "SM",
+            "label": null
+        },
+        {
+            "code": "ST",
+            "label": null
+        },
+        {
+            "code": "SA",
+            "label": null
+        },
+        {
+            "code": "SN",
+            "label": null
+        },
+        {
+            "code": "CS",
+            "label": null
+        },
+        {
+            "code": "RS",
+            "label": null
+        },
+        {
+            "code": "SC",
+            "label": null
+        },
+        {
+            "code": "SL",
+            "label": null
+        },
+        {
+            "code": "SG",
+            "label": null
+        },
+        {
+            "code": "SK",
+            "label": null
+        },
+        {
+            "code": "SI",
+            "label": null
+        },
+        {
+            "code": "SB",
+            "label": null
+        },
+        {
+            "code": "SO",
+            "label": null
+        },
+        {
+            "code": "ZA",
+            "label": null
+        },
+        {
+            "code": "GS",
+            "label": null
+        },
+        {
+            "code": "ES",
+            "label": null
+        },
+        {
+            "code": "LK",
+            "label": null
+        },
+        {
+            "code": "SD",
+            "label": null
+        },
+        {
+            "code": "SR",
+            "label": null
+        },
+        {
+            "code": "SJ",
+            "label": null
+        },
+        {
+            "code": "SZ",
+            "label": null
+        },
+        {
+            "code": "SE",
+            "label": null
+        },
+        {
+            "code": "CH",
+            "label": null
+        },
+        {
+            "code": "SY",
+            "label": null
+        },
+        {
+            "code": "TW",
+            "label": null
+        },
+        {
+            "code": "TJ",
+            "label": null
+        },
+        {
+            "code": "TZ",
+            "label": null
+        },
+        {
+            "code": "TL",
+            "label": null
+        },
+        {
+            "code": "TH",
+            "label": null
+        },
+        {
+            "code": "TG",
+            "label": null
+        },
+        {
+            "code": "TK",
+            "label": null
+        },
+        {
+            "code": "TO",
+            "label": null
+        },
+        {
+            "code": "TT",
+            "label": null
+        },
+        {
+            "code": "TN",
+            "label": null
+        },
+        {
+            "code": "TR",
+            "label": null
+        },
+        {
+            "code": "TM",
+            "label": null
+        },
+        {
+            "code": "TC",
+            "label": null
+        },
+        {
+            "code": "TV",
+            "label": null
+        },
+        {
+            "code": "UG",
+            "label": null
+        },
+        {
+            "code": "UA",
+            "label": null
+        },
+        {
+            "code": "AE",
+            "label": null
+        },
+        {
+            "code": "GB",
+            "label": null
+        },
+        {
+            "code": "US",
+            "label": null
+        },
+        {
+            "code": "UM",
+            "label": null
+        },
+        {
+            "code": "UY",
+            "label": null
+        },
+        {
+            "code": "UZ",
+            "label": null
+        },
+        {
+            "code": "VU",
+            "label": null
+        },
+        {
+            "code": "VE",
+            "label": null
+        },
+        {
+            "code": "VN",
+            "label": null
+        },
+        {
+            "code": "VG",
+            "label": null
+        },
+        {
+            "code": "VI",
+            "label": null
+        },
+        {
+            "code": "WF",
+            "label": null
+        },
+        {
+            "code": "EH",
+            "label": null
+        },
+        {
+            "code": "YE",
+            "label": null
+        },
+        {
+            "code": "YU",
+            "label": null
+        },
+        {
+            "code": "ZM",
+            "label": null
+        },
+        {
+            "code": "ZW",
+            "label": null
+        }
+    ],
+    "CreditPurposeDomain": [
+        {
+            "code": "10",
+            "label": "Loan to Government - National Government"
+        },
+        {
+            "code": "11",
+            "label": "Loan to Government - LGUs"
+        },
+        {
+            "code": "12",
+            "label": "Loan to Government - GOCCs (Social Security Institutions)"
+        },
+        {
+            "code": "13",
+            "label": "Loan to Government - GOCCs (Other Financial)"
+        },
+        {
+            "code": "14",
+            "label": "Loan to Government - GOCCs (Non-Financial)"
+        },
+        {
+            "code": "15",
+            "label": "Agrarian Reform"
+        },
+        {
+            "code": "16",
+            "label": "Other Agricultural Credit"
+        },
+        {
+            "code": "17",
+            "label": "Development Loan Incentives - Educational Inst."
+        },
+        {
+            "code": "18",
+            "label": "Development Loan Incentives - Cooperatives"
+        },
+        {
+            "code": "19",
+            "label": "Development Loan Incentives - Hospital and Medical Serivces"
+        },
+        {
+            "code": "20",
+            "label": "Development Loan Incentives - Socialized Low Cost Housing ( Contract to Sell)"
+        },
+        {
+            "code": "21",
+            "label": "Development Loan Incentives - Socialized Low Cost Housing (Loans to individuals for housing purposes )"
+        },
+        {
+            "code": "22",
+            "label": "Development Loan Incentives - Socialized Low Cost Housing (Others)"
+        },
+        {
+            "code": "23",
+            "label": "Microfinance Loans"
+        },
+        {
+            "code": "24",
+            "label": "Small and Medium Enterprise Loans (Small Scale Enterprise)"
+        },
+        {
+            "code": "25",
+            "label": "Small and Medium Enterprise Loans (Medium Scale Enterprise)"
+        },
+        {
+            "code": "26",
+            "label": "Contract to Sell"
+        },
+        {
+            "code": "27",
+            "label": "Loans to Private Corporation (Financial)"
+        },
+        {
+            "code": "28",
+            "label": "Loans to Private Corporation (Non-Financial)"
+        },
+        {
+            "code": "29",
+            "label": "Loans to Individual for Consumption Purposes - Credit Card"
+        },
+        {
+            "code": "30",
+            "label": "Loans to Individual for Consumption Purposes - Auto Loans"
+        },
+        {
+            "code": "31",
+            "label": "Loans to Individual for Consumption Purposes - Others"
+        },
+        {
+            "code": "32",
+            "label": "Loans to Individual for other purposes"
+        }
+    ],
+    "CurrencyDomain": [
+        {
+            "code": "AED",
+            "label": null
+        },
+        {
+            "code": "AFN",
+            "label": null
+        },
+        {
+            "code": "ALL",
+            "label": null
+        },
+        {
+            "code": "AMD",
+            "label": null
+        },
+        {
+            "code": "ANG",
+            "label": null
+        },
+        {
+            "code": "AOA",
+            "label": null
+        },
+        {
+            "code": "ARS",
+            "label": null
+        },
+        {
+            "code": "AUD",
+            "label": null
+        },
+        {
+            "code": "AWG",
+            "label": null
+        },
+        {
+            "code": "AZN",
+            "label": null
+        },
+        {
+            "code": "BAM",
+            "label": null
+        },
+        {
+            "code": "BBD",
+            "label": null
+        },
+        {
+            "code": "BDT",
+            "label": null
+        },
+        {
+            "code": "BGN",
+            "label": null
+        },
+        {
+            "code": "BHD",
+            "label": null
+        },
+        {
+            "code": "BIF",
+            "label": null
+        },
+        {
+            "code": "BMD",
+            "label": null
+        },
+        {
+            "code": "BND",
+            "label": null
+        },
+        {
+            "code": "BOB",
+            "label": null
+        },
+        {
+            "code": "BOV",
+            "label": null
+        },
+        {
+            "code": "BRL",
+            "label": null
+        },
+        {
+            "code": "BSD",
+            "label": null
+        },
+        {
+            "code": "BTN",
+            "label": null
+        },
+        {
+            "code": "BWP",
+            "label": null
+        },
+        {
+            "code": "BYR",
+            "label": null
+        },
+        {
+            "code": "BZD",
+            "label": null
+        },
+        {
+            "code": "CAD",
+            "label": null
+        },
+        {
+            "code": "CDF",
+            "label": null
+        },
+        {
+            "code": "CHE",
+            "label": null
+        },
+        {
+            "code": "CHF",
+            "label": null
+        },
+        {
+            "code": "CHW",
+            "label": null
+        },
+        {
+            "code": "CLF",
+            "label": null
+        },
+        {
+            "code": "CLP",
+            "label": null
+        },
+        {
+            "code": "CNY",
+            "label": null
+        },
+        {
+            "code": "COP",
+            "label": null
+        },
+        {
+            "code": "COU",
+            "label": null
+        },
+        {
+            "code": "CRC",
+            "label": null
+        },
+        {
+            "code": "CUC",
+            "label": null
+        },
+        {
+            "code": "CUP",
+            "label": null
+        },
+        {
+            "code": "CVE",
+            "label": null
+        },
+        {
+            "code": "CZK",
+            "label": null
+        },
+        {
+            "code": "DJF",
+            "label": null
+        },
+        {
+            "code": "DKK",
+            "label": null
+        },
+        {
+            "code": "DOP",
+            "label": null
+        },
+        {
+            "code": "DZD",
+            "label": null
+        },
+        {
+            "code": "EEK",
+            "label": null
+        },
+        {
+            "code": "EGP",
+            "label": null
+        },
+        {
+            "code": "ERN",
+            "label": null
+        },
+        {
+            "code": "ETB",
+            "label": null
+        },
+        {
+            "code": "EUR",
+            "label": null
+        },
+        {
+            "code": "FJD",
+            "label": null
+        },
+        {
+            "code": "FKP",
+            "label": null
+        },
+        {
+            "code": "GBP",
+            "label": null
+        },
+        {
+            "code": "GEL",
+            "label": null
+        },
+        {
+            "code": "GHS",
+            "label": null
+        },
+        {
+            "code": "GIP",
+            "label": null
+        },
+        {
+            "code": "GMD",
+            "label": null
+        },
+        {
+            "code": "GNF",
+            "label": null
+        },
+        {
+            "code": "GTQ",
+            "label": null
+        },
+        {
+            "code": "GYD",
+            "label": null
+        },
+        {
+            "code": "HKD",
+            "label": null
+        },
+        {
+            "code": "HNL",
+            "label": null
+        },
+        {
+            "code": "HRK",
+            "label": null
+        },
+        {
+            "code": "HTG",
+            "label": null
+        },
+        {
+            "code": "HUF",
+            "label": null
+        },
+        {
+            "code": "IDR",
+            "label": null
+        },
+        {
+            "code": "ILS",
+            "label": null
+        },
+        {
+            "code": "INR",
+            "label": null
+        },
+        {
+            "code": "IQD",
+            "label": null
+        },
+        {
+            "code": "IRR",
+            "label": null
+        },
+        {
+            "code": "ISK",
+            "label": null
+        },
+        {
+            "code": "JMD",
+            "label": null
+        },
+        {
+            "code": "JOD",
+            "label": null
+        },
+        {
+            "code": "JPY",
+            "label": null
+        },
+        {
+            "code": "KES",
+            "label": null
+        },
+        {
+            "code": "KGS",
+            "label": null
+        },
+        {
+            "code": "KHR",
+            "label": null
+        },
+        {
+            "code": "KMF",
+            "label": null
+        },
+        {
+            "code": "KPW",
+            "label": null
+        },
+        {
+            "code": "KRW",
+            "label": null
+        },
+        {
+            "code": "KWD",
+            "label": null
+        },
+        {
+            "code": "KYD",
+            "label": null
+        },
+        {
+            "code": "KZT",
+            "label": null
+        },
+        {
+            "code": "LAK",
+            "label": null
+        },
+        {
+            "code": "LBP",
+            "label": null
+        },
+        {
+            "code": "LKR",
+            "label": null
+        },
+        {
+            "code": "LRD",
+            "label": null
+        },
+        {
+            "code": "LSL",
+            "label": null
+        },
+        {
+            "code": "LTL",
+            "label": null
+        },
+        {
+            "code": "LVL",
+            "label": null
+        },
+        {
+            "code": "LYD",
+            "label": null
+        },
+        {
+            "code": "MAD",
+            "label": null
+        },
+        {
+            "code": "MDL",
+            "label": null
+        },
+        {
+            "code": "MGA",
+            "label": null
+        },
+        {
+            "code": "MKD",
+            "label": null
+        },
+        {
+            "code": "MMK",
+            "label": null
+        },
+        {
+            "code": "MNT",
+            "label": null
+        },
+        {
+            "code": "MOP",
+            "label": null
+        },
+        {
+            "code": "MRO",
+            "label": null
+        },
+        {
+            "code": "MUR",
+            "label": null
+        },
+        {
+            "code": "MVR",
+            "label": null
+        },
+        {
+            "code": "MWK",
+            "label": null
+        },
+        {
+            "code": "MXN",
+            "label": null
+        },
+        {
+            "code": "MXV",
+            "label": null
+        },
+        {
+            "code": "MYR",
+            "label": null
+        },
+        {
+            "code": "MZN",
+            "label": null
+        },
+        {
+            "code": "NAD",
+            "label": null
+        },
+        {
+            "code": "NGN",
+            "label": null
+        },
+        {
+            "code": "NIO",
+            "label": null
+        },
+        {
+            "code": "NOK",
+            "label": null
+        },
+        {
+            "code": "NPR",
+            "label": null
+        },
+        {
+            "code": "NZD",
+            "label": null
+        },
+        {
+            "code": "OMR",
+            "label": null
+        },
+        {
+            "code": "PAB",
+            "label": null
+        },
+        {
+            "code": "PEN",
+            "label": null
+        },
+        {
+            "code": "PGK",
+            "label": null
+        },
+        {
+            "code": "PHP",
+            "label": null
+        },
+        {
+            "code": "PKR",
+            "label": null
+        },
+        {
+            "code": "PLN",
+            "label": null
+        },
+        {
+            "code": "PYG",
+            "label": null
+        },
+        {
+            "code": "QAR",
+            "label": null
+        },
+        {
+            "code": "RON",
+            "label": null
+        },
+        {
+            "code": "RSD",
+            "label": null
+        },
+        {
+            "code": "RUB",
+            "label": null
+        },
+        {
+            "code": "RWF",
+            "label": null
+        },
+        {
+            "code": "SAR",
+            "label": null
+        },
+        {
+            "code": "SBD",
+            "label": null
+        },
+        {
+            "code": "SCR",
+            "label": null
+        },
+        {
+            "code": "SDG",
+            "label": null
+        },
+        {
+            "code": "SEK",
+            "label": null
+        },
+        {
+            "code": "SGD",
+            "label": null
+        },
+        {
+            "code": "SHP",
+            "label": null
+        },
+        {
+            "code": "SLL",
+            "label": null
+        },
+        {
+            "code": "SOS",
+            "label": null
+        },
+        {
+            "code": "SRD",
+            "label": null
+        },
+        {
+            "code": "STD",
+            "label": null
+        },
+        {
+            "code": "SYP",
+            "label": null
+        },
+        {
+            "code": "SZL",
+            "label": null
+        },
+        {
+            "code": "THB",
+            "label": null
+        },
+        {
+            "code": "TJS",
+            "label": null
+        },
+        {
+            "code": "TMT",
+            "label": null
+        },
+        {
+            "code": "TND",
+            "label": null
+        },
+        {
+            "code": "TOP",
+            "label": null
+        },
+        {
+            "code": "TRY",
+            "label": null
+        },
+        {
+            "code": "TTD",
+            "label": null
+        },
+        {
+            "code": "TWD",
+            "label": null
+        },
+        {
+            "code": "TZS",
+            "label": null
+        },
+        {
+            "code": "UAH",
+            "label": null
+        },
+        {
+            "code": "UGX",
+            "label": null
+        },
+        {
+            "code": "USD",
+            "label": null
+        },
+        {
+            "code": "USN",
+            "label": null
+        },
+        {
+            "code": "USS",
+            "label": null
+        },
+        {
+            "code": "UYU",
+            "label": null
+        },
+        {
+            "code": "UZS",
+            "label": null
+        },
+        {
+            "code": "VEF",
+            "label": null
+        },
+        {
+            "code": "VND",
+            "label": null
+        },
+        {
+            "code": "VUV",
+            "label": null
+        },
+        {
+            "code": "WST",
+            "label": null
+        },
+        {
+            "code": "XAF",
+            "label": null
+        },
+        {
+            "code": "XAG",
+            "label": null
+        },
+        {
+            "code": "XAU",
+            "label": null
+        },
+        {
+            "code": "XBA",
+            "label": null
+        },
+        {
+            "code": "XBB",
+            "label": null
+        },
+        {
+            "code": "XBC",
+            "label": null
+        },
+        {
+            "code": "XBD",
+            "label": null
+        },
+        {
+            "code": "XCD",
+            "label": null
+        },
+        {
+            "code": "XDR",
+            "label": null
+        },
+        {
+            "code": "XFU",
+            "label": null
+        },
+        {
+            "code": "XOF",
+            "label": null
+        },
+        {
+            "code": "XPD",
+            "label": null
+        },
+        {
+            "code": "XPF",
+            "label": null
+        },
+        {
+            "code": "XPT",
+            "label": null
+        },
+        {
+            "code": "XTS",
+            "label": null
+        },
+        {
+            "code": "XXX",
+            "label": null
+        },
+        {
+            "code": "YER",
+            "label": null
+        },
+        {
+            "code": "ZAR",
+            "label": null
+        },
+        {
+            "code": "ZMK",
+            "label": null
+        },
+        {
+            "code": "ZWL",
+            "label": null
+        }
+    ],
+    "EventStatusDomain": [
+        {
+            "code": "AC",
+            "label": "Active"
+        },
+        {
+            "code": "CL",
+            "label": "Closed / Settled"
+        }
+    ],
+    "FirmSizeDomain": [
+        {
+            "code": "O",
+            "label": "Micro (<= 3M)"
+        },
+        {
+            "code": "S",
+            "label": "Small (> 3M up to <= 15M)"
+        },
+        {
+            "code": "M",
+            "label": "Medium (>15M up to <=100M)"
+        },
+        {
+            "code": "L",
+            "label": "Large (>100M)"
+        }
+    ],
+    "GenderDomain": [
+        {
+            "code": "M",
+            "label": "Male"
+        },
+        {
+            "code": "F",
+            "label": "Female"
+        }
+    ],
+    "GoodTypeDomain": [
+        {
+            "code": "10",
+            "label": "Agricultural Equipment"
+        },
+        {
+            "code": "11",
+            "label": "Aircraft"
+        },
+        {
+            "code": "12",
+            "label": "Appliance"
+        },
+        {
+            "code": "13",
+            "label": "Auxiliary Equipment"
+        },
+        {
+            "code": "14",
+            "label": "Bus/Mass transportation"
+        },
+        {
+            "code": "15",
+            "label": "Cars"
+        },
+        {
+            "code": "16",
+            "label": "Other Land Transportation Equipment"
+        },
+        {
+            "code": "17",
+            "label": "Truck"
+        },
+        {
+            "code": "18",
+            "label": "Computer / Peripheral"
+        },
+        {
+            "code": "19",
+            "label": "Office Equipment / BPO Equipment"
+        },
+        {
+            "code": "20",
+            "label": "Contruction / Heavy Mining Equipment"
+        },
+        {
+            "code": "21",
+            "label": "Furniture / Fixture"
+        },
+        {
+            "code": "22",
+            "label": "Handling Equipment"
+        },
+        {
+            "code": "23",
+            "label": "Food processing / Production Equipment"
+        },
+        {
+            "code": "24",
+            "label": "Kitchen Equipment"
+        },
+        {
+            "code": "25",
+            "label": "Medical / Dental Equipment"
+        },
+        {
+            "code": "26",
+            "label": "Packaging Equipment"
+        },
+        {
+            "code": "27",
+            "label": "Plastic mfg Equipment"
+        },
+        {
+            "code": "28",
+            "label": "Printing Equipment"
+        },
+        {
+            "code": "29",
+            "label": "Power Equipment"
+        },
+        {
+            "code": "30",
+            "label": "Real Estate"
+        },
+        {
+            "code": "31",
+            "label": "Industrial Equipment"
+        },
+        {
+            "code": "32",
+            "label": "Telecom Equipment"
+        },
+        {
+            "code": "33",
+            "label": "Marine Equipment"
+        },
+        {
+            "code": "34",
+            "label": "Others (Non-Industrial)"
+        }
+    ],
+    "GuaranteeCustomerTypeDomain": [
+        {
+            "code": "D",
+            "label": "Domestic"
+        },
+        {
+            "code": "F",
+            "label": "Foreign"
+        }
+    ],
+    "GuaranteesDomain": [
+        {
+            "code": "100",
+            "label": "Surety / Payment Guarantee"
+        },
+        {
+            "code": "200",
+            "label": "Real Estate Morgage - Insured by HGC"
+        },
+        {
+            "code": "201",
+            "label": "Real Estate Mortgage - Not insured by HGC"
+        },
+        {
+            "code": "202",
+            "label": "Chattel Mortgage"
+        },
+        {
+            "code": "203",
+            "label": "Holdout vs. Peso Deposits/Deposit substitute"
+        },
+        {
+            "code": "204",
+            "label": "Holdout vs. FCDU Deposits/Deposit substitute"
+        },
+        {
+            "code": "205",
+            "label": "Assignment/Pledge of Govt Securities"
+        },
+        {
+            "code": "206",
+            "label": "Cash Margin Deposit"
+        },
+        {
+            "code": "207",
+            "label": "Assignment of Export LC/PO/Sales and/or Service Contract"
+        },
+        {
+            "code": "208",
+            "label": "Guaranteed by National Government (RP)"
+        },
+        {
+            "code": "209",
+            "label": "Guaranteed by Local Government Unit (LGU)"
+        },
+        {
+            "code": "210",
+            "label": "Guaranteed by Philippine Incorporated Bank/Quasi-Bank"
+        },
+        {
+            "code": "211",
+            "label": "Guaranteed by Multilateral Development Banks"
+        },
+        {
+            "code": "212",
+            "label": "Guaranteed by Foreign Incorporated Bank"
+        },
+        {
+            "code": "213",
+            "label": "Guaranteed by non-central government public sector entities of foreign countries"
+        },
+        {
+            "code": "214",
+            "label": "Shares of Stocks of Philippine Incorporated Banks/Quasi-banks- PSE Listed"
+        },
+        {
+            "code": "215",
+            "label": "Shares of Stocks of Philippine Incorporated Banks/Quasi-banks- Unlisted"
+        },
+        {
+            "code": "216",
+            "label": "Shares of Stocks of other Philippine Incorporated Corporations - PSE Listed"
+        },
+        {
+            "code": "217",
+            "label": "Shares of Stocks of other Philippine Incorporated Corporations – Unlisted"
+        },
+        {
+            "code": "218",
+            "label": "Deed of Assignment of Accounts Receivable"
+        },
+        {
+            "code": "219",
+            "label": "Mortgage Trust Indenture"
+        },
+        {
+            "code": "220",
+            "label": "Guaranteed by IGLF"
+        },
+        {
+            "code": "221",
+            "label": "Guaranteed by TIDCORP"
+        },
+        {
+            "code": "222",
+            "label": "Guaranteed by GFSME/SBGFC"
+        },
+        {
+            "code": "223",
+            "label": "Guaranteed by Government Agencies"
+        },
+        {
+            "code": "224",
+            "label": "Securities issued by National Government (RP)"
+        },
+        {
+            "code": "225",
+            "label": "Securities issued by Government Agencies"
+        },
+        {
+            "code": "226",
+            "label": "Securities issued by Local Government Unit (LGU)"
+        },
+        {
+            "code": "227",
+            "label": "Securities issued by SPVs against assignment of A/R (RA 6957)"
+        },
+        {
+            "code": "228",
+            "label": "Securities issued by Philippine Incorporated Bank/Quasi-Bank"
+        },
+        {
+            "code": "229",
+            "label": "Securities issued by Foreign Incorporated Bank"
+        },
+        {
+            "code": "230",
+            "label": "Securities issued by Philippine Incorporated Corporations"
+        },
+        {
+            "code": "231",
+            "label": "Securities issued by Foreign Incorporated Corporations"
+        },
+        {
+            "code": "232",
+            "label": "Securities issued by Multilateral Development Banks"
+        },
+        {
+            "code": "233",
+            "label": "Securities issued by non-central government public sector entities of foreign countries"
+        },
+        {
+            "code": "234",
+            "label": "Other secured guarantee"
+        }
+    ],
+    "HouseOwnerLesseeTypeDomain": [
+        {
+            "code": "1",
+            "label": "Own"
+        },
+        {
+            "code": "2",
+            "label": "Rent"
+        },
+        {
+            "code": "3",
+            "label": "Lease"
+        },
+        {
+            "code": "4",
+            "label": "Other"
+        }
+    ],
+    "IDTypeDomain": [
+        {
+            "code": "10",
+            "label": "Driver’s License"
+        },
+        {
+            "code": "11",
+            "label": "VIN"
+        },
+        {
+            "code": "12",
+            "label": "Passport ID"
+        },
+        {
+            "code": "13",
+            "label": "PRC ID"
+        },
+        {
+            "code": "14",
+            "label": "NBI"
+        },
+        {
+            "code": "15",
+            "label": "Police clearance"
+        },
+        {
+            "code": "16",
+            "label": "Postal ID"
+        },
+        {
+            "code": "17",
+            "label": "Barangay certification"
+        },
+        {
+            "code": "18",
+            "label": "OWWA ID"
+        },
+        {
+            "code": "19",
+            "label": "OFW ID"
+        },
+        {
+            "code": "20",
+            "label": "Seaman’s book"
+        },
+        {
+            "code": "21",
+            "label": "PNP"
+        },
+        {
+            "code": "22",
+            "label": "AFP"
+        },
+        {
+            "code": "23",
+            "label": "HDMF"
+        },
+        {
+            "code": "24",
+            "label": "PWD"
+        },
+        {
+            "code": "25",
+            "label": "DSWD Travel Clearance"
+        },
+        {
+            "code": "26",
+            "label": "ACR I-Card"
+        },
+        {
+            "code": "27",
+            "label": "DTI - Business Name Registration Certificate"
+        },
+        {
+            "code": "28",
+            "label": "IBP ID"
+        },
+        {
+            "code": "29",
+            "label": "Fire Arms License"
+        },
+        {
+            "code": "30",
+            "label": "Government Officer or Agency ID"
+        },
+        {
+            "code": "31",
+            "label": "Diplomat ID"
+        },
+        {
+            "code": "32",
+            "label": "National ID"
+        },
+        {
+            "code": "33",
+            "label": "Work Permit"
+        },
+        {
+            "code": "34",
+            "label": "GOCC ID"
+        },
+        {
+            "code": "35",
+            "label": "PLRA ID"
+        },
+        {
+            "code": "36",
+            "label": "Major Credit Cards"
+        },
+        {
+            "code": "37",
+            "label": "Media Report/publication with photo"
+        },
+        {
+            "code": "38",
+            "label": "Student ID"
+        },
+        {
+            "code": "39",
+            "label": "SIRV"
+        }
+    ],
+    "IdentificationTypeDomain": [
+        {
+            "code": "10",
+            "label": "TIN"
+        },
+        {
+            "code": "11",
+            "label": "SSS Card"
+        },
+        {
+            "code": "12",
+            "label": "GSIS"
+        },
+        {
+            "code": "13",
+            "label": "Philhealth Card"
+        },
+        {
+            "code": "14",
+            "label": "Senior Citizen card"
+        },
+        {
+            "code": "15",
+            "label": "UMID"
+        },
+        {
+            "code": "16",
+            "label": "SEC registration number"
+        },
+        {
+            "code": "17",
+            "label": "DTI registration number"
+        },
+        {
+            "code": "18",
+            "label": "CDA registration number"
+        },
+        {
+            "code": "19",
+            "label": "CooperativeId"
+        }
+    ],
+    "InstallmentTypeDomain": [
+        {
+            "code": "F",
+            "label": "fixed"
+        },
+        {
+            "code": "V",
+            "label": "variable"
+        }
+    ],
+    "LegalFormDomain": [
+        {
+            "code": "10",
+            "label": "General partnership"
+        },
+        {
+            "code": "11",
+            "label": "Limited partnership"
+        },
+        {
+            "code": "12",
+            "label": "Association (or company) in participation"
+        },
+        {
+            "code": "13",
+            "label": "Limited company"
+        },
+        {
+            "code": "14",
+            "label": "Limited partnership by action"
+        },
+        {
+            "code": "15",
+            "label": "Limited liability company"
+        },
+        {
+            "code": "16",
+            "label": "Limited liability company of unique partner"
+        },
+        {
+            "code": "17",
+            "label": "Co-operatives"
+        },
+        {
+            "code": "18",
+            "label": "Non-trading company"
+        },
+        {
+            "code": "19",
+            "label": "Pubic institution"
+        },
+        {
+            "code": "20",
+            "label": "De facto companies"
+        },
+        {
+            "code": "21",
+            "label": "National Government"
+        },
+        {
+            "code": "22",
+            "label": "Local Government"
+        },
+        {
+            "code": "23",
+            "label": "Government Financial Corporation"
+        },
+        {
+            "code": "24",
+            "label": "Government Non-Financial Corporation"
+        },
+        {
+            "code": "25",
+            "label": "Private Financial Corporation"
+        },
+        {
+            "code": "26",
+            "label": "Private Non-Financial Corporation"
+        }
+    ],
+    "NewUsedDomain": [
+        {
+            "code": "N",
+            "label": "New"
+        },
+        {
+            "code": "U",
+            "label": "Used"
+        }
+    ],
+    "OccupationStatusDomain": [
+        {
+            "code": "1",
+            "label": "Permanent Job (Private sector)"
+        },
+        {
+            "code": "2",
+            "label": "Temporary Job (Private sector)"
+        },
+        {
+            "code": "3",
+            "label": "Permanent Job (Government sector)"
+        },
+        {
+            "code": "4",
+            "label": "Temporary Job (Government sector)"
+        },
+        {
+            "code": "5",
+            "label": "Self Employed"
+        },
+        {
+            "code": "6",
+            "label": "Not Employed"
+        },
+        {
+            "code": "7",
+            "label": "Retired"
+        },
+        {
+            "code": "8",
+            "label": "Student"
+        },
+        {
+            "code": "9",
+            "label": "Other"
+        }
+    ],
+    "OverdueDaysDomain": [
+        {
+            "code": "N",
+            "label": "Too new to be rated / Not Available"
+        },
+        {
+            "code": "0",
+            "label": "Paid as agreed / Current"
+        },
+        {
+            "code": "1",
+            "label": "1-30 days delay / 1 Cycle late"
+        },
+        {
+            "code": "2",
+            "label": "31-60 days delay / 2 Cycles late"
+        },
+        {
+            "code": "3",
+            "label": "61-90 days delay / 3 Cycles late"
+        },
+        {
+            "code": "4",
+            "label": "91-180 days delay / More than 3 Cycles late"
+        },
+        {
+            "code": "5",
+            "label": "181-365 days delay"
+        },
+        {
+            "code": "6",
+            "label": "More than 1 year delay"
+        }
+    ],
+    "PaymentMethodDomain": [
+        {
+            "code": "CAD",
+            "label": "Current Account Debit"
+        },
+        {
+            "code": "BAR",
+            "label": "Bank draft; Automated bank draft"
+        },
+        {
+            "code": "DIR",
+            "label": "Direct transfer; postal payment slip"
+        },
+        {
+            "code": "ADD",
+            "label": "Authorization to Direct Current Account Debit"
+        },
+        {
+            "code": "CCR",
+            "label": "Credit card payment"
+        },
+        {
+            "code": "CHQ",
+            "label": "Cheque"
+        },
+        {
+            "code": "CAS",
+            "label": "Cash"
+        },
+        {
+            "code": "OTH",
+            "label": "Other"
+        }
+    ],
+    "PaymentPeriodicityDomain": [
+        {
+            "code": "D",
+            "label": "Daily installments-1 day"
+        },
+        {
+            "code": "W",
+            "label": "weekly installments-7 days"
+        },
+        {
+            "code": "F",
+            "label": "fortnight installments-15 days"
+        },
+        {
+            "code": "M",
+            "label": "monthly installments-30 days"
+        },
+        {
+            "code": "B",
+            "label": "bimonthly installments-60 days"
+        },
+        {
+            "code": "Q",
+            "label": "quarterly installments-90 days"
+        },
+        {
+            "code": "T",
+            "label": "Trimester four-monthly installments-120 days"
+        },
+        {
+            "code": "C",
+            "label": "installments every five months-150 days"
+        },
+        {
+            "code": "S",
+            "label": "installments every six months-180 days"
+        },
+        {
+            "code": "Y",
+            "label": "Yearly installments-360 days"
+        },
+        {
+            "code": "I",
+            "label": "irregular installments"
+        }
+    ],
+    "ReorganizedCreditDomain": [
+        {
+            "code": "0",
+            "label": "Credit is not re-organized"
+        },
+        {
+            "code": "1",
+            "label": "Credit is re-organized by simply updating the old contract"
+        },
+        {
+            "code": "2",
+            "label": "Credit is re-organized by closing the old contract and creating a new one, while keeping a reference link between the two"
+        }
+    ],
+    "RoleDomain": [
+        {
+            "code": "B",
+            "label": "Borrower"
+        },
+        {
+            "code": "C",
+            "label": "Co-Borrower"
+        },
+        {
+            "code": "G",
+            "label": "Guarantor/Surety"
+        }
+    ],
+    "SubjectInfoTypeDomain": [
+        {
+            "code": "U",
+            "label": "Customer untraceable or deceased"
+        },
+        {
+            "code": "E",
+            "label": "Attachment in course"
+        },
+        {
+            "code": "N",
+            "label": "Bankruptcy petition"
+        },
+        {
+            "code": "Z",
+            "label": "A legal action has been taken"
+        },
+        {
+            "code": "K",
+            "label": "Court of justice declared the bankruptcy"
+        },
+        {
+            "code": "L",
+            "label": "liquidation"
+        },
+        {
+            "code": "P",
+            "label": "Frauds"
+        },
+        {
+            "code": "D",
+            "label": "Not allowed debit balance on current account (not related to any contract)"
+        },
+        {
+            "code": "R",
+            "label": "Stolen identity card"
+        },
+        {
+            "code": "M",
+            "label": "Mishandled Account"
+        },
+        {
+            "code": "O",
+            "label": "Drop out"
+        },
+        {
+            "code": "C",
+            "label": "Corporate Rehabilitation"
+        }
+    ],
+    "TitleDomain": [
+        {
+            "code": "10",
+            "label": "Mr"
+        },
+        {
+            "code": "11",
+            "label": "Ms"
+        },
+        {
+            "code": "12",
+            "label": "Miss"
+        },
+        {
+            "code": "13",
+            "label": "Mrs"
+        },
+        {
+            "code": "14",
+            "label": "Dr"
+        },
+        {
+            "code": "15",
+            "label": "Prof"
+        },
+        {
+            "code": "16",
+            "label": "Hon"
+        },
+        {
+            "code": "17",
+            "label": "Lady"
+        },
+        {
+            "code": "18",
+            "label": "Major"
+        },
+        {
+            "code": "19",
+            "label": "Sir"
+        },
+        {
+            "code": "20",
+            "label": "Madam"
+        }
+    ],
+    "TransactionTypeDomain": [
+        {
+            "code": "NA",
+            "label": "NOT APPLICABLE"
+        },
+        {
+            "code": "AL",
+            "label": "AGRICULTURAL LOAN"
+        },
+        {
+            "code": "BD",
+            "label": "BILLS DISCOUNTED"
+        },
+        {
+            "code": "CAD",
+            "label": "CUSTOMERS' LIABILITY UNDER ACCEPTANCE - DOMESTIC"
+        },
+        {
+            "code": "CAF",
+            "label": "CUSTOMERS' LIABILITY UNDER ACCEPTANCE - FOREIGN"
+        },
+        {
+            "code": "DB",
+            "label": "DOMESTIC BILLS PURCHASED"
+        },
+        {
+            "code": "LCF",
+            "label": "DEFERRED LETTER OF CREDIT - FOREIGN"
+        },
+        {
+            "code": "LCD",
+            "label": "DEFERRED LETTER OF CREDIT - DOMESTIC"
+        },
+        {
+            "code": "DL",
+            "label": "DEMAND LOAN"
+        },
+        {
+            "code": "DC",
+            "label": "DOCS CREDIT"
+        },
+        {
+            "code": "EBP",
+            "label": "EXPORT BILLS PURCHASED"
+        },
+        {
+            "code": "EPC",
+            "label": "EXPORT PACKING CREDIT / EXPORT ADVANCES"
+        },
+        {
+            "code": "FBP",
+            "label": "FOREIGN BILLS PURCHASED"
+        },
+        {
+            "code": "IB",
+            "label": "IMPORT BILLS"
+        },
+        {
+            "code": "LCC",
+            "label": "LC CONFIRMATION"
+        },
+        {
+            "code": "CLD",
+            "label": "CASH LETTER OF CREDIT - DOMESTIC"
+        },
+        {
+            "code": "CLF",
+            "label": "CASH LETTER OF CR / SPOT LETTER OF CR - FOREIGN"
+        },
+        {
+            "code": "BUL",
+            "label": "BALANCE UNDER LOANS"
+        },
+        {
+            "code": "ML",
+            "label": "MARGIN LOAN"
+        },
+        {
+            "code": "MM",
+            "label": "MONEY MARKET"
+        },
+        {
+            "code": "STT",
+            "label": "ORDINARY SHORT TERM BANK TRANSACTION"
+        },
+        {
+            "code": "QL",
+            "label": "QUEDAN LOAN"
+        },
+        {
+            "code": "SG",
+            "label": "SHIPPING GTY"
+        },
+        {
+            "code": "SBD",
+            "label": "SHIPSIDE BOND/BANK GUARANTY - DOMESTIC"
+        },
+        {
+            "code": "SBF",
+            "label": "SHIPSIDE BOND/BANK GUARANTY - FOREIGN"
+        },
+        {
+            "code": "SLD",
+            "label": "STANDBY LETTER OF CREDIT - DOMESTIC"
+        },
+        {
+            "code": "SLF",
+            "label": "STANDBY LETTER OF CREDIT - FOREIGN"
+        },
+        {
+            "code": "TRD",
+            "label": "TRUST RECEIPT - DOMESTIC"
+        },
+        {
+            "code": "TRF",
+            "label": "TRUST RECEIPTS - FOREIGN"
+        },
+        {
+            "code": "ULD",
+            "label": "UNUSED LETTER OF CREDIT - DOMESTIC"
+        },
+        {
+            "code": "ULF",
+            "label": "UNUSED LETTER OF CREDIT - FOREIGN"
+        },
+        {
+            "code": "PCC",
+            "label": "Primary Credit Card"
+        },
+        {
+            "code": "SCC",
+            "label": "Supplementary Credit Card"
+        }
+    ],
+    "YesNoDomain": [
+        {
+            "code": "0",
+            "label": "No"
+        },
+        {
+            "code": "1",
+            "label": "Yes"
+        }
+    ]
+}

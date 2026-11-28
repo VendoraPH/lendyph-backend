@@ -3,6 +3,7 @@
 use App\Http\Middleware\AllowAuthOrSubmissionToken;
 use App\Http\Middleware\BlockHiddenModules;
 use App\Http\Middleware\CheckTokenExpiry;
+use App\Http\Middleware\EnsureCicEnabled;
 use App\Http\Middleware\EnsureUserIsActive;
 use App\Http\Middleware\OptionalSanctumAuth;
 use App\Http\Middleware\Portal\CheckPortalTokenExpiry;
@@ -199,6 +200,12 @@ return Application::configure(basePath: dirname(__DIR__))
         // The limiters run first: a hidden module's requests are metered like
         // any other's.
         $middleware->prependToPriorityList(SubstituteBindings::class, BlockHiddenModules::class);
+
+        // CIC reporting's backend switch (CIC_ENABLED) answers 404 on every
+        // /cic route while it is off, as a hidden module does: after the gates
+        // and BlockHiddenModules, still ahead of SubstituteBindings, so no CIC
+        // id is looked up while the module is off.
+        $middleware->prependToPriorityList(SubstituteBindings::class, EnsureCicEnabled::class);
 
         // An API guest is answered, never redirected. The framework default
         // sends every guest to route('login'), which this API-only app does

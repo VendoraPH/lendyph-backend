@@ -29,10 +29,10 @@ it('lists every menu in the side menu\'s order with its parent and switch', func
     expect(array_column($modules, 'key'))->toBe([
         'dashboard', 'executive_dashboard', 'linda', 'members', 'loans', 'loans.reminders', 'loans.origination',
         'payments', 'payments.auto_pay', 'share_capital', 'share_capital.auto_credit', 'savings', 'collateral',
-        'gcash', 'credit_scoring', 'cda', 'member_portal', 'amla', 'accounting', 'users', 'reports',
+        'gcash', 'credit_scoring', 'cic', 'cda', 'member_portal', 'amla', 'accounting', 'users', 'reports',
         'documents', 'audit_trail',
     ])->and($modules[5])->toBe(['key' => 'loans.reminders', 'label' => 'Reminders', 'parent' => 'loans', 'hidden' => false])
-        ->and($modules[16])->toBe(['key' => 'member_portal', 'label' => 'Member Portal', 'parent' => null, 'hidden' => false])
+        ->and($modules[17])->toBe(['key' => 'member_portal', 'label' => 'Member Portal', 'parent' => null, 'hidden' => false])
         ->and(array_unique(array_column($modules, 'hidden')))->toBe([false]);
 });
 

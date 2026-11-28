@@ -1251,10 +1251,7 @@ class RepaymentService
             + max(0, (float) $s->penalty_amount - (float) $s->penalty_paid)
         ));
 
-        $nextSchedule = $schedules
-            ->filter(fn ($s) => in_array($s->status, ['pending', 'partial', 'overdue']))
-            ->sortBy('due_date')
-            ->first();
+        $nextSchedule = AmortizationSchedule::nextDue($schedules);
 
         // Every posted receipt, plus, on a loan the CSV importer brought in,
         // what its file says was paid before the import (PaidBeforeImport),

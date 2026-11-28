@@ -30,6 +30,7 @@ final class PermissionWords
         'gcash' => 'GCash',
         'cda' => 'CDA Compliance',
         'amla' => 'AMLA Compliance',
+        'cic' => 'CIC Reporting',
     ];
 
     /** Actions whose words aren't the key's. */
