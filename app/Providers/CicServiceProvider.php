@@ -26,6 +26,11 @@ class CicServiceProvider extends ServiceProvider
 {
     public const PER_MINUTE = 30;
 
+    /** Every CIC staff read shares this bucket in the `api` limiter (AppServiceProvider), apart from the rest of the app. */
+    public const API_READS_PER_MINUTE = 60;
+
+    public const TOO_MANY = 'Too many CIC requests. Wait a minute and try again.';
+
     public function boot(): void
     {
         if ($this->app->environment('production') && config('cic.test_captures') === true) {
@@ -34,9 +39,15 @@ class CicServiceProvider extends ServiceProvider
 
         RateLimiter::for('cic', fn (Request $request) => Limit::perMinute(self::PER_MINUTE)
             ->by('cic:'.($request->user()?->id ?: $request->ip()))
-            ->response(fn (Request $request, array $headers): JsonResponse => response()->json([
-                'message' => 'Too many CIC requests. Wait a minute and try again.',
-                'retry_after' => (int) ($headers['Retry-After'] ?? 0),
-            ], 429, $headers)));
+            ->response(self::tooMany(...)));
+    }
+
+    /** A CIC 429 in words, with when to try again. */
+    public static function tooMany(Request $request, array $headers): JsonResponse
+    {
+        return response()->json([
+            'message' => self::TOO_MANY,
+            'retry_after' => (int) ($headers['Retry-After'] ?? 0),
+        ], 429, $headers);
     }
 }

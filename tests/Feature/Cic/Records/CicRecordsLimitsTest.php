@@ -146,3 +146,37 @@ it('never caches a value bigger than the limit', function () {
         ->and(Cache::has('cic:big'))->toBeFalse()
         ->and(CicCache::put('cic:small', str_repeat('x', 100), 60))->toBeTrue();
 });
+
+it('answers a 429 on the submission detail in CIC\'s words, never Laravel\'s default', function () {
+    config(['cic.test_captures' => true]);
+    $this->cicLoan();
+    $capture = app(CicCaptureService::class)->capture(Carbon::parse('2026-11-30'), CicCapture::KIND_TEST, null);
+    $submission = CicSubmission::factory()->create(['capture_id' => $capture->id, 'reference_date' => '2026-11-30']);
+
+    foreach (range(1, 30) as $ignored) {
+        $this->actingAs($this->reader)->getJson("/api/cic/submissions/{$submission->id}")->assertOk();
+    }
+
+    $response = $this->actingAs($this->reader)->getJson("/api/cic/submissions/{$submission->id}")->assertTooManyRequests();
+    expect($response->json())->toHaveKeys(['message', 'retry_after'])
+        ->and($response->json('message'))->toBe('Too many CIC requests. Wait a minute and try again.')
+        ->and($response->json('retry_after'))->toBeGreaterThan(0)
+        ->and($response->getContent())->not->toContain('Too Many Attempts');
+});
+
+it('keeps CIC reads in their own bucket of the app-wide limiter, answering in CIC\'s words', function () {
+    $this->actingAs($this->reader);
+
+    // The rest of the app spending its 60 a minute leaves CIC untouched.
+    foreach (range(1, 60) as $ignored) {
+        $this->getJson('/api/auth/me')->assertOk();
+    }
+    $this->getJson('/api/auth/me')->assertTooManyRequests();
+    $this->getJson('/api/cic/status')->assertOk();
+
+    // A CIC read with no screen limiter of its own meets the CIC bucket.
+    foreach (range(1, 59) as $ignored) {
+        $this->getJson('/api/cic/status')->assertOk();
+    }
+    $this->getJson('/api/cic/status')->assertTooManyRequests()->assertJsonPath('message', 'Too many CIC requests. Wait a minute and try again.');
+});
