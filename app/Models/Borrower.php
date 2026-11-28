@@ -272,6 +272,12 @@ class Borrower extends Model
         );
     }
 
+    /** The member's row in the CIC subject register, once captured for reporting. */
+    public function cicSubject(): HasOne
+    {
+        return $this->hasOne(CicSubject::class);
+    }
+
     public function coMakers(): HasMany
     {
         return $this->hasMany(CoMaker::class);

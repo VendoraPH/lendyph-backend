@@ -303,6 +303,14 @@ class RoleAndPermissionSeeder extends Seeder
             // which grants it on the already-migrated deployments.
             'menu_visibility:manage',
 
+            // CIC reporting (the CIC build plan, decision 8): screens, preparing
+            // and submitting files, recording CIC's answer, and settings and
+            // keys. Every CIC route also needs branches:view_all. admin and
+            // super_admin only, through Permission::all() below; no other role
+            // lists them. Mirrors 2026_11_28_900100_add_cic_permissions, which
+            // grants them on the already-migrated deployments.
+            'cic:view', 'cic:prepare', 'cic:submit', 'cic:review', 'cic:settings',
+
             // Phase 6: self::PHASE6_PERMISSIONS (AMLA, executive dashboard,
             // branches, member transfer, inter-branch transfers, loan
             // origination).

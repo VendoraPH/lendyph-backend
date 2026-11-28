@@ -146,6 +146,12 @@ final class MenuModules
             'parent' => null,
             'blocks' => ['credit-scoring'],
         ],
+        'cic' => [
+            'label' => 'CIC Reporting',
+            'pages' => ['/cic', '/settings/cic'],
+            'parent' => null,
+            'blocks' => ['cic'],
+        ],
         'cda' => [
             'label' => 'CDA Compliance',
             'pages' => ['/cda', '/settings/cda'],

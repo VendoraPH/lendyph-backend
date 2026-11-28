@@ -54,6 +54,7 @@ it('holds the contract\'s modules, labels and parents, in the side menu\'s order
         ['collateral', 'Collateral', null],
         ['gcash', 'GCash', null],
         ['credit_scoring', 'Credit Scoring', null],
+        ['cic', 'CIC Reporting', null],
         ['cda', 'CDA Compliance', null],
         ['member_portal', 'Member Portal', null],
         ['amla', 'AMLA Compliance', null],

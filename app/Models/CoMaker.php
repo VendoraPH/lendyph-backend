@@ -9,6 +9,7 @@ use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
+use Illuminate\Database\Eloquent\Relations\HasOne;
 use Illuminate\Database\Eloquent\Relations\MorphMany;
 
 class CoMaker extends Model
@@ -55,6 +56,12 @@ class CoMaker extends Model
             $this->last_name,
             $this->suffix,
         ])->filter()->implode(' '));
+    }
+
+    /** The co-maker's row in the CIC subject register, once captured for reporting. */
+    public function cicSubject(): HasOne
+    {
+        return $this->hasOne(CicSubject::class);
     }
 
     public function borrower(): BelongsTo

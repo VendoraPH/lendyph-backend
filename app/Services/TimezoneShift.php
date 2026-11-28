@@ -430,6 +430,17 @@ class TimezoneShift
         // 2026-11-25), a column added well after the cutover to a table the
         // shift covers, as `documents.portal_shared_at` is.
         'loan_adjustments' => ['cancelled_at'],
+        // CIC reporting (2026-11-28), well after the cutover. Every `DATE`
+        // column (captures' and submissions' `reference_date`) is left out.
+        'cic_capture_records' => ['created_at', 'updated_at'],
+        'cic_captures' => ['created_at', 'finished_at', 'started_at', 'updated_at'],
+        'cic_code_mappings' => ['created_at', 'updated_at'],
+        'cic_loan_overrides' => ['created_at', 'updated_at'],
+        'cic_product_mappings' => ['created_at', 'updated_at'],
+        'cic_public_keys' => ['created_at', 'expires_at', 'key_created_at', 'retired_at', 'updated_at', 'verified_at'],
+        'cic_settings' => ['created_at', 'updated_at'],
+        'cic_subjects' => ['created_at', 'first_captured_at', 'updated_at'],
+        'cic_submissions' => ['acknowledged_at', 'created_at', 'encrypted_at', 'generated_at', 'submitted_at', 'updated_at'],
         // The shift's own bookkeeping, written after the cutover by definition.
         'timezone_shifts' => ['completed_at', 'cutover_at', 'started_at'],
     ];

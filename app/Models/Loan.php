@@ -4,6 +4,7 @@ namespace App\Models;
 
 use App\Enums\InterestRateFrequency;
 use App\Enums\TermUnit;
+use App\Exceptions\CicRecordIsFrozenException;
 use App\Services\ApprovalAssignees;
 use App\Services\BranchAccess;
 use App\Services\LoanOrigination\Observers\LoanStatusObserver;
@@ -19,6 +20,7 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasOne;
 use Illuminate\Database\Eloquent\Relations\MorphMany;
 use Illuminate\Support\Facades\DB;
 
@@ -323,6 +325,14 @@ class Loan extends Model
                 ? SequenceCode::first(self::CODE_PREFIX)
                 : SequenceCode::after(self::CODE_PREFIX, $last->application_number, "loans.id {$last->id}");
         });
+
+        // The CIC Provider Contract No is set once, by the first capture that
+        // reports the loan, and never changes: CIC reads the contract by it.
+        static::updating(function (Loan $loan) {
+            if ($loan->isDirty('cic_contract_no') && $loan->getOriginal('cic_contract_no') !== null) {
+                throw CicRecordIsFrozenException::because('loans', $loan->getKey(), 'a loan\'s CIC contract number never changes once set.');
+            }
+        });
     }
 
     /**
@@ -359,6 +369,12 @@ class Loan extends Model
     protected function isReleasable(): Attribute
     {
         return Attribute::get(fn () => $this->status === 'approved');
+    }
+
+    /** The loan's own CIC classification over its product's, when staff set one. */
+    public function cicOverride(): HasOne
+    {
+        return $this->hasOne(CicLoanOverride::class);
     }
 
     public function borrower(): BelongsTo
