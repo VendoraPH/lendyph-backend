@@ -27,6 +27,7 @@ use Illuminate\Database\Query\Builder;
  * @property string $record_key the subject_no or the contract_no
  * @property array<string, string> $values
  * @property string $checksum
+ * @property list<array{field_id: string|null, severity: string, code: string, message: string}>|null $build_issues what the builder found that the values can't show
  */
 class CicCaptureRecord extends Model
 {
@@ -43,6 +44,7 @@ class CicCaptureRecord extends Model
             'cic_subject_id' => 'integer',
             'loan_id' => 'integer',
             'values' => 'array',
+            'build_issues' => 'array',
         ];
     }
 

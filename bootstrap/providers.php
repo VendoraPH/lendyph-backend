@@ -2,6 +2,7 @@
 
 use App\Providers\AmlaServiceProvider;
 use App\Providers\AppServiceProvider;
+use App\Providers\CicRecordsServiceProvider;
 use App\Providers\CicServiceProvider;
 use App\Providers\LoanOriginationServiceProvider;
 use App\Providers\PortalServiceProvider;
@@ -16,4 +17,5 @@ return [
     LoanOriginationServiceProvider::class,
     ReceiptShareServiceProvider::class,
     CicServiceProvider::class,
+    CicRecordsServiceProvider::class,
 ];
