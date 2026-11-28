@@ -88,6 +88,15 @@ final class LedgerGapsReport
     /** ShareCapitalService::processAutoCredit()'s description. */
     private const AUTO_CREDIT_DESCRIPTION = 'Monthly pledge - auto-credit';
 
+    /**
+     * A loan row's reference: the loan's display number, in the order of
+     * {@see Loan::displayNumberOf()} (LN- number, the file's Loan No., the
+     * application number), skipping blanks. Shown only, never matched on.
+     */
+    private const LOAN_DISPLAY_NUMBER = "CASE WHEN TRIM(COALESCE(l.loan_account_number, '')) <> '' THEN l.loan_account_number
+        WHEN TRIM(COALESCE(l.external_loan_no, '')) <> '' THEN l.external_loan_no
+        ELSE l.application_number END";
+
     /** Whether a part's loan came in through the CSV importer (Loan::isImported()). */
     private const IMPORTED_LOAN = '(l.external_loan_no IS NOT NULL OR l.imported_arrears_baseline IS NOT NULL)';
 
@@ -312,7 +321,7 @@ final class LedgerGapsReport
         return DB::table('loans as l')
             ->whereIn('l.status', Loan::EVER_RELEASED_STATUSES)
             ->whereNotExists($this->journal(Loan::class, 'l.id', 'loan_release'))
-            ->selectRaw("'release' AS kind, l.id AS record_id, COALESCE(l.loan_account_number, l.application_number) AS reference")
+            ->selectRaw("'release' AS kind, l.id AS record_id, ".self::LOAN_DISPLAY_NUMBER.' AS reference')
             ->selectRaw('DATE(l.released_at) AS event_date, l.branch_id, l.borrower_id')
             ->selectRaw('CAST(ROUND(l.principal_amount * 100) AS SIGNED) AS amount')
             ->selectRaw("'none' AS posted")
@@ -374,7 +383,7 @@ final class LedgerGapsReport
                         $lines->orWhere('jl.description', 'like', $prefix.'%');
                     }
                 }))
-            ->selectRaw("'restructure' AS kind, l.id AS record_id, COALESCE(l.loan_account_number, l.application_number) AS reference")
+            ->selectRaw("'restructure' AS kind, l.id AS record_id, ".self::LOAN_DISPLAY_NUMBER.' AS reference')
             ->selectRaw('DATE(l.released_at) AS event_date, l.branch_id, l.borrower_id')
             ->selectRaw('CAST(ROUND(l.principal_amount * 100) AS SIGNED) AS amount')
             ->selectRaw("'differently' AS posted, NULL AS detail");

@@ -136,7 +136,8 @@ final class AutomaticPoster
         return $this->write($posting, $loan, [
             'date' => $this->releaseDate($loan),
             'reference' => $loan->loan_account_number ?? $loan->application_number,
-            'description' => $this->describe('Loan release', $loan->loan_account_number ?? $loan->application_number),
+            // The loan by its display number (round 9); the reference stays.
+            'description' => $this->describe('Loan release', $loan->displayNumber()),
             'branch_id' => $loan->branch_id,
         ], $userId);
     }
@@ -345,7 +346,7 @@ final class AutomaticPoster
         return $this->write($posting, $repayment, [
             'date' => $this->dateOf($repayment->payment_date),
             'reference' => $repayment->receipt_number,
-            'description' => $this->describe('Loan collection', $repayment->receipt_number),
+            'description' => $this->describe('Loan collection', $this->collectionReference($repayment)),
             'branch_id' => $repayment->loan?->branch_id,
         ], $userId);
     }
@@ -807,19 +808,23 @@ final class AutomaticPoster
         $this->warnAboutTaxFallbacks($new, $map);
 
         $date = $this->releaseDate($new);
-        $newNumber = $new->loan_account_number ?? $new->application_number;
-        $sourceNumber = $source->loan_account_number ?? $source->application_number;
+        // References stay as they were; descriptions name each loan by its
+        // display number (round 9).
+        $newReference = $new->loan_account_number ?? $new->application_number;
+        $sourceReference = $source->loan_account_number ?? $source->application_number;
+        $newNumber = $new->displayNumber();
+        $sourceNumber = $source->displayNumber();
 
         return [
             'release' => $this->write($release, $new, [
                 'date' => $date,
-                'reference' => $newNumber,
+                'reference' => $newReference,
                 'description' => $this->describe('Loan release (restructure)', $newNumber),
                 'branch_id' => $new->branch_id,
             ], $userId),
             'write_off' => $writeOff === null ? null : $this->write($writeOff, $source, [
                 'date' => $date,
-                'reference' => $sourceNumber,
+                'reference' => $sourceReference,
                 'description' => $this->describe('Restructure write-off', "{$sourceNumber} into {$newNumber}"),
                 'branch_id' => $source->branch_id,
             ], $userId),
@@ -1854,11 +1859,18 @@ final class AutomaticPoster
     /**
      * What an operator calls this record: "LN-000154", "RCP-000031".
      *
-     * Falls back through the other issued codes, then to the model name, so a
-     * record with no code yet still produces a message someone can act on.
+     * A loan reads its display number (its LN- number, else the file's Loan
+     * No., else its application number), so an imported loan is named as
+     * staff know it. Other records fall back through the issued codes, then
+     * to the model name, so a record with no code yet still produces a
+     * message someone can act on. Text only: never a reference or a key.
      */
     private function businessIdentifier(Model $owner): string
     {
+        if ($owner instanceof Loan && ($number = $owner->displayNumber()) !== null) {
+            return $number;
+        }
+
         foreach (['loan_account_number', 'receipt_number', 'application_number', 'reference_no', 'adjustment_number', 'reference'] as $column) {
             $value = $owner->getAttribute($column);
 
@@ -1868,6 +1880,23 @@ final class AutomaticPoster
         }
 
         return class_basename($owner);
+    }
+
+    /**
+     * What a collection's description names: its receipt and the loan by its
+     * display number (round 9), "RCP-000031 (Loan LN-000154)", so a payment on
+     * an imported loan reads the file's Loan No.
+     */
+    private function collectionReference(Repayment $repayment): ?string
+    {
+        $receipt = $repayment->receipt_number;
+        $loan = $repayment->loan?->displayNumber();
+
+        if ($loan === null) {
+            return $receipt;
+        }
+
+        return $receipt === null || $receipt === '' ? "Loan {$loan}" : "{$receipt} (Loan {$loan})";
     }
 
     /** "Loan release — LN-000154", clamped to the column's 500 characters. */

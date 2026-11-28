@@ -268,6 +268,30 @@ class LedgerGapsReportTest extends TestCase
         $this->gaps(['imported' => 'sometimes'])->assertUnprocessable()->assertJsonValidationErrors('imported');
     }
 
+    /**
+     * A loan row reads the loan's display number: its LN- number, else the
+     * file's Loan No. (an imported loan has no LN- number), else its
+     * application number, skipping blanks.
+     */
+    public function test_loan_rows_read_the_display_number(): void
+    {
+        $imported = $this->createReleasedLoan();
+        DB::table('loans')->where('id', $imported->id)->update(['loan_account_number' => null, 'external_loan_no' => 'OLD-0001']);
+        $blank = $this->createReleasedLoan();
+        DB::table('loans')->where('id', $blank->id)->update(['loan_account_number' => null, 'external_loan_no' => ' ']);
+        $restructure = $this->restructureOf($this->createReleasedLoan(), $this->createReleasedLoan());
+        DB::table('loans')->where('id', $restructure->id)->update(['loan_account_number' => null, 'external_loan_no' => 'OLD-0002']);
+        $this->seedChartOfAccounts();
+        $this->poster()->loanRelease($restructure->fresh(), $this->admin->id);
+
+        $response = $this->gaps()->assertOk();
+        $releases = $this->rowsOf($response, 'release');
+
+        $this->assertSame('OLD-0001', $releases[$imported->id]['reference']);
+        $this->assertSame($blank->application_number, $releases[$blank->id]['reference']);
+        $this->assertSame('OLD-0002', $this->rowsOf($response, 'restructure')[$restructure->id]['reference']);
+    }
+
     /** A timestamp is filtered by its Manila day: the last minute of `to` is in, the first of the next day out. */
     public function test_dates_filter_a_timestamp_by_its_day(): void
     {
