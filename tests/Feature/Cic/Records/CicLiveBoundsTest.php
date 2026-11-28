@@ -86,3 +86,21 @@ it('fails a capture stuck for over an hour and deletes its records, leaving a ru
         ->and($running->fresh()->status)->toBe('capturing')
         ->and(app(CicCaptureService::class)->failStuck())->toBe(0);
 });
+
+it('refuses a capture on readiness, which is always live, and never caches a refused date', function () {
+    $this->cicLoan();
+    $capture = CicCapture::factory()->monthEnd('2026-05-31')->completeWithRecords(1, 1)->create();
+
+    $this->actingAs($this->reader)->getJson("/api/cic/readiness?capture_id={$capture->id}&reference_date=2026-05-31")
+        ->assertUnprocessable()
+        ->assertJsonPath('errors.capture_id.0', 'Readiness is always worked out live for today or a recent month end, so it takes no capture. Open a capture\'s records or issues to read it.');
+    expect(Cache::has(CicRecordsReader::liveCacheKey(Carbon::parse('2026-05-31'))))->toBeFalse();
+
+    app(CicRecordsReader::class)->live(Carbon::parse('2026-05-31'));
+    app(CicRecordsReader::class)->live(Carbon::parse('2026-11-15'));
+    app(CicRecordsReader::class)->live(Carbon::parse('2026-10-31'));
+
+    expect(Cache::has(CicRecordsReader::liveCacheKey(Carbon::parse('2026-05-31'))))->toBeFalse()
+        ->and(Cache::has(CicRecordsReader::liveCacheKey(Carbon::parse('2026-11-15'))))->toBeFalse()
+        ->and(Cache::has(CicRecordsReader::liveCacheKey(Carbon::parse('2026-10-31'))))->toBeTrue();
+});

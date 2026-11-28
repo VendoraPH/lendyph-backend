@@ -10,6 +10,7 @@ use App\Services\Cic\CicLayouts;
 use App\Services\Cic\Records\CicRecordsReader;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Validation\ValidationException;
 use OpenApi\Attributes as OA;
 
 /**
@@ -27,7 +28,7 @@ class CicReadinessController extends CicController
     #[OA\Get(
         path: '/api/cic/readiness',
         summary: 'CIC data readiness',
-        description: 'Needs `cic:view` and `branches:view_all`. Built live now at `reference_date` (Y-m-d, default today, not after today). {reference_date, provider_code_set, blocking, record_types: {ID|CI|CN|NE: {records, with_errors, with_warnings, ready, errors, warnings}}, totals: {records, with_errors, with_warnings, ready, errors, warnings}, file_issues: [issue], top_issues: [{record_type, field_id, field_name, classification, code, severity, count, message}], unmapped_products: [{loan_product_id, name, contracts}], last_capture}. No personal data.',
+        description: 'Needs `cic:view` and `branches:view_all`. Built live now at `reference_date` (Y-m-d: today by default, or a month\'s last day within the last 92 days; 422 otherwise). Takes no `capture_id` (422). {reference_date, provider_code_set, blocking, record_types: {ID|CI|CN|NE: {records, with_errors, with_warnings, ready, errors, warnings}}, totals: {records, with_errors, with_warnings, ready, errors, warnings}, file_issues: [issue], top_issues: [{record_type, field_id, field_name, classification, code, severity, count, message}], unmapped_products: [{loan_product_id, name, contracts}], last_capture}. No personal data.',
         tags: ['CIC'],
         security: [['sanctum' => []]],
         responses: [new OA\Response(response: 200, description: 'Readiness'), new OA\Response(response: 403, description: 'No access'), new OA\Response(response: 422, description: 'Bad reference date')],
@@ -35,6 +36,13 @@ class CicReadinessController extends CicController
     public function show(Request $request, CicRecordsReader $reader): JsonResponse
     {
         $this->authorizeCic($request, CicAccess::VIEW);
+
+        // Readiness is always built live, so it reads no capture, and the
+        // live date bound always applies (delta re-review).
+        if ($request->has('capture_id')) {
+            throw ValidationException::withMessages(['capture_id' => 'Readiness is always worked out live for today or a recent month end, so it takes no capture. Open a capture\'s records or issues to read it.']);
+        }
+
         $filters = $this->recordFilters($request);
 
         ['set' => $set, 'issues' => $issues] = $reader->live($filters['reference_date']);

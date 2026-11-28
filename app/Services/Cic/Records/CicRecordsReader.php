@@ -44,6 +44,20 @@ final class CicRecordsReader
 
     public const LIVE_SECONDS = 60;
 
+    /** How far back a live view may read a month end. */
+    public const LIVE_DAYS_BACK = 92;
+
+    public const LIVE_DATE_REFUSAL = 'Choose today, or the last day of a month within the last 92 days. Older months are read from their captures.';
+
+    /** Today, or a month's last day within the last 92 days: the only dates a live build is made, and cached, for. */
+    public static function liveDateAllowed(Carbon $date): bool
+    {
+        $today = Carbon::today();
+
+        return $date->isSameDay($today)
+            || ($date->isLastOfMonth() && $date->lessThan($today) && $date->greaterThanOrEqualTo($today->copy()->subDays(self::LIVE_DAYS_BACK)));
+    }
+
     /** @return array{set: CicRecordSet, issues: list<Issue>} */
     public function live(Carbon $reference): array
     {
@@ -66,7 +80,11 @@ final class CicRecordsReader
         // One key per date (security re-review SN1): a newer fingerprint
         // overwrites it, never adding another; too big for the store, it
         // isn't cached at all.
-        CicCache::put(self::liveCacheKey($reference), Crypt::encrypt(['fingerprint' => $fingerprint, 'build' => $this->live[$key]]), self::LIVE_SECONDS);
+        // A date the live views refuse is never cached either (delta
+        // re-review: a second guard behind the request check).
+        if (self::liveDateAllowed($reference)) {
+            CicCache::put(self::liveCacheKey($reference), Crypt::encrypt(['fingerprint' => $fingerprint, 'build' => $this->live[$key]]), self::LIVE_SECONDS);
+        }
 
         return $this->live[$key];
     }
